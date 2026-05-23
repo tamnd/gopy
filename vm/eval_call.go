@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sync"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -93,6 +94,59 @@ func init() {
 		}
 		ts.SetException(nil)
 	}
+	// Let typeSetNames attach a __notes__ string to the live exception
+	// when __set_name__ raises during class creation, matching
+	// _PyErr_FormatNote inside type_new_set_names. When the hook fires
+	// before the Go error has been promoted to a typed Exception (e.g.
+	// arg-binding TypeError that never reached thread state) the note
+	// goes onto a per-goroutine queue that handleException drains.
+	//
+	// CPython: Python/errors.c:1567 _PyErr_FormatNote
+	// CPython: Objects/typeobject.c:11538 type_new_set_names
+	objects.FormatNoteHook = func(note string) {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		exc := pyerrors.Occurred(ts)
+		if exc == nil {
+			enqueuePendingNote(note)
+			return
+		}
+		if exc.Notes == nil {
+			exc.Notes = objects.NewList(nil)
+		}
+		exc.Notes.Append(objects.NewStr(note))
+	}
+}
+
+// pendingNotes carries __notes__ strings that FormatNoteHook produced
+// before a typed Exception existed on the thread state. handleException
+// drains the per-goroutine queue when it synthesizes the Exception so
+// the note rides along with the materialized object. Keyed by goid for
+// the same reason as activeThreads.
+var pendingNotes sync.Map // map[uint64][]string
+
+func enqueuePendingNote(note string) {
+	g := goid()
+	var list []string
+	if v, ok := pendingNotes.Load(g); ok {
+		list = v.([]string)
+	}
+	list = append(list, note)
+	pendingNotes.Store(g, list)
+}
+
+// drainPendingNotes removes and returns every queued note for the
+// current goroutine. handleException calls this once the typed
+// Exception is on the thread state so the notes attach in source order.
+func drainPendingNotes() []string {
+	g := goid()
+	v, ok := pendingNotes.LoadAndDelete(g)
+	if !ok {
+		return nil
+	}
+	return v.([]string)
 }
 
 // currentInterpreterFrame returns the top of the active thread's frame

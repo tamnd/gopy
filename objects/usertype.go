@@ -370,12 +370,21 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 	}
 }
 
+// FormatNoteHook lets the errors package attach a __notes__ string to
+// the live exception on the thread state. Installed from vm/eval_call
+// so objects does not depend on errors or state.
+//
+// CPython: Python/errors.c:1567 _PyErr_FormatNote
+var FormatNoteHook func(string)
+
 // typeSetNames invokes __set_name__(cls, name) on every namespace
 // value that defines it. Mirrors CPython's __set_name__ pass; this
 // is what gives PEP 487 descriptors (and enum's _proto_member) a
-// chance to rewrite themselves once the owning class is known.
+// chance to rewrite themselves once the owning class is known. On
+// failure CPython attaches a note that names the offending instance,
+// key, and owner type.
 //
-// CPython: Objects/typeobject.c:4549 type_new_set_names
+// CPython: Objects/typeobject.c:11514 type_new_set_names
 func typeSetNames(t *Type, ns *Dict) error {
 	if ns == nil {
 		return nil
@@ -407,6 +416,15 @@ func typeSetNames(t *Type, ns *Dict) error {
 			callable = setName
 		}
 		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+			if FormatNoteHook != nil {
+				keyRepr, rerr := Repr(s)
+				keyText := s.Value()
+				if rerr == nil {
+					keyText = keyRepr
+				}
+				FormatNoteHook(fmt.Sprintf("Error calling __set_name__ on '%s' instance %s in '%s'",
+					typeNameOf(v), keyText, t.Name))
+			}
 			return err
 		}
 	}

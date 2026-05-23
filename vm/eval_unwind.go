@@ -242,6 +242,19 @@ func (e *evalState) handleException(err error) bool {
 		// exception is being born here, it has no causal predecessor
 		// in the currently-handled chain.
 		exc := synthesizeException(err)
+		// Attach any __notes__ queued by FormatNoteHook before this
+		// Go error became a typed Exception (e.g. arg-binding
+		// TypeError raised inside type_new_set_names).
+		//
+		// CPython: Python/errors.c:1567 _PyErr_FormatNote
+		if notes := drainPendingNotes(); len(notes) > 0 {
+			if exc.Notes == nil {
+				exc.Notes = objects.NewList(nil)
+			}
+			for _, n := range notes {
+				exc.Notes.Append(objects.NewStr(n))
+			}
+		}
 		pyerrors.Restore(e.ts, exc.ExcType, exc, nil)
 	}
 	// Prepend a traceback entry for this frame before considering

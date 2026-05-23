@@ -1638,3 +1638,54 @@ CPython:
 - `Python/codegen.c:1390 codegen_function`
 - `Python/codegen.c:1480 CALL_INTRINSIC_2 INTRINSIC_SET_FUNCTION_TYPE_PARAMS`
 - `Python/symtable.c:1659 symtable_enter_type_param_block`
+
+### P7 closer 24: test_subclassinit closes (metaclass guard + PEP 678 notes)
+
+`test_subclassinit` carried three errors that were all rooted in two
+distinct missing pieces of `type.__call__`.
+
+**(1) Metaclass `__new__` returning a non-Type instance** (`test_set_name_metaclass`).
+The CPython type_call dance after `tp_new`:
+
+```c
+obj = type->tp_new(type, args, kwds);
+if (!PyObject_TypeCheck(obj, type)) return obj;
+type = Py_TYPE(obj);
+if (type->tp_init != NULL) ...
+```
+
+gopy's `typeCallViaTpNew` skipped the `PyObject_TypeCheck` guard, so a
+metaclass whose `__new__` returns `0` (the test does this) still tripped
+`type.__init__(int)` and raised `descriptor '__init__' for 'type'
+objects doesn't apply to a 'int' object`. Ported the guard and
+re-resolved `__init__` from `Py_TYPE(obj)` (not the calling type), so
+the path now matches `Objects/typeobject.c:2331 type_call` 1:1.
+
+**(2) PEP 678 `__notes__` attach during `type_new_set_names`**
+(`test_set_name_error`, `test_set_name_wrong`). When `__set_name__`
+raises, CPython calls `_PyErr_FormatNote` with `"Error calling
+__set_name__ on '%.100s' instance %R in '%.100s'"`. gopy never
+attached the note, so `cm.exception.__notes__` raised AttributeError.
+
+The plumbing was the awkward part: `objects` cannot import `errors`
+or `state`, so it has no direct path to the live `*Exception`. Added
+two pieces:
+
+1. `objects.FormatNoteHook func(string)`, installed from
+   `vm/eval_call.go` exactly like `ClearCurrentExceptionHook`. The hook
+   reads the live exception via `pyerrors.Occurred(ts)` and appends to
+   `exc.Notes`.
+2. A per-goroutine pending-notes queue in `vm/eval_call.go`. The hook
+   queues notes when no Exception exists yet on the thread state
+   because the inner failure (e.g. `TooManyPositionalError` raised by
+   arg binding before any frame ran) propagated as a bare Go error
+   that `handleException` only later promotes via `synthesizeException`.
+   `handleException` drains the queue right after the synthesize, so
+   the notes attach in source order.
+
+After this, `test_subclassinit` flips from 3 errors to all 17 passing.
+
+CPython:
+- `Objects/typeobject.c:2331 type_call`
+- `Objects/typeobject.c:11514 type_new_set_names`
+- `Python/errors.c:1567 _PyErr_FormatNote`

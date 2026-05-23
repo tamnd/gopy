@@ -138,15 +138,22 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 
 // typeCallViaTpNew allocates through the type's tp_new slot, then
 // runs __init__ when the type has one registered as a descriptor.
+// CPython skips __init__ entirely when the value returned from tp_new
+// is not an instance of the calling type (e.g. a metaclass __new__
+// that returns an int); the result is passed back untouched.
 //
-// CPython: Objects/typeobject.c:1748 type_call (tp_new + tp_init path)
+// CPython: Objects/typeobject.c:2331 type_call (tp_new + tp_init path)
 func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 	inst, err := cls.TpNew(cls, args, kwargs)
 	if err != nil {
 		return nil, err
 	}
-	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
-		bound := bindDescr(init, inst, cls)
+	if !IsSubtype(inst.Type(), cls) {
+		return inst, nil
+	}
+	actual := inst.Type()
+	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
+		bound := bindDescr(init, inst, actual)
 		if _, err := callBound(bound, args, kwargs); err != nil {
 			return nil, err
 		}
