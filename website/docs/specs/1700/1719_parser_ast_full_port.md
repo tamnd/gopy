@@ -1898,3 +1898,97 @@ CPython:
 - `Python/import.c:5034 _imp__override_frozen_modules_for_tests_impl`
 - `Python/import.c:5052 _imp__override_multi_interp_extensions_check_impl`
 - `Modules/_collectionsmodule.c:2364 defdict_repr`
+
+### P7 closer 28: PEP 750 Template + Interpolation end-to-end port
+
+`test_annotationlib` failed at module import with `AttributeError:
+'string.templatestring' object has no attribute 'interpolations'` because
+the t-string subsystem only had the type singleton without the rest of
+the runtime, codegen, dispatch, or parser wiring. Five files port the
+full PEP 750 chain so `Template` exposes the same surface as CPython
+3.14 and `Interpolation` is a first-class object.
+
+1. `objects/template_str.go` renames `string.templatestring` to
+   `string.templatelib.Template`, adds the `strings` /
+   `interpolations` / `values` `GetSetDescr` rows from
+   `Objects/templateobject.c:333 template_members` and
+   `Objects/templateobject.c:339 template_getset`, hooks
+   `template_iter` (skips empty literal parts, interleaves
+   interpolations) and `template_values_get`, and adds the full
+   `Interpolation` type with `value` / `expression` / `conversion` /
+   `format_spec` `GetSetDescr`s plus the `__match_args__` tuple from
+   `Objects/interpolationobject.c:163 _PyInterpolation_InitTypes`.
+   `NewInterpolation` mirrors `_PyInterpolation_Build`, mapping the
+   FVC_* tag (0 = None, 1 = "s", 2 = "r", 3 = "a") onto the
+   `conversion` slot.
+
+2. `compile/codegen_expr_misc.go` replaces the stub
+   `visitTemplateStr` (which returned `compile: t-string
+   interpolations not yet supported`) with a faithful port of
+   `Python/codegen.c:4063 codegen_template_str`: emit each Constant
+   string, insert an empty-string Constant before any
+   back-to-back Interpolation, `BUILD_TUPLE` the strings, then visit
+   each Interpolation, `BUILD_TUPLE` the interpolations, and
+   `BUILD_TEMPLATE`. The new `visitInterpolation` ports
+   `Python/codegen.c:4135 codegen_interpolation`: push value + the
+   captured expression source `Str`, optionally push the format spec,
+   encode conversion into the upper bits of oparg, emit
+   `BUILD_INTERPOLATION`.
+
+3. `vm/eval_dispatch_gen.go` and `vm/dispatch_gen_whitelist.go` add
+   the `BUILD_INTERPOLATION` arm. The dispatcher pulls `value` and
+   `str` (and optionally `format_spec`) off the stack, decodes the
+   conversion tag from the upper oparg bits, and pushes the
+   `Interpolation` returned by `NewInterpolation`. Mirrors
+   `Python/bytecodes.c BUILD_INTERPOLATION`.
+
+4. `parser/pegen/action_helpers_gen.go` replaces the
+   placeholder-returning stub for `actionPgenInterpolation` with a
+   port of `Parser/action_helpers.c:1508 _PyPegen_interpolation`. The
+   helper unwraps the expression, picks up the conversion character
+   via `fstringConversionChar`, reads the expression source text
+   from the closing-brace token's `Metadata`, and constructs an
+   `*ast.Interpolation`. Two off-by-one bugs in adjacent helpers are
+   also fixed: `actionPgenTemplateStr` was reading
+   `argAt(args, 3)` (the `TSTRING_END` token) instead of
+   `argAt(args, 2)` (the loop body); `actionPgenConcatenateTstrings`
+   was reading `argAt(args, 2)` past the end of its 2-element args
+   slice. Both bugs swallowed every `Values` entry and produced an
+   empty `Template`.
+
+5. `parser/lexer/fstring.go` guards `last_expr_end` writes on `}` /
+   `!` so the first `:` / `!` / `}` wins. Without the guard,
+   `}` would overwrite the value set at `:`, leaving the closing
+   brace token's metadata pointing past the format spec. CPython
+   handles this by reading metadata off the `format_spec` /
+   `conversion` token instead of the closing brace, but
+   `actionPgenInterpolation` currently has no per-token metadata for
+   the format spec, so the guarded write is the simpler fix that
+   yields the same result for the simple cases the gates exercise.
+
+Net effect: `t"hello {1+2} world"` evaluates end-to-end, exposes
+`strings = ('hello ', ' world')`, `interpolations` holds an
+`Interpolation(3, '1+2', None, '')`, and `for x in t:` yields the
+interleaved literal-plus-interpolation sequence. `test_annotationlib`
+moves past the `Interpolation` attribute lookup and the import path
+now reaches the test bodies (47 failures + 237 errors remaining,
+which are PEP 649 `__annotate__` lazy-codegen drifts tracked under
+task #101, not t-string drifts). `test/cpython/test/test_inspect/`
+was vendored under `stdlib/test/test_inspect/` so the fixture
+modules `inspect_stock_annotations` /
+`inspect_stringized_annotations*` resolve through the regular
+`test/` package.
+
+CPython:
+- `Objects/templateobject.c:221 template_iter`
+- `Objects/templateobject.c:314 template_values_get`
+- `Objects/templateobject.c:333 template_members`
+- `Objects/templateobject.c:339 template_getset`
+- `Objects/interpolationobject.c:120 interpolation_members`
+- `Objects/interpolationobject.c:163 _PyInterpolation_InitTypes`
+- `Objects/interpolationobject.c:188 _PyInterpolation_Build`
+- `Python/codegen.c:4063 codegen_template_str`
+- `Python/codegen.c:4135 codegen_interpolation`
+- `Python/bytecodes.c BUILD_INTERPOLATION`
+- `Parser/action_helpers.c:1508 _PyPegen_interpolation`
+- `Parser/lexer/lexer.c:227 _PyLexer_update_ftstring_expr`

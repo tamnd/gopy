@@ -307,7 +307,20 @@ func (s *State) updateFtstringExpr(cur byte) {
 		m.lastExprSize = size
 		m.lastExprEnd = -1
 	case '}', '!':
-		m.lastExprEnd = s.inp - s.start
+		// Match CPython lexer.c:263, which writes last_expr_end on
+		// every `}`/`!`. The gopy parser does not yet track per-token
+		// metadata for the format-spec or conversion tokens, so the
+		// closing-brace token is the only path actionPgenInterpolation
+		// can read the expression source from. Guard the write so the
+		// first `:`/`!`/`}` wins; later `}` writes (which would point
+		// past the format spec) cannot clobber the correct value.
+		//
+		// CPython: Parser/action_helpers.c:1519 _PyPegen_interpolation
+		// (uses the conversion or format-spec metadata when present,
+		// falling back to closing_brace->metadata).
+		if m.lastExprEnd == -1 {
+			m.lastExprEnd = s.inp - s.start
+		}
 	case ':':
 		if m.lastExprEnd == -1 {
 			m.lastExprEnd = s.inp - s.start

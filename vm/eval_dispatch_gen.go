@@ -24,14 +24,25 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 	switch op {
 	case compile.BUILD_INTERPOLATION:
 		value := e.peek(1 + int(oparg&1))
-		_ = value
 		str := e.peek(int(oparg & 1))
-		_ = str
 		format := e.peekSliceBottomFirst(0, int(oparg&1))
-		_ = format
-		// body bail: PyObject interpolation_o rhs: unexpected token "_PyInterpolation_Build" in expression
-		// outputs: interpolation
-		return 0, opcodeNotImplemented(op) // body pending (B6)
+		value_o := value.AsObject()
+		str_o := str.AsObject()
+		conversion := int(oparg >> 2)
+		var format_o objects.Object
+		if oparg&1 != 0 {
+			format_o = format[0].AsObject()
+		} else {
+			format_o = objects.NewStr("")
+		}
+		interp_o, err := objects.NewInterpolation(value_o, str_o, conversion, format_o)
+		if err != nil {
+			e.pendingErr = err
+			return 0, e.error("error")
+		}
+		e.drop(2 + int(oparg&1))
+		e.push(stackref.FromObject(interp_o))
+		return e.advance(), nil
 	case compile.BUILD_LIST:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values

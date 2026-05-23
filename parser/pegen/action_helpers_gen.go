@@ -893,10 +893,41 @@ func fstringConversionChar(v any) int {
 	return 0
 }
 
+// actionPgenInterpolation builds an Interpolation node for a t-string
+// {expr!conv:fmt} chunk. Call shape:
+//
+//	(p, p, expression, debug_expr_token, conversion, format, rbrace)
+//
+// CPython captures the source text of `expr` via set_ftstring_expr, so
+// it is reachable as the closing brace token's metadata.
+//
+// CPython: Parser/action_helpers.c _PyPegen_interpolation (PEP 750)
 func actionPgenInterpolation(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	value := asExpr(argAt(args, 1))
+	if value == nil {
+		return placeholderMatched
+	}
+	debug, _ := argAt(args, 2).(*Token)
+	conv := fstringConversionChar(argAt(args, 3))
+	format := asExpr(argAt(args, 4))
+	rbrace, _ := argAt(args, 5).(*Token)
+	if conv == 0 && debug != nil && format == nil {
+		conv = 'r'
+	} else if conv == 0 {
+		conv = -1
+	}
+	var src string
+	if rbrace != nil && len(rbrace.Metadata) > 0 {
+		src = string(rbrace.Metadata)
+	}
+	return &ast.Interpolation{
+		Value:      value,
+		Str:        src,
+		Conversion: conv,
+		FormatSpec: format,
+		Pos:        ast.NoPos,
+	}
 }
 
 // actionPgenConcatenateStrings dispatches the `strings` rule's
@@ -919,23 +950,23 @@ func actionPgenConcatenateStrings(p *Parser, args ...any) any {
 
 // actionPgenTemplateStr builds a TemplateStr from the tstring tokens.
 // Call shape: (p, p, TSTRING_START, loop0_66_result, TSTRING_END).
-// Arg[3] is the _loop0_66 result: []any of Constant / Interpolation exprs.
+// Arg[2] is the _loop0_66 result: []any of Constant / Interpolation exprs.
 //
 // CPython: Parser/action_helpers.c _PyPegen_tstring_node (PEP 750)
 func actionPgenTemplateStr(p *Parser, args ...any) any {
 	_ = p
-	parts := exprSeqOf(argAt(args, 3))
+	parts := exprSeqOf(argAt(args, 2))
 	return TemplateStrFromValues([]ast.Expr(parts))
 }
 
 // actionPgenConcatenateTstrings joins one or more TemplateStr nodes
-// produced by a tstring+ loop into a single TemplateStr. Arg[2] is
+// produced by a tstring+ loop into a single TemplateStr. Arg[1] is
 // the loop result ([]any of *ast.TemplateStr).
 //
 // CPython: Parser/action_helpers.c _PyPegen_concatenate_tstrings
 func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
 	_ = p
-	items := exprSeqOf(argAt(args, 2))
+	items := exprSeqOf(argAt(args, 1))
 	var allValues []ast.Expr
 	for _, item := range items {
 		if ts, ok := item.(*ast.TemplateStr); ok {

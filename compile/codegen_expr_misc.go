@@ -92,39 +92,91 @@ func (c *Compiler) visitAwait(e *ast.Await) error {
 	return nil
 }
 
-// visitTemplateStr lowers a t-string (PEP 750). Values alternate between
-// Constant string parts and Interpolation nodes. The compiler pushes a
-// strings tuple and an interpolations tuple then emits BUILD_TEMPLATE.
-// Interpolations are not yet supported; attempting them returns an error.
+// visitTemplateStr lowers a t-string (PEP 750). Mirrors
+// codegen_template_str: emits each string Constant, inserts an empty
+// string before any back-to-back interpolation, BUILD_TUPLE's the
+// strings, then VISITs each interpolation and BUILD_TUPLE's the
+// interpolations before BUILD_TEMPLATE.
 //
-// CPython: Python/codegen.c codegen_templatestr
+// CPython: Python/codegen.c:4063 codegen_template_str
 func (c *Compiler) visitTemplateStr(e *ast.TemplateStr) error {
-	var strParts []any
-	var interps []any
-	for i := 0; i < e.Values.Len(); i++ {
+	valueCount := e.Values.Len()
+	lastWasInterp := true
+	stringslen := 0
+	loc := loc(e)
+	for i := 0; i < valueCount; i++ {
 		v := e.Values.Get(i)
-		switch n := v.(type) {
-		case *ast.Constant:
-			if s, ok := n.Value.(string); ok {
-				strParts = append(strParts, s)
+		if _, isInterp := v.(*ast.Interpolation); isInterp {
+			if lastWasInterp {
+				c.addLoadConst("", loc)
+				stringslen++
 			}
-		case *ast.Interpolation:
-			_ = n
-			if len(strParts) == len(interps) {
-				strParts = append(strParts, "")
-			}
-			interps = append(interps, nil)
+			lastWasInterp = true
+			continue
+		}
+		if err := c.visitExpr(v); err != nil {
+			return err
+		}
+		stringslen++
+		lastWasInterp = false
+	}
+	if lastWasInterp {
+		c.addLoadConst("", loc)
+		stringslen++
+	}
+	c.addOpI(BUILD_TUPLE, int32(stringslen), loc)
+
+	interpolationslen := 0
+	for i := 0; i < valueCount; i++ {
+		v := e.Values.Get(i)
+		ip, isInterp := v.(*ast.Interpolation)
+		if !isInterp {
+			continue
+		}
+		if err := c.visitInterpolation(ip); err != nil {
+			return err
+		}
+		interpolationslen++
+	}
+	c.addOpI(BUILD_TUPLE, int32(interpolationslen), loc)
+	c.addOp(BUILD_TEMPLATE, loc)
+	return nil
+}
+
+// visitInterpolation lowers a t-string {expr!conv:fmt} entry. Mirrors
+// codegen_interpolation: pushes value + str (the expression source),
+// optionally pushes format_spec, encodes conversion into the upper
+// bits of oparg, then emits BUILD_INTERPOLATION.
+//
+// CPython: Python/codegen.c:4135 codegen_interpolation
+func (c *Compiler) visitInterpolation(e *ast.Interpolation) error {
+	loc := loc(e)
+	if err := c.visitExpr(e.Value); err != nil {
+		return err
+	}
+	c.addLoadConst(e.Str, loc)
+
+	oparg := int32(2)
+	if e.FormatSpec != nil {
+		oparg = 3
+		if err := c.visitExpr(e.FormatSpec); err != nil {
+			return err
 		}
 	}
-	if len(strParts) == len(interps) {
-		strParts = append(strParts, "")
+	conv := e.Conversion
+	if conv != -1 {
+		switch conv {
+		case 's':
+			oparg |= int32(1) << 2
+		case 'r':
+			oparg |= int32(2) << 2
+		case 'a':
+			oparg |= int32(3) << 2
+		default:
+			return fmt.Errorf("SystemError: Unrecognized conversion character %d", conv)
+		}
 	}
-	if len(interps) > 0 {
-		return fmt.Errorf("compile: t-string interpolations not yet supported")
-	}
-	c.addLoadConst(tupleOf(strParts), loc(e))
-	c.addLoadConst(tupleOf(interps), loc(e))
-	c.addOp(BUILD_TEMPLATE, loc(e))
+	c.addOpI(BUILD_INTERPOLATION, oparg, loc)
 	return nil
 }
 
