@@ -2166,3 +2166,57 @@ CPython:
 - `Parser/lexer/lexer.c:435 tok_continuation_line E_LINECONT`
 - `Objects/unicodeobject.c:6791 \N{name} expansion + error path`
 - `Objects/unicodeobject.c:6854 raise on "unicodeescape"`
+
+### P7 closer 32: format-spec thousands-separator validation messages
+
+`parse_internal_render_format_spec` raises three distinct ValueError
+spellings when the comma/underscore grouping options collide:
+
+- `Cannot specify ',' with ','.` for `f'{1:,,}'`
+- `Cannot specify '_' with '_'.` for `f'{1:__}'`
+- `Cannot specify both ',' and '_'.` for `f'{1:,_}'` / `f'{1:_,}'`
+
+The Go port in `format/format.go` previously folded all four into a
+generic `ErrInvalidSpec` ("format: invalid format specifier"), and
+the comma/underscore parser consumed both characters in a single
+step, so the staged checks that produce those messages never ran.
+
+The fix is a 1:1 port of the comma/underscore section:
+
+1. `[grouping]` now parses in three stages, matching
+   `Python/formatter_unicode.c:236`. First a `,` becomes
+   `LT_DEFAULT_LOCALE`; then a `_` either becomes
+   `LT_UNDERSCORE_LOCALE` or, if `,` was already seen, raises
+   `invalid_comma_and_underscore`; then a final `,` raises the same
+   error when `_` was seen. The trailing comma is *not* consumed so
+   it falls into the type slot and trips
+   `invalid_thousands_separator_type` with the codec-style spelling.
+
+2. `validateThousands(thousands, type)` ports the post-parse switch
+   at `Python/formatter_unicode.c:331`. `'d'/'e'/'f'/'g'/'E'/'G'/
+   '%'/'F'/'\0'` are allowed unconditionally; `'b'/'o'/'x'/'X'`
+   accept only `'_'` (with the PEP 515 4-digit group). Anything
+   else surfaces through `invalidThousandsSeparator`, which mirrors
+   the CPython `%c`/`\\x%x` branching exactly.
+
+3. `ParseSpec` runs the validation when `Type != 0` so explicit
+   type characters trip at parse time. `FormatString`, `FormatInt`,
+   and `FormatFloat` each run it again after applying their default
+   type so empty-Type specs ("`,`" against str/float/int) get the
+   matching error.
+
+4. `FormatInt`'s ad-hoc "bin/oct/hex with `,`" rejection is gone;
+   `validateThousands` now owns the rule. The `_b`/`_o`/`_x`/`_X`
+   path still picks up the 4-digit group size.
+
+Net effect on `test_fstring`: 38F+22E -> 34F+22E (the four
+`test_with_*_in_format_specifier` cases close). Go unit tests across
+format/parser/objects/vm/compile/builtins stay green;
+`test_string_literals`, `test_syntax`, and `test_tstring` are
+unchanged.
+
+CPython:
+- `Python/formatter_unicode.c:33 invalid_thousands_separator_type`
+- `Python/formatter_unicode.c:47 invalid_comma_and_underscore`
+- `Python/formatter_unicode.c:236 grouping section`
+- `Python/formatter_unicode.c:331 thousands/type validation`

@@ -12,6 +12,7 @@ package format
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -24,6 +25,49 @@ import (
 // ErrInvalidSpec is returned by ParseSpec when the spec violates the
 // grammar.
 var ErrInvalidSpec = errors.New("format: invalid format specifier")
+
+// errCommaAndUnderscore mirrors invalid_comma_and_underscore from
+// formatter_unicode.c: the user requested both grouping styles in the
+// same spec.
+//
+// CPython: Python/formatter_unicode.c:47 invalid_comma_and_underscore
+var errCommaAndUnderscore = errors.New("Cannot specify both ',' and '_'.") //nolint:staticcheck // Mirror CPython error text.
+
+// invalidThousandsSeparator mirrors invalid_thousands_separator_type:
+// the grouping character is incompatible with the presentation type.
+// The %c/\\x%x split matches CPython's PyErr_Format branches so the
+// rendered ValueError reads identically.
+//
+// CPython: Python/formatter_unicode.c:33 invalid_thousands_separator_type
+func invalidThousandsSeparator(sep byte, t byte) error {
+	if t > 32 && t < 128 {
+		return fmt.Errorf("Cannot specify '%c' with '%c'.", sep, t) //nolint:staticcheck // Mirror CPython error text.
+	}
+	return fmt.Errorf("Cannot specify '%c' with '\\x%x'.", sep, uint(t)) //nolint:staticcheck // Mirror CPython error text.
+}
+
+// validateThousands enforces the PEP 378/PEP 515 type/grouping pairing
+// rules. It is a 1:1 port of the post-parse switch in
+// parse_internal_render_format_spec: 'd'/'e'/'f'/'g'/'E'/'G'/'%'/'F'/0
+// allow either separator; 'b'/'o'/'x'/'X' allow only underscore (with
+// a 4-digit group); everything else is rejected with the codec-style
+// message.
+//
+// CPython: Python/formatter_unicode.c:331 thousands-separator switch
+func validateThousands(thousands, t byte) error {
+	if thousands == 0 {
+		return nil
+	}
+	switch t {
+	case 'd', 'e', 'f', 'g', 'E', 'G', '%', 'F', 0:
+		return nil
+	case 'b', 'o', 'x', 'X':
+		if thousands == '_' {
+			return nil
+		}
+	}
+	return invalidThousandsSeparator(thousands, t)
+}
 
 // Spec is the parsed form of a format-spec mini-language string.
 //
@@ -102,10 +146,29 @@ func ParseSpec(s string) (Spec, error) {
 		i += consumed
 	}
 
-	// [grouping]
-	if i < len(s) && (s[i] == ',' || s[i] == '_') {
-		spec.Thousands = s[i]
+	// [grouping]: comma + underscore are parsed in stages so the
+	// distinct "Cannot specify both" / "Cannot specify '_' with '_'."
+	// messages can fire.
+	//
+	// CPython: Python/formatter_unicode.c:236 grouping section
+	if i < len(s) && s[i] == ',' {
+		spec.Thousands = ','
 		i++
+	}
+	if i < len(s) && s[i] == '_' {
+		if spec.Thousands != 0 {
+			return spec, errCommaAndUnderscore
+		}
+		spec.Thousands = '_'
+		i++
+	}
+	if i < len(s) && s[i] == ',' {
+		if spec.Thousands == '_' {
+			return spec, errCommaAndUnderscore
+		}
+		// Leave the comma in place; it becomes the type and is
+		// rejected by validateThousands with the codec-style
+		// "Cannot specify ',' with ','." message.
 	}
 
 	// [.precision]
@@ -128,6 +191,11 @@ func ParseSpec(s string) (Spec, error) {
 	if i != len(s) {
 		return spec, ErrInvalidSpec
 	}
+	if spec.Type != 0 {
+		if err := validateThousands(spec.Thousands, spec.Type); err != nil {
+			return spec, err
+		}
+	}
 	return spec, nil
 }
 
@@ -148,9 +216,16 @@ func parseInt(s string, i int) (val, consumed int, err error) {
 
 // FormatString renders s under spec. Mirrors format_string_internal.
 //
-// CPython: Python/formatter_unicode.c:L848 format_string_internal
+// CPython: Python/formatter_unicode.c:848 format_string_internal
 func FormatString(s string, spec Spec) (string, error) {
-	if spec.Sign != 0 || spec.Alt || spec.Zero || spec.Thousands != 0 {
+	t := spec.Type
+	if t == 0 {
+		t = 's'
+	}
+	if err := validateThousands(spec.Thousands, t); err != nil {
+		return "", err
+	}
+	if spec.Sign != 0 || spec.Alt || spec.Zero {
 		return "", ErrInvalidSpec
 	}
 	if spec.Type != 0 && spec.Type != 's' {
@@ -262,12 +337,12 @@ func FormatInt(v *big.Int, spec Spec) (string, error) {
 	}
 
 	if spec.Thousands != 0 {
+		if err := validateThousands(spec.Thousands, t); err != nil {
+			return "", err
+		}
 		groupSize := 3
 		if t == 'b' || t == 'o' || t == 'x' || t == 'X' {
 			groupSize = 4
-			if spec.Thousands == ',' {
-				return "", ErrInvalidSpec
-			}
 		}
 		digits = insertGrouping(digits, spec.Thousands, groupSize)
 	}
@@ -380,11 +455,21 @@ func zeroPadGrouped(digits string, pad int, sep byte, groupSize int) string {
 
 // FormatFloat renders v under spec. Mirrors format_float_internal.
 //
-// CPython: Python/formatter_unicode.c:L1290 format_float_internal
+// CPython: Python/formatter_unicode.c:1290 format_float_internal
 func FormatFloat(v float64, spec Spec) (string, error) {
 	t := spec.Type
 	if t == 0 {
 		t = 'r'
+	}
+	// 'r' is gopy's internal stand-in for CPython's "no type" float
+	// path. validateThousands matches CPython by treating type==0 as
+	// allowed, so canonicalize before the check.
+	checkType := t
+	if t == 'r' {
+		checkType = 0
+	}
+	if err := validateThousands(spec.Thousands, checkType); err != nil {
+		return "", err
 	}
 
 	precision := spec.Precision
