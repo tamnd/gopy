@@ -45,6 +45,7 @@ func init() {
 	// Identity hash so method descriptors are hashable.
 	MethodDescrType.Hash = identityHash
 	addDescriptorSlotWrappers(MethodDescrType)
+	AddCallSlotWrapper(MethodDescrType)
 	addDescrIntrospectionDescriptors(MethodDescrType)
 }
 

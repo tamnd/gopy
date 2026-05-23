@@ -308,6 +308,24 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 		e.pushObject(val)
 		return genResult{next: e.cacheAdvance(compile.SEND), ok: true}, nil
 
+	case *objects.Coroutine:
+		val, serr := r.Send(v)
+		if retVal, isStop := stopIterRetval(serr); isStop {
+			// _PyGen_FetchStopIterationValue: pull args[0] (or None)
+			// from the StopIteration so END_SEND can hand it back as
+			// the value of the await expression.
+			//
+			// CPython: Python/bytecodes.c _SEND (StopIteration path)
+			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+			e.pushObject(retVal)
+			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
+		}
+		if serr != nil {
+			return genResult{ok: true}, serr
+		}
+		e.pushObject(val)
+		return genResult{next: e.cacheAdvance(compile.SEND), ok: true}, nil
+
 	default:
 		// Generic path: if v is None, call tp_iternext; otherwise call .send(v).
 		t := recv.Type()
@@ -469,6 +487,43 @@ func (e *evalState) execCleanupThrow() (genResult, error) {
 		return genResult{next: e.advance(), ok: true}, nil
 	}
 	return genResult{ok: true}, excAsError(excVal)
+}
+
+// stopIterRetval inspects err for a StopIteration crossing. Returns
+// (value, true) when err is either the bare ErrStopIteration sentinel
+// or a RaisedError wrapping a StopIteration exception. value is the
+// args[0] payload when present, else None. Used by _SEND to drop the
+// await result into the END_SEND slot.
+//
+// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+func stopIterRetval(err error) (objects.Object, bool) {
+	if err == nil {
+		return nil, false
+	}
+	if errors.Is(err, objects.ErrStopIteration) {
+		var re *objects.RaisedError
+		if errors.As(err, &re) {
+			if exc, ok := re.Exc.(objects.ExceptionInstance); ok {
+				args := exc.ExceptionArgs()
+				if args != nil && args.Len() > 0 {
+					return args.Item(0), true
+				}
+			}
+		}
+		return objects.None(), true
+	}
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		if exc, ok := re.Exc.(*pyerrors.Exception); ok {
+			if exc.ExcType != nil && exc.ExcType.Name == "StopIteration" {
+				if exc.Args != nil && exc.Args.Len() > 0 {
+					return exc.Args.Item(0), true
+				}
+				return objects.None(), true
+			}
+		}
+	}
+	return nil, false
 }
 
 // stopIterationValue returns the .value attribute of a StopIteration

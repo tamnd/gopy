@@ -1813,3 +1813,88 @@ CPython:
 - `Objects/exceptions.c:1326 exceptiongroup_split_recursive`
 - `Objects/exceptions.c:1414 exceptiongroup_subset`
 - `Objects/exceptions.c:1618 _PyExc_PrepReraiseStar`
+
+### P7 closer 27: drift sweep (matmul, async dunders, coroutine SEND, `__call__` slot, `_imp` surface, defaultdict `__repr__`)
+
+Six unrelated v0.6 drifts surface together when `test_grammar` is
+forced through. They all hide behind a single missing slot wrap,
+intrinsic, or builtin and ship as a batch under one closer.
+
+1. `vm/eval_simple.go` adds `nbMatrixMultiply` (4) and
+   `nbInplaceMatrixMultiply` (17) to the `BINARY_OP` suboperator
+   dispatch so user classes that implement `__matmul__` /
+   `__imatmul__` no longer raise "BINARY_OP suboperator 4 not
+   implemented". Mirrors `Python/specialize.c:2389 binary_op_descrs`
+   and the `NB_MATRIX_MULTIPLY` / `NB_INPLACE_MATRIX_MULTIPLY` rows in
+   `Include/internal/pycore_opcode_metadata.h`.
+
+2. `objects/usertype.go::fixupSlotDispatchers` grows `fixupAsyncSlots`.
+   When a user class defines `__aiter__` / `__anext__` / `__await__`,
+   the helper installs `slotAmAiter` / `slotAmAnext` / `slotAmAwait`
+   into `t.Async`. Each dispatcher delegates through
+   `lookupMethodOnSelf` so `async for` / `async with` / `await`
+   resolve via the user method instead of raising
+   "TypeError: object has no `__aiter__` method". Mirrors
+   `Objects/typeobject.c slot_am_aiter / slot_am_anext / slot_am_await`.
+
+3. `vm/eval_gen.go::execSend` adds a `*objects.Coroutine` arm. It
+   forwards via `r.Send(v)`, and a new `stopIterRetval` helper unwraps
+   both bare `ErrStopIteration` and `RaisedError`-wrapped
+   `StopIteration` so the awaited return value flows from
+   `args[0]` onto the stack as PEP 492 / CPython's `SEND` bytecode
+   specifies. Mirrors `Python/bytecodes.c SEND` plus
+   `Objects/genobject.c:1090 send_value`.
+
+4. `objects/slot_wrap_descr.go` ships `AddCallSlotWrapper` and
+   `makeWrapCall`. The wrapper exposes `__call__` on any type whose
+   only callable hook is the `Call` or `Vectorcall` slot, mirroring
+   CPython's `slotdefs` row for `tp_call` resolved by `add_operators`.
+   The init blocks for `FunctionType` (`vm/eval_call.go`),
+   `BuiltinFunctionType`, `MethodDescrType`, and `BoundMethodType`
+   now call `AddCallSlotWrapper(t)` so `f.__call__`,
+   `bif.__call__`, `descr.__call__`, and `bm.__call__` all resolve
+   instead of raising `AttributeError`. Mirrors
+   `Objects/typeobject.c wrap_call`.
+
+5. `module/_imp/module.go` grows seven stub entries that
+   `test.support.import_helper` toggles around module reloads:
+   `lock_held`, `acquire_lock`, `release_lock`, `is_builtin`,
+   `is_frozen`, `_override_frozen_modules_for_tests`, and
+   `_override_multi_interp_extensions_check`. gopy serializes imports
+   through Go-side sync so the lock helpers are no-ops; the override
+   pair returns the CPython sentinel int. Mirrors `Python/import.c
+   imp_module` plus the override impls at `Python/import.c:5034`
+   (`_imp__override_frozen_modules_for_tests_impl`) and
+   `Python/import.c:5052`
+   (`_imp__override_multi_interp_extensions_check_impl`).
+
+6. `module/_collections/module.go` installs a dedicated `__repr__`
+   `MethodDescr` (`defaultDictReprMethod`) on `DefaultDictType`.
+   Without it, `defaultdict` inherits `dict.__repr__` and
+   `pprint._dispatch` (keyed on `type.__repr__`) collapses both onto
+   `_pprint_default_dict`, so any plain `dict` going through
+   `pprint.pformat` raises `AttributeError: 'dict' object has no
+   attribute 'default_factory'`. Mirrors
+   `Modules/_collectionsmodule.c:2364 defdict_repr` registered via
+   `add_operators` for `tp_repr`.
+
+7. `test/cpython/test/__init__.py` is removed so the vendored
+   typinganndata fixtures form a PEP 420 namespace package that
+   merges with `stdlib/test/`. Without the removal, the regular
+   package marker shadowed `test.support`, breaking every
+   import-helper-using gate.
+
+Net effect: `test_grammar` drops from 3 errors to 1 (the remaining
+error is the lexer warning-stash `__warningregistry__` deferred to
+the warning module port). Unit tests in `module/_collections`,
+`module/_imp`, `objects`, and `vm` stay green.
+
+CPython:
+- `Python/specialize.c:2389 binary_op_descrs`
+- `Objects/typeobject.c slot_am_aiter` / `slot_am_anext` / `slot_am_await`
+- `Python/bytecodes.c SEND`
+- `Objects/genobject.c:1090 send_value`
+- `Objects/typeobject.c wrap_call`
+- `Python/import.c:5034 _imp__override_frozen_modules_for_tests_impl`
+- `Python/import.c:5052 _imp__override_multi_interp_extensions_check_impl`
+- `Modules/_collectionsmodule.c:2364 defdict_repr`

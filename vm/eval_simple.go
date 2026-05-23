@@ -1114,34 +1114,36 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 // CPython: Python/bytecodes.c BINARY_OP_GENERIC
 func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 	const (
-		nbAdd         = 0
-		nbAnd         = 1
-		nbFloorDivide = 2
-		nbLshift      = 3
-		nbMult        = 5
-		nbRemainder   = 6
-		nbOr          = 7
-		nbPower       = 8
-		nbRshift      = 9
-		nbSubtract    = 10
-		nbTrueDivide  = 11
-		nbXor         = 12
+		nbAdd            = 0
+		nbAnd            = 1
+		nbFloorDivide    = 2
+		nbLshift         = 3
+		nbMatrixMultiply = 4
+		nbMult           = 5
+		nbRemainder      = 6
+		nbOr             = 7
+		nbPower          = 8
+		nbRshift         = 9
+		nbSubtract       = 10
+		nbTrueDivide     = 11
+		nbXor            = 12
 		// Inplace forms (13..25) re-use the non-inplace slot for
 		// immutable types; the mapping mirrors CPython's NB_INPLACE_*
 		// alphabetical numbering.
-		nbInplaceAdd         = 13
-		nbInplaceAnd         = 14
-		nbInplaceFloorDivide = 15
-		nbInplaceLshift      = 16
-		nbInplaceMult        = 18
-		nbInplaceRemainder   = 19
-		nbInplaceOr          = 20
-		nbInplacePower       = 21
-		nbInplaceRshift      = 22
-		nbInplaceSubtract    = 23
-		nbInplaceTrueDivide  = 24
-		nbInplaceXor         = 25
-		nbSubscr             = 26
+		nbInplaceAdd            = 13
+		nbInplaceAnd            = 14
+		nbInplaceFloorDivide    = 15
+		nbInplaceLshift         = 16
+		nbInplaceMatrixMultiply = 17
+		nbInplaceMult           = 18
+		nbInplaceRemainder      = 19
+		nbInplaceOr             = 20
+		nbInplacePower          = 21
+		nbInplaceRshift         = 22
+		nbInplaceSubtract       = 23
+		nbInplaceTrueDivide     = 24
+		nbInplaceXor            = 25
+		nbSubscr                = 26
 	)
 	switch sub {
 	case nbAdd:
@@ -1156,6 +1158,10 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberMultiply(a, b)
 	case nbInplaceMult:
 		return objects.NumberInPlaceMultiply(a, b)
+	case nbMatrixMultiply:
+		return objects.NumberMatrixMultiply(a, b)
+	case nbInplaceMatrixMultiply:
+		return objects.NumberInPlaceMatrixMultiply(a, b)
 	case nbTrueDivide, nbInplaceTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide

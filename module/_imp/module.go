@@ -46,6 +46,65 @@ func buildModule() (*objects.Module, error) {
 	if err := d.SetItem(objects.NewStr("check_hash_based_pycs"), objects.NewStr("default")); err != nil {
 		return nil, err
 	}
+	// Lock helpers: gopy serializes imports through Go-side
+	// synchronization so these are no-ops, matching how a single-threaded
+	// CPython would see them.
+	//
+	// CPython: Python/import.c:4943 imp_module (lock_held / acquire_lock /
+	// release_lock entries)
+	if err := d.SetItem(objects.NewStr("lock_held"),
+		objects.NewBuiltinFunction("lock_held", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewBool(false), nil
+		})); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("acquire_lock"),
+		objects.NewBuiltinFunction("acquire_lock", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.None(), nil
+		})); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("release_lock"),
+		objects.NewBuiltinFunction("release_lock", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.None(), nil
+		})); err != nil {
+		return nil, err
+	}
+	// is_builtin / is_frozen: gopy has no frozen/builtin import path, so
+	// both report negative.
+	//
+	// CPython: Python/import.c:4943 imp_module
+	if err := d.SetItem(objects.NewStr("is_builtin"),
+		objects.NewBuiltinFunction("is_builtin", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewInt(0), nil
+		})); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("is_frozen"),
+		objects.NewBuiltinFunction("is_frozen", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewBool(false), nil
+		})); err != nil {
+		return nil, err
+	}
+	// _override_frozen_modules_for_tests / _override_multi_interp_extensions_check:
+	// test.support.import_helper toggles these around test runs. gopy
+	// keeps them as no-ops returning a sentinel int matching CPython's
+	// previous-value convention.
+	//
+	// CPython: Python/import.c:5034 _imp__override_frozen_modules_for_tests_impl
+	// CPython: Python/import.c:5052 _imp__override_multi_interp_extensions_check_impl
+	if err := d.SetItem(objects.NewStr("_override_frozen_modules_for_tests"),
+		objects.NewBuiltinFunction("_override_frozen_modules_for_tests", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.None(), nil
+		})); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("_override_multi_interp_extensions_check"),
+		objects.NewBuiltinFunction("_override_multi_interp_extensions_check", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewInt(0), nil
+		})); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 

@@ -515,8 +515,72 @@ func fixupSlotDispatchers(t *Type) {
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
+	fixupAsyncSlots(t)
 	fixupTpNew(t)
 	fixupFinalize(t)
+}
+
+// fixupAsyncSlots wires tp_as_async (am_aiter / am_anext / am_await)
+// when the class body (or any user-defined base on the MRO) provides
+// __aiter__ / __anext__ / __await__. Without this, async for / async
+// with / await on a user class can find the Python-level methods via
+// LookupDescriptor but the C-level Async slot stays nil, so the
+// dispatcher panel rejects the call as "no __aiter__ method".
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot (am_aiter /
+// am_anext / am_await entries), Objects/typeobject.c slot_am_aiter etc.
+func fixupAsyncSlots(t *Type) {
+	hasAiter := lookupDunderCallable(t, "__aiter__")
+	hasAnext := lookupDunderCallable(t, "__anext__")
+	hasAwait := lookupDunderCallable(t, "__await__")
+	if !hasAiter && !hasAnext && !hasAwait {
+		return
+	}
+	if t.Async == nil {
+		t.Async = &AsyncMethods{}
+	}
+	if hasAiter {
+		t.Async.Aiter = slotAmAiter
+	}
+	if hasAnext {
+		t.Async.Anext = slotAmAnext
+	}
+	if hasAwait {
+		t.Async.Await = slotAmAwait
+	}
+}
+
+// slotAmAiter dispatches to __aiter__.
+//
+// CPython: Objects/typeobject.c slot_am_aiter
+func slotAmAiter(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__aiter__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotAmAnext dispatches to __anext__.
+//
+// CPython: Objects/typeobject.c slot_am_anext
+func slotAmAnext(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__anext__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotAmAwait dispatches to __await__.
+//
+// CPython: Objects/typeobject.c slot_am_await
+func slotAmAwait(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__await__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
 }
 
 // fixupFinalize wires tp_finalize when the class body (or any base on

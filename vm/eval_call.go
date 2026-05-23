@@ -74,6 +74,13 @@ func currentThread() *state.Thread {
 
 func init() {
 	objects.FunctionType.Call = callPyFunction
+	// add_operators installs __call__ as a slot wrapper for every type
+	// with tp_call. FunctionType.Call lands here (not in objects/) to
+	// avoid an objects -> vm import cycle, so the slot wrapper has to
+	// be installed at the same point.
+	//
+	// CPython: Objects/typeobject.c wrap_call (slotdefs row for tp_call)
+	objects.AddCallSlotWrapper(objects.FunctionType)
 	// Expose the current Python frame to objects/ for super() zero-arg.
 	// The frame stack lives on the active thread's threadVM; this hook
 	// avoids an objects -> vm import edge.
