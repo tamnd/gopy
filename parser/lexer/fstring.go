@@ -266,6 +266,9 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				peek = s.nextC()
 			}
 			if peek == '{' || peek == '}' {
+				if !m.raw {
+					s.warnInvalidEscape(byte(peek))
+				}
 				s.backup(peek)
 				continue
 			}

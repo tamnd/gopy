@@ -2220,3 +2220,37 @@ CPython:
 - `Python/formatter_unicode.c:47 invalid_comma_and_underscore`
 - `Python/formatter_unicode.c:236 grouping section`
 - `Python/formatter_unicode.c:331 thousands/type validation`
+
+### P7 closer 33: SyntaxWarning for `\{` / `\}` inside non-raw f-strings
+
+CPython's lexer treats a backslash before `{` or `}` inside an
+f-string as an unrecognized escape: the body keeps the literal
+backslash and the tokenizer emits a `SyntaxWarning` so the user
+notices the typo before PEP 414 escalates it to a `SyntaxError` in
+a future version. The matching code lives in
+`Parser/lexer/lexer.c:1581` (the `\{`/`\}` branch inside
+`tok_get_fstring_mode`) and routes through
+`_PyTokenizer_warn_invalid_escape_sequence`.
+
+The Go port in `parser/lexer/fstring.go:fstringMiddle` already kept
+the backslash in the middle token's text, but never raised the
+warning, so `test_fstring`'s six `test_backslash_before_*` cases
+never saw the expected diagnostic. The fix is a one-line call to
+`s.warnInvalidEscape(byte(peek))` inside the existing `peek == '{'
+|| peek == '}'` branch, guarded by `!m.raw` so raw f-strings (where
+the backslash is just a literal byte anyway) stay silent.
+
+Net effect on the parser surface: `f'\{...}'` and `f'\}...'` now
+produce the canonical SyntaxWarning. The six affected `test_fstring`
+cases remain failing for a separate reason: gopy's
+`unittest.assertWarns` interaction with
+`stdlib/_py_warnings.py:_add_filter` propagates an `AttributeError`
+when `filters.remove(item)` triggers a module `__getattr__` lookup
+for `__warningregistry__`. That is a warnings-subsystem bug
+unrelated to spec 1719 and is tracked as a separate follow-up; the
+port here is faithful to CPython and is the prerequisite for those
+tests to close once the warnings filter bug is fixed.
+
+CPython:
+- `Parser/lexer/lexer.c:1581 fstring \{ / \} branch`
+- `Parser/tokenizer/helpers.c:110 _PyTokenizer_warn_invalid_escape_sequence`
