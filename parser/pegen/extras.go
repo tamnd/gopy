@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
+	perrors "github.com/tamnd/gopy/parser/errors"
 )
 
 // GetKeys flattens the key side of a list of (key, value) pairs.
@@ -123,7 +124,12 @@ func ConcatenateStrings(p *Parser, parts []ast.Expr) ast.Expr {
 		}
 	}
 	if (unicodeFound || fStringFound) && bytesFound {
-		p.errorIndicator = true
+		// CPython: Parser/action_helpers.c:1897
+		// _PyPegen_concatenate_strings raises the SyntaxError directly
+		// via RAISE_SYNTAX_ERROR before bailing, so the parser surface
+		// gets the specific message rather than the generic "invalid
+		// syntax" the empty errorIndicator path produces.
+		p.RaiseSyntaxError("%s", perrors.MsgMixedBytesLiterals)
 		return nil
 	}
 	if !fStringFound {

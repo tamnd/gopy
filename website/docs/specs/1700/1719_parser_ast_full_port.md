@@ -2364,3 +2364,44 @@ CPython:
 - `Parser/string_parser.c:38 octal long-form text`
 - `Parser/action_helpers.c:1270 _PyPegen_decode_fstring_part`
 - `Objects/object.c:1392 PyObject_GetOptionalAttr PyErr_Clear`
+
+### P7 closer 36: mix-bytes-and-nonbytes + unknown_presentation_type ports
+
+Two small message-fidelity fixes that close `test_fstring`
+`test_compile_time_concat_errors` (both shapes) and the
+`test_errors` `f'{1000:j}'` cluster.
+
+1. `parser/pegen/extras.go` `ConcatenateStrings` was setting
+   `p.errorIndicator = true` and bailing, which surfaces as the
+   generic "invalid syntax". CPython's
+   `_PyPegen_concatenate_strings` calls
+   `RAISE_SYNTAX_ERROR("cannot mix bytes and nonbytes literals")`
+   right at the mix-detection point
+   (`Parser/action_helpers.c:1897`), so the parser raises the
+   specific text. The port swaps the indicator-only path for an
+   actual `p.RaiseSyntaxError(...)` call keyed on
+   `perrors.MsgMixedBytesLiterals`.
+
+2. `objects/long_format.go`, `objects/float_format.go`,
+   `objects/str_format.go` now check the presentation type before
+   handing off to the format-package renderer and raise the
+   CPython `Unknown format code 'X' for object of type 'T'` text
+   when the type is unsupported. The shared helper
+   `unknownPresentationType` mirrors
+   `Python/formatter_unicode.c:14 unknown_presentation_type`
+   exactly: printable ASCII rendered as `'%c'`, anything else as
+   `'\\x%x'`. Before, every unsupported type collapsed to the
+   format-package's `ErrInvalidSpec` text "format: invalid format
+   specifier", which only described the parser layer and lost the
+   object-type-name half of CPython's message.
+
+Net effect on `test_fstring`: 33F+15E to 29F+15E. Closed:
+`test_compile_time_concat_errors` (2 shapes) and `test_errors`
+(`f'{1000:j}'`, both repetitions).
+
+CPython:
+- `Parser/action_helpers.c:1897 _PyPegen_concatenate_strings RAISE_SYNTAX_ERROR`
+- `Python/formatter_unicode.c:14 unknown_presentation_type`
+- `Python/formatter_unicode.c:1584 format_long_internal default branch`
+- `Python/formatter_unicode.c:1642 format_float_internal default branch`
+- `Python/formatter_unicode.c:1685 format_unicode_internal default branch`

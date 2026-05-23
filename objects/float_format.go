@@ -48,6 +48,14 @@ func floatFormat(o Object, spec string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ValueError: %w", err)
 	}
+	switch parsed.Type {
+	case 0, 'e', 'E', 'f', 'F', 'g', 'G', '%', 'n':
+		// CPython's float formatter accepts these presentation
+		// types; everything else falls through to the
+		// unknown-format-code branch.
+	default:
+		return "", unknownPresentationType(parsed.Type, o.Type().Name)
+	}
 	out, err := format.FormatFloat(f.Float64(), parsed)
 	if err != nil {
 		return "", fmt.Errorf("ValueError: %w", err)
