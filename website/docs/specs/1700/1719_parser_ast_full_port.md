@@ -2254,3 +2254,44 @@ tests to close once the warnings filter bug is fixed.
 CPython:
 - `Parser/lexer/lexer.c:1581 fstring \{ / \} branch`
 - `Parser/tokenizer/helpers.c:110 _PyTokenizer_warn_invalid_escape_sequence`
+
+### P7 closer 34: decode_unicode_with_escapes preprocessing pass
+
+`Parser/string_parser.c:135 decode_unicode_with_escapes` is the
+wrapper CPython runs before its inner unicode-escape decoder. It
+walks the input and rewrites two awkward shapes:
+
+- a trailing `\` becomes `\` (so the inner decoder, which
+  rejects `\` at EOF, sees a complete escape that decodes to a
+  literal backslash)
+- a `\` immediately followed by a non-ASCII byte gets the same
+  `\` rewrite, then the high byte is re-emitted as a
+  `\UXXXXXXXX` escape so the inner decoder treats them as two
+  independent characters rather than one bogus escape
+
+Without the pass, gopy's decoder raised `"\ at end of string"`
+the moment an f-string middle ended on a literal backslash. The
+test `test_syntax_warning_infinite_recursion_in_file` exercises
+exactly this shape via `f'\{1}'`: after P7 closer 33 emits the
+SyntaxWarning and the lexer backs up the `{`, the middle token's
+body is the single byte `\`. The inner decoder would then fail
+with "trailing backslash", masking the SyntaxWarning under a
+spurious SyntaxError.
+
+The port adds `preprocessUnicodeEscapes` in
+`parser/string/decode.go` and routes `decodeUnicodeEscapes`
+through it. The high-byte arm emits raw UTF-8 instead of the
+`\UXXXXXXXX` round trip CPython needs (our inner decoder already
+accepts UTF-8 directly), so the observable behaviour is the same:
+trailing `\` decodes to a literal backslash, `\<utf8>` decodes to
+backslash plus the original UTF-8 character, no SyntaxWarning
+fires for the high-byte case.
+
+Net effect on `test_fstring`: 34F+22E to 33F+22E. The
+`test_syntax_warning_infinite_recursion_in_file` case closes.
+Other gates unchanged.
+
+CPython:
+- `Parser/string_parser.c:135 decode_unicode_with_escapes`
+- `Parser/string_parser.c:158 trailing-backslash + high-byte rewrite loop`
+- `Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal2`
