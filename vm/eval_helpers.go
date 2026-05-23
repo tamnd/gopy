@@ -410,7 +410,7 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 	}
 	tp, ok := typeObj.(*objects.Type)
 	if !ok {
-		e.pendingErr = fmt.Errorf("MATCH_CLASS: type operand not a type, got %T", typeObj)
+		e.pendingErr = errors.New("TypeError: called match pattern must be a class")
 		return nil
 	}
 	if !isInstance(subject, tp) {

@@ -450,12 +450,13 @@ func NewType(name string, bases []*Type) *Type {
 			continue
 		}
 		b.addSubclass(t)
-		// inherit_flags: MATCH_SELF carries down from a base, so a
-		// subclass of int (e.g. bool) self-matches without redeclaring
-		// the flag. CPython: Objects/typeobject.c:8204 inherit_flags
-		if b.TpFlags&TpFlagMatchSelf != 0 {
-			t.TpFlags |= TpFlagMatchSelf
-		}
+		// inherit_flags: MATCH_SELF / SEQUENCE / MAPPING carry down
+		// from a base, so a subclass of int (e.g. bool) self-matches
+		// and a subclass of collections.abc.Sequence matches as a
+		// sequence without redeclaring the flag.
+		//
+		// CPython: Objects/typeobject.c:8204 inherit_flags
+		t.TpFlags |= b.TpFlags & (TpFlagMatchSelf | TpFlagSequence | TpFlagMapping)
 	}
 	// inherit slots from every ancestor so dispatch can resolve in
 	// one field load. Built-in types that set their own Number /

@@ -9,8 +9,6 @@
 package compile
 
 import (
-	"fmt"
-
 	"github.com/tamnd/gopy/ast"
 )
 
@@ -66,7 +64,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 	end := c.newLabel()
 	cases := len(s.Cases)
 	if cases == 0 {
-		return fmt.Errorf("compile: match has zero cases")
+		return c.errorAt(loc(s), "match has zero cases")
 	}
 	last := s.Cases[cases-1]
 	hasDefault := isWildcardPattern(last.Pattern) && cases > 1
@@ -237,7 +235,7 @@ func (c *Compiler) visitPattern(p ast.Pattern, pc *patternContext) error {
 	case *ast.MatchOr:
 		return c.patternOr(n, pc)
 	}
-	return fmt.Errorf("compile: unknown pattern kind %T", p)
+	return c.errorAt(loc(p), "unknown pattern kind %T", p)
 }
 
 // patternSubpattern is visitPattern with allowIrrefutable forced on.
@@ -262,7 +260,7 @@ func (c *Compiler) patternValue(p *ast.MatchValue, pc *patternContext) error {
 	switch p.Value.(type) {
 	case *ast.Constant, *ast.Attribute:
 	default:
-		return fmt.Errorf("compile: patterns may only match literals and attribute lookups")
+		return c.errorAt(loc(p), "patterns may only match literals and attribute lookups")
 	}
 	if err := c.visitExpr(p.Value); err != nil {
 		return err
@@ -300,9 +298,9 @@ func (c *Compiler) patternAs(p *ast.MatchAs, pc *patternContext) error {
 	if p.Pattern == nil {
 		if !pc.allowIrrefutable {
 			if p.Name != nil {
-				return fmt.Errorf("compile: name capture %q makes remaining patterns unreachable", *p.Name)
+				return c.errorAt(loc(p), "name capture %q makes remaining patterns unreachable", *p.Name)
 			}
-			return fmt.Errorf("compile: wildcard makes remaining patterns unreachable")
+			return c.errorAt(loc(p), "wildcard makes remaining patterns unreachable")
 		}
 		return c.patternStoreName(p.Name, pc, loc(p))
 	}
@@ -328,7 +326,7 @@ func (c *Compiler) patternStoreName(name *string, pc *patternContext, l ast.Pos)
 	}
 	for _, n := range pc.stores {
 		if n == *name {
-			return fmt.Errorf("compile: multiple assignments to name %q in pattern", *name)
+			return c.errorAt(l, "multiple assignments to name %q in pattern", *name)
 		}
 	}
 	rotations := pc.onTop + len(pc.stores) + 1
@@ -359,7 +357,7 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 	for i, sub := range p.Patterns {
 		if _, ok := sub.(*ast.MatchStar); ok {
 			if star >= 0 {
-				return fmt.Errorf("compile: multiple starred names in sequence pattern")
+				return c.errorAt(loc(p), "multiple starred names in sequence pattern")
 			}
 			star = i
 			starWild = isWildcardStarPattern(sub)
@@ -518,7 +516,7 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 	keys := p.Keys
 	patterns := p.Patterns
 	if len(keys) != len(patterns) {
-		return fmt.Errorf("compile: mapping pattern keys/patterns length mismatch")
+		return c.errorAt(loc(p), "mapping pattern keys/patterns length mismatch")
 	}
 	pc.onTop++
 	c.addOp(MATCH_MAPPING, loc(p))
@@ -541,7 +539,7 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 	}
 	for _, k := range keys {
 		if !isValidMappingPatternKey(k) {
-			return fmt.Errorf("compile: mapping pattern keys may only be literals and attribute lookups")
+			return c.errorAt(loc(k), "mapping pattern keys may only match literals and attribute lookups")
 		}
 		if err := c.visitExpr(k); err != nil {
 			return err
@@ -599,10 +597,10 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	nargs := len(p.Patterns)
 	nattrs := len(p.KwdAttrs)
 	if nargs+nattrs > 1<<31-1 {
-		return fmt.Errorf("compile: too many sub-patterns in class pattern")
+		return c.errorAt(loc(p), "too many sub-patterns in class pattern")
 	}
 	if nattrs != len(p.KwdPatterns) {
-		return fmt.Errorf("compile: kwd attrs/patterns length mismatch")
+		return c.errorAt(loc(p), "kwd_attrs (%d) / kwd_patterns (%d) length mismatch in class pattern", nattrs, len(p.KwdPatterns))
 	}
 	if err := c.visitExpr(p.Cls); err != nil {
 		return err
@@ -610,7 +608,7 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	for i, a := range p.KwdAttrs {
 		for j := i + 1; j < nattrs; j++ {
 			if a == p.KwdAttrs[j] {
-				return fmt.Errorf("compile: attribute name %q repeated in class pattern", a)
+				return c.errorAt(loc(p.KwdPatterns[j]), "attribute name repeated in class pattern: %s", a)
 			}
 		}
 	}
@@ -658,7 +656,7 @@ func (c *Compiler) patternOr(p *ast.MatchOr, pc *patternContext) error {
 	end := c.newLabel()
 	size := len(p.Patterns)
 	if size < 2 {
-		return fmt.Errorf("compile: or-pattern requires at least two alternatives")
+		return c.errorAt(loc(p), "or-pattern requires at least two alternatives")
 	}
 	oldStores := pc.stores
 	oldFailPop := pc.failPop
@@ -679,14 +677,14 @@ func (c *Compiler) patternOr(p *ast.MatchOr, pc *patternContext) error {
 			control = append([]string(nil), pc.stores...)
 		} else {
 			if nstores != len(control) {
-				return fmt.Errorf("compile: alternative patterns bind different names")
+				return c.errorAt(loc(alt), "alternative patterns bind different names")
 			}
 			if nstores > 0 {
 				for icontrol := nstores - 1; icontrol >= 0; icontrol-- {
 					name := control[icontrol]
 					istores := indexOf(pc.stores, name)
 					if istores < 0 {
-						return fmt.Errorf("compile: alternative patterns bind different names")
+						return c.errorAt(loc(alt), "alternative patterns bind different names")
 					}
 					if icontrol != istores {
 						rotations := istores + 1
@@ -722,7 +720,7 @@ func (c *Compiler) patternOr(p *ast.MatchOr, pc *patternContext) error {
 		c.patternRotate(nrots, loc(p))
 		for _, n := range pc.stores {
 			if n == name {
-				return fmt.Errorf("compile: multiple assignments to name %q in pattern", name)
+				return c.errorAt(loc(p), "multiple assignments to name %q in pattern", name)
 			}
 		}
 		pc.stores = append(pc.stores, name)

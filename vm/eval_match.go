@@ -143,7 +143,7 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 	}
 	tp, ok := typeObj.(*objects.Type)
 	if !ok {
-		return 0, true, fmt.Errorf("MATCH_CLASS: type operand not a type, got %T", typeObj)
+		return 0, true, errors.New("TypeError: called match pattern must be a class")
 	}
 
 	// isinstance check: subject's type must be tp or a subtype.
