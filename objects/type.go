@@ -292,6 +292,14 @@ const (
 	//
 	// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
 	TpFlagManagedDict uint64 = 1 << 4
+	// TpFlagMatchSelf marks the ten built-in types (bool/bytearray/
+	// bytes/dict/float/frozenset/int/list/set/str/tuple) that bind the
+	// subject itself when MATCH_CLASS receives exactly one positional
+	// sub-pattern and the type has no __match_args__. Subclasses
+	// inherit the flag through the type system.
+	//
+	// CPython: Include/object.h:588 _Py_TPFLAGS_MATCH_SELF
+	TpFlagMatchSelf uint64 = 1 << 22
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
@@ -442,6 +450,12 @@ func NewType(name string, bases []*Type) *Type {
 			continue
 		}
 		b.addSubclass(t)
+		// inherit_flags: MATCH_SELF carries down from a base, so a
+		// subclass of int (e.g. bool) self-matches without redeclaring
+		// the flag. CPython: Objects/typeobject.c:8204 inherit_flags
+		if b.TpFlags&TpFlagMatchSelf != 0 {
+			t.TpFlags |= TpFlagMatchSelf
+		}
 	}
 	// inherit slots from every ancestor so dispatch can resolve in
 	// one field load. Built-in types that set their own Number /

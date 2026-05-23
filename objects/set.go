@@ -49,6 +49,8 @@ func init() {
 	SetType.Str = setRepr
 	SetType.Hash = nil // sets are not hashable
 	SetType.RichCmp = setRichCmp
+	SetType.TpFlags |= TpFlagMatchSelf
+	FrozensetType.TpFlags |= TpFlagMatchSelf
 	SetType.Iter = setIter
 	SetType.Sequence = &SequenceMethods{
 		Length:   setLen,

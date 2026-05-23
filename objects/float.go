@@ -29,6 +29,7 @@ func init() {
 	FloatType.Str = floatRepr
 	FloatType.Hash = floatHash
 	FloatType.RichCmp = floatRichCmp
+	FloatType.TpFlags |= TpFlagMatchSelf
 	FloatType.Number = &NumberMethods{
 		Add:         floatAdd,
 		Subtract:    floatSub,

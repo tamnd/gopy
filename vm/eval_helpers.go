@@ -418,27 +418,17 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 	}
 	npos := int(oparg)
 	nkw := namesTup.Len()
-	attrs := make([]objects.Object, npos+nkw)
+	attrs := make([]objects.Object, 0, npos+nkw)
 	if npos > 0 {
-		matchArgs, agerr := objects.GetAttr(typeObj, objects.NewStr("__match_args__"))
-		if agerr != nil {
+		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos)
+		if mcErr != nil {
+			e.pendingErr = mcErr
+			return nil
+		}
+		if noMatch {
 			return objects.None()
 		}
-		maTup, isTup := matchArgs.(*objects.Tuple)
-		if !isTup || maTup.Len() < npos {
-			return objects.None()
-		}
-		for i := 0; i < npos; i++ {
-			s, serr := objects.Str(maTup.Item(i))
-			if serr != nil {
-				return objects.None()
-			}
-			val, verr := objects.GetAttr(subject, objects.NewStr(s))
-			if verr != nil {
-				return objects.None()
-			}
-			attrs[i] = val
-		}
+		attrs = append(attrs, posAttrs...)
 	}
 	for i := 0; i < nkw; i++ {
 		s, serr := objects.Str(namesTup.Item(i))
@@ -449,7 +439,7 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 		if verr != nil {
 			return objects.None()
 		}
-		attrs[npos+i] = val
+		attrs = append(attrs, val)
 	}
 	return objects.NewTuple(attrs)
 }

@@ -154,30 +154,17 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 
 	npos := int(oparg)
 	nkw := namesTup.Len()
-	attrs := make([]objects.Object, npos+nkw)
+	attrs := make([]objects.Object, 0, npos+nkw)
 
-	// Positional patterns: look up __match_args__ on the type.
 	if npos > 0 {
-		matchArgs, agerr := objects.GetAttr(typeObj, objects.NewStr("__match_args__"))
-		if agerr != nil {
-			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos)
+		if mcErr != nil {
+			return 0, true, mcErr
 		}
-		maTup, isTup := matchArgs.(*objects.Tuple)
-		if !isTup || maTup.Len() < npos {
-			e.pushObject(objects.None())
-			return e.advance(), true, nil
+		if noMatch {
+			return e.matchNoMatch(), true, nil
 		}
-		for i := 0; i < npos; i++ {
-			attrNameStr, serr := objects.Str(maTup.Item(i))
-			if serr != nil {
-				return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
-			}
-			val, verr := objects.GetAttr(subject, objects.NewStr(attrNameStr))
-			if verr != nil {
-				return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
-			}
-			attrs[i] = val
-		}
+		attrs = append(attrs, posAttrs...)
 	}
 
 	// Keyword patterns: look up each name in namesTup on the subject.
@@ -190,7 +177,7 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 		if verr != nil {
 			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 		}
-		attrs[npos+i] = val
+		attrs = append(attrs, val)
 	}
 
 	e.pushObject(objects.NewTuple(attrs))
@@ -206,6 +193,60 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 func (e *evalState) matchNoMatch() int {
 	e.pushObject(objects.None())
 	return e.advance()
+}
+
+// resolvePositionalAttrs runs the __match_args__ + MATCH_SELF gating for
+// MATCH_CLASS's positional sub-patterns. Returns the extracted attrs,
+// or noMatch=true to make the caller emit the None / "no match" arm,
+// or a real err for the TypeError cases (__match_args__ wrong type,
+// arity overrun on a self-matching type).
+//
+// CPython: Python/ceval.c:836 _PyEval_MatchClass positional branch
+func resolvePositionalAttrs(subject, typeObj objects.Object, tp *objects.Type, npos int) (attrs []objects.Object, noMatch bool, err error) {
+	matchArgs, agerr := objects.LookupAttrString(typeObj, "__match_args__")
+	if agerr != nil {
+		return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+	}
+	matchSelf := false
+	var maTup *objects.Tuple
+	if matchArgs != nil {
+		t, isTup := matchArgs.(*objects.Tuple)
+		if !isTup {
+			return nil, false, fmt.Errorf("TypeError: %s.__match_args__ must be a tuple (got %s)", tp.Name, matchArgs.Type().Name)
+		}
+		maTup = t
+	} else {
+		matchSelf = tp.TpFlags&objects.TpFlagMatchSelf != 0
+	}
+	allowed := 0
+	if matchSelf {
+		allowed = 1
+	} else if maTup != nil {
+		allowed = maTup.Len()
+	}
+	if allowed < npos {
+		plural := "s"
+		if allowed == 1 {
+			plural = ""
+		}
+		return nil, false, fmt.Errorf("TypeError: %s() accepts %d positional sub-pattern%s (%d given)", tp.Name, allowed, plural, npos)
+	}
+	if matchSelf {
+		return []objects.Object{subject}, false, nil
+	}
+	out := make([]objects.Object, 0, npos)
+	for i := 0; i < npos; i++ {
+		attrNameStr, serr := objects.Str(maTup.Item(i))
+		if serr != nil {
+			return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		}
+		val, verr := objects.GetAttr(subject, objects.NewStr(attrNameStr))
+		if verr != nil {
+			return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		}
+		out = append(out, val)
+	}
+	return out, false, nil
 }
 
 // isInstance returns true if o is an instance of tp. v0.9 checks

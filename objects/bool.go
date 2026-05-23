@@ -27,6 +27,7 @@ func init() {
 		}
 		return 0, nil
 	}
+	BoolType.TpFlags |= TpFlagMatchSelf
 	trueSingleton = newBool(1)
 	falseSingleton = newBool(0)
 }

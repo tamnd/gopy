@@ -35,6 +35,7 @@ func init() {
 	IntType.Str = intRepr
 	IntType.Hash = intHash
 	IntType.RichCmp = intRichCmp
+	IntType.TpFlags |= TpFlagMatchSelf
 	IntType.Number = &NumberMethods{
 		Add:         intAdd,
 		Subtract:    intSub,

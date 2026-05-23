@@ -209,6 +209,7 @@ func init() {
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
 	strType.Getattro = GenericGetAttr
+	strType.TpFlags |= TpFlagMatchSelf
 	SetTypeDescr(strType, "__repr__", NewMethodDescr(strType, "__repr__", unicodeReprDescr))
 	SetTypeDescr(strType, "__str__", NewMethodDescr(strType, "__str__", unicodeStrDescr))
 	SetTypeDescr(strType, "__hash__", NewMethodDescr(strType, "__hash__", unicodeHashDescr))
