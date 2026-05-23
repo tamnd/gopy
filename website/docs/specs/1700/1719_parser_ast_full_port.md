@@ -1561,3 +1561,36 @@ patternMapping.
 
 CPython:
 - `Python/codegen.c:6094 codegen_pattern_mapping` star_target arm
+
+### P7 closer 22: co_positions() yields one tuple per codeunit
+
+`test_patma.TestSourceLocations.test_jump_threading` walked
+`dis.get_instructions(f)` and expected every jump in a `match`
+body to carry a non-None `positions.lineno`. gopy was reporting
+`None` on every instruction past the first coalesced linetable
+run.
+
+Root cause was a 1:N drift in `objects/code_attrs.go`
+`codeCoPositionsMethod`: we emitted one position tuple per
+`CoPositions(c)` entry (one per coalesced linetable record),
+but `dis._get_instructions_bytes` calls
+`next(co_positions, ())` once per instruction plus once per
+inline cache slot, so a run that covers N codeunits has to
+yield N copies of the same tuple.
+
+CPython's `positionsiter_next` (Objects/codeobject.c:1492)
+advances `pi_offset += 2` on every call and only re-decodes
+the linetable when the cursor reaches the end of the current
+range, which works out to one tuple per codeunit (2 bytes).
+Fixed by expanding each `PositionEntry` into
+`(End - Start) / 2` copies before handing the list to
+`listIter`.
+
+The AST / codegen / location-table writer were already
+correct; only the iterator wrapper was wrong, which is why
+`co_linetable` decoded cleanly by hand but `dis` saw None.
+
+CPython:
+- `Objects/codeobject.c:1492 positionsiter_next`
+- `Objects/codeobject.c:1554 code_positionsiterator`
+- `Lib/dis.py:754 _get_instructions_bytes`
