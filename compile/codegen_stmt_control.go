@@ -3,11 +3,7 @@
 
 package compile
 
-import (
-	"fmt"
-
-	"github.com/tamnd/gopy/ast"
-)
+import "github.com/tamnd/gopy/ast"
 
 // visitIf compiles If: emit test, POP_JUMP_IF_FALSE to else label,
 // body, JUMP to end label, else label, orelse, end label.
@@ -182,11 +178,11 @@ func (c *Compiler) visitAsyncFor(s *ast.AsyncFor) error {
 //
 // CPython: Python/codegen.c:L2232 codegen_break
 func (c *Compiler) visitBreak(s *ast.Break) error {
+	l := loc(s)
 	loop := c.topFblock(fblockWhileLoop, fblockForLoop)
 	if loop == nil {
-		return fmt.Errorf("compile: 'break' outside loop")
+		return c.errorAt(l, "'break' outside loop")
 	}
-	l := loc(s)
 	c.unwindToLoop(loop, l)
 	c.unwindFblock(loop, l, false)
 	c.addOpJump(JUMP, loop.Exit, l)
@@ -197,12 +193,13 @@ func (c *Compiler) visitBreak(s *ast.Break) error {
 //
 // CPython: Python/codegen.c:L2248 codegen_continue
 func (c *Compiler) visitContinue(s *ast.Continue) error {
+	l := loc(s)
 	loop := c.topFblock(fblockWhileLoop, fblockForLoop)
 	if loop == nil {
-		return fmt.Errorf("compile: 'continue' not properly in loop")
+		return c.errorAt(l, "'continue' not properly in loop")
 	}
-	c.unwindToLoop(loop, loc(s))
-	c.addOpJump(JUMP, loop.Block, loc(s))
+	c.unwindToLoop(loop, l)
+	c.addOpJump(JUMP, loop.Block, l)
 	return nil
 }
 

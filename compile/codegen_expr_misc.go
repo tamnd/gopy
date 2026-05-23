@@ -24,25 +24,35 @@ func (c *Compiler) visitNamedExpr(e *ast.NamedExpr) error {
 }
 
 // visitYield emits YIELD_VALUE. Bare `yield` puts None on the stack.
-// CPython requires the enclosing scope to be a generator; symtable
-// already verifies this.
+// The enclosing scope must be function-like; module / class scope
+// rejects yield with a SyntaxError at compile time.
 //
-// CPython: Python/codegen.c codegen_yield
+// CPython: Python/codegen.c:5223 codegen_yield
 func (c *Compiler) visitYield(e *ast.Yield) error {
+	l := loc(e)
+	if c.scope == nil || !c.scope.IsFunctionLike() {
+		return c.errorAt(l, "'yield' outside function")
+	}
 	if e.Value == nil {
-		c.addLoadConst(nil, loc(e))
+		c.addLoadConst(nil, l)
 	} else if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
-	c.addOpI(YIELD_VALUE, 0, loc(e))
+	c.addOpI(YIELD_VALUE, 0, l)
 	return nil
 }
 
 // visitYieldFrom lowers `yield from x` to GET_YIELD_FROM_ITER plus a
 // SEND loop that drives the inner iterator.
 //
-// CPython: Python/codegen.c:L472 codegen_add_yield_from
+// CPython: Python/codegen.c:5235 codegen_add_yield_from
 func (c *Compiler) visitYieldFrom(e *ast.YieldFrom) error {
+	if c.scope == nil || !c.scope.IsFunctionLike() {
+		return c.errorAt(loc(e), "'yield from' outside function")
+	}
+	if c.scope.Coroutine {
+		return c.errorAt(loc(e), "'yield from' inside async function")
+	}
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}

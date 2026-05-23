@@ -303,6 +303,9 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 // CPython: Python/codegen.c:2191 codegen_return
 func (c *Compiler) visitReturn(s *ast.Return) error {
 	l := loc(s)
+	if c.scope == nil || !c.scope.IsFunctionLike() {
+		return c.errorAt(l, "'return' outside function")
+	}
 	_, valueIsConst := s.Value.(*ast.Constant)
 	preserveTOS := s.Value != nil && !valueIsConst
 
