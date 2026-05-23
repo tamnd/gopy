@@ -216,7 +216,7 @@ func init() {
 		SetItem: arrayMpAssSubscript,
 		DelItem: arrayMpDelItem,
 	}
-	ArrayType.TpFlags = objects.TpFlagSequence
+	ArrayType.TpFlags |= objects.TpFlagSequence
 	registerArrayMethods(ArrayType)
 }
 

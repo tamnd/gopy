@@ -300,6 +300,14 @@ const (
 	//
 	// CPython: Include/object.h:588 _Py_TPFLAGS_MATCH_SELF
 	TpFlagMatchSelf uint64 = 1 << 22
+	// TpFlagImmutable mirrors Py_TPFLAGS_IMMUTABLETYPE. Set on every
+	// static built-in type so SetFlagsRecursive (called from
+	// Sequence.register(str) and friends in collections.abc) refuses
+	// to paint sequence/mapping bits onto str/bytes/int/etc. Without
+	// the guard MATCH_SEQUENCE on a plain string returns True.
+	//
+	// CPython: Include/object.h:289 Py_TPFLAGS_IMMUTABLETYPE
+	TpFlagImmutable uint64 = 1 << 8
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
@@ -442,7 +450,7 @@ func TypeType() *Type {
 //
 // CPython: Objects/typeobject.c:L4153 type_new (adapted from)
 func NewType(name string, bases []*Type) *Type {
-	t := &Type{Name: name, Bases: bases}
+	t := &Type{Name: name, Bases: bases, TpFlags: TpFlagImmutable}
 	t.init(typeType)
 	t.MRO = c3Linearize(t)
 	for _, b := range bases {
@@ -494,8 +502,15 @@ func (t *Type) Subclasses() []*Type {
 // mask, then propagates the same edit to every transitive subclass.
 // Mirrors _PyType_SetFlagsRecursive.
 //
-// CPython: Objects/typeobject.c:1340 _PyType_SetFlagsRecursive
+// Immutable types are skipped (and stop the walk into their
+// subclasses) so collections.abc registrations like
+// Sequence.register(str) don't repaint built-in flag bits.
+//
+// CPython: Objects/typeobject.c:6042 set_flags_recursive
 func SetFlagsRecursive(t *Type, mask, add uint64) {
+	if t.TpFlags&TpFlagImmutable != 0 || (t.TpFlags&mask) == add {
+		return
+	}
 	t.TpFlags = (t.TpFlags &^ mask) | add
 	for _, sub := range t.Subclasses() {
 		SetFlagsRecursive(sub, mask, add)

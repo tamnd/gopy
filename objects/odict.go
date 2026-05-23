@@ -58,7 +58,7 @@ type OrderedDict struct {
 var OrderedDictType = NewType("OrderedDict", []*Type{DictType})
 
 func init() {
-	OrderedDictType.TpFlags = TpFlagMapping
+	OrderedDictType.TpFlags |= TpFlagMapping
 	OrderedDictType.Repr = odictRepr
 	OrderedDictType.Str = odictRepr
 	OrderedDictType.Iter = odictIter

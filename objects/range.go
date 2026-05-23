@@ -23,6 +23,7 @@ type Range struct {
 var RangeType = NewType("range", []*Type{objectType})
 
 func init() {
+	RangeType.TpFlags |= TpFlagSequence
 	RangeType.Repr = rangeRepr
 	RangeType.Str = rangeRepr
 	RangeType.Iter = rangeIter

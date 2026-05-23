@@ -103,6 +103,13 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
+	// Heap (user) types are mutable: drop the IMMUTABLETYPE flag that
+	// NewType stamps on by default so collections.abc registrations
+	// can still paint sequence/mapping bits onto user subclasses.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (heap types lack
+	// Py_TPFLAGS_IMMUTABLETYPE)
+	t.TpFlags &^= TpFlagImmutable
 	stampMetaclass(t, meta)
 	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
