@@ -372,7 +372,7 @@ func (e *evalState) objectDelAttr(o, name objects.Object) int32 {
 // matchKeys wraps _PyEval_MatchKeys: returns a tuple of values, or
 // None on partial match, or nil on a real error.
 //
-// CPython: Python/ceval.c:5052 _PyEval_MatchKeys
+// CPython: Python/ceval.c:728 _PyEval_MatchKeys
 func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 	keysTup, ok := keys.(*objects.Tuple)
 	if !ok {
@@ -383,15 +383,41 @@ func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 	if n == 0 {
 		return objects.NewTuple(nil)
 	}
+	get, gerr := objects.LookupAttrString(subject, "get")
+	if gerr != nil {
+		e.pendingErr = gerr
+		return nil
+	}
+	if get == nil {
+		e.pendingErr = fmt.Errorf("TypeError: %s object has no attribute 'get'", subject.Type().Name)
+		return nil
+	}
+	dummy := objects.NewInstance(objects.ObjectType())
+	seen := objects.NewSet()
 	values := make([]objects.Object, n)
 	for i := 0; i < n; i++ {
-		v, gerr := matchKeysGet(subject, keysTup.Item(i))
-		if errors.Is(gerr, errKeyMissing) {
-			return objects.None()
-		}
-		if gerr != nil {
-			e.pendingErr = gerr
+		k := keysTup.Item(i)
+		contains, cerr := seen.Contains(k)
+		if cerr != nil {
+			e.pendingErr = cerr
 			return nil
+		}
+		if contains {
+			rep, _ := objects.Repr(k)
+			e.pendingErr = fmt.Errorf("ValueError: mapping pattern checks duplicate key (%s)", rep)
+			return nil
+		}
+		if aerr := seen.Add(k); aerr != nil {
+			e.pendingErr = aerr
+			return nil
+		}
+		v, cerr := objects.Call(get, objects.NewTuple([]objects.Object{k, dummy}), nil)
+		if cerr != nil {
+			e.pendingErr = cerr
+			return nil
+		}
+		if v == dummy {
+			return objects.None()
 		}
 		values[i] = v
 	}

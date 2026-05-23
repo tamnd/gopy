@@ -57,6 +57,13 @@ type OrderedDict struct {
 // CPython: Objects/odictobject.c:1840 PyODict_Type
 var OrderedDictType = NewType("OrderedDict", []*Type{DictType})
 
+// AsDictBacking exposes the inner *Dict (the hash table half of the
+// odict layout) so dict's tp_richcompare and MATCH_KEYS treat an
+// OrderedDict as a dict subclass.
+//
+// CPython: Objects/odictobject.c:489 _odictobject (PyDictObject substructure)
+func (od *OrderedDict) AsDictBacking() *Dict { return od.inner }
+
 func init() {
 	OrderedDictType.TpFlags |= TpFlagMapping
 	OrderedDictType.Repr = odictRepr

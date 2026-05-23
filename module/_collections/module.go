@@ -1146,6 +1146,13 @@ type DefaultDictObject struct {
 // CPython: Modules/_collectionsmodule.c:2514 defdict_spec
 var DefaultDictType = newDefaultDictType()
 
+// AsDictBacking exposes the inner *Dict storage so dict's tp_richcompare
+// (and any other slot that introspects subclass instances) operates on
+// the dict_data the subclass inherits from PyDict_Type.
+//
+// CPython: Modules/_collectionsmodule.c:2213 defdictobject (PyDictObject substructure)
+func (dd *DefaultDictObject) AsDictBacking() *objects.Dict { return dd.Dict }
+
 func newDefaultDictType() *objects.Type {
 	t := objects.NewType("defaultdict", []*objects.Type{objects.DictType})
 	t.HasDict = false

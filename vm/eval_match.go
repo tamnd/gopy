@@ -66,8 +66,13 @@ func (e *evalState) execMatchSequence() (next int, handled bool, err error) {
 // Stack before: [..., subject, keys]
 // Stack after:  [..., subject, keys, values_or_None]
 //
-// CPython: Python/bytecodes.c:3072 MATCH_KEYS
-// CPython: Python/ceval.c:L5052 _PyEval_MatchKeys
+// CPython uses `map.get(key, dummy)` rather than `map[key]` so that
+// dict subclasses defining __missing__ (collections.defaultdict and
+// friends) don't get mutated by a probing lookup, and so that absence
+// is signalled without exception handling.
+//
+// CPython: Python/bytecodes.c:3071 MATCH_KEYS
+// CPython: Python/ceval.c:728 _PyEval_MatchKeys
 func (e *evalState) execMatchKeys() (next int, handled bool, err error) {
 	keys, ok := e.peek(0).AsObject().(*objects.Tuple)
 	if !ok {
@@ -81,47 +86,41 @@ func (e *evalState) execMatchKeys() (next int, handled bool, err error) {
 		return e.advance(), true, nil
 	}
 
+	get, gerr := objects.LookupAttrString(subject, "get")
+	if gerr != nil {
+		return 0, true, gerr
+	}
+	if get == nil {
+		return 0, true, fmt.Errorf("TypeError: %s object has no attribute 'get'", subject.Type().Name)
+	}
+	dummy := objects.NewInstance(objects.ObjectType())
+	seen := objects.NewSet()
 	values := make([]objects.Object, n)
 	for i := 0; i < n; i++ {
 		k := keys.Item(i)
-		v, gerr := matchKeysGet(subject, k)
-		if errors.Is(gerr, errKeyMissing) {
+		contains, cerr := seen.Contains(k)
+		if cerr != nil {
+			return 0, true, cerr
+		}
+		if contains {
+			rep, _ := objects.Repr(k)
+			return 0, true, fmt.Errorf("ValueError: mapping pattern checks duplicate key (%s)", rep)
+		}
+		if aerr := seen.Add(k); aerr != nil {
+			return 0, true, aerr
+		}
+		v, cerr := objects.Call(get, objects.NewTuple([]objects.Object{k, dummy}), nil)
+		if cerr != nil {
+			return 0, true, cerr
+		}
+		if v == dummy {
 			e.pushObject(objects.None())
 			return e.advance(), true, nil
-		}
-		if gerr != nil {
-			return 0, true, gerr
 		}
 		values[i] = v
 	}
 	e.pushObject(objects.NewTuple(values))
 	return e.advance(), true, nil
-}
-
-var errKeyMissing = fmt.Errorf("key missing")
-
-// matchKeysGet extracts one key from the subject. Returns errKeyMissing
-// when the key is absent (not an error, just "no match").
-//
-// CPython: Python/ceval.c _PyEval_MatchKeys (inner loop)
-func matchKeysGet(subject, key objects.Object) (objects.Object, error) {
-	if d, ok := subject.(*objects.Dict); ok {
-		v, gerr := d.GetItem(key)
-		if gerr != nil || v == nil {
-			return nil, errKeyMissing
-		}
-		return v, nil
-	}
-	// Generic mapping path via __getitem__.
-	t := subject.Type()
-	if t.Mapping == nil || t.Mapping.GetItem == nil {
-		return nil, fmt.Errorf("MATCH_KEYS: subject is not a mapping")
-	}
-	v, gerr := t.Mapping.GetItem(subject, key)
-	if gerr != nil {
-		return nil, errKeyMissing
-	}
-	return v, nil
 }
 
 // execMatchClass ports MATCH_CLASS: pop subject, type, names; test

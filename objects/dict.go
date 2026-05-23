@@ -508,6 +508,35 @@ func dictLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(args[0].(*Dict).Len())), nil
 }
 
+// DictBacking is implemented by every type whose instances are a dict
+// subclass (collections.defaultdict, collections.OrderedDict, ...).
+// asDictBacking() returns the underlying *Dict so dict's tp_richcompare,
+// MATCH_KEYS, and friends can operate on the storage that the subclass
+// inherits from PyDict_Type, mirroring CPython's tp_basicsize sharing.
+//
+// CPython: Objects/dictobject.c PyDict_Check / PyDictObject layout
+type DictBacking interface {
+	AsDictBacking() *Dict
+}
+
+// AsDictBacking returns d itself; *Dict implements DictBacking.
+func (d *Dict) AsDictBacking() *Dict { return d }
+
+// asDictBacking returns the *Dict stored inside o, or (nil, false) if
+// o is not a dict subclass. Used by dict slots to accept defaultdict
+// and similar subclass instances.
+func asDictBacking(o Object) (*Dict, bool) {
+	if d, ok := o.(*Dict); ok {
+		return d, true
+	}
+	if b, ok := o.(DictBacking); ok {
+		if d := b.AsDictBacking(); d != nil {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
 // dictEqual reports whether two dicts compare equal by key/value.
 //
 // CPython: Objects/dictobject.c:3494 dict_equal
@@ -543,11 +572,11 @@ func dictEqual(a, b *Dict) (bool, error) {
 //
 // CPython: Objects/dictobject.c:3554 dict_richcompare
 func dictRichCmp(a, b Object, op CompareOp) (Object, error) {
-	ad, ok := a.(*Dict)
+	ad, ok := asDictBacking(a)
 	if !ok {
 		return notImplemented(), nil
 	}
-	bd, ok := b.(*Dict)
+	bd, ok := asDictBacking(b)
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -571,11 +600,11 @@ func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __eq__() takes exactly one argument (%d given)", len(args)-1)
 	}
-	a, ok := args[0].(*Dict)
+	a, ok := asDictBacking(args[0])
 	if !ok {
 		return NotImplemented(), nil
 	}
-	b, ok := args[1].(*Dict)
+	b, ok := asDictBacking(args[1])
 	if !ok {
 		return NotImplemented(), nil
 	}
