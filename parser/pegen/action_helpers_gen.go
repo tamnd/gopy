@@ -774,39 +774,60 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 }
 
 // actionPgenEnsureImaginary validates that exp is a Constant carrying
-// a complex value. Mirrors CPython's _PyPegen_ensure_imaginary which
-// just type-checks and returns the same node; the surrounding grammar
-// rule has already built it via numberToken.
+// a complex value. The complex_number grammar rule requires the right
+// operand to be an imaginary literal; anything else (a real, an
+// integer) raises a SyntaxError at the operand's location so the
+// parser fails fast rather than letting codegen do shape checks.
 //
 // CPython: Parser/action_helpers.c:843 _PyPegen_ensure_imaginary
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
-	_ = p
 	exp := asExpr(argAt(args, 1))
 	c, ok := exp.(*ast.Constant)
 	if !ok {
+		raiseEnsureNumberError(p, exp, "imaginary number required in complex literal")
 		return placeholderMatched
 	}
 	if _, isComplex := c.Value.(complex128); !isComplex {
+		raiseEnsureNumberError(p, c, "imaginary number required in complex literal")
 		return placeholderMatched
 	}
 	return c
 }
 
 // actionPgenEnsureReal validates that exp is a Constant carrying a
-// non-complex numeric value.
+// non-complex numeric value. The complex_number grammar rule requires
+// the left operand to be a real literal (signed_real_number); a
+// complex literal here raises the symmetric SyntaxError.
 //
 // CPython: Parser/action_helpers.c:853 _PyPegen_ensure_real
 func actionPgenEnsureReal(p *Parser, args ...any) any {
-	_ = p
 	exp := asExpr(argAt(args, 1))
 	c, ok := exp.(*ast.Constant)
 	if !ok {
+		raiseEnsureNumberError(p, exp, "real number required in complex literal")
 		return placeholderMatched
 	}
 	if _, isComplex := c.Value.(complex128); isComplex {
+		raiseEnsureNumberError(p, c, "real number required in complex literal")
 		return placeholderMatched
 	}
 	return c
+}
+
+// raiseEnsureNumberError reports a SyntaxError at the expression's
+// span. ensureReal / ensureImaginary share this path so the location
+// arithmetic stays in one place.
+func raiseEnsureNumberError(p *Parser, exp ast.Expr, msg string) {
+	if p == nil || exp == nil {
+		return
+	}
+	pos := exp.Position()
+	p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+		Lineno:  pos.Lineno,
+		ColOff:  pos.ColOffset,
+		EndLine: pos.EndLineno,
+		EndCol:  pos.EndColOffset,
+	}, "%s", msg)
 }
 
 // The remaining pgen helpers cover string-formatting, function/class

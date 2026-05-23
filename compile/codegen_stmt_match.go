@@ -9,6 +9,9 @@
 package compile
 
 import (
+	"fmt"
+	"math/big"
+
 	"github.com/tamnd/gopy/ast"
 )
 
@@ -537,9 +540,22 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 			return err
 		}
 	}
+	// CPython: Python/codegen.c:6060 mirror the seen-set duplicate check.
+	// Detect duplicates by Python equality: 0 == False == 0.0 == 0j == -0
+	// all share a bucket and must collide here so the SyntaxError fires
+	// before the bytecode reaches MATCH_KEYS.
+	seen := map[mappingDedupKey]struct{}{}
 	for _, k := range keys {
 		if !isValidMappingPatternKey(k) {
 			return c.errorAt(loc(k), "mapping pattern keys may only match literals and attribute lookups")
+		}
+		if v, ok := foldedMappingKey(k); ok {
+			if dk, ok := normalizeMappingKey(v); ok {
+				if _, dup := seen[dk]; dup {
+					return c.errorAt(loc(k), fmt.Sprintf("mapping pattern checks duplicate key (%s)", literalRepr(v)))
+				}
+				seen[dk] = struct{}{}
+			}
 		}
 		if err := c.visitExpr(k); err != nil {
 			return err
@@ -736,4 +752,177 @@ func indexOf(s []string, v string) int {
 		}
 	}
 	return -1
+}
+
+// mappingDedupKey is the canonical bucket every numeric value sharing
+// Python equality collapses into. Strings, bytes, and singletons take
+// their own kind so they cannot collide with a number.
+type mappingDedupKey struct {
+	kind byte
+	s    string
+	c    complex128
+}
+
+// foldedMappingKey returns the Python-value a mapping-pattern key
+// resolves to. CPython gets here from AST optimizer constant folding;
+// gopy folds the same three shapes (Constant, UnaryOp USub Constant,
+// BinOp real ± imaginary) inline.
+//
+// CPython: Python/ast_opt.c:457 fold_unaryop / fold_binop (folded prior
+// to codegen.c:5989 codegen_pattern_mapping_key)
+func foldedMappingKey(e ast.Expr) (any, bool) {
+	switch v := e.(type) {
+	case *ast.Constant:
+		return v.Value, true
+	case *ast.UnaryOp:
+		if v.Op != ast.USub {
+			return nil, false
+		}
+		c, ok := v.Operand.(*ast.Constant)
+		if !ok {
+			return nil, false
+		}
+		return negateConstValue(c.Value), true
+	case *ast.BinOp:
+		if v.Op != ast.Add && v.Op != ast.Sub {
+			return nil, false
+		}
+		left, lok := signedConstValue(v.Left)
+		if !lok {
+			return nil, false
+		}
+		rc, rok := v.Right.(*ast.Constant)
+		if !rok {
+			return nil, false
+		}
+		right := rc.Value
+		if v.Op == ast.Sub {
+			right = negateConstValue(right)
+		}
+		return addConstValues(left, right), true
+	}
+	return nil, false
+}
+
+// signedConstValue accepts a bare Constant or UnaryOp(USub, Constant)
+// and returns the folded numeric value. Used as the left-operand
+// helper for foldedMappingKey's BinOp arm.
+func signedConstValue(e ast.Expr) (any, bool) {
+	switch v := e.(type) {
+	case *ast.Constant:
+		return v.Value, true
+	case *ast.UnaryOp:
+		if v.Op != ast.USub {
+			return nil, false
+		}
+		c, ok := v.Operand.(*ast.Constant)
+		if !ok {
+			return nil, false
+		}
+		return negateConstValue(c.Value), true
+	}
+	return nil, false
+}
+
+func negateConstValue(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return -x
+	case float64:
+		return -x
+	case complex128:
+		return -x
+	case *big.Int:
+		return new(big.Int).Neg(x)
+	case bool:
+		if x {
+			return int64(-1)
+		}
+		return int64(0)
+	}
+	return v
+}
+
+func addConstValues(a, b any) any {
+	af, aok := toComplexValue(a)
+	bf, bok := toComplexValue(b)
+	if !aok || !bok {
+		return a
+	}
+	return af + bf
+}
+
+func toComplexValue(v any) (complex128, bool) {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return 1, true
+		}
+		return 0, true
+	case int64:
+		return complex(float64(x), 0), true
+	case float64:
+		return complex(x, 0), true
+	case complex128:
+		return x, true
+	case *big.Int:
+		f, _ := new(big.Float).SetInt(x).Float64()
+		return complex(f, 0), true
+	}
+	return 0, false
+}
+
+// normalizeMappingKey returns the dedup bucket for v. Numeric values
+// (bool, int, float, complex) collapse to the same kind so that
+// `{0: _, False: _}`, `{0: _, 0.0: _}`, `{0: _, 0j: _}`, and
+// `{0: _, -0: _}` all flag as duplicates the way CPython's PySet would.
+func normalizeMappingKey(v any) (mappingDedupKey, bool) {
+	switch x := v.(type) {
+	case nil:
+		return mappingDedupKey{kind: 'N'}, true
+	case bool, int64, float64, complex128:
+		c, _ := toComplexValue(x)
+		return mappingDedupKey{kind: 'n', c: c}, true
+	case *big.Int:
+		if x.IsInt64() {
+			f := float64(x.Int64())
+			return mappingDedupKey{kind: 'n', c: complex(f, 0)}, true
+		}
+		return mappingDedupKey{kind: 'I', s: x.String()}, true
+	case string:
+		return mappingDedupKey{kind: 's', s: x}, true
+	case []byte:
+		return mappingDedupKey{kind: 'b', s: string(x)}, true
+	}
+	return mappingDedupKey{}, false
+}
+
+// literalRepr returns a CPython-faithful repr() for the values that
+// reach mapping-pattern keys. Only the literal kinds get a custom
+// spelling; anything else falls back to %v which is good enough for
+// SyntaxError diagnostics.
+func literalRepr(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "None"
+	case bool:
+		if x {
+			return "True"
+		}
+		return "False"
+	case int64:
+		return fmt.Sprintf("%d", x)
+	case *big.Int:
+		return x.String()
+	case float64:
+		return fmt.Sprintf("%g", x)
+	case complex128:
+		if real(x) == 0 {
+			return fmt.Sprintf("%gj", imag(x))
+		}
+		return fmt.Sprintf("(%g+%gj)", real(x), imag(x))
+	case string:
+		return fmt.Sprintf("%q", x)
+	}
+	return fmt.Sprintf("%v", v)
 }
