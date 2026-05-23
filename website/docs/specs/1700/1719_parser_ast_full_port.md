@@ -2092,3 +2092,29 @@ CPython:
 - `Objects/unicodeobject.c:11641 PyUnicode_Concat`
 - `Grammar/python.gram:1510 invalid_fstring_replacement_field`
 - `Grammar/python.gram:1532 invalid_tstring_replacement_field`
+
+### P7 closer 30: `UnicodeWriter.Finish` populates the PEP 393 slab
+
+`objects/unicode_writer.go` previously built the returned `*Unicode`
+by setting `length`, `kind`, and `ascii` directly from the writer's
+incremental `pos`/`maxchar` counters, without populating the matching
+narrow slab (`data1` for non-ASCII Latin-1, `data2` for BMP, `data4`
+for full unicode). Indexing the result through `unicodeGetItemKind`
+then deref'd a nil `data1`, panicking with `index out of range [0]
+with length 0`.
+
+CPython's `_PyUnicodeWriter_Finish` (`Objects/unicodeobject.c:14199`)
+allocates a fresh `PyUnicode_New` which inlines the slab. We mirror
+that by calling `out.classify()`, the same path `NewStr` already
+uses. classify walks the buffer once to re-pick the narrowest kind
+and populate the slab.
+
+Net effect: `test_fstring` no longer crashes. The gate now runs the
+full 90 tests (54 fails + 22 errors remain, all real test mismatches:
+AST-mode compile, `\N{...}` lexer drift, format-spec validation
+messages). No other regressions; Go unit tests across
+parser/objects/vm/compile stay green.
+
+CPython:
+- `Objects/unicodeobject.c:14199 _PyUnicodeWriter_Finish`
+- `Objects/unicodeobject.c:1368 PyUnicode_New (slab allocation)`

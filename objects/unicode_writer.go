@@ -607,13 +607,18 @@ func (w *UnicodeWriter) Finish() *Unicode {
 		return out
 	}
 	out := &Unicode{
-		v:      string(w.buf),
-		length: w.pos,
-		hash:   -1,
-		ready:  true,
+		v:    string(w.buf),
+		hash: -1,
 	}
-	out.kind = unicodeKindForMaxChar(w.maxchar)
-	out.ascii = w.maxchar < 0x80
+	// classify fills kind, ascii, length, and the matching narrow
+	// slab (data1/data2/data4). The writer tracked maxchar/pos
+	// incrementally but skipped slab population, so unicodeGetItemKind
+	// on a non-ASCII Latin-1 result would deref a nil data1.
+	//
+	// CPython: Objects/unicodeobject.c:14199 _PyUnicodeWriter_Finish
+	// (PyUnicode_New allocates the slab inline; we mirror that by
+	// invoking classify here.)
+	out.classify()
 	out.init(strType)
 	w.buf = nil
 	return out
