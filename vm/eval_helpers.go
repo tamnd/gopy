@@ -419,8 +419,9 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 	npos := int(oparg)
 	nkw := namesTup.Len()
 	attrs := make([]objects.Object, 0, npos+nkw)
+	seen := make(map[string]struct{}, npos+nkw)
 	if npos > 0 {
-		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos)
+		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos, seen)
 		if mcErr != nil {
 			e.pendingErr = mcErr
 			return nil
@@ -431,12 +432,17 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 		attrs = append(attrs, posAttrs...)
 	}
 	for i := 0; i < nkw; i++ {
-		s, serr := objects.Str(namesTup.Item(i))
-		if serr != nil {
-			return objects.None()
+		name, isStr := namesTup.Item(i).(*objects.Unicode)
+		if !isStr {
+			e.pendingErr = fmt.Errorf("TypeError: keyword sub-pattern names must be strings (got %s)", namesTup.Item(i).Type().Name)
+			return nil
 		}
-		val, verr := objects.GetAttr(subject, objects.NewStr(s))
-		if verr != nil {
+		val, mcErr := matchClassAttr(subject, tp, name.Value(), seen)
+		if mcErr != nil {
+			e.pendingErr = mcErr
+			return nil
+		}
+		if val == nil {
 			return objects.None()
 		}
 		attrs = append(attrs, val)

@@ -155,9 +155,10 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 	npos := int(oparg)
 	nkw := namesTup.Len()
 	attrs := make([]objects.Object, 0, npos+nkw)
+	seen := make(map[string]struct{}, npos+nkw)
 
 	if npos > 0 {
-		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos)
+		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos, seen)
 		if mcErr != nil {
 			return 0, true, mcErr
 		}
@@ -169,13 +170,16 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 
 	// Keyword patterns: look up each name in namesTup on the subject.
 	for i := 0; i < nkw; i++ {
-		nameStr, serr := objects.Str(namesTup.Item(i))
-		if serr != nil {
-			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		name, isStr := namesTup.Item(i).(*objects.Unicode)
+		if !isStr {
+			return 0, true, fmt.Errorf("TypeError: keyword sub-pattern names must be strings (got %s)", namesTup.Item(i).Type().Name)
 		}
-		val, verr := objects.GetAttr(subject, objects.NewStr(nameStr))
-		if verr != nil {
-			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		val, mcErr := matchClassAttr(subject, tp, name.Value(), seen)
+		if mcErr != nil {
+			return 0, true, mcErr
+		}
+		if val == nil {
+			return e.matchNoMatch(), true, nil
 		}
 		attrs = append(attrs, val)
 	}
@@ -202,7 +206,7 @@ func (e *evalState) matchNoMatch() int {
 // arity overrun on a self-matching type).
 //
 // CPython: Python/ceval.c:836 _PyEval_MatchClass positional branch
-func resolvePositionalAttrs(subject, typeObj objects.Object, tp *objects.Type, npos int) (attrs []objects.Object, noMatch bool, err error) {
+func resolvePositionalAttrs(subject, typeObj objects.Object, tp *objects.Type, npos int, seen map[string]struct{}) (attrs []objects.Object, noMatch bool, err error) {
 	matchArgs, agerr := objects.LookupAttrString(typeObj, "__match_args__")
 	if agerr != nil {
 		return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
@@ -236,17 +240,38 @@ func resolvePositionalAttrs(subject, typeObj objects.Object, tp *objects.Type, n
 	}
 	out := make([]objects.Object, 0, npos)
 	for i := 0; i < npos; i++ {
-		attrNameStr, serr := objects.Str(maTup.Item(i))
-		if serr != nil {
-			return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		name, isStr := maTup.Item(i).(*objects.Unicode)
+		if !isStr {
+			return nil, false, fmt.Errorf("TypeError: __match_args__ elements must be strings (got %s)", maTup.Item(i).Type().Name)
 		}
-		val, verr := objects.GetAttr(subject, objects.NewStr(attrNameStr))
-		if verr != nil {
-			return nil, true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+		val, mcErr := matchClassAttr(subject, tp, name.Value(), seen)
+		if mcErr != nil {
+			return nil, false, mcErr
+		}
+		if val == nil {
+			return nil, true, nil
 		}
 		out = append(out, val)
 	}
 	return out, false, nil
+}
+
+// matchClassAttr fetches subject.<name> while tracking seen attribute
+// names. Returns (nil, nil) on AttributeError (no-match signal),
+// (val, nil) on success, or (nil, err) for a real TypeError such as a
+// duplicate sub-pattern hit on the same attribute.
+//
+// CPython: Python/ceval.c:824 match_class_attr
+func matchClassAttr(subject objects.Object, tp *objects.Type, name string, seen map[string]struct{}) (objects.Object, error) {
+	if _, dup := seen[name]; dup {
+		return nil, fmt.Errorf("TypeError: %s() got multiple sub-patterns for attribute %q", tp.Name, name)
+	}
+	seen[name] = struct{}{}
+	v, err := objects.LookupAttrString(subject, name)
+	if err != nil {
+		return nil, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
+	}
+	return v, nil
 }
 
 // isInstance returns true if o is an instance of tp. v0.9 checks
