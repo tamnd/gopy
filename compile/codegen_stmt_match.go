@@ -552,7 +552,7 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 		if v, ok := foldedMappingKey(k); ok {
 			if dk, ok := normalizeMappingKey(v); ok {
 				if _, dup := seen[dk]; dup {
-					return c.errorAt(loc(k), fmt.Sprintf("mapping pattern checks duplicate key (%s)", literalRepr(v)))
+					return c.errorAt(loc(k), "mapping pattern checks duplicate key (%s)", literalRepr(v))
 				}
 				seen[dk] = struct{}{}
 			}

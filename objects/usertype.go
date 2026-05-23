@@ -302,6 +302,19 @@ func processClassNamespace(t *Type, ns *Dict) {
 		}
 		_ = ns.DelItem(classCellKey)
 	}
+	// __classdictcell__ holds the class-body namespace dict for
+	// methods that reference __classdict__ (PEP 695 generics, for
+	// instance). type_new patches it with the dict and removes the
+	// entry so it does not pollute cls.__dict__ / cls.__protocol_attrs__.
+	//
+	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
+	classDictCellKey := NewStr("__classdictcell__")
+	if cellObj, err := ns.GetItem(classDictCellKey); err == nil {
+		if cell, ok := cellObj.(*Cell); ok {
+			cell.Contents = ns
+		}
+		_ = ns.DelItem(classDictCellKey)
+	}
 	// __slots__ processing runs before the descriptor copy so the
 	// MemberDescr entries land in typeDescrTable before any class body
 	// assignments could overwrite them. Errors here are programming

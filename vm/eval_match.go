@@ -145,8 +145,17 @@ func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err er
 		return 0, true, errors.New("TypeError: called match pattern must be a class")
 	}
 
-	// isinstance check: subject's type must be tp or a subtype.
-	if !isInstance(subject, tp) {
+	// isinstance check: subject's type must be tp or a subtype. Route
+	// through ObjectIsInstance so metaclass __instancecheck__ overrides
+	// (typing._ProtocolMeta, abc.ABCMeta) get the same priority CPython
+	// gives them inside MATCH_CLASS, and so a raised TypeError (e.g. the
+	// "@runtime_checkable" guard a non-runtime protocol triggers)
+	// propagates instead of silently failing the match.
+	ok, icErr := objects.ObjectIsInstance(subject, tp)
+	if icErr != nil {
+		return 0, true, icErr
+	}
+	if !ok {
 		e.pushObject(objects.None())
 		return e.advance(), true, nil
 	}
@@ -280,14 +289,9 @@ func matchClassAttr(subject objects.Object, tp *objects.Type, name string, seen 
 //
 // CPython: Objects/abstract.c PyObject_IsInstance
 func isInstance(o objects.Object, tp *objects.Type) bool {
-	got := o.Type()
-	if got == tp {
-		return true
+	ok, err := objects.ObjectIsInstance(o, tp)
+	if err != nil {
+		return false
 	}
-	for _, base := range got.Bases {
-		if base == tp {
-			return true
-		}
-	}
-	return false
+	return ok
 }

@@ -30,9 +30,46 @@ func init() {
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
 
+	// long_getset (Objects/longobject.c:6466): real/numerator return
+	// self as int, imag returns 0, denominator returns 1.
+	SetTypeDescr(IntType, "real", NewGetSetDescr("real", intRealGetter, nil))
+	SetTypeDescr(IntType, "imag", NewGetSetDescr("imag", intImagGetter, nil))
+	SetTypeDescr(IntType, "numerator", NewGetSetDescr("numerator", intRealGetter, nil))
+	SetTypeDescr(IntType, "denominator", NewGetSetDescr("denominator", intDenominatorGetter, nil))
+
 	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
 		NewBuiltinFunction("from_bytes", intFromBytesMethod),
 	))
+}
+
+// intRealGetter backs int.real and int.numerator: returns self when
+// type(self) is int, else a fresh int with the same value so that
+// `type(x.real) is int` holds for subclasses too (matching long_long).
+//
+// CPython: Objects/longobject.c:6195 long_long
+func intRealGetter(owner Object) (Object, error) {
+	i, ok := owner.(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'real' for 'int' objects doesn't apply to a '%s' object", typeNameOf(owner))
+	}
+	if i.Type() == IntType {
+		return i, nil
+	}
+	return NewIntFromBig(i.BigInt()), nil
+}
+
+// intImagGetter backs int.imag: always 0.
+//
+// CPython: Objects/longobject.c:6210 long_get0
+func intImagGetter(_ Object) (Object, error) {
+	return NewInt(0), nil
+}
+
+// intDenominatorGetter backs int.denominator: always 1.
+//
+// CPython: Objects/longobject.c:6216 long_get1
+func intDenominatorGetter(_ Object) (Object, error) {
+	return NewInt(1), nil
 }
 
 // intReprDescr backs int.__dict__["__repr__"] and int.__dict__["__str__"].

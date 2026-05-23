@@ -17,9 +17,10 @@ import "errors"
 // CPython: Objects/descrobject.c:1620 PyGetSetDescr_Type
 type GetSetDescr struct {
 	Header
-	name string
-	fget func(owner Object) (Object, error)
-	fset func(owner Object, value Object) error
+	name  string
+	owner *Type
+	fget  func(owner Object) (Object, error)
+	fset  func(owner Object, value Object) error
 }
 
 // GetSetDescrType is the type singleton for getset descriptors.
@@ -33,6 +34,65 @@ func init() {
 	GetSetDescrType.DescrGet = getsetDescrGet
 	GetSetDescrType.DescrSet = getsetDescrSet
 	addDescriptorSlotWrappers(GetSetDescrType)
+	addDescrIntrospectionDescriptors(GetSetDescrType)
+}
+
+// addDescrIntrospectionDescriptors exposes __name__ and __objclass__
+// on a descriptor type. CPython stuffs these on every PyDescrObject
+// subclass through PyMemberDef descr_members and reads them from
+// inspect.getattr_static / typing._ProtocolMeta when inferring whether
+// an instance satisfies a protocol's attribute set.
+//
+// CPython: Objects/descrobject.c:642 descr_members
+func addDescrIntrospectionDescriptors(t *Type) {
+	SetTypeDescr(t, "__name__", NewGetSetDescr("__name__", descrNameGetter, nil))
+	SetTypeDescr(t, "__objclass__", NewGetSetDescr("__objclass__", descrObjclassGetter, nil))
+	SetTypeDescr(t, "__qualname__", NewGetSetDescr("__qualname__", descrQualnameGetter, nil))
+}
+
+// descrName reads the bound name from any descriptor type the port
+// installs through SetTypeDescr.
+type descrNamer interface {
+	Name() string
+}
+
+// descrOwner reads the owning type. MethodDescr exposes Owner();
+// GetSetDescr exposes its owner via the field accessor here.
+type descrOwner interface {
+	Owner() *Type
+}
+
+// Owner returns the type this getset descriptor is registered on.
+func (d *GetSetDescr) Owner() *Type { return d.owner }
+
+func descrNameGetter(owner Object) (Object, error) {
+	if n, ok := owner.(descrNamer); ok {
+		return NewStr(n.Name()), nil
+	}
+	return nil, errors.New("AttributeError: __name__")
+}
+
+func descrObjclassGetter(owner Object) (Object, error) {
+	if o, ok := owner.(descrOwner); ok {
+		if t := o.Owner(); t != nil {
+			return t, nil
+		}
+	}
+	return nil, errors.New("AttributeError: __objclass__")
+}
+
+// descrQualnameGetter returns Owner.__qualname__.Name, matching
+// descr_get_qualname (Objects/descrobject.c:144).
+func descrQualnameGetter(owner Object) (Object, error) {
+	n, hasName := owner.(descrNamer)
+	if !hasName {
+		return nil, errors.New("AttributeError: __qualname__")
+	}
+	o, hasOwner := owner.(descrOwner)
+	if !hasOwner || o.Owner() == nil {
+		return NewStr(n.Name()), nil
+	}
+	return NewStr(o.Owner().Name + "." + n.Name()), nil
 }
 
 // NewGetSetDescr builds a getset descriptor that exposes name on the
@@ -160,10 +220,22 @@ func TypeDescrNames(t *Type) []string {
 
 // SetTypeDescr installs d as the attribute name on t. Used by built-in
 // type initialisers to expose properties before the typeobject port
-// gives every type a real __dict__.
+// gives every type a real __dict__. When d is a GetSetDescr without an
+// owner, we record t there so that descr.__objclass__ resolves the way
+// CPython exposes it via PyMemberDef.
 //
 // CPython: Objects/typeobject.c:6012 type_add_method
 func SetTypeDescr(t *Type, name string, d Object) {
+	switch x := d.(type) {
+	case *GetSetDescr:
+		if x.owner == nil {
+			x.owner = t
+		}
+	case *MemberDescr:
+		if x.owner == nil {
+			x.owner = t
+		}
+	}
 	m, ok := typeDescrTable[t]
 	if !ok {
 		m = map[string]Object{}

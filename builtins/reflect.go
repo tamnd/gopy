@@ -34,45 +34,11 @@ func IsInstance(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: isinstance expected 2 arguments, got %d", len(args))
 	}
-	ok, err := isInstanceCheck(args[0], args[1])
+	ok, err := objects.ObjectIsInstance(args[0], args[1])
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewBool(ok), nil
-}
-
-func isInstanceCheck(inst, cls objects.Object) (bool, error) {
-	// Exact-type quick test, matching Py_IS_TYPE(inst, cls).
-	if t, ok := cls.(*objects.Type); ok && inst.Type() == t {
-		return true, nil
-	}
-	if tup, ok := cls.(*objects.Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := isInstanceCheck(inst, tup.Item(i))
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	t, ok := cls.(*objects.Type)
-	if !ok {
-		return false, fmt.Errorf("TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union")
-	}
-	// Metaclass __instancecheck__ override.
-	if t.Type() != objects.TypeType() {
-		res, ok, err := callMetaCheck(cls, "__instancecheck__", inst)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			return objects.IsTrue(res), nil
-		}
-	}
-	return objects.IsSubtype(inst.Type(), t), nil
 }
 
 // IsSubclass ports builtin_issubclass. As with IsInstance, the call
@@ -88,67 +54,11 @@ func IsSubclass(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if !ok {
 		return nil, fmt.Errorf("TypeError: issubclass() arg 1 must be a class")
 	}
-	ok2, err := isSubclassCheck(sub, args[1])
+	ok2, err := objects.ObjectIsSubclass(sub, args[1])
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewBool(ok2), nil
-}
-
-func isSubclassCheck(sub *objects.Type, cls objects.Object) (bool, error) {
-	if tup, ok := cls.(*objects.Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := isSubclassCheck(sub, tup.Item(i))
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	t, ok := cls.(*objects.Type)
-	if !ok {
-		return false, fmt.Errorf("TypeError: issubclass() arg 2 must be a class, a tuple of classes, or a union")
-	}
-	// Metaclass __subclasscheck__ override (ABCMeta, etc.).
-	if t.Type() != objects.TypeType() {
-		res, ok, err := callMetaCheck(cls, "__subclasscheck__", sub)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			return objects.IsTrue(res), nil
-		}
-	}
-	return objects.IsSubtype(sub, t), nil
-}
-
-// callMetaCheck looks up name on cls's metaclass and, when present,
-// invokes it as cls.name(arg). Returns (result, true, nil) on a real
-// call, (nil, false, nil) when no descriptor is installed, or a
-// propagated error.
-//
-// CPython: Objects/typeobject.c:1976 _PyObject_LookupSpecial
-func callMetaCheck(cls objects.Object, name string, arg objects.Object) (objects.Object, bool, error) {
-	descr, owner := objects.LookupDescriptor(cls.Type(), name)
-	if descr == nil {
-		return nil, false, nil
-	}
-	bound := descr
-	if dg := descr.Type().DescrGet; dg != nil {
-		b, err := dg(descr, cls, owner)
-		if err != nil {
-			return nil, false, err
-		}
-		bound = b
-	}
-	res, err := objects.CallOneArg(bound, arg)
-	if err != nil {
-		return nil, false, err
-	}
-	return res, true, nil
 }
 
 // Callable ports builtin_callable. Returns True iff the type has a

@@ -8,6 +8,7 @@ package objects
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"strings"
@@ -42,6 +43,53 @@ func init() {
 		Absolute:   complexAbs,
 		Bool:       complexBool,
 	}
+
+	// complex_members (Objects/complexobject.c:1337): real/imag are
+	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval
+	// fields. PyMember and getset behave the same to Python attribute
+	// lookup, so install GetSetDescr here for consistency with int/float.
+	SetTypeDescr(ComplexType, "real", NewGetSetDescr("real", complexRealGetter, nil))
+	SetTypeDescr(ComplexType, "imag", NewGetSetDescr("imag", complexImagGetter, nil))
+	SetTypeDescr(ComplexType, "conjugate", NewMethodDescr(ComplexType, "conjugate", complexConjugateMethod))
+}
+
+// complexRealGetter backs complex.real: returns the real component as
+// a Python float.
+//
+// CPython: Objects/complexobject.c:1338 complex_members[real]
+func complexRealGetter(owner Object) (Object, error) {
+	c, ok := owner.(*Complex)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'real' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(owner))
+	}
+	return NewFloat(real(c.v)), nil
+}
+
+// complexImagGetter backs complex.imag: returns the imaginary
+// component as a Python float.
+//
+// CPython: Objects/complexobject.c:1340 complex_members[imag]
+func complexImagGetter(owner Object) (Object, error) {
+	c, ok := owner.(*Complex)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'imag' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(owner))
+	}
+	return NewFloat(imag(c.v)), nil
+}
+
+// complexConjugateMethod backs complex.conjugate(): negates the
+// imaginary part.
+//
+// CPython: Objects/complexobject.c:1058 complex_conjugate_impl
+func complexConjugateMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: conjugate() takes no arguments (%d given)", len(args)-1)
+	}
+	c, ok := args[0].(*Complex)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'conjugate' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return NewComplex(real(c.v), -imag(c.v)), nil
 }
 
 // NewComplex builds a complex from real and imaginary parts.

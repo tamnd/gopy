@@ -38,6 +38,12 @@ func init() {
 	MemoryViewType.RichCmp = memoryViewRichCmp
 	MemoryViewType.Iter = memoryViewIter
 	MemoryViewType.Getattro = memoryViewGetattr
+	// CPython tags PyMemoryView_Type with Py_TPFLAGS_SEQUENCE so
+	// match-statement sequence patterns decompose memoryview through
+	// the buffer protocol.
+	//
+	// CPython: Objects/memoryobject.c:3597 PyMemoryView_Type tp_flags
+	MemoryViewType.TpFlags |= TpFlagSequence
 	MemoryViewType.Sequence = &SequenceMethods{
 		Length:   memoryViewLen,
 		GetItem:  memoryViewGetItem,
