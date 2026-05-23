@@ -458,14 +458,14 @@ func NewType(name string, bases []*Type) *Type {
 			continue
 		}
 		b.addSubclass(t)
-		// inherit_flags: MATCH_SELF / SEQUENCE / MAPPING carry down
-		// from a base, so a subclass of int (e.g. bool) self-matches
-		// and a subclass of collections.abc.Sequence matches as a
-		// sequence without redeclaring the flag.
+		// MATCH_SELF carries from every base independently: bool is a
+		// self-matching int subclass, and we want that bit to ride
+		// down through any multiple-inheritance combination.
 		//
 		// CPython: Objects/typeobject.c:8204 inherit_flags
-		t.TpFlags |= b.TpFlags & (TpFlagMatchSelf | TpFlagSequence | TpFlagMapping)
+		t.TpFlags |= b.TpFlags & TpFlagMatchSelf
 	}
+	inheritPatmaFlagsAllMRO(t)
 	// inherit slots from every ancestor so dispatch can resolve in
 	// one field load. Built-in types that set their own Number /
 	// Sequence / Mapping / Async bundle after NewType returns will
