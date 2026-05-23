@@ -138,7 +138,13 @@ func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit, cases int,
 	if err := c.visitStmts(m.Body); err != nil {
 		return err
 	}
-	c.addOpJump(JUMP, end, ast.Pos{})
+	// gh-123048: stamp the case-pattern location on the post-body JUMP
+	// so the optimizer's jump-threading pass does not propagate an
+	// empty location across folded blocks. dis(get_instructions) needs
+	// every jump to carry a lineno.
+	//
+	// CPython: Python/codegen.c:6407 codegen_match_inner
+	c.addOpJump(JUMP, end, loc(m.Pattern))
 	return c.emitAndResetFailPop(pc, loc(m.Pattern))
 }
 

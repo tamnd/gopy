@@ -110,6 +110,10 @@ func init() {
 	SetTypeDescr(FrozensetType, "union", NewMethodDescr(FrozensetType, "union", setUnionMethod))
 	SetTypeDescr(FrozensetType, "issubset", NewMethodDescr(FrozensetType, "issubset", setIsSubsetMethod))
 	SetTypeDescr(FrozensetType, "issuperset", NewMethodDescr(FrozensetType, "issuperset", setIsSupersetMethod))
+	SetTypeDescr(FrozensetType, "difference", NewMethodDescr(FrozensetType, "difference", setDifferenceMethod))
+	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
+	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
+	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
 }
 
 // setTraverse visits each element of a set or frozenset.
