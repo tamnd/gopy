@@ -733,7 +733,7 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	body, isBytes, ok, derr := decodeStringTokenTaggedErr(string(t.Bytes))
+	body, isBytes, ok, warns, derr := decodeStringTokenTaggedErrWithWarns(string(t.Bytes))
 	if !ok {
 		if derr != nil && p != nil {
 			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
@@ -745,6 +745,7 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 		}
 		return placeholderMatched
 	}
+	forwardDecodeWarnings(p, t, warns)
 	if isBytes {
 		return &ast.Constant{Value: []byte(body), Pos: ast.NoPos}
 	}
@@ -766,7 +767,7 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 	if p != nil && p.tok != nil && p.tok.InsideFString() {
 		isRaw = p.tok.CurrentFStringRaw()
 	}
-	text, _, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
+	text, warns, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
 	if err != nil {
 		// CPython: Parser/action_helpers.c:1288 _PyPegen_decode_fstring_part
 		// surfaces decode errors through _Pypegen_raise_decode_error so the
@@ -781,7 +782,26 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 		}
 		return placeholderMatched
 	}
+	forwardDecodeWarnings(p, t, warns)
 	return &ast.Constant{Value: text, Pos: ast.NoPos}
+}
+
+// forwardDecodeWarnings funnels the SyntaxWarning-class messages the
+// string decoder produced back to the lexer's warning channel. CPython
+// raises these inline from warn_invalid_escape_sequence inside
+// _PyUnicode_DecodeUnicodeEscapeInternal2; gopy collects them on the
+// Result and the parser stage forwards each one, anchored to the
+// originating token's start position, so FlushWarnings drains them
+// through the same path as tokenizer-side warnings.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+func forwardDecodeWarnings(p *Parser, t *Token, warns []string) {
+	if p == nil || p.tok == nil || len(warns) == 0 || t == nil {
+		return
+	}
+	for _, msg := range warns {
+		p.tok.AppendWarning(t.Lineno, t.ColOff, "SyntaxWarning", msg)
+	}
 }
 
 // actionPgenEnsureImaginary validates that exp is a Constant carrying
@@ -1652,17 +1672,29 @@ func decodeStringTokenTagged(s string) (string, bool, bool) {
 //
 // CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringTokenTaggedErr(s string) (string, bool, bool, error) {
+	body, isBytes, ok, _, err := decodeStringTokenTaggedErrWithWarns(s)
+	return body, isBytes, ok, err
+}
+
+// decodeStringTokenTaggedErrWithWarns is the form that also surfaces
+// any SyntaxWarning text the decoder collected. CPython routes the
+// warning through warn_invalid_escape_sequence inline; gopy lifts the
+// slice out of the Result so the parser stage can forward it to the
+// lexer's warning channel.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+func decodeStringTokenTaggedErrWithWarns(s string) (string, bool, bool, []string, error) {
 	if len(s) < 2 {
-		return "", false, false, nil
+		return "", false, false, nil, nil
 	}
 	res, err := stringparse.ParseString([]byte(s))
 	if err != nil {
-		return "", false, false, err
+		return "", false, false, nil, err
 	}
 	if res.IsBytes {
-		return string(res.Bytes), true, true, nil
+		return string(res.Bytes), true, true, res.Warnings, nil
 	}
-	return res.Text, false, true, nil
+	return res.Text, false, true, res.Warnings, nil
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
@@ -2243,7 +2275,7 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 func actionPgenJoinedStr(p *Parser, args ...any) any {
 	start, _ := argAt(args, 1).(*Token)
 	values := joinedStrValues(argAt(args, 2))
-	resized, err := resizeFStringExprs(start, values)
+	resized, err := resizeFStringExprs(p, start, values)
 	if err != nil {
 		// CPython: Parser/action_helpers.c:1354 _PyPegen_decode_fstring_part
 		// reports the decode failure via _Pypegen_raise_decode_error so the
@@ -2270,7 +2302,7 @@ func actionPgenJoinedStr(p *Parser, args ...any) any {
 // drops empty Constants the lexer emits for adjacent escape runs.
 //
 // CPython: Parser/action_helpers.c:1301 _get_resized_exprs
-func resizeFStringExprs(start *Token, raw []ast.Expr) ([]ast.Expr, error) {
+func resizeFStringExprs(p *Parser, start *Token, raw []ast.Expr) ([]ast.Expr, error) {
 	isRaw := fstringStartIsRaw(start)
 	out := make([]ast.Expr, 0, len(raw))
 	for _, item := range raw {
@@ -2288,9 +2320,14 @@ func resizeFStringExprs(start *Token, raw []ast.Expr) ([]ast.Expr, error) {
 			out = append(out, item)
 			continue
 		}
-		decoded, _, err := stringparse.DecodeFStringPart(isRaw, s)
+		decoded, warns, err := stringparse.DecodeFStringPart(isRaw, s)
 		if err != nil {
 			return nil, err
+		}
+		if p != nil && p.tok != nil && start != nil {
+			for _, msg := range warns {
+				p.tok.AppendWarning(start.Lineno, start.ColOff, "SyntaxWarning", msg)
+			}
 		}
 		if decoded == "" {
 			continue

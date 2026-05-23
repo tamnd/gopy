@@ -2295,3 +2295,72 @@ CPython:
 - `Parser/string_parser.c:135 decode_unicode_with_escapes`
 - `Parser/string_parser.c:158 trailing-backslash + high-byte rewrite loop`
 - `Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal2`
+
+### P7 closer 35: warn_invalid_escape_sequence text + brace dedup
+
+Three sub-fixes ported together so f-string SyntaxWarnings stop
+double-firing on `\{` / `\}` while regular strings keep the
+CPython-faithful warning text.
+
+1. `parser/string/decode.go` now emits the long-form
+   `warn_invalid_escape_sequence` message
+   (`Parser/string_parser.c:32`):
+
+   ```
+   "\X" is an invalid escape sequence. Such sequences will not
+   work in the future. Did you mean "\\X"? A raw string is also
+   an option.
+   ```
+
+   The octal branch uses the same template with `%.3s`, taking the
+   original digit triple from `s[escStart+1:i]` rather than
+   reformatting the numeric value (so `\477` reports `"\477"`,
+   matching `Parser/string_parser.c:34`). Matching the long-form
+   text lets the runtime warnings filter use the same key the
+   tokenizer surface uses.
+
+2. `parser/pegen/action_helpers_gen.go` now forwards decoder
+   warnings through a new `forwardDecodeWarnings` helper anchored
+   on the originating token's start position; the variant
+   `decodeStringTokenTaggedErrWithWarns` surfaces warnings the old
+   `decodeStringTokenTaggedErr` was discarding.
+   `resizeFStringExprs` also forwards the warnings it gets from
+   `DecodeFStringPart` so `f''` middles route through the same
+   channel. Without this every `'\g'` / `f'\g'` silently dropped
+   its SyntaxWarning.
+
+3. `DecodeFStringPart` now drops `\{` and `\}` warnings before
+   returning them. The tokenizer (P7 closer 33) already emits
+   these when it scans the FSTRING_MIDDLE body; CPython suppresses
+   the decoder copy via the explicit token-type guard in
+   `warn_invalid_escape_sequence` (`Parser/string_parser.c:22`).
+   `dropFStringBraceWarnings` matches by the leading `"\{"` /
+   `"\}"` prefix so the filter is stable against future wording
+   changes.
+
+The lexer-side `\{` / `\}` emission already used the long-form
+text (`parser/lexer/helpers.go:79 warnInvalidEscape`), so once the
+decoder copy is filtered the test
+`test_fstring_backslash_before_double_bracket_warns_once`
+observes exactly one SyntaxWarning per occurrence.
+
+The `clearCurrentException` hook in `builtins.GetAttr` /
+`builtins.HasAttr` is the matching VM-side fix: a Python-level
+`__getattr__` that raised `AttributeError` was leaving the
+thread-state's current exception set even after `getattr`
+folded the error into the default. The next bare `raise` inside
+`assertWarns` then re-surfaced the stale AttributeError. The hook
+mirrors `Objects/object.c:1392 PyObject_GetOptionalAttr`'s
+`PyErr_Clear` call.
+
+Net effect on `test_fstring`: 34F+15E to 33F+15E. The
+`test_fstring_backslash_before_double_bracket_warns_once` case
+closes.
+
+CPython:
+- `Parser/string_parser.c:14 warn_invalid_escape_sequence`
+- `Parser/string_parser.c:22 FSTRING_MIDDLE / FSTRING_END brace dedup`
+- `Parser/string_parser.c:32 non-octal long-form text`
+- `Parser/string_parser.c:38 octal long-form text`
+- `Parser/action_helpers.c:1270 _PyPegen_decode_fstring_part`
+- `Objects/object.c:1392 PyObject_GetOptionalAttr PyErr_Clear`

@@ -163,8 +163,17 @@ func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 
 // fstring_find_literal_and_field), so the {{/}} length=1 trick the C
 // helper applies after the lexer is a no-op here.
 //
+// `\{` and `\}` SyntaxWarnings are dropped here. The tokenizer already
+// emits them when it scans the FSTRING_MIDDLE / FSTRING_END body
+// (Parser/lexer/lexer.c:1581, ported in parser/lexer/fstring.go), and
+// CPython suppresses the decoder copy via the explicit token-type
+// guard in warn_invalid_escape_sequence so the user only sees one
+// warning per occurrence.
+//
 // CPython: Parser/action_helpers.c:1270 _PyPegen_decode_fstring_part
 // CPython: Parser/string_parser.c:242 _PyPegen_decode_string
+// CPython: Parser/string_parser.c:22 warn_invalid_escape_sequence
+// f-string brace dedup
 func DecodeFStringPart(isRaw bool, s string) (string, []string, error) {
 	if isRaw || !hasBackslash([]byte(s)) {
 		if !utf8.Valid([]byte(s)) {
@@ -176,5 +185,26 @@ func DecodeFStringPart(isRaw bool, s string) (string, []string, error) {
 	if err != nil {
 		return "", nil, wrapDecodeError(err)
 	}
-	return text, warns, nil
+	return text, dropFStringBraceWarnings(warns), nil
+}
+
+// dropFStringBraceWarnings strips the `\{` and `\}` invalid-escape
+// warnings the decoder would otherwise duplicate against the
+// tokenizer's copy. Matches the long-form CPython text by looking at
+// the leading `"\X"` prefix so the filter is stable across both the
+// non-octal and the future "deprecated" wording.
+//
+// CPython: Parser/string_parser.c:22 warn_invalid_escape_sequence
+func dropFStringBraceWarnings(warns []string) []string {
+	if len(warns) == 0 {
+		return warns
+	}
+	out := warns[:0]
+	for _, w := range warns {
+		if strings.HasPrefix(w, "\"\\{\"") || strings.HasPrefix(w, "\"\\}\"") {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }

@@ -15,9 +15,14 @@ import (
 
 // GetAttr ports builtin_getattr. Two-argument form returns
 // PyObject_GetAttr; three-argument form catches AttributeError and
-// returns the default. Other errors propagate.
+// returns the default. Other errors propagate. When the
+// AttributeError is swallowed, the thread-state's current exception
+// is cleared to match CPython's PyObject_GetOptionalAttr +
+// PyErr_Clear pattern: a Python-level __getattr__ that raised
+// AttributeError must not leak its exception state past the catch.
 //
 // CPython: Python/bltinmodule.c:1228 builtin_getattr
+// CPython: Objects/object.c:1392 PyObject_GetOptionalAttr (PyErr_Clear)
 func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 2 || len(args) > 3 {
 		return nil, fmt.Errorf("TypeError: getattr expected 2 or 3 arguments, got %d", len(args))
@@ -27,6 +32,9 @@ func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return v, nil
 	}
 	if len(args) == 3 && isAttributeError(err) {
+		if objects.ClearCurrentExceptionHook != nil {
+			objects.ClearCurrentExceptionHook()
+		}
 		return args[2], nil
 	}
 	return nil, err
@@ -36,8 +44,12 @@ func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 // PyObject_GetOptionalAttr; gopy emulates by calling GetAttr and
 // folding AttributeError into False. Non-AttributeError failures
 // still propagate, matching CPython's "raise other exceptions" path.
+// The PyErr_Clear inside PyObject_GetOptionalAttr is ported via the
+// thread-state clear hook so a Python-level __getattr__ that raised
+// AttributeError does not leak its exception state past the catch.
 //
 // CPython: Python/bltinmodule.c:1301 builtin_hasattr_impl
+// CPython: Objects/object.c:1392 PyObject_GetOptionalAttr (PyErr_Clear)
 func HasAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: hasattr expected 2 arguments, got %d", len(args))
@@ -47,6 +59,9 @@ func HasAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return objects.True(), nil
 	}
 	if isAttributeError(err) {
+		if objects.ClearCurrentExceptionHook != nil {
+			objects.ClearCurrentExceptionHook()
+		}
 		return objects.False(), nil
 	}
 	return nil, err

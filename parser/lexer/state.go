@@ -498,6 +498,34 @@ func (s *State) ForceDedentsAtEOF() {
 // CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 func (s *State) Warnings() []SyntaxError { return s.warnings }
 
+// AppendWarning lets the parser stage record a SyntaxWarning that
+// the lexer itself did not catch. CPython's string decoder
+// (_PyUnicode_DecodeUnicodeEscapeInternal2) reports invalid escape
+// sequences inside literal bodies the same way the tokenizer does;
+// gopy collects them on the *string* parser and forwards them here
+// so FlushWarnings can route everything through one path.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+func (s *State) AppendWarning(line, col int, category, message string) {
+	if !s.reportWarnings {
+		return
+	}
+	if line <= 0 {
+		line = s.lineno
+	}
+	if col < 0 {
+		col = 0
+	}
+	s.warnings = append(s.warnings, SyntaxError{
+		Pos:      Pos{Line: line, Col: col},
+		EndPos:   Pos{Line: line, Col: col},
+		Message:  message,
+		Text:     nthLine(s.buf, line),
+		Category: category,
+	})
+}
+
 // WarnHook is the package-level drain that FlushWarnings calls. It is
 // nil until a runtime package (typically module/_warnings) registers a
 // real implementation in its init function. Keeping the hook here

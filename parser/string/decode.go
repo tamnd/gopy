@@ -154,14 +154,23 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, err
 			// Octal value is a Unicode ordinal: emit as a codepoint,
 			// not as a raw byte (raw bytes >=0x80 corrupt UTF-8).
 			// Values > 0o377 are reported as invalid escapes, but
-			// the codepoint is still emitted.
+			// the codepoint is still emitted. The warning text mirrors
+			// Parser/string_parser.c:32 warn_invalid_escape_sequence
+			// octal branch: it quotes the original digit triple, not the
+			// numeric value, so `\477` shows `"\477"` in the message.
+			digitsStart := escStart + 1
 			val := int(c - '0')
 			for k := 0; k < 2 && i < len(s) && s[i] >= '0' && s[i] <= '7'; k++ {
 				val = val*8 + int(s[i]-'0')
 				i++
 			}
 			if val > 0o377 {
-				warns = append(warns, fmt.Sprintf("invalid octal escape sequence '\\%o'", val))
+				digits := string(s[digitsStart:i])
+				warns = append(warns, fmt.Sprintf(
+					"\"\\%s\" is an invalid octal escape sequence. "+
+						"Such sequences will not work in the future. "+
+						"Did you mean \"\\\\%s\"? A raw string is also an option.",
+					digits, digits))
 			}
 			out = utf8.AppendRune(out, rune(val))
 		case 'x':
@@ -226,9 +235,16 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, err
 		default:
 			// PEP 414 keeps the backslash in the output for
 			// unrecognized escapes; CPython 3.14 also emits a
-			// SyntaxWarning so the user can spot a typo.
+			// SyntaxWarning so the user can spot a typo. The text
+			// mirrors Parser/string_parser.c:38 warn_invalid_escape_sequence
+			// non-octal branch so the runtime warnings filter sees the
+			// same key the tokenizer surface uses.
 			out = append(out, '\\', c)
-			warns = append(warns, fmt.Sprintf("invalid escape sequence '\\%c'", c))
+			warns = append(warns, fmt.Sprintf(
+				"\"\\%c\" is an invalid escape sequence. "+
+					"Such sequences will not work in the future. "+
+					"Did you mean \"\\\\%c\"? A raw string is also an option.",
+				c, c))
 		}
 	}
 	if !utf8.Valid(out) {
