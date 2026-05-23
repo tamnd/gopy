@@ -14525,7 +14525,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-			return []any{op, annotated_rhs}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '=', or '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14545,7 +14545,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-			return []any{op, annotated_rhs, op_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14587,7 +14587,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting ':' or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14613,7 +14613,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			rep := parseRule__loop0_63(p)
 			_ = rep
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '}', or format specs") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14634,7 +14634,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14779,7 +14779,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-			return []any{op, annotated_rhs}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '=', or '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14799,7 +14799,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-			return []any{op, annotated_rhs, op_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14841,7 +14841,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting ':' or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14867,7 +14867,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			rep := parseRule__loop0_63(p)
 			_ = rep
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '}', or format specs") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14888,7 +14888,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v

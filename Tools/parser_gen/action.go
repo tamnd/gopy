@@ -614,6 +614,18 @@ func translateCall(fname string, args []string) (string, bool) {
 		"RAISE_SYNTAX_ERROR_STARTING_FROM", "RAISE_SYNTAX_ERROR_INVALID_TARGET",
 		"RAISE_INDENTATION_ERROR", "RAISE_ERROR_KNOWN_LOCATION":
 		return "raiseAction(p, " + strconv.Quote(fname) + ", " + joinArgsForRaise(args) + ")", true
+	case "PyErr_Occurred":
+		// Conditional raise pattern in invalid_*_replacement_field
+		// and friends: `PyErr_Occurred() ? NULL : RAISE_SYNTAX_ERROR_*(...)`.
+		// Returns true when a SyntaxError is already pinned; the
+		// ternary then skips the new raise. gopy's recordError has
+		// the same idempotency guard but the ternary still needs a
+		// truthy boolean here so the action body type-checks.
+		//
+		// CPython: Include/cpython/pyerrors.h PyErr_Occurred
+		if len(args) == 0 {
+			return "(p.PinnedError() != nil)", true
+		}
 	case "PyPegen_last_item":
 		// PyPegen_last_item(seq, type) returns the last element of a
 		// sequence. The second arg is a C type tag that the Go side

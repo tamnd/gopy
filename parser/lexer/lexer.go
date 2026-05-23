@@ -308,6 +308,16 @@ func (s *State) tokGetNormalMode() Tok {
 		}
 
 		if c == eof {
+			if s.level > 0 {
+				// EOF with unclosed paren: emit ERRORTOKEN so the
+				// parser's tokenizer-error path raises "'%c' was never
+				// closed" before any invalid_*_replacement_field alt
+				// has a chance to pin a generic message.
+				//
+				// CPython: Parser/lexer/lexer.c:735 EOF + tok->level
+				s.done = eEOF
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
 			return s.endmarker()
 		}
 
@@ -842,13 +852,13 @@ func (s *State) scanString(quote int) Tok {
 		switch c {
 		case eof:
 			s.done = eEOFS
-			s.recordUnterminatedString(triple, c)
+			s.recordUnterminatedStringInFString(triple, quote)
 			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		case '\\':
 			escaped := s.nextC()
 			if escaped == eof {
 				s.done = eEOFS
-				s.recordUnterminatedString(triple, escaped)
+				s.recordUnterminatedStringInFString(triple, quote)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			// `\<newline>` inside a string literal still consumes a
@@ -866,7 +876,7 @@ func (s *State) scanString(quote int) Tok {
 		case '\n':
 			if !triple {
 				s.done = eEOLS
-				s.recordUnterminatedString(false, c)
+				s.recordUnterminatedStringInFString(false, quote)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.pendingLineno++
@@ -912,6 +922,29 @@ func (s *State) recordUnterminatedString(triple bool, _ int) {
 		msg = fmt.Sprintf("unterminated string literal (detected at line %d)", detectLine)
 	}
 	s.recordStringError(msg)
+}
+
+// recordUnterminatedStringInFString refines the unterminated-string
+// message when the offending literal sits inside an f-string or
+// t-string expression block. CPython checks whether the inner quote
+// matches the outer f-string's quote char and size; when so, the user
+// almost certainly meant to close the expression with `}` and the
+// error becomes "%c-string: expecting '}'".
+//
+// CPython: Parser/lexer/lexer.c:1181 INSIDE_FSTRING tok_get_normal_mode
+func (s *State) recordUnterminatedStringInFString(triple bool, quote int) {
+	if s.insideFString() {
+		m := s.curMode()
+		size := 1
+		if triple {
+			size = 3
+		}
+		if int(m.quote) == quote && m.quoteSize == size {
+			s.recordStringError(fmt.Sprintf("%c-string: expecting '}'", s.CurrentFStringPrefixChar()))
+			return
+		}
+	}
+	s.recordUnterminatedString(triple, 0)
 }
 
 // scanOperator scans an operator or punctuation token. Multi-byte
@@ -1013,23 +1046,28 @@ func (s *State) scanOperator(c int) Tok {
 		tok = s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case ':':
 		c2 := 0
-		if s.peek() == '=' {
-			c2 = s.peek()
-			s.nextC()
-		}
 		// Inside an f-string interpolation `{expr:fmt}`, a `:` at the
 		// outer curly-bracket level switches the lexer back to fstring
 		// mode for the format-spec body so `>10`, `>{w}`, etc. arrive
-		// as FSTRING_MIDDLE rather than as separate operators.
+		// as FSTRING_MIDDLE rather than as separate operators. CPython's
+		// is_punctuation branch returns the COLON as a one-char token
+		// BEFORE the two-char merge runs, so `f'{x:=10}'` does not
+		// collapse into the walrus operator.
 		//
 		// CPython: Parser/lexer/lexer.c:1271 (is_punctuation branch)
+		switchedToFormatSpec := false
 		if s.insideFString() && s.insideFStringExpr() {
 			m := s.curMode()
 			cursor := m.curlyBracketDepth - 1
 			if cursor == m.curlyBracketExprStartDepth {
 				m.kind = tokFStringMode
 				m.inFormatSpec = true
+				switchedToFormatSpec = true
 			}
+		}
+		if !switchedToFormatSpec && s.peek() == '=' {
+			c2 = s.peek()
+			s.nextC()
 		}
 		tok = s.tokenSetup(classifyOp(c, c2, 0), s.start, s.cur)
 	case '.':
@@ -1096,6 +1134,14 @@ func (s *State) popParen(c byte) bool {
 			return true
 		}
 		s.done = eToken
+		// Inside an f-string or t-string body, a stray `}` outside any
+		// expression block has its own dedicated message.
+		//
+		// CPython: Parser/lexer/lexer.c:1319 syntaxerror "single '}' is not allowed"
+		if c == '}' && s.insideFString() && s.curMode().curlyBracketDepth == 0 {
+			s.recordError(fmt.Sprintf("%c-string: single '}' is not allowed", s.CurrentFStringPrefixChar()))
+			return false
+		}
 		// CPython: Parser/lexer/lexer.c:1324 syntaxerror "unmatched '%c'".
 		s.recordError(fmt.Sprintf("unmatched '%c'", c))
 		return false

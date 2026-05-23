@@ -227,6 +227,16 @@ func (p *Parser) recordError(kind perrors.Kind, pos perrors.Pos, msg string) {
 		// CPython: Parser/pegen_errors.c:416 _Pypegen_set_syntax_error
 		return
 	}
+	if p.errorIndicator && p.pinnedErr != nil {
+		// Once a parser-side raise has fired, subsequent raises in
+		// the same alt-chain are no-ops. Mirrors CPython's
+		// `if (p->error_indicator && PyErr_Occurred()) return NULL;`
+		// guard so the first SyntaxError wins instead of the last.
+		//
+		// CPython: Parser/pegen_errors.c:323 _PyPegen_raise_error_known_location
+		// CPython: Parser/pegen_errors.c:231 _PyPegen_raise_error
+		return
+	}
 	if p.pinnedErr != nil && p.mark < p.farthestPos {
 		// A deeper error already won; ignore this shallower one.
 		return

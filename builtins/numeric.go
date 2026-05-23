@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/tamnd/gopy/abstract"
-	"github.com/tamnd/gopy/format"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -178,38 +177,9 @@ func Format(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 		}
 		specStr, _ = objects.Str(args[1])
 	}
-	if specStr == "" {
-		s, err := objects.Str(args[0])
-		if err != nil {
-			return nil, err
-		}
-		return objects.NewStr(s), nil
-	}
-	spec, err := format.ParseSpec(specStr)
+	out, err := objects.Format(args[0], specStr)
 	if err != nil {
-		return nil, fmt.Errorf("ValueError: %w", err)
+		return nil, err
 	}
-	switch v := args[0].(type) {
-	case *objects.Int:
-		out, err := format.FormatInt(v.BigInt(), spec)
-		if err != nil {
-			return nil, fmt.Errorf("ValueError: %w", err)
-		}
-		return objects.NewStr(out), nil
-	case *objects.Float:
-		out, err := format.FormatFloat(v.Float64(), spec)
-		if err != nil {
-			return nil, fmt.Errorf("ValueError: %w", err)
-		}
-		return objects.NewStr(out), nil
-	}
-	if args[0].Type() == objects.StrType() {
-		s, _ := objects.Str(args[0])
-		out, err := format.FormatString(s, spec)
-		if err != nil {
-			return nil, fmt.Errorf("ValueError: %w", err)
-		}
-		return objects.NewStr(out), nil
-	}
-	return nil, fmt.Errorf("TypeError: unsupported format string for type '%s'", args[0].Type().Name)
+	return objects.NewStr(out), nil
 }

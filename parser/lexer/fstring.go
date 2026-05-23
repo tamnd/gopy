@@ -179,10 +179,25 @@ func (s *State) fstringMiddleKind(m *tokenizerMode) token.Type {
 // CPython: Parser/lexer/lexer.c:1446 f_string_middle label
 func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 	endQuoteSize := 0
+	unicodeEscape := false
 	for endQuoteSize != m.quoteSize {
 		c := s.nextC()
 		if c == eof || (m.quoteSize == 1 && c == '\n') {
-			return s.syntaxError("unterminated %c-string", s.fstringPrefixChar(m))
+			// CPython distinguishes three EOF/newline arms here. A
+			// newline inside a format spec of a single-quoted string is
+			// its own message; otherwise we shift the caret back to the
+			// opening quote and emit the literal-suffix variant.
+			//
+			// CPython: Parser/lexer/lexer.c:1462 f_string_middle EOF/'\n' arm
+			if m.inFormatSpec && c == '\n' && m.quoteSize == 1 {
+				prefix := s.fstringPrefixChar(m)
+				return s.syntaxError("%c-string: newlines are not allowed in format specifiers for single quoted %c-strings", prefix, prefix)
+			}
+			start := m.firstLine
+			if m.quoteSize == 3 {
+				return s.syntaxError("unterminated triple-quoted %c-string literal (detected at line %d)", s.fstringPrefixChar(m), start)
+			}
+			return s.syntaxError("unterminated %c-string literal (detected at line %d)", s.fstringPrefixChar(m), start)
 		}
 		if c == int(m.quote) {
 			endQuoteSize++
@@ -227,6 +242,14 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 			return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
 		}
 		if c == '}' {
+			if unicodeEscape {
+				// `\N{NAME}` named escape: the closing brace belongs
+				// to the escape sequence, not to an f-string expression
+				// terminator. Emit middle up through this `}`.
+				//
+				// CPython: Parser/lexer/lexer.c:1547 (unicode_escape branch)
+				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur)
+			}
 			peek := s.nextC()
 			if peek == '}' && m.curlyBracketDepth == 0 {
 				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
@@ -257,8 +280,20 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				s.pendingLineno++
 				s.col = 0
 			}
-			// Skip the escaped character. Named escapes \N{...} fall
-			// through to the regular middle scanning.
+			// Named unicode escape `\N{NAME}`: the `{` is part of the
+			// escape sequence, not an f-string expression start.
+			// Remember the open brace so the matching `}` emits a
+			// middle instead of re-entering regular mode.
+			//
+			// CPython: Parser/lexer/lexer.c:1589 (peek == 'N' branch)
+			if !m.raw && peek == 'N' {
+				peek2 := s.nextC()
+				if peek2 == '{' {
+					unicodeEscape = true
+				} else {
+					s.backup(peek2)
+				}
+			}
 		}
 	}
 	// Hit the closing quotes during literal scan: back them up so the

@@ -901,7 +901,7 @@ func fstringConversionChar(v any) int {
 // CPython captures the source text of `expr` via set_ftstring_expr, so
 // it is reachable as the closing brace token's metadata.
 //
-// CPython: Parser/action_helpers.c _PyPegen_interpolation (PEP 750)
+// CPython: Parser/action_helpers.c:1508 _PyPegen_interpolation (PEP 750)
 func actionPgenInterpolation(p *Parser, args ...any) any {
 	_ = p
 	value := asExpr(argAt(args, 1))
@@ -917,17 +917,45 @@ func actionPgenInterpolation(p *Parser, args ...any) any {
 	} else if conv == 0 {
 		conv = -1
 	}
-	var src string
+	var exprstr string
 	if rbrace != nil && len(rbrace.Metadata) > 0 {
-		src = string(rbrace.Metadata)
+		exprstr = string(rbrace.Metadata)
 	}
-	return &ast.Interpolation{
+	interp := &ast.Interpolation{
 		Value:      value,
-		Str:        src,
+		Str:        stripInterpolationExpr(exprstr),
 		Conversion: conv,
 		FormatSpec: format,
 		Pos:        ast.NoPos,
 	}
+	if debug == nil {
+		return interp
+	}
+	return &ast.JoinedStr{
+		Values: []ast.Expr{
+			&ast.Constant{Value: exprstr, Pos: ast.NoPos},
+			interp,
+		},
+		Pos: ast.NoPos,
+	}
+}
+
+// stripInterpolationExpr drops trailing whitespace and '=' from the
+// expression source. Used so the Interpolation.str field carries the
+// pre-'=' expression while the debug Constant keeps the full text.
+//
+// CPython: Parser/action_helpers.c:1491 _strip_interpolation_expr
+func stripInterpolationExpr(s string) string {
+	end := len(s)
+	for end > 0 {
+		c := s[end-1]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '=' {
+			end--
+			continue
+		}
+		break
+	}
+	return s[:end]
 }
 
 // actionPgenConcatenateStrings dispatches the `strings` rule's
@@ -950,46 +978,111 @@ func actionPgenConcatenateStrings(p *Parser, args ...any) any {
 
 // actionPgenTemplateStr builds a TemplateStr from the tstring tokens.
 // Call shape: (p, p, TSTRING_START, loop0_66_result, TSTRING_END).
-// Arg[2] is the _loop0_66 result: []any of Constant / Interpolation exprs.
+// Arg[2] is the _loop0_66 result: []any of Constant / Interpolation /
+// JoinedStr(debug) exprs.
 //
-// CPython: Parser/action_helpers.c _PyPegen_tstring_node (PEP 750)
+// CPython splits JoinedStr nodes (which only arise from debug
+// interpolations) into their [Constant, Interpolation] pair so the
+// constant text sits in the TemplateStr.values stream rather than
+// inside a nested JoinedStr. Empty Constants from TSTRING_MIDDLE
+// tokens between adjacent {expr} / closing quote get dropped here so
+// they do not flow into BUILD_TEMPLATE.
+//
+// CPython: Parser/action_helpers.c:1300 _get_resized_exprs
+// CPython: Parser/action_helpers.c:1387 _PyPegen_template_str
 func actionPgenTemplateStr(p *Parser, args ...any) any {
 	_ = p
 	parts := exprSeqOf(argAt(args, 2))
-	return TemplateStrFromValues([]ast.Expr(parts))
+	out := make([]ast.Expr, 0, len(parts))
+	for _, item := range parts {
+		if js, ok := item.(*ast.JoinedStr); ok && len(js.Values) == 2 {
+			out = append(out, js.Values[0], js.Values[1])
+			continue
+		}
+		if c, ok := item.(*ast.Constant); ok {
+			if s, isStr := c.Value.(string); isStr && s == "" {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	return TemplateStrFromValues(out)
 }
 
 // actionPgenConcatenateTstrings joins one or more TemplateStr nodes
-// produced by a tstring+ loop into a single TemplateStr. Arg[1] is
-// the loop result ([]any of *ast.TemplateStr).
+// produced by a tstring+ loop into a single TemplateStr, folding runs
+// of adjacent Constants and dropping empty ones. Arg[1] is the loop
+// result ([]any of *ast.TemplateStr).
 //
-// CPython: Parser/action_helpers.c _PyPegen_concatenate_tstrings
+// CPython: Parser/action_helpers.c:1849 _PyPegen_concatenate_tstrings
 func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
 	_ = p
 	items := exprSeqOf(argAt(args, 1))
-	var allValues []ast.Expr
+	parts := make([]ast.Expr, 0, len(items))
 	for _, item := range items {
-		if ts, ok := item.(*ast.TemplateStr); ok {
-			allValues = append(allValues, ts.Values...)
-		}
+		parts = append(parts, item)
 	}
-	return TemplateStrFromValues(allValues)
+	return TemplateStrFromValues(buildConcatenatedStr(parts))
 }
 
 // actionPgenCheckFstringConversion validates the conversion specifier
-// after `!` in an f-string interpolation and returns the conv Name so
-// downstream FormattedValue construction can read its single-character
-// id. The CPython helper wraps this in a ResultTokenWithMetadata; our
-// fstringConversionChar accepts the bare *ast.Name directly.
+// after `!` in an f-string or t-string interpolation. The conversion
+// must be a single-character Name whose id is one of 's', 'r', or 'a',
+// and it must sit immediately after the `!` (no whitespace allowed).
+// Violations turn into SyntaxError at the conv's span, so the lexer's
+// generic Unrecognized conversion character SystemError never reaches
+// user code. Returns the conv Name on success so downstream
+// FormattedValue construction can read its single-character id via
+// fstringConversionChar.
 //
 // CPython: Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion
 func actionPgenCheckFstringConversion(p *Parser, args ...any) any {
-	_ = p
+	convToken, _ := argAt(args, 1).(*Token)
 	conv := asExpr(argAt(args, 2))
 	if conv == nil {
 		return placeholderMatched
 	}
-	return conv
+	name, ok := conv.(*ast.Name)
+	if !ok {
+		return placeholderMatched
+	}
+	prefix := byte('f')
+	if p != nil && p.tok != nil {
+		prefix = p.tok.CurrentFStringPrefixChar()
+	}
+	convPos := name.Position()
+	// CPython rejects whitespace between `!` and the conversion char by
+	// comparing the `!` token's end_col_offset to the conv name's
+	// col_offset on the same line. The range carrying both spans pins
+	// the caret at the gap.
+	//
+	// CPython: Parser/action_helpers.c:968 RAISE_SYNTAX_ERROR_KNOWN_RANGE
+	if convToken != nil && (convToken.EndLine != convPos.Lineno || convToken.EndCol != convPos.ColOffset) {
+		p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+			Lineno:  convToken.Lineno,
+			ColOff:  convToken.ColOff,
+			EndLine: convPos.EndLineno,
+			EndCol:  convPos.EndColOffset,
+		}, "%c-string: conversion type must come right after the exclamation mark", prefix)
+		return placeholderMatched
+	}
+	id := name.Id
+	if len(id) != 1 || (id[0] != 's' && id[0] != 'r' && id[0] != 'a') {
+		// CPython renders the bad id with %R, which for a str object
+		// emits Python's repr (single-quoted ASCII for short ids).
+		// Build the same shape by hand: %q would pick double quotes
+		// and diverge from CPython's caret message.
+		//
+		// CPython: Parser/action_helpers.c:979 RAISE_SYNTAX_ERROR_KNOWN_LOCATION
+		p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+			Lineno:  convPos.Lineno,
+			ColOff:  convPos.ColOffset,
+			EndLine: convPos.EndLineno,
+			EndCol:  convPos.EndColOffset,
+		}, "%c-string: invalid conversion character '%s': expected 's', 'r', or 'a'", prefix, id)
+		return placeholderMatched
+	}
+	return name
 }
 
 // actionPgenAddTypeCommentToArg wires the param-with-type-comment alt

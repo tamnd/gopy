@@ -1992,3 +1992,103 @@ CPython:
 - `Python/bytecodes.c BUILD_INTERPOLATION`
 - `Parser/action_helpers.c:1508 _PyPegen_interpolation`
 - `Parser/lexer/lexer.c:227 _PyLexer_update_ftstring_expr`
+
+### P7 closer 29: test_tstring gate green (parser + lexer + str ops)
+
+`test_tstring` failed with 15 mismatches and 1 error because the
+parser surfaced generic `invalid syntax` for cases CPython tags with
+specific f-string / t-string diagnostics, the lexer collapsed `:=`
+inside an f-string expression at format-spec position, and a stray
+`}` reported `unmatched '}'` instead of the dedicated message.
+
+1. `tools/parser_gen/action.go` teaches the C-to-Go action translator
+   about `PyErr_Occurred()`. The conditional-raise pattern
+   `PyErr_Occurred() ? NULL : RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN(...)`
+   used by `invalid_fstring_replacement_field` /
+   `invalid_tstring_replacement_field` was previously dropped to the
+   raw-children fallback, leaving the alts as silent no-ops. Mapping
+   the C call to `(p.PinnedError() != nil)` lets `parseTernary` emit
+   the matching Go ternary, so the six per-shape messages
+   (`expecting '=', or '!', or ':', or '}'`,
+   `expecting '!', or ':', or '}'`,
+   `expecting ':' or '}'`,
+   `expecting '}'`, etc.) propagate end-to-end.
+
+2. `parser/pegen/errors.go` adds the idempotency guard that mirrors
+   `Parser/pegen_errors.c:231 _PyPegen_raise_error`'s
+   `if (p->error_indicator && PyErr_Occurred()) return NULL;`. Without
+   it, adjacent parser alts both raised, so `t'{x!z:}'` reported
+   `invalid conversion character` over `missing conversion character`.
+
+3. `parser/pegen/action_helpers_gen.go` replaces the no-op
+   `actionPgenCheckFstringConversion` stub with a port of
+   `Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion`:
+   reject when the `!`-to-name span has whitespace, reject names
+   longer than one character or not in `{'s', 'r', 'a'}`, and use the
+   active mode's prefix (`f` vs `t`) in the message.
+
+4. `parser/lexer/state.go` exposes `CurrentFStringPrefixChar()` so
+   action helpers can read the active mode's `stringKind` without
+   first checking `INSIDE_FSTRING`. Mirrors
+   `Parser/lexer/lexer.c:43 TOK_GET_STRING_PREFIX`.
+
+5. `parser/lexer/fstring.go` ports the EOF / `\n` arm of
+   `Parser/lexer/lexer.c:1462 f_string_middle` to emit
+   `unterminated <c>-string literal (detected at line N)` (and the
+   triple-quoted variant), plus the format-spec-newline message for
+   single-quoted strings. Adds the `unicodeEscape` flag so `\N{NAME}`
+   inside an f-string body emits a middle through the closing brace
+   instead of treating the `{` as an expression-start (CPython
+   `Parser/lexer/lexer.c:1589 peek == 'N'` branch + the
+   `if (unicode_escape)` short-circuit at line 1547).
+
+6. `parser/lexer/lexer.go` adds two paren-aware refinements. EOF with
+   `s.level > 0` emits `ERRORTOKEN` instead of `ENDMARKER` so the
+   parser's tokenizer-error path raises `'%c' was never closed` (the
+   alt-level `expecting a valid expression after '{'` message that
+   gopy would otherwise pin loses the race). A stray `}` inside an
+   f-string body at `curlyBracketDepth == 0` now raises the dedicated
+   `<c>-string: single '}' is not allowed` message instead of falling
+   through to the generic `unmatched '}'`. The `recordUnterminatedStringInFString`
+   helper refines the unterminated-inner-string case to
+   `<c>-string: expecting '}'` when the inner literal matches the
+   outer quote char/size, mirroring
+   `Parser/lexer/lexer.c:1181 INSIDE_FSTRING tok_get_normal_mode`.
+   The `:` scanOperator arm now returns the one-char `COLON` before
+   the two-char `:=` merge when inside an f-string expression at
+   format-spec position, matching
+   `Parser/lexer/lexer.c:1271 is_punctuation` so `f'{x:=10}'` parses
+   as `x` plus the format spec `=10`.
+
+7. `objects/str.go` updates the `str.__add__` slot to name the bad
+   operand type in the TypeError message
+   (`can only concatenate str (not "int") to str`) per
+   `Objects/unicodeobject.c:11641 PyUnicode_Concat`. `Template +
+   Template` runtime concat lives on `TemplateStrType.Sequence`
+   (`templateConcat` in `objects/template_str.go`), so the
+   ConcatenateError test that exercised `Template("a") + 1` and
+   `"a" + t` now reports the matching TypeError.
+
+8. `builtins/numeric.go` routes the `format(int, 'Nf')` builtin
+   through `objects.Format(args[0], specStr)` instead of calling
+   `format.FormatInt` directly, so int's `__format__` slot picks up
+   the precision spec used by the t-string conversion tests.
+
+Net effect: `test/cpython/test_tstring.py` goes from 15 fails + 1
+error to 12/12 passing. No regressions on the surrounding gates
+(`test_eof`, `test_string_literals`, `test_syntax`).
+
+CPython:
+- `Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion`
+- `Parser/pegen_errors.c:231 _PyPegen_raise_error`
+- `Parser/pegen_errors.c:323 _PyPegen_raise_error_known_location`
+- `Parser/lexer/lexer.c:43 TOK_GET_STRING_PREFIX`
+- `Parser/lexer/lexer.c:735 EOF + tok->level`
+- `Parser/lexer/lexer.c:1181 INSIDE_FSTRING tok_get_normal_mode`
+- `Parser/lexer/lexer.c:1271 is_punctuation`
+- `Parser/lexer/lexer.c:1462 f_string_middle`
+- `Parser/lexer/lexer.c:1547 unicode_escape branch`
+- `Parser/lexer/lexer.c:1589 peek == 'N' branch`
+- `Objects/unicodeobject.c:11641 PyUnicode_Concat`
+- `Grammar/python.gram:1510 invalid_fstring_replacement_field`
+- `Grammar/python.gram:1532 invalid_tstring_replacement_field`

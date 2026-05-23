@@ -244,7 +244,16 @@ func init() {
 			sa, _ := a.(*Unicode)
 			sb, _ := b.(*Unicode)
 			if sa == nil || sb == nil {
-				return nil, fmt.Errorf("TypeError: can only concatenate str to str")
+				// CPython names the bad-side type in the message
+				// (typically the right operand, since ensure_unicode on
+				// `a` would have raised before we got here in real use).
+				//
+				// CPython: Objects/unicodeobject.c:11641 PyUnicode_Concat
+				other := b
+				if sa == nil {
+					other = a
+				}
+				return nil, fmt.Errorf("TypeError: can only concatenate str (not %q) to str", typeNameOf(other))
 			}
 			return NewStr(sa.v + sb.v), nil
 		},

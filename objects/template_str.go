@@ -61,6 +61,82 @@ func init() {
 			return templateValues(ts)
 		}, nil))
 	AddIterSlotWrappers(TemplateStrType)
+	// sq_concat lets `t1 + t2` produce a new Template with the joined
+	// strings (last(left) + first(right) merged) and concatenated
+	// interpolations.
+	//
+	// CPython: Objects/templateobject.c:345 template_as_sequence
+	TemplateStrType.Sequence = &SequenceMethods{
+		Concat: templateConcat,
+	}
+}
+
+// templateConcat is sq_concat for Template. Templates concatenate
+// only with templates; any other RHS type raises TypeError that names
+// both operand types in CPython's message format.
+//
+// CPython: Objects/templateobject.c:301 _PyTemplate_Concat
+func templateConcat(a, b Object) (Object, error) {
+	left, ok := a.(*TemplateStr)
+	if !ok {
+		return nil, fmt.Errorf(
+			"TypeError: can only concatenate string.templatelib.Template (not \"%s\") to string.templatelib.Template",
+			typeNameOf(a))
+	}
+	right, ok := b.(*TemplateStr)
+	if !ok {
+		return nil, fmt.Errorf(
+			"TypeError: can only concatenate string.templatelib.Template (not \"%s\") to string.templatelib.Template",
+			typeNameOf(b))
+	}
+	newStrings, err := templateStringsConcat(left.strings, right.strings)
+	if err != nil {
+		return nil, err
+	}
+	newInterps, err := SequenceConcat(left.interpolations, right.interpolations)
+	if err != nil {
+		return nil, err
+	}
+	return NewTemplateStr(newStrings, newInterps), nil
+}
+
+// templateStringsConcat folds the boundary entries of the two
+// strings tuples into a single concatenated str, returning a tuple of
+// length (len(left) + len(right) - 1).
+//
+// CPython: Objects/templateobject.c:250 template_strings_concat
+func templateStringsConcat(left, right Object) (Object, error) {
+	leftTuple, ok := left.(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: Template.strings is not a tuple")
+	}
+	rightTuple, ok := right.(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: Template.strings is not a tuple")
+	}
+	leftLen := leftTuple.Len()
+	rightLen := rightTuple.Len()
+	if leftLen == 0 || rightLen == 0 {
+		return nil, fmt.Errorf("ValueError: Template.strings must not be empty")
+	}
+	leftLast, ok := leftTuple.Item(leftLen - 1).(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: Template.strings entries must be str")
+	}
+	rightFirst, ok := rightTuple.Item(0).(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: Template.strings entries must be str")
+	}
+	concat := NewStr(leftLast.Value() + rightFirst.Value())
+	out := make([]Object, 0, leftLen+rightLen-1)
+	for i := 0; i < leftLen-1; i++ {
+		out = append(out, leftTuple.Item(i))
+	}
+	out = append(out, concat)
+	for i := 1; i < rightLen; i++ {
+		out = append(out, rightTuple.Item(i))
+	}
+	return NewTuple(out), nil
 }
 
 func errTypeMismatchForTemplate(attr string) error {

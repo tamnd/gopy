@@ -305,6 +305,20 @@ func (s *State) CurrentFStringRaw() bool {
 	return s.tokModeStack[s.tokModeStackIndex].raw
 }
 
+// CurrentFStringPrefixChar returns 'f' or 't' for the active f-string
+// or t-string mode. Mirrors TOK_GET_STRING_PREFIX, which the CPython
+// helper macros use inside the parser actions without first checking
+// INSIDE_FSTRING: the active mode entry retains its string_kind even
+// while the inner {expr} body is being scanned in regular mode.
+//
+// CPython: Parser/lexer/lexer.c:43 TOK_GET_STRING_PREFIX
+func (s *State) CurrentFStringPrefixChar() byte {
+	if s.tokModeStack[s.tokModeStackIndex].stringKind == kindTString {
+		return 't'
+	}
+	return 'f'
+}
+
 // pushMode is TOK_NEXT_MODE: enter a nested f-string or t-string
 // scanning context.
 //
