@@ -26,6 +26,7 @@ func init() {
 	RangeType.TpFlags |= TpFlagSequence
 	RangeType.Repr = rangeRepr
 	RangeType.Str = rangeRepr
+	RangeType.RichCmp = rangeRichCmp
 	RangeType.Iter = rangeIter
 	RangeType.Sequence = &SequenceMethods{
 		Length:   rangeLen,
@@ -61,6 +62,54 @@ func rangeRepr(o Object) (string, error) {
 func rangeIter(o Object) (Object, error) {
 	r := o.(*Range)
 	return newRangeIterator(r.Start, r.Stop, r.Step), nil
+}
+
+// rangeRichCmp ports range_richcompare: only EQ / NE produce a real
+// answer (anything else is NotImplemented). Two ranges are equal when
+// their lengths match, and either both are empty or both start at the
+// same value AND (length == 1 or both steps match). Identity of
+// start/stop on Python ints stays through big.Int.Cmp because that's
+// how integer equality is computed elsewhere in objects/.
+//
+// CPython: Objects/rangeobject.c:541 range_richcompare
+func rangeRichCmp(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return notImplemented(), nil
+	}
+	r0 := a.(*Range)
+	r1, ok := b.(*Range)
+	if !ok {
+		return notImplemented(), nil
+	}
+	eq := rangeEquals(r0, r1)
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
+// rangeEquals returns true when r0 and r1 describe the same sequence.
+//
+// CPython: Objects/rangeobject.c:515 range_equals
+func rangeEquals(r0, r1 *Range) bool {
+	if r0 == r1 {
+		return true
+	}
+	l0 := rangeLengthBig(&r0.Start.v, &r0.Stop.v, &r0.Step.v)
+	l1 := rangeLengthBig(&r1.Start.v, &r1.Stop.v, &r1.Step.v)
+	if l0.Cmp(l1) != 0 {
+		return false
+	}
+	if l0.Sign() == 0 {
+		return true
+	}
+	if r0.Start.v.Cmp(&r1.Start.v) != 0 {
+		return false
+	}
+	if l0.Cmp(big.NewInt(1)) == 0 {
+		return true
+	}
+	return r0.Step.v.Cmp(&r1.Step.v) == 0
 }
 
 // rangeLengthBig returns the number of elements in the range as a
