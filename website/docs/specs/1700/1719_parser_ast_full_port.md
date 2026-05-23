@@ -1594,3 +1594,47 @@ CPython:
 - `Objects/codeobject.c:1492 positionsiter_next`
 - `Objects/codeobject.c:1554 code_positionsiterator`
 - `Lib/dis.py:754 _get_instructions_bytes`
+
+### P7 closer 23: PEP 695 generic function codegen
+
+`def outer[A]():` and `def F[T: ...]():` blew up `test_type_aliases`
+and `test_type_params` at compile time with
+
+```
+compile: free var "A" in nested scope "outer" has scope ? in outer "test"
+```
+
+The symtable already created the synthetic `<generic parameters of X>`
+`TypeParametersBlock` for each PEP 695 function, but
+`compileFunctionLike` ignored `s.TypeParams` and emitted the function
+directly. With the wrapper missed, the inner function's free var `A`
+had no cell to walk to, so `emitClosure` aborted.
+
+`codegen_typealias` and `codegen_class` had this wrapper for a while;
+the function path just had not been ported yet. Mirrored
+`Python/codegen.c:1390 codegen_function` 1:1:
+
+1. evaluate defaults in the outer scope (unchanged),
+2. if `len(typeParams) > 0`: `SWAP 2` when both defaults and kwdefaults
+   are pushed so the wrapper's first positional arg lands on
+   `.defaults`, enter the wrapper scope, declare `.defaults` /
+   `.kwdefaults` as fast slots 0/1, `RESUME 0`, emit the type-param
+   tuple, `LOAD_FAST 0..n-1` so the inner MAKE_FUNCTION sees the
+   defaults back on the wrapper stack,
+3. emit the inner function code object normally,
+4. inside the wrapper: `SWAP 2` then `CALL_INTRINSIC_2
+   INTRINSIC_SET_FUNCTION_TYPE_PARAMS` to stamp `__type_params__` on
+   the new function, `RETURN_VALUE`,
+5. exit the wrapper, build a closure tuple for it, `MAKE_FUNCTION`,
+6. if any defaults flowed: `SWAP num+1` + `CALL num-1` to route them
+   through the wrapper's positional args; else `PUSH_NULL` + `CALL 0`.
+
+After this, `def outer[A]():` and `def F[T: [lambda: T for T in ...]]`
+compile and run; `test_type_aliases` and `test_type_params` flip from
+`compile:` BAD to `ModuleNotFoundError: test.typinganndata` BAD (a
+fixture vendor follow-up, not a codegen issue).
+
+CPython:
+- `Python/codegen.c:1390 codegen_function`
+- `Python/codegen.c:1480 CALL_INTRINSIC_2 INTRINSIC_SET_FUNCTION_TYPE_PARAMS`
+- `Python/symtable.c:1659 symtable_enter_type_param_block`

@@ -20,7 +20,7 @@ import (
 // CPython: Python/codegen.c:L1390 codegen_function
 func (c *Compiler) visitFunctionDef(s *ast.FunctionDef) error {
 	return c.compileFunctionLike(s.Name, s.Args, s.Body, s.Returns,
-		s.DecoratorList, false, s)
+		s.DecoratorList, s.TypeParams, false, s)
 }
 
 // visitAsyncFunctionDef compiles `async def`. Same shape as
@@ -30,7 +30,7 @@ func (c *Compiler) visitFunctionDef(s *ast.FunctionDef) error {
 // CPython: Python/codegen.c:L1390 codegen_function with is_async=1
 func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 	return c.compileFunctionLike(s.Name, s.Args, s.Body, s.Returns,
-		s.DecoratorList, false, s)
+		s.DecoratorList, s.TypeParams, false, s)
 }
 
 // visitLambda compiles a Lambda expression. Same shape as a function
@@ -40,7 +40,7 @@ func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 // CPython: Python/codegen.c:L1999 codegen_lambda
 func (c *Compiler) visitLambda(e *ast.Lambda) error {
 	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: e.Pos}}
-	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, true, e)
+	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, nil, true, e)
 }
 
 // compileFunctionLike is the shared emit driver. It evaluates
@@ -50,7 +50,7 @@ func (c *Compiler) visitLambda(e *ast.Lambda) error {
 // CPython: Python/codegen.c:L1311 codegen_function_body driver
 func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	body ast.Seq[ast.Stmt], returns ast.Expr, decorators ast.Seq[ast.Expr],
-	isLambda bool, scopeKey any,
+	typeParams ast.Seq[ast.TypeParam], isLambda bool, scopeKey any,
 ) error {
 	_ = returns
 
@@ -66,6 +66,75 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	flags, err := c.emitDefaults(args, loc(scopeKey))
 	if err != nil {
 		return err
+	}
+
+	isGeneric := len(typeParams) > 0
+
+	var (
+		outerScope    *symtable.Entry
+		outerFblocks  []fblock
+		outerCaches   savedCaches
+		wrapperScope  *symtable.Entry
+		wrapperUnit   *Unit
+		numTPArgs     int32
+		hasDefaults   = flags&0x01 != 0
+		hasKwDefaults = flags&0x02 != 0
+	)
+
+	if isGeneric {
+		wrapperScope = c.Symtable.LookupTypeParams(scopeKey)
+		if wrapperScope == nil {
+			return fmt.Errorf("compile: no TypeParametersBlock for %s %q", funcLikeKind(scopeKey), name)
+		}
+		if hasDefaults {
+			numTPArgs++
+		}
+		if hasKwDefaults {
+			numTPArgs++
+		}
+		// Both defaults and kwdefaults present: outer stack is
+		// [defaults_tuple, kwdefaults_dict] with kwdefaults on TOS.
+		// Swap so the wrapper's first positional arg (`.defaults`)
+		// receives defaults_tuple and the second (`.kwdefaults`)
+		// receives kwdefaults_dict after the eventual outer CALL.
+		//
+		// CPython: Python/codegen.c:1441 (num_typeparam_args==2 SWAP)
+		if numTPArgs == 2 {
+			c.addOpI(SWAP, 2, loc(scopeKey))
+		}
+
+		outerScope = c.scope
+		outerFblocks = c.fblocks
+		outerCaches = c.savedCaches()
+
+		c.enterScope(wrapperScope)
+		first := c.unit().FirstLineno
+		c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
+
+		// Declare the wrapper's positional parameters so the var pool
+		// allocates slot 0 (and slot 1 if both flavors are present)
+		// in the order CPython expects from
+		// codegen_function: .defaults first, .kwdefaults second.
+		//
+		// CPython: Python/codegen.c:1448 _PyCompile_CodeUnitMetadata u_argcount
+		if hasDefaults {
+			c.declareArg(".defaults")
+		}
+		if hasKwDefaults {
+			c.declareArg(".kwdefaults")
+		}
+		c.unit().Argcount = int(numTPArgs)
+
+		if err := c.emitTypeParams(typeParams); err != nil {
+			return err
+		}
+		// Load the wrapper's positional args back so codegen_function_body's
+		// MAKE_FUNCTION sees [type_params, defaults?, kwdefaults?, ...].
+		//
+		// CPython: Python/codegen.c:1456 LOAD_FAST loop
+		for i := int32(0); i < numTPArgs; i++ {
+			c.addOpI(LOAD_FAST, i, loc(scopeKey))
+		}
 	}
 
 	// Look up the inner scope from the symtable.
@@ -88,6 +157,45 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	}
 
 	c.emitMakeFunction(flags, loc(scopeKey))
+
+	if isGeneric {
+		// Wrapper stack: [type_params_tuple, func]. Attach the
+		// type-params tuple to the new function object.
+		//
+		// CPython: Python/codegen.c:1479 SWAP 2 + CALL_INTRINSIC_2 SET_FUNCTION_TYPE_PARAMS
+		c.addOpI(SWAP, 2, loc(scopeKey))
+		c.addOpI(CALL_INTRINSIC_2, intrinsicSetFunctionTypeParams, loc(scopeKey))
+		c.addOp(RETURN_VALUE, loc(scopeKey))
+
+		wrapperUnit = c.unit()
+		wrapperUnit.Name = "<generic parameters of " + name + ">"
+
+		c.leaveScope()
+		c.scope = outerScope
+		c.fblocks = outerFblocks
+		c.restoreCaches(outerCaches)
+
+		// Outer scope: push closure + wrapper code + MAKE_FUNCTION.
+		wrapperClosureFlag, err := c.emitClosure(wrapperScope, loc(scopeKey))
+		if err != nil {
+			return err
+		}
+		c.addLoadConst(wrapperUnit, loc(scopeKey))
+		c.emitMakeFunction(wrapperClosureFlag, loc(scopeKey))
+
+		// Outer stack: [defaults?, kwdefaults?, wrapper_func].
+		// Move the wrapper to the bottom so CALL's func/self_or_null
+		// slots resolve to wrapper(d, k).
+		//
+		// CPython: Python/codegen.c:1490 SWAP num+1 + CALL num-1
+		if numTPArgs > 0 {
+			c.addOpI(SWAP, numTPArgs+1, loc(scopeKey))
+			c.addOpI(CALL, numTPArgs-1, loc(scopeKey))
+		} else {
+			c.addOp(PUSH_NULL, loc(scopeKey))
+			c.addOpI(CALL, 0, loc(scopeKey))
+		}
+	}
 
 	// Apply decorators. Each emits CALL 0: 3.14 lays out the stack as
 	// [..., decorator, wrapped] and CALL's MAYBE_EXPAND_METHOD path
