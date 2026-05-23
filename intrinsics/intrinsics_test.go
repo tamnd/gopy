@@ -104,6 +104,7 @@ func TestStubHelpersReturnNotImplemented(t *testing.T) {
 		UnaryTypealiasID:        true,
 	}
 	implementedBinary := map[int]bool{
+		BinaryPrepReraiseStarID:        true,
 		BinaryTypevarWithBoundID:       true,
 		BinaryTypevarWithConstraintsID: true,
 		BinarySetFunctionTypeParamsID:  true,

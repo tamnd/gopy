@@ -8,6 +8,7 @@ package intrinsics
 import (
 	"errors"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
@@ -32,11 +33,61 @@ func Binary2InvalidFn(ts *state.Thread, lhs, rhs objects.Object) (objects.Object
 	return nil, errors.New("intrinsics: invalid binary intrinsic id 0")
 }
 
-// BinaryPrepReraiseStar reconstructs an ExceptionGroup for `raise except*`.
+// BinaryPrepReraiseStar reconstructs the exception (or group of
+// exceptions) that should propagate after a `try/except*` finishes.
+// orig is the original raised exception that drove the unwind; excs
+// is the accumulated list of leftovers (each `rest` partition from
+// CHECK_EG_MATCH plus any exception raised inside an except* arm).
+// None entries are filtered out. Returns None when nothing remains.
 //
-// CPython: Python/intrinsics.c prep_reraise_star
-func BinaryPrepReraiseStar(ts *state.Thread, lhs, rhs objects.Object) (objects.Object, error) {
-	return nil, notImplemented("BinaryPrepReraiseStar", "ExceptionGroup type lives in 1686")
+// Lifecycle mirrors CPython: a naked exception that was wrapped into
+// an ExceptionGroup only for matching purposes surfaces as itself
+// when at most one leaf survives; a group input collapses back into
+// a derived ExceptionGroup over the survivors.
+//
+// CPython: Python/intrinsics.c:237 prep_reraise_star
+// CPython: Objects/exceptions.c:1618 _PyExc_PrepReraiseStar
+func BinaryPrepReraiseStar(ts *state.Thread, orig, excs objects.Object) (objects.Object, error) {
+	list, ok := excs.(*objects.List)
+	if !ok {
+		return nil, errors.New("TypeError: PrepReraiseStar excs must be a list")
+	}
+	var leftovers []*pyerrors.Exception
+	for i := 0; i < list.Len(); i++ {
+		item := list.Item(i)
+		if item == objects.None() {
+			continue
+		}
+		exc, eok := item.(*pyerrors.Exception)
+		if !eok {
+			return nil, errors.New("TypeError: PrepReraiseStar item is not an exception")
+		}
+		leftovers = append(leftovers, exc)
+	}
+	if len(leftovers) == 0 {
+		return objects.None(), nil
+	}
+	origExc, _ := orig.(*pyerrors.Exception)
+	// Naked-exception input: only one leaf could have survived. Return
+	// it bare so user code sees the original exception, not a wrapper.
+	if origExc != nil && !pyerrors.IsExceptionGroup(origExc.ExcType) {
+		return leftovers[0], nil
+	}
+	if len(leftovers) == 1 {
+		return leftovers[0], nil
+	}
+	items := make([]objects.Object, len(leftovers))
+	for i, e := range leftovers {
+		items[i] = e
+	}
+	message := objects.NewStr("")
+	if origExc != nil && origExc.Args != nil && origExc.Args.Len() >= 1 {
+		message = origExc.Args.Item(0).(*objects.Unicode)
+	}
+	group := pyerrors.New(pyerrors.PyExc_ExceptionGroup, objects.NewTuple([]objects.Object{
+		message, objects.NewTuple(items),
+	}))
+	return group, nil
 }
 
 // BinaryTypevarWithBound builds TypeVar(name, bound=...). CPython

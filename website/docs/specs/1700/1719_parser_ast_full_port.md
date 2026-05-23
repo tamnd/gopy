@@ -1749,3 +1749,67 @@ CPython:
 - `Objects/genobject.c:225 gen_send_ex2`
 - `Objects/exceptions.c:684 StopIteration_init`
 - `Objects/exceptions.c:711 StopIteration_members`
+
+### P7 closer 26: CHECK_EG_MATCH + PREP_RERAISE_STAR for except*
+
+`test_global.test_except_star_global_*` and the `test_grammar`
+`try_stmt` family exercise PEP 654 `except*` syntax. Both opcodes
+required by the codegen were stubs in v0.6: `CHECK_EG_MATCH` returned
+"not implemented" and `BinaryPrepReraiseStar` raised before any leaf
+projection happened. The pair lands here, ported function-by-function
+from CPython.
+
+Implementation:
+
+1. `errors/exc_group.go` grows `IsExceptionGroup`,
+   `ExceptionGroupLeaves`, `SplitExceptionGroup`, and a private
+   `deriveGroup` helper. The split walks the leaves of a
+   `BaseExceptionGroup`, recurses into nested groups, and rebuilds two
+   parallel subsets (matched / rest) using the source group's class
+   and message slot. Mirrors `Objects/exceptions.c:1326
+   exceptiongroup_split_recursive` and
+   `Objects/exceptions.c:1414 exceptiongroup_subset`.
+
+2. `vm/eval_dispatch_handwritten.go` claims `CHECK_EG_MATCH` from the
+   stub panel and ships `opCHECK_EG_MATCH`. The opcode pops
+   `(exc_value, match_type)` and pushes `(rest, match)`. Branches:
+   `None` exc -> both None; non-Exception payload -> rest = value,
+   match = None; whole-group match wraps a naked exception into an
+   `ExceptionGroup("", (exc,))` so the `as` binding always sees a
+   group; partial match calls `splitExceptionGroupAny` which accepts a
+   tuple-of-types match shape (which CPython's
+   `PyErr_GivenExceptionMatches` supports) and returns the
+   (match, rest) partition. Mirrors `Python/bytecodes.c CHECK_EG_MATCH`
+   and `Python/ceval.c:2295 _PyEval_ExceptionGroupMatch`.
+
+3. `intrinsics/binary.go::BinaryPrepReraiseStar` replaces the stub.
+   It filters `None` entries from the `excs` list (each `rest`
+   partition pushed by an `except*` arm), and returns: `None` if no
+   survivors; the single survivor if the original was a naked
+   exception (so user code sees the original type, not a wrapper); the
+   sole survivor if only one made it through a group input; or a fresh
+   `ExceptionGroup(message, (survivors...))` over the message from the
+   source group. Mirrors `Python/intrinsics.c:237 prep_reraise_star`
+   and `Objects/exceptions.c:1618 _PyExc_PrepReraiseStar`.
+
+4. `intrinsics/intrinsics_test.go` adds `BinaryPrepReraiseStarID` to
+   the `implementedBinary` map so the stub sweep no longer expects a
+   `notImplementedError` for the now-live intrinsic.
+
+5. `stdlib/test/typinganndata/` vendors `__init__.py`,
+   `ann_module.py`, `ann_module2.py`, and `ann_module3.py` straight
+   from `Lib/test/typinganndata/` so future `test_positional_only_arg`
+   annotation-laden cases can import the fixture instead of skipping.
+
+Net effect: `test_global` goes from 1 error to 20/20 passing.
+`test_grammar` `test_try_star` now succeeds; remaining `test_grammar`
+errors live in unrelated subsystems (matmul, var-annot module
+semantics, lexer numerical-literal SyntaxError enforcement).
+
+CPython:
+- `Python/bytecodes.c CHECK_EG_MATCH`
+- `Python/ceval.c:2295 _PyEval_ExceptionGroupMatch`
+- `Python/intrinsics.c:237 prep_reraise_star`
+- `Objects/exceptions.c:1326 exceptiongroup_split_recursive`
+- `Objects/exceptions.c:1414 exceptiongroup_subset`
+- `Objects/exceptions.c:1618 _PyExc_PrepReraiseStar`
