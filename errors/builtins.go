@@ -63,6 +63,55 @@ func init() {
 		const p = "IndexError:"
 		return len(msg) >= len(p) && msg[:len(p)] == p
 	}
+	// StopIteration.value exposes args[0] (or None) as a member, so
+	// callers can read the generator/coroutine return value from
+	// `except StopIteration as e: e.value`. CPython stores it in a
+	// dedicated field stamped by StopIteration_init; gopy reads it back
+	// off args so the same value flows through whether the exception
+	// was constructed via StopIteration(retval) or args was rewritten.
+	//
+	// CPython: Objects/exceptions.c:711 StopIteration_members
+	// CPython: Objects/exceptions.c:684 StopIteration_init
+	objects.SetTypeDescr(PyExc_StopIteration, "value",
+		objects.NewGetSetDescr("value", stopIterValueGet, stopIterValueSet))
+}
+
+// stopIterValueGet returns args[0] when StopIteration was constructed
+// with a value, else None.
+//
+// CPython: Objects/exceptions.c:684 StopIteration_init (value field)
+func stopIterValueGet(owner objects.Object) (objects.Object, error) {
+	e, ok := owner.(*Exception)
+	if !ok || e.Args == nil || e.Args.Len() == 0 {
+		return objects.None(), nil
+	}
+	return e.Args.Item(0), nil
+}
+
+// stopIterValueSet rewrites args[0] so reassigning .value also surfaces
+// through args. CPython has a dedicated field for value; gopy keeps
+// args and value in lock-step.
+//
+// CPython: Objects/exceptions.c:711 StopIteration_members
+func stopIterValueSet(owner objects.Object, value objects.Object) error {
+	e, ok := owner.(*Exception)
+	if !ok {
+		return stderrors.New("TypeError: descriptor 'value' requires StopIteration")
+	}
+	if value == nil {
+		value = objects.None()
+	}
+	if e.Args == nil || e.Args.Len() == 0 {
+		e.Args = objects.NewTuple([]objects.Object{value})
+		return nil
+	}
+	items := make([]objects.Object, e.Args.Len())
+	items[0] = value
+	for i := 1; i < e.Args.Len(); i++ {
+		items[i] = e.Args.Item(i)
+	}
+	e.Args = objects.NewTuple(items)
+	return nil
 }
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {

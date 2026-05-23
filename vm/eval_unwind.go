@@ -76,6 +76,19 @@ var errorPrefixToType = map[string]*objects.Type{
 // the result falls back to a plain Exception, matching the previous
 // behavior.
 func synthesizeException(err error) *pyerrors.Exception {
+	// RaisedError carries an already-typed Python exception across the
+	// generator/coroutine channel boundary (or any other Go error
+	// surface). Unwrap so the original instance lands on the thread
+	// state with its args (and therefore StopIteration.value) intact.
+	//
+	// CPython: Objects/genobject.c:225 gen_send_ex2 (StopIteration
+	// carries the body's return value through args[0]).
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		if exc, ok := re.Exc.(*pyerrors.Exception); ok {
+			return exc
+		}
+	}
 	// Iterator-protocol sentinels: the Go side carries them as bare
 	// errors.New("StopIteration") / "StopAsyncIteration", which the
 	// prefix table below misses (no trailing colon). Recognize them

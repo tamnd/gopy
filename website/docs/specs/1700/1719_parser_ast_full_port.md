@@ -1689,3 +1689,63 @@ CPython:
 - `Objects/typeobject.c:2331 type_call`
 - `Objects/typeobject.c:11514 type_new_set_names`
 - `Python/errors.c:1567 _PyErr_FormatNote`
+
+### P7 closer 25: coroutine return value flows through StopIteration.value
+
+`test_positional_only_arg.test_async` exercises the classic PEP 492
+pattern of priming a coroutine with `coro.send(None)` and catching the
+implicit `StopIteration` to read `e.value`:
+
+```python
+async def f(a=1, /, b=2):
+    return a, b
+
+try:
+    coro = f(*args, **kwargs)
+    coro.send(None)
+except StopIteration as e:
+    result = e.value
+```
+
+Two gaps blocked this. (1) The coroutine goroutine in `vm/eval_gen.go`
+discarded the body's return value (`_, runErr := ge.run()`) and always
+sent bare `objects.ErrStopIteration`, so the caller never saw the
+returned tuple. (2) `StopIteration` had no `value` getset descriptor,
+so even when args carried the retval an `except StopIteration as e:
+e.value` access raised `AttributeError`.
+
+Fixes ported piece by piece from CPython:
+
+1. `objects/usertype.go` already exposes `SetTypeDescr` /
+   `NewGetSetDescr`; `errors/builtins.go` now stamps
+   `StopIteration.value` in `init()` with getter
+   `stopIterValueGet` (returns `args[0]` or `None`) and setter
+   `stopIterValueSet` (rewrites `args[0]` so .value and args stay in
+   lock-step). Mirrors `Objects/exceptions.c:684 StopIteration_init`
+   and `Objects/exceptions.c:711 StopIteration_members`.
+
+2. `vm/eval_gen.go` now keeps the retval out of `ge.run()` and, when
+   the body produced a non-None value, wraps it as
+   `pyerrors.New(PyExc_StopIteration, NewTuple([retVal]))` and ships
+   the typed exception across `yieldCh` via
+   `objects.NewRaisedError(exc, "StopIteration")`. Bare `ErrStopIteration`
+   still flows when the body returned `None`, matching the no-value
+   case in CPython's `gen_send_ex2` (`Objects/genobject.c:225`).
+
+3. `vm/eval_unwind.go::synthesizeException` learns to unwrap a
+   `*objects.RaisedError` first, returning the embedded
+   `*pyerrors.Exception` directly so its args (and therefore .value)
+   survive promotion to thread state. Without this step, the path
+   through `handleException` would build a fresh generic `Exception`
+   and discard the retval-carrying StopIteration instance.
+
+Net effect: `test_positional_only_arg` errors drop from 6 to 3
+(`test_async` now passes); the remaining errors
+(`test_annotations_constant_fold`, `test_annotations_in_closures`,
+`test_serialization`) trace to unrelated subsystems already tracked
+elsewhere.
+
+CPython:
+- `Objects/genobject.c:225 gen_send_ex2`
+- `Objects/exceptions.c:684 StopIteration_init`
+- `Objects/exceptions.c:711 StopIteration_members`

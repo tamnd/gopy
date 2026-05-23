@@ -206,10 +206,23 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			genSend:  sendCh,
 			code:     savedFrame.Code.Code,
 		}
-		_, runErr := ge.run()
-		if runErr != nil && !errors.Is(runErr, objects.ErrStopIteration) {
+		retVal, runErr := ge.run()
+		switch {
+		case runErr != nil && !errors.Is(runErr, objects.ErrStopIteration):
 			yieldCh <- objects.GenMsg{Err: runErr}
-		} else {
+		case retVal != nil && retVal != objects.None():
+			// Body returned a value (PEP 380, PEP 492). CPython wraps
+			// it in StopIteration(value) so `except StopIteration as
+			// e: e.value` sees the return. Carry the typed Exception
+			// across the channel through RaisedError so the receiver's
+			// Eval frame finds the original instance on the thread
+			// state (preserves `.value` identity).
+			//
+			// CPython: Objects/genobject.c:225 gen_send_ex2
+			exc := pyerrors.New(pyerrors.PyExc_StopIteration,
+				objects.NewTuple([]objects.Object{retVal}))
+			yieldCh <- objects.GenMsg{Err: objects.NewRaisedError(exc, "StopIteration")}
+		default:
 			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 		}
 	}()
