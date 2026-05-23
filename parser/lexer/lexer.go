@@ -197,22 +197,25 @@ func (s *State) tokGetNormalMode() Tok {
 		//
 		// CPython: Parser/lexer/lexer.c:1244 line-continuation branch
 		// CPython: Parser/lexer/lexer.c:444  tok_continuation_line E_EOF
-		for c == '\\' && s.peek() == '\n' {
-			s.nextC()
+		// A backslash here commits to the line-continuation path:
+		// tok_continuation_line must see a '\n' next or it raises
+		// E_LINECONT ("unexpected character after line continuation
+		// character"). The previous form predicated the loop on
+		// `peek == '\n'` and silently fell through for `\<other>`,
+		// ending up at the operator default which emitted a generic
+		// "invalid character".
+		for c == '\\' {
+			next := s.nextC()
+			if next == '\r' {
+				next = s.nextC()
+			}
+			if next != '\n' {
+				s.done = eErrLine
+				s.recordError("unexpected character after line continuation character")
+				return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
+			}
 			s.pendingLineno++
 			s.col = 0
-			// CPython does NOT update tok->line_start in
-			// tok_continuation_line. line_start advances only when
-			// underflow successfully fetches another line. For string
-			// input that means: after consuming the continuation '\n',
-			// the next tok_nextc call snaps line_start to the new
-			// position via the same per-byte path as any other newline.
-			// On EOF (no more input) line_start stays at the previous
-			// line so the unexpected-EOF caret lands at the byte just
-			// past the trailing backslash on the original line.
-			//
-			// CPython: Parser/lexer/lexer.c:444 tok_continuation_line
-			// CPython: Parser/tokenizer/string_tokenizer.c:23 tok_underflow_string
 			s.contLine = true
 			c = s.nextC()
 			if c == eof {

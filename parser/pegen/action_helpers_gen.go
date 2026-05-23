@@ -768,6 +768,17 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 	}
 	text, _, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
 	if err != nil {
+		// CPython: Parser/action_helpers.c:1288 _PyPegen_decode_fstring_part
+		// surfaces decode errors through _Pypegen_raise_decode_error so the
+		// resulting SyntaxError carries the codec-prefixed message.
+		if p != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  t.Lineno,
+				ColOff:  t.ColOff,
+				EndLine: t.EndLine,
+				EndCol:  t.EndCol,
+			}, "%s", err.Error())
+		}
 		return placeholderMatched
 	}
 	return &ast.Constant{Value: text, Pos: ast.NoPos}
@@ -2230,11 +2241,23 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
 // CPython: Parser/action_helpers.c:1301 _get_resized_exprs
 func actionPgenJoinedStr(p *Parser, args ...any) any {
-	_ = p
 	start, _ := argAt(args, 1).(*Token)
 	values := joinedStrValues(argAt(args, 2))
 	resized, err := resizeFStringExprs(start, values)
 	if err != nil {
+		// CPython: Parser/action_helpers.c:1354 _PyPegen_decode_fstring_part
+		// reports the decode failure via _Pypegen_raise_decode_error so the
+		// SyntaxError carries the codec-prefixed text. Pin at the f-string
+		// start token (the resize walker lost the per-Constant position by
+		// this point; CPython attaches at the same outer span).
+		if p != nil && start != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  start.Lineno,
+				ColOff:  start.ColOff,
+				EndLine: start.EndLine,
+				EndCol:  start.EndCol,
+			}, "%s", err.Error())
+		}
 		return placeholderMatched
 	}
 	return &ast.JoinedStr{Values: resized, Pos: ast.NoPos}

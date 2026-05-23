@@ -11,6 +11,28 @@ import (
 	"unicode/utf8"
 )
 
+// DecodeError carries the byte-position pair that
+// _PyUnicode_DecodeUnicodeEscapeInternal2 records on its
+// PyUnicodeDecodeError so _Pypegen_raise_decode_error can format the
+// codec-style prefix the parser surface needs.
+//
+// CPython: Objects/unicodeobject.c:6854 raise on "unicodeescape"
+type DecodeError struct {
+	Reason string
+	Start  int
+	End    int
+}
+
+func (e *DecodeError) Error() string {
+	return e.Reason
+}
+
+// newDecodeError constructs a DecodeError that mirrors the
+// PyUnicodeDecodeError raised inside the C decoder.
+func newDecodeError(reason string, start, end int) *DecodeError {
+	return &DecodeError{Reason: reason, Start: start, End: end}
+}
+
 // decodeUnicodeEscapes walks s and expands the standard Python
 // escape sequences. The returned string is the decoded text in
 // UTF-8 form. Unknown escape sequences are kept verbatim and
@@ -29,9 +51,10 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			i++
 			continue
 		}
+		escStart := i
 		i++
 		if i >= len(s) {
-			return "", nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
+			return "", nil, newDecodeError("\\ at end of string", escStart, i)
 		}
 		c = s[i]
 		i++
@@ -75,53 +98,60 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			out = utf8.AppendRune(out, rune(val))
 		case 'x':
 			if i+2 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\xXX escape")
+				return "", nil, newDecodeError("truncated \\xXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+2])
 			if err != nil {
-				return "", nil, err
+				return "", nil, newDecodeError("truncated \\xXX escape", escStart, i+2)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 2
 		case 'u':
 			if i+4 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\uXXXX escape")
+				return "", nil, newDecodeError("truncated \\uXXXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+4])
 			if err != nil {
-				return "", nil, err
+				return "", nil, newDecodeError("truncated \\uXXXX escape", escStart, i+4)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 4
 		case 'U':
 			if i+8 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\UXXXXXXXX escape")
+				return "", nil, newDecodeError("truncated \\UXXXXXXXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+8])
 			if err != nil {
-				return "", nil, err
+				return "", nil, newDecodeError("truncated \\UXXXXXXXX escape", escStart, i+8)
 			}
 			if v > 0x10FFFF {
-				return "", nil, fmt.Errorf("illegal Unicode character in \\U escape")
+				return "", nil, newDecodeError("illegal Unicode character", escStart, i+8)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 8
 		case 'N':
-			// CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscape
-			// \N{NAME} expands via the unicodedata name table.
+			// CPython: Objects/unicodeobject.c:6791 \N{name} expansion.
+			// The matching errors live at unicodeobject.c:6801 ("malformed
+			// \N character escape") and :6826 ("unknown Unicode character
+			// name"); both are surfaced through PyUnicodeDecodeError so
+			// _Pypegen_raise_decode_error can format the codec prefix.
 			if i >= len(s) || s[i] != '{' {
-				return "", nil, fmt.Errorf("malformed \\N character escape")
+				return "", nil, newDecodeError("malformed \\N character escape", escStart, i)
 			}
 			j := i + 1
 			for j < len(s) && s[j] != '}' {
 				j++
 			}
 			if j >= len(s) {
-				return "", nil, fmt.Errorf("malformed \\N character escape")
+				return "", nil, newDecodeError("malformed \\N character escape", escStart, j)
 			}
-			expanded, ok := NameLookup(string(s[i+1 : j]))
+			name := string(s[i+1 : j])
+			if name == "" {
+				return "", nil, newDecodeError("malformed \\N character escape", escStart, j+1)
+			}
+			expanded, ok := NameLookup(name)
 			if !ok {
-				return "", nil, fmt.Errorf("unknown Unicode character name")
+				return "", nil, newDecodeError("unknown Unicode character name", escStart, j+1)
 			}
 			out = append(out, expanded...)
 			i = j + 1

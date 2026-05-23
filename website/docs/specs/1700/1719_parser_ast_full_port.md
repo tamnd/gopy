@@ -2118,3 +2118,51 @@ parser/objects/vm/compile stay green.
 CPython:
 - `Objects/unicodeobject.c:14199 _PyUnicodeWriter_Finish`
 - `Objects/unicodeobject.c:1368 PyUnicode_New (slab allocation)`
+
+### P7 closer 31: codec-prefix decode errors + line-continuation reject
+
+Three drifts dropped together since they're all on the literal/decode
+surface and they share test coverage:
+
+1. `parser/string/decode.go` introduces a `DecodeError` carrying the
+   byte-range `(start, end)` that
+   `_PyUnicode_DecodeUnicodeEscapeInternal2` stamps on
+   `PyUnicodeDecodeError`. Every `\x`, `\u`, `\U`, `\N`, and trailing
+   backslash error now records its escape's byte position.
+   `parser/string/parse.go` `wrapDecodeError` formats it as `(unicode
+   error) 'unicodeescape' codec can't decode bytes in position
+   {start}-{end}: {reason}` to match
+   `_Pypegen_raise_decode_error` (`Parser/pegen_errors.c:130`).
+
+2. `parser/pegen/action_helpers_gen.go`: `actionPgenJoinedStr` and
+   `actionPgenDecodedConstantFromToken` previously swallowed
+   `DecodeFStringPart` errors and returned `placeholderMatched`, so
+   `f'\N'` and `f'{\N{...'` ended up reported as the generic
+   "invalid syntax". They now surface the decode error through
+   `RaiseSyntaxErrorKnownLocation` so the codec-prefixed message
+   reaches the SyntaxError surface.
+
+3. `parser/lexer/lexer.go`: `tokGetNormalMode` previously only ran the
+   line-continuation path when the byte after `\` was `\n`; any other
+   byte fell through to the operator dispatcher and surfaced as a
+   generic "invalid character". CPython
+   (`Parser/lexer/lexer.c:1244`) unconditionally calls
+   `tok_continuation_line` after a backslash, and that helper raises
+   `E_LINECONT` ("unexpected character after line continuation
+   character") whenever the next byte is not `\n`. The Go loop now
+   matches: `\<non-newline>` emits the right error.
+
+Net effect on `test_fstring`: 54F+22E -> 38F+22E (16 closures across
+`test_misformed_unicode_character_name` and
+`test_invalid_backslashes_inside_fstring_context`). `test_syntax`
+14F+2E -> 12F+2E (2 closures from the same backslash drift). Other
+gates unchanged. Go unit tests across
+parser/objects/vm/compile/builtins remain green.
+
+CPython:
+- `Parser/pegen_errors.c:130 _Pypegen_raise_decode_error`
+- `Parser/action_helpers.c:1288 _PyPegen_decode_fstring_part raise path`
+- `Parser/lexer/lexer.c:1244 line-continuation branch`
+- `Parser/lexer/lexer.c:435 tok_continuation_line E_LINECONT`
+- `Objects/unicodeobject.c:6791 \N{name} expansion + error path`
+- `Objects/unicodeobject.c:6854 raise on "unicodeescape"`

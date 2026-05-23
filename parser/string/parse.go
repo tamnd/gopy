@@ -132,9 +132,25 @@ stripped:
 	}
 	text, warns, err := decodeUnicodeEscapes(s)
 	if err != nil {
-		return Result{}, err
+		return Result{}, wrapDecodeError(err)
 	}
 	return Result{Text: text, Warnings: warns}, nil
+}
+
+// wrapDecodeError formats a *DecodeError into the codec-prefix string
+// the parser surface expects. Mirrors what
+// _PyUnicode_DecodeUnicodeEscapeInternal2 stores on the
+// PyUnicodeDecodeError plus the `(unicode error)` tag added by
+// _Pypegen_raise_decode_error.
+//
+// CPython: Parser/pegen_errors.c:130 _Pypegen_raise_decode_error
+// CPython: Objects/unicodeobject.c:6854 raise "unicodeescape"
+func wrapDecodeError(err error) error {
+	if de, ok := err.(*DecodeError); ok {
+		pos := fmt.Sprintf("%d-%d", de.Start, de.End)
+		return fmt.Errorf("(unicode error) 'unicodeescape' codec can't decode bytes in position %s: %s", pos, de.Reason)
+	}
+	return err
 }
 
 func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 0 }
@@ -158,7 +174,7 @@ func DecodeFStringPart(isRaw bool, s string) (string, []string, error) {
 	}
 	text, warns, err := decodeUnicodeEscapes([]byte(s))
 	if err != nil {
-		return "", nil, err
+		return "", nil, wrapDecodeError(err)
 	}
 	return text, warns, nil
 }
