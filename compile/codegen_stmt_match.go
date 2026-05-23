@@ -78,7 +78,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 	}
 	for i := 0; i < limit; i++ {
 		m := s.Cases[i]
-		if err := c.matchOneCase(m, i, limit, pc, end); err != nil {
+		if err := c.matchOneCase(m, i, limit, cases, pc, end); err != nil {
 			return err
 		}
 	}
@@ -95,7 +95,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 // captures, body, JUMP to end, then the per-arm fail-pop tail.
 //
 // CPython: Python/codegen.c:L6384 codegen_match_inner case loop
-func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit int,
+func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit, cases int,
 	pc *patternContext, end JumpTargetLabel,
 ) error {
 	notLast := i != limit-1
@@ -103,7 +103,15 @@ func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit int,
 		c.addOpI(COPY, 1, loc(m.Pattern))
 	}
 	pc.stores = pc.stores[:0]
-	pc.allowIrrefutable = m.Guard != nil || i == limit-1
+	// allow_irrefutable lifts the "name capture / wildcard makes
+	// remaining patterns unreachable" guard. CPython gates it on
+	// i == cases - 1 (the absolute last case, not the last refutable
+	// one): when there's a trailing wildcard arm, the non-wildcard
+	// case ahead of it still has to be refutable so the wildcard can
+	// actually catch something.
+	//
+	// CPython: Python/codegen.c:6384 codegen_match_inner
+	pc.allowIrrefutable = m.Guard != nil || i == cases-1
 	pc.failPop = nil
 	pc.onTop = 0
 
