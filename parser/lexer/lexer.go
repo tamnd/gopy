@@ -244,10 +244,22 @@ func (s *State) tokGetNormalMode() Tok {
 			}
 			// Type comment recognition (`# type: ...`).
 			//
-			// CPython: Parser/lexer/lexer.c:830 type-comment branch
+			// CPython: Parser/lexer/lexer.c:692 tok_backup(tok, c) before p_end
+			// Back up the trailing '\n' (or EOF) before calling maybeTypeComment
+			// so the token text does not include the newline and s.col is at the
+			// last comment character. On the failure path, re-read c to restore
+			// the cursor for the regular comment / newline branches below.
+			//
+			// CPython: Parser/lexer/lexer.c:716 MAKE_TYPE_COMMENT_TOKEN
 			if s.typeComments {
+				if c != eof {
+					s.backup(c)
+				}
 				if t, ok := s.maybeTypeComment(commentStart, s.cur); ok {
 					return t
+				}
+				if c != eof {
+					c = s.nextC()
 				}
 			}
 			if s.tokExtraTokens {

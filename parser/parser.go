@@ -71,9 +71,19 @@ func ParseString(src, filename string, mode Mode) (ast.Mod, error) {
 //
 // CPython: Parser/peg_api.c:8 _PyParser_ASTFromString
 func ParseStringFlags(src, filename string, mode Mode, pyFlags int) (ast.Mod, error) {
+	return ParseStringFlagsVersion(src, filename, mode, pyFlags, 0)
+}
+
+// ParseStringFlagsVersion is ParseStringFlags plus a feature_version minor
+// number (0 = unset). When non-zero, p.featureVersion is set so
+// CHECK_VERSION guards in the grammar can reject syntax added after that
+// minor version.
+//
+// CPython: Parser/peg_api.c:8 _PyParser_ASTFromString (feature_version passed via compile flags)
+func ParseStringFlagsVersion(src, filename string, mode Mode, pyFlags, featureVersion int) (ast.Mod, error) {
 	st := lexer.FromString(src, lexerMode(mode))
 	st.SetFilename(filename)
-	return runParse(st, mode, pegenFlags(pyFlags))
+	return runParse(st, mode, pegenFlags(pyFlags), featureVersion)
 }
 
 // ParseBytes is the bytes-input form: src is run through
@@ -92,9 +102,16 @@ func ParseBytes(src []byte, filename string, mode Mode) (ast.Mod, error) {
 //
 // CPython: Python/bltinmodule.c:771 builtin_compile_impl (bytes branch via _Py_SourceAsString)
 func ParseBytesFlags(src []byte, filename string, mode Mode, pyFlags int) (ast.Mod, error) {
+	return ParseBytesFlagsVersion(src, filename, mode, pyFlags, 0)
+}
+
+// ParseBytesFlagsVersion is ParseBytesFlags plus a feature_version minor number.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl
+func ParseBytesFlagsVersion(src []byte, filename string, mode Mode, pyFlags, featureVersion int) (ast.Mod, error) {
 	st := lexer.FromBytes(src, lexerMode(mode))
 	st.SetFilename(filename)
-	return runParse(st, mode, pegenFlags(pyFlags))
+	return runParse(st, mode, pegenFlags(pyFlags), featureVersion)
 }
 
 // Parse reads from r. Useful for tokenize.tokenize() over file
@@ -123,7 +140,7 @@ func pegenFlags(pyFlags int) int {
 	return f
 }
 
-func runParse(st *lexer.State, mode Mode, flags int) (ast.Mod, error) {
+func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (ast.Mod, error) {
 	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
 	// source) trump anything pegen would surface: the parser cannot
 	// progress past a broken decode. Lift the lexer's structured
@@ -160,6 +177,9 @@ func runParse(st *lexer.State, mode Mode, flags int) (ast.Mod, error) {
 		}
 	}
 	p := pegen.New(st, pegenStartRule(mode), flags)
+	if len(featureVersion) > 0 && featureVersion[0] > 0 {
+		p.SetFeatureVersion(featureVersion[0])
+	}
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
 	// CPython emits SyntaxWarnings inline from helpers.c:152
 	// _PyTokenizer_parser_warn. gopy stashes them on State.warnings

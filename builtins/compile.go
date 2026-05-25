@@ -32,9 +32,9 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	}
 	var mod ast.Mod
 	if parsed.sourceBytes != nil {
-		mod, err = parser.ParseBytesFlags(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags)
+		mod, err = parser.ParseBytesFlagsVersion(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
 	} else {
-		mod, err = parser.ParseStringFlags(parsed.source, parsed.filename, parsed.mode, parsed.flags)
+		mod, err = parser.ParseStringFlagsVersion(parsed.source, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
 	}
 	if err != nil {
 		// Parser-incomplete sentinel surfaces as SyntaxError to Python
@@ -65,12 +65,13 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 }
 
 type compileArgs struct {
-	source      string
-	sourceBytes []byte
-	filename    string
-	mode        parser.Mode
-	flags       int
-	optimize    int
+	source         string
+	sourceBytes    []byte
+	filename       string
+	mode           parser.Mode
+	flags          int
+	optimize       int
+	featureVersion int // minor-only, e.g. 4 for (3, 4)
 }
 
 // parseCompileArgs binds the positional and keyword arguments to the
@@ -113,13 +114,18 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
+	featureVersion, err := parseFeatureVersion(bound[6])
+	if err != nil {
+		return compileArgs{}, err
+	}
 	return compileArgs{
-		source:      source,
-		sourceBytes: sourceBytes,
-		filename:    filename,
-		mode:        mode,
-		flags:       flags,
-		optimize:    optimize,
+		source:         source,
+		sourceBytes:    sourceBytes,
+		filename:       filename,
+		mode:           mode,
+		flags:          flags,
+		optimize:       optimize,
+		featureVersion: featureVersion,
 	}, nil
 }
 
@@ -188,6 +194,27 @@ func bindCompileArgs(args []objects.Object, kwargs map[string]objects.Object) ([
 		}
 	}
 	return bound, nil
+}
+
+// parseFeatureVersion extracts the minor version from the _feature_version
+// kwarg. ast.parse already strips the major and passes only the minor as
+// an integer (e.g. 4 for Python 3.4). We also accept -1 (unset sentinel
+// used by ast.parse when feature_version=None) as "unset".
+//
+// CPython: Python/clinic/bltinmodule.c.h:289 builtin_compile (feature_version param)
+// CPython: Lib/ast.py:38-44 (feature_version normalization: tuple→minor int)
+func parseFeatureVersion(obj objects.Object) (int, error) {
+	if obj == nil {
+		return 0, nil
+	}
+	if n, ok := obj.(*objects.Int); ok {
+		v, exact := n.Int64()
+		if !exact || v <= 0 {
+			return 0, nil
+		}
+		return int(v), nil
+	}
+	return 0, nil
 }
 
 // parseCompileMode maps the mode string to the parser mode constant.

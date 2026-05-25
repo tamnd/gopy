@@ -1590,7 +1590,7 @@ func parseRule_assignment(p *Parser) any {
 			_ = b
 			c := parseRule__rhs_9(p)
 			_ = c
-			return withSpan(p, mark, actionAstAnnAssign(p, actionPgenSetExprContext(p, p, a, ast.Store), b, c, 1))
+			return withSpan(p, mark, checkVersion(p, 6, "Variable annotation syntax is", actionAstAnnAssign(p, actionPgenSetExprContext(p, p, a, ast.Store), b, c, 1)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment, v)
 			return v
@@ -1611,7 +1611,7 @@ func parseRule_assignment(p *Parser) any {
 			_ = b
 			c := parseRule__rhs_9(p)
 			_ = c
-			return withSpan(p, mark, actionAstAnnAssign(p, a, b, c, 0))
+			return withSpan(p, mark, checkVersion(p, 6, "Variable annotations syntax is", actionAstAnnAssign(p, a, b, c, 0)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment, v)
 			return v
@@ -1766,7 +1766,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(token.ATEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return withSpan(p, mark, actionPgenAugoperator(p, p, ast.MatMult))
+			return withSpan(p, mark, checkVersion(p, 5, "The '@' operator is", actionPgenAugoperator(p, p, ast.MatMult)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -2850,7 +2850,7 @@ func parseRule_function_def_raw(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncFunctionDef(p, nameIDOf(n), func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }(), b, nil, a, tc, t))
+			return withSpan(p, mark, checkVersion(p, 5, "Async functions are", actionAstAsyncFunctionDef(p, nameIDOf(n), func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }(), b, nil, a, tc, t)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_function_def_raw, v)
 			return v
@@ -2915,7 +2915,7 @@ func parseRule_parameters(p *Parser) any {
 			_ = c
 			d := parseRule_star_etc(p)
 			_ = d
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, a, nil, b, c, d))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, a, nil, b, c, d)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_parameters, v)
 			return v
@@ -2932,7 +2932,7 @@ func parseRule_parameters(p *Parser) any {
 			_ = b
 			c := parseRule_star_etc(p)
 			_ = c
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, nil, a, nil, b, c))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, nil, a, nil, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_parameters, v)
 			return v
@@ -3866,7 +3866,7 @@ func parseRule_for_stmt(p *Parser) any {
 			_ = b
 			el := parseRule_else_block(p)
 			_ = el
-			return withSpan(p, mark, actionAstAsyncFor(p, t, ex, b, el, tc))
+			return withSpan(p, mark, checkVersion(p, 5, "Async for loops are", actionAstAsyncFor(p, t, ex, b, el, tc)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_for_stmt, v)
 			return v
@@ -3995,7 +3995,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncWith(p, a, b, nil))
+			return withSpan(p, mark, checkVersion(p, 5, "Async with statements are", actionAstAsyncWith(p, a, b, nil)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -4022,7 +4022,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncWith(p, a, b, tc))
+			return withSpan(p, mark, checkVersion(p, 5, "Async with statements are", actionAstAsyncWith(p, a, b, tc)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -4182,7 +4182,7 @@ func parseRule_try_stmt(p *Parser) any {
 			_ = el
 			f := parseRule_finally_block(p)
 			_ = f
-			return withSpan(p, mark, actionAstTryStar(p, b, ex, el, f))
+			return withSpan(p, mark, checkVersion(p, 11, "Exception groups are", actionAstTryStar(p, b, ex, el, f)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_try_stmt, v)
 			return v
@@ -4277,7 +4277,7 @@ func parseRule_except_block(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstExceptHandler(p, e, nil, b))
+			return withSpan(p, mark, checkVersion(p, 14, "except expressions without parentheses are", actionAstExceptHandler(p, e, nil, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_except_block, v)
 			return v
@@ -4413,7 +4413,7 @@ func parseRule_except_star_block(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstExceptHandler(p, e, nil, b))
+			return withSpan(p, mark, checkVersion(p, 14, "except expressions without parentheses are", actionAstExceptHandler(p, e, nil, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_except_star_block, v)
 			return v
@@ -4507,7 +4507,7 @@ func parseRule_match_stmt(p *Parser) any {
 			dedent := p.ExpectToken(token.DEDENT)
 			if dedent == nil { return nil }
 			_ = dedent
-			return withSpan(p, mark, actionAstMatch(p, subject, cases))
+			return withSpan(p, mark, checkVersion(p, 10, "Pattern matching is", actionAstMatch(p, subject, cases)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_match_stmt, v)
 			return v
@@ -6018,7 +6018,7 @@ func parseRule_type_alias(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstTypeAlias(p, actionPgenSetExprContext(p, p, n, ast.Store), t, b))
+			return withSpan(p, mark, checkVersion(p, 12, "Type statement is", actionAstTypeAlias(p, actionPgenSetExprContext(p, p, n, ast.Store), t, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_alias, v)
 			return v
@@ -6060,7 +6060,7 @@ func parseRule_type_params(p *Parser) any {
 			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return withSpan(p, mark, matchedOr(t))
+			return withSpan(p, mark, checkVersion(p, 12, "Type parameter lists are", t))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_params, v)
 			return v
@@ -6213,7 +6213,7 @@ func parseRule_type_param_default(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return withSpan(p, mark, matchedOr(e))
+			return withSpan(p, mark, checkVersion(p, 13, "Type parameter defaults are", e))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_param_default, v)
 			return v
@@ -6239,7 +6239,7 @@ func parseRule_type_param_starred_default(p *Parser) any {
 			e := parseRule_star_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return withSpan(p, mark, matchedOr(e))
+			return withSpan(p, mark, checkVersion(p, 13, "Type parameter defaults are", e))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_param_starred_default, v)
 			return v
@@ -6618,7 +6618,7 @@ func parseRule_assignment_expression(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstNamedExpr(p, actionPgenSetExprContext(p, p, a, ast.Store), b))
+			return withSpan(p, mark, checkVersion(p, 8, "Assignment expressions are", actionAstNamedExpr(p, actionPgenSetExprContext(p, p, a, ast.Store), b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment_expression, v)
 			return v
@@ -7698,7 +7698,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstBinOp(p, a, ast.MatMult, b))
+			return withSpan(p, mark, checkVersion(p, 5, "The '@' operator is", actionAstBinOp(p, a, ast.MatMult, b)))
 		}(); v != nil {
 			return v
 		}
@@ -7859,7 +7859,7 @@ func parseRule_await_primary(p *Parser) any {
 			a := parseRule_primary(p)
 			if a == nil { return nil }
 			_ = a
-			return withSpan(p, mark, actionAstAwait(p, a))
+			return withSpan(p, mark, checkVersion(p, 5, "Await expressions are", actionAstAwait(p, a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_await_primary, v)
 			return v
@@ -8350,7 +8350,7 @@ func parseRule_lambda_parameters(p *Parser) any {
 			_ = c
 			d := parseRule_lambda_star_etc(p)
 			_ = d
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, a, nil, b, c, d))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, a, nil, b, c, d)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_parameters, v)
 			return v
@@ -8367,7 +8367,7 @@ func parseRule_lambda_parameters(p *Parser) any {
 			_ = b
 			c := parseRule_lambda_star_etc(p)
 			_ = c
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, nil, a, nil, b, c))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, nil, a, nil, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_parameters, v)
 			return v
@@ -9197,7 +9197,7 @@ func parseRule_tstring(p *Parser) any {
 			c := p.ExpectToken(token.TSTRING_END)
 			if c == nil { return nil }
 			_ = c
-			return withSpan(p, mark, actionPgenTemplateStr(p, p, a, b, c))
+			return withSpan(p, mark, checkVersion(p, 14, "t-strings are", actionPgenTemplateStr(p, p, a, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_tstring, v)
 			return v
@@ -9556,7 +9556,7 @@ func parseRule_for_if_clause(p *Parser) any {
 			_ = b
 			c := parseRule__loop0_72(p)
 			_ = c
-			return withSpan(p, mark, actionAstComprehension(p, a, b, c, 1))
+			return withSpan(p, mark, checkVersion(p, 6, "Async comprehensions are", actionAstComprehension(p, a, b, c, 1)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_for_if_clause, v)
 			return v
@@ -13626,7 +13626,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'"))
+			return withSpan(p, mark, checkVersion(p, 10, "Pattern matching is", raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
 			return v
