@@ -114,6 +114,16 @@ func stopIterValueSet(owner objects.Object, value objects.Object) error {
 	return nil
 }
 
+// NewExcType creates a named exception type that inherits from the
+// given bases. It wires the same Call/TpNew/Str/Repr/HasDict slots
+// that all CPython exception types carry. Exported for use by C-extension
+// ports (e.g. _pickle, _struct) that need proper exception classes.
+//
+// CPython: Objects/exceptions.c BaseException_Type setup
+func NewExcType(name string, bases []*objects.Type) *objects.Type {
+	return newExcType(name, bases)
+}
+
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
 	t.Call = excCall

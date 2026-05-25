@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -368,7 +369,15 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 // runFile is the gopy <script.py> entry. Mirrors pymain_run_file in
 // the file-positional branch.
 //
+// For test_*.py files that import unittest but do not call
+// unittest.main() themselves, a runner suffix is appended so the tests
+// actually execute. CPython's regrtest does the equivalent by calling
+// unittest.main(module=module) after importing the test module; gopy
+// cannot import-then-run cleanly without a full regrtest port, so the
+// suffix approach achieves the same result when running a single file.
+//
 // CPython: Modules/main.c:373 pymain_run_file
+// CPython: Lib/test/libregrtest/runtest.py unittest.main call
 func runFile(path string, stdout, stderr *os.File) int {
 	g, err := bootstrapBuiltins(stdout, stderr)
 	if err != nil {
@@ -381,9 +390,44 @@ func runFile(path string, stdout, stderr *os.File) int {
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
-	rc := pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
+	var rc int
+	if suffix, ok := unittestRunnerSuffix(path); ok {
+		src, readErr := os.ReadFile(path) //nolint:gosec
+		if readErr != nil {
+			fmt.Fprintln(stderr, readErr)
+			return 1
+		}
+		combined := string(src) + suffix
+		rc = pythonrun.RunSimpleString(ts, combined, mainGlobals, stderr)
+	} else {
+		rc = pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
+	}
 	pythonrun.FlushStdFiles()
 	return rc
+}
+
+// unittestRunnerSuffix returns a suffix that calls unittest.main() when
+// the file is a test_*.py that uses unittest but does not invoke the
+// runner itself. Mirrors what CPython's regrtest does when it imports a
+// test module and calls unittest.main(module=module).
+//
+// CPython: Lib/test/libregrtest/runtest.py unittest.main
+func unittestRunnerSuffix(path string) (string, bool) {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "test_") || !strings.HasSuffix(base, ".py") {
+		return "", false
+	}
+	src, err := os.ReadFile(path) //nolint:gosec
+	if err != nil {
+		return "", false
+	}
+	if !bytes.Contains(src, []byte("unittest")) {
+		return "", false
+	}
+	if bytes.Contains(src, []byte("unittest.main")) {
+		return "", false
+	}
+	return "\nimport unittest as _ut; _ut.main(module=__import__('__main__'), verbosity=2)\n", true
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner
