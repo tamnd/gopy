@@ -566,6 +566,20 @@ func (p *Parser) FarthestToken() *Token {
 	return p.tokens[idx]
 }
 
+// PrevTokenLevel returns the paren-nesting Level of the most-recently
+// consumed token (p.tokens[p.mark-1].Level). The invalid_expression
+// rule uses this to restrict the "perhaps you forgot a comma?" error
+// to positions inside parentheses only.
+//
+// CPython: Grammar/python.gram invalid_expression alt
+// p->tokens[p->mark-1]->level == 0 guard
+func (p *Parser) PrevTokenLevel() int {
+	if p.mark <= 0 || p.mark > len(p.tokens) {
+		return 0
+	}
+	return p.tokens[p.mark-1].Level
+}
+
 // Tokenizer returns the lexer state driving this parser. The driver
 // reads the source buffer through it to populate SyntaxError.text.
 func (p *Parser) Tokenizer() *lexer.State { return p.tok }

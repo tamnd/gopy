@@ -1359,10 +1359,51 @@ func actionPgenMakeArguments(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenNonparenGenexpInCall raises a SyntaxError when a genexp
+// is used as an argument in a call without parentheses and there are
+// other arguments present. Only fires when len(call.args) > 1.
+//
+// CPython: Parser/action_helpers.c:1244 _PyPegen_nonparen_genexp_in_call
 func actionPgenNonparenGenexpInCall(p *Parser, args ...any) any {
+	call, _ := argAt(args, 1).(*ast.Call)
+	if call == nil {
+		return nil
+	}
+	if len(call.Args) <= 1 {
+		return nil
+	}
+	comps := comprehensionSeqOf(argAt(args, 2))
+	if len(comps) == 0 {
+		return nil
+	}
+	lastArg := call.Args[len(call.Args)-1]
+	lastComp := comps[len(comps)-1]
+	var endExpr ast.Expr
+	if len(lastComp.Ifs) > 0 {
+		endExpr = lastComp.Ifs[len(lastComp.Ifs)-1]
+	} else {
+		endExpr = lastComp.Iter
+	}
+	return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", lastArg, endExpr,
+		"Generator expression must be parenthesized")
+}
+
+// actionPgenCheckLegacyStmt returns the name node when it is "print"
+// or "exec" so the invalid_legacy_expression rule can raise a helpful
+// "Missing parentheses in call to 'print'" error. Returns nil for any
+// other name so the rule falls through without raising.
+//
+// CPython: Parser/action_helpers.c:940 _PyPegen_check_legacy_stmt
+func actionPgenCheckLegacyStmt(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	a, _ := argAt(args, 1).(*ast.Name)
+	if a == nil {
+		return nil
+	}
+	if a.Id == "print" || a.Id == "exec" {
+		return a
+	}
+	return nil
 }
 
 // actionPgenStarEtc bundles the (*vararg, kwonlyargs, **kwarg) tail of
@@ -3252,6 +3293,22 @@ func raiseAction(p *Parser, kind string, args ...any) any {
 		if len(args) > 1 {
 			fmtArgs = args[1:]
 		}
+	case "RAISE_INDENTATION_ERROR":
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+		if msg == "" {
+			msg = "unexpected indent"
+		}
+		msg = normalizeFormat(msg)
+		if len(fmtArgs) > 0 {
+			p.RaiseIndentationError(msg, fmtArgs...)
+		} else {
+			p.RaiseIndentationError("%s", msg)
+		}
+		return nil
 	default: // RAISE_SYNTAX_ERROR
 		pos = peekTokenPos(p)
 		msg, _ = argAt(args, 0).(string)

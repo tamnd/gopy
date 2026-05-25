@@ -17,6 +17,9 @@ import (
 //
 // CPython: Python/codegen.c:L4036 codegen_call
 func (c *Compiler) visitCall(e *ast.Call) error {
+	if err := c.checkCaller(e.Func); err != nil {
+		return err
+	}
 	if err := c.validateKeywords(e.Keywords); err != nil {
 		return err
 	}

@@ -46,17 +46,21 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 			text = objects.NewStr(se.Text)
 		}
 	}
+	// SyntaxError.offset and .end_offset are 1-indexed (CPython:
+	// pegen_errors.c:258 col_offset + 1). ColOff is 0-based (same as
+	// ast.col_offset), so we add 1 and allow column 0 (col_offset=-1 is
+	// the sentinel for "unknown" in CPython; -1 means truly absent).
 	offset := objects.None()
-	if se.Pos.ColOff > 0 {
-		offset = objects.NewInt(int64(se.Pos.ColOff))
+	if se.Pos.ColOff >= 0 {
+		offset = objects.NewInt(int64(se.Pos.ColOff + 1))
 	}
 	endLineno := objects.None()
 	if se.Pos.EndLine > 0 {
 		endLineno = objects.NewInt(int64(se.Pos.EndLine))
 	}
 	endOffset := objects.None()
-	if se.Pos.EndCol > 0 {
-		endOffset = objects.NewInt(int64(se.Pos.EndCol))
+	if se.Pos.EndCol >= 0 {
+		endOffset = objects.NewInt(int64(se.Pos.EndCol + 1))
 	}
 	lineno := objects.None()
 	if se.Pos.Lineno > 0 {

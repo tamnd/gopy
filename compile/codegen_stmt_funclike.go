@@ -52,7 +52,6 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	body ast.Seq[ast.Stmt], returns ast.Expr, decorators ast.Seq[ast.Expr],
 	typeParams ast.Seq[ast.TypeParam], isLambda bool, scopeKey any,
 ) error {
-	_ = returns
 
 	// Evaluate decorator expressions (in source order, top-to-bottom)
 	// before the function is created. They wrap the result of
@@ -135,6 +134,26 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 		for i := int32(0); i < numTPArgs; i++ {
 			c.addOpI(LOAD_FAST, i, loc(scopeKey))
 		}
+	}
+
+	// Compile the __annotate__ callable for PEP 649 lazy annotations.
+	// For generic functions this runs inside the TypeParams scope (c.scope
+	// is already wrapperScope after the isGeneric block above), matching
+	// CPython where codegen_function_annotations is called after
+	// codegen_enter_scope for type params.
+	//
+	// The callable must be pushed before emitClosure and
+	// emitInnerFunctionCode because emitMakeFunction emits
+	// SET_FUNCTION_ATTRIBUTE 0x04 after 0x08 (closure), expecting the
+	// annotate callable to be one deeper than the closure tuple.
+	//
+	// CPython: Python/codegen.c:1113 codegen_function_annotations
+	if !isLambda {
+		annotFlag, err := c.emitFunctionAnnotations(args, returns, loc(scopeKey))
+		if err != nil {
+			return err
+		}
+		flags |= annotFlag
 	}
 
 	// Look up the inner scope from the symtable.

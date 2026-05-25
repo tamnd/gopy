@@ -171,19 +171,18 @@ func (c *Compiler) visitAsyncFor(s *ast.AsyncFor) error {
 	return nil
 }
 
-// visitBreak emits a JUMP to the enclosing loop's exit. The unwind
-// of intermediate fblocks (try-finally cleanup, with __exit__) is
-// pending; for now reject break inside any non-loop frame so we
-// never silently drop unwinds.
+// visitBreak emits a JUMP to the enclosing loop's exit. Intermediate
+// fblocks (try-finally cleanup, with __exit__) are unwound first.
 //
 // CPython: Python/codegen.c:L2232 codegen_break
 func (c *Compiler) visitBreak(s *ast.Break) error {
 	l := loc(s)
-	loop := c.topFblock(fblockWhileLoop, fblockForLoop)
-	if loop == nil {
+	idx := c.topFblockIdx(fblockWhileLoop, fblockForLoop)
+	if idx < 0 {
 		return c.errorAt(l, "'break' outside loop")
 	}
-	c.unwindToLoop(loop, l)
+	c.unwindToLoop(idx, l)
+	loop := &c.fblocks[idx]
 	c.unwindFblock(loop, l, false)
 	c.addOpJump(JUMP, loop.Exit, l)
 	return nil
@@ -194,28 +193,23 @@ func (c *Compiler) visitBreak(s *ast.Break) error {
 // CPython: Python/codegen.c:L2248 codegen_continue
 func (c *Compiler) visitContinue(s *ast.Continue) error {
 	l := loc(s)
-	loop := c.topFblock(fblockWhileLoop, fblockForLoop)
-	if loop == nil {
+	idx := c.topFblockIdx(fblockWhileLoop, fblockForLoop)
+	if idx < 0 {
 		return c.errorAt(l, "'continue' not properly in loop")
 	}
-	c.unwindToLoop(loop, l)
-	c.addOpJump(JUMP, loop.Block, l)
+	c.unwindToLoop(idx, l)
+	c.addOpJump(JUMP, c.fblocks[idx].Block, l)
 	return nil
 }
 
-// unwindToLoop emits the cleanup ops for every fblock between the
-// current top and the named loop, walking from inner to outer. Each
-// kind contributes its own unwind sequence (POP_BLOCK, POP_EXCEPT,
-// inline finally body, ...). The loop frame itself does not unwind.
+// unwindToLoop emits the cleanup ops for every fblock above loopIdx
+// (exclusive), walking inner to outer. The loop frame itself is not
+// unwound.
 //
 // CPython: Python/codegen.c:L622 codegen_unwind_fblock_stack
-func (c *Compiler) unwindToLoop(loop *fblock, l ast.Pos) {
-	for i := len(c.fblocks) - 1; i >= 0; i-- {
-		fb := &c.fblocks[i]
-		if fb == loop {
-			return
-		}
-		c.unwindFblock(fb, l, false)
+func (c *Compiler) unwindToLoop(loopIdx int, l ast.Pos) {
+	for i := len(c.fblocks) - 1; i > loopIdx; i-- {
+		c.unwindFblock(&c.fblocks[i], l, false)
 	}
 }
 
@@ -253,8 +247,47 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 		c.addOp(POP_BLOCK, l)
 	case fblockFinallyTry:
 		c.addOp(POP_BLOCK, l)
-		if stmts, ok := fb.Datum.([]ast.Stmt); ok {
+		// Datum is ast.Seq[ast.Stmt], not []ast.Stmt. Go does not consider
+		// named generic types (type Seq[T] []T) identical to their base
+		// slice type in type assertions, so we must assert the actual type.
+		//
+		// CPython: Python/codegen.c:541 codegen_unwind_fblock FB_FINALLY_TRY
+		if stmts, ok := fb.Datum.(ast.Seq[ast.Stmt]); ok {
+			// Deep-copy the fblock stack before visiting the inline
+			// finally body. The copy is used to restore the stack
+			// afterward, undoing any push/pop mutations that visitStmts
+			// makes to the underlying array (a bare slice header would
+			// share the array and see clobbered data after restoration).
+			//
+			// Also truncate to hide fb so that break/continue inside
+			// the finally body cannot re-enter this block and recurse
+			// infinitely. CPython achieves the same by decrementing
+			// u_nfblocks before VISIT_SEQ and incrementing it after.
+			//
+			// CPython: Python/codegen.c:541 codegen_unwind_fblock FB_FINALLY_TRY
+			origFblocks := append([]fblock{}, c.fblocks...)
+			for i := range c.fblocks {
+				if &c.fblocks[i] == fb {
+					c.fblocks = c.fblocks[:i]
+					break
+				}
+			}
+			// When unwinding a return (preserve_tos=true), the return value
+			// sits on top of the stack while the finally body runs. Push a
+			// fblockPopValue so that any break/continue inside the finally
+			// body knows to POP_TOP the return value before jumping to the
+			// loop target, exactly matching CPython's behavior.
+			//
+			// CPython: Python/codegen.c:544 preserve_tos PushFBlock POP_VALUE
+			if preserveTos {
+				noLabel := JumpTargetLabel{}
+				c.pushFblock(fblockPopValue, noLabel, noLabel, nil)
+			}
 			_ = c.visitStmts(stmts)
+			if preserveTos {
+				_ = c.popFblock(fblockPopValue)
+			}
+			c.fblocks = origFblocks
 		}
 	case fblockFinallyEnd:
 		if preserveTos {

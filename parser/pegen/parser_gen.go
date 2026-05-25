@@ -11442,7 +11442,16 @@ func parseRule_invalid_expression(p *Parser) any {
 			string_var_1 := stringToken(p)
 			if string_var_1 == nil { return nil }
 			_ = string_var_1
-			return []any{string_var, a, string_var_1}
+			// CPython: Grammar/python.gram invalid_expression alt 0
+			// RAISE_SYNTAX_ERROR_KNOWN_RANGE(first_item(a), last_item(a), "invalid syntax. Is this intended to be part of the string?")
+			return withSpan(p, mark, func() any {
+				items, _ := a.([]any)
+				if len(items) == 0 { return nil }
+				first := asExpr(items[0])
+				last := asExpr(items[len(items)-1])
+				if first == nil || last == nil { return nil }
+				return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", first, last, "invalid syntax. Is this intended to be part of the string?")
+			}())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -11459,7 +11468,15 @@ func parseRule_invalid_expression(p *Parser) any {
 			b := parseRule_expression_without_invalid(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			// CPython: Grammar/python.gram invalid_expression alt 1
+			// _PyPegen_check_legacy_stmt(p, a) ? NULL :
+			// p->tokens[p->mark-1]->level == 0 ? NULL :
+			// RAISE_SYNTAX_ERROR_KNOWN_RANGE(a, b, "invalid syntax. Perhaps you forgot a comma?")
+			return withSpan(p, mark, func() any {
+				if truthy(actionPgenCheckLegacyStmt(p, p, a)) { return nil }
+				if p.PrevTokenLevel() == 0 { return nil }
+				return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "invalid syntax. Perhaps you forgot a comma?")
+			}())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -19367,7 +19384,6 @@ func parseRule__rhs_156(p *Parser) any {
 
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
-func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenGetLastComprehensionItem(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 
 // placeholderMatched is a non-nil sentinel returned by alts

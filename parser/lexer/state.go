@@ -536,20 +536,20 @@ func (s *State) AppendWarning(line, col int, category, message string) {
 // CPython does the routing inline in _PyTokenizer_parser_warn
 // (helpers.c:152); gopy needs the indirection because parser/lexer
 // must not pull in the runtime's heavy dependency graph.
-var WarnHook func(filename string, warns []SyntaxError)
+var WarnHook func(filename string, warns []SyntaxError) error
 
 // FlushWarnings forwards every recorded SyntaxWarning to WarnHook so
-// the warnings filter sees them. Callers should invoke this once
-// tokenization is complete; the hook is a no-op when module/_warnings
-// is not linked into the binary.
+// the warnings filter sees them. Returns the first error returned by
+// the hook (a warning elevated to SyntaxError), which the caller must
+// propagate to abort the parse/compile pipeline.
 //
 // CPython: Parser/tokenizer/helpers.c:152 _PyTokenizer_parser_warn
 // (where the actual PyErr_WarnExplicitObject call happens).
-func (s *State) FlushWarnings() {
+func (s *State) FlushWarnings() error {
 	if WarnHook == nil || len(s.warnings) == 0 {
-		return
+		return nil
 	}
-	WarnHook(s.filename, s.warnings)
+	return WarnHook(s.filename, s.warnings)
 }
 
 // Done returns the lexer's terminal status as an exported int that

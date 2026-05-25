@@ -186,6 +186,14 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 	if c.scope.Type == symtable.FunctionBlock {
 		return nil
 	}
+	// Non-simple targets (parenthesized names like `(x): int`, attribute
+	// targets `a.b: int`, subscript targets `a[i]: int`) do not update
+	// __annotations__. Only simple bare names do.
+	//
+	// CPython: Python/codegen.c:5513 if (simple) { codegen_argannotation }
+	if s.Simple == 0 {
+		return nil
+	}
 	name, ok := s.Target.(*ast.Name)
 	if !ok {
 		// Subscript / attribute targets only get their value stored;
@@ -239,6 +247,11 @@ func (c *Compiler) visitRaise(s *ast.Raise) error {
 //
 // CPython: Python/codegen.c:L2932 codegen_assert
 func (c *Compiler) visitAssert(s *ast.Assert) error {
+	// Warn on non-empty tuple test: assert(x, msg) is always true.
+	// CPython: Python/codegen.c:2932 codegen_assert tuple-check
+	if err := c.assertTupleWarning(s); err != nil {
+		return err
+	}
 	if c.Optimize > 0 {
 		return nil
 	}

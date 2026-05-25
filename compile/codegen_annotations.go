@@ -1,13 +1,17 @@
-// PEP 649 / 749 deferred annotation emission. After a class body
-// finishes its statements, drain the unit's DeferredAnnotations into
-// a synthetic `__annotate__` function and STORE_NAME it in the class
-// namespace. Phase 5 (objects/type_attr.go:typeGetAttr) picks the
-// function up on the first __annotations__ access and calls it with
-// format=VALUE to materialize the dict.
+// PEP 649 / 749 annotation codegen. Two call sites:
+//
+//  1. Function defs: emitFunctionAnnotations builds an __annotate__
+//     callable that is attached to the function via SET_FUNCTION_ATTRIBUTE
+//     0x04.  The caller passes the result flag (0x04) back to
+//     compileFunctionLike which OR's it into the MAKE_FUNCTION flags.
+//
+//  2. Class/module bodies: emitDeferredAnnotations drains
+//     DeferredAnnotations and emits the callable as STORE_NAME __annotate__.
 //
 // CPython: Python/codegen.c:786 codegen_process_deferred_annotations,
 // Python/codegen.c:737 codegen_deferred_annotations_body,
-// Python/codegen.c:704 codegen_setup_annotations_scope
+// Python/codegen.c:704 codegen_setup_annotations_scope,
+// Python/codegen.c:1113 codegen_function_annotations
 
 package compile
 
@@ -116,7 +120,16 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 		// the top) so STORE_SUBSCR can consume [value, dict, name]
 		// while preserving the original dict for the next iteration.
 		c.addOpI(COPY, 2, d.Loc)
-		c.addLoadConst(d.Name, d.Loc)
+		// Name mangling: __foo in class C becomes _C__foo. The annotation
+		// scope inherits u_private from the enclosing class unit, so
+		// c.unit().Private is the class name. outerScope (the class body
+		// symtable entry) has MangledNames=nil for ordinary classes, so
+		// MaybeMangle falls through to Mangle unconditionally.
+		//
+		// CPython: Python/codegen.c:753 codegen_deferred_annotations_body
+		// _PyCompile_Mangle(c, st->v.AnnAssign.target->v.Name.id)
+		mangled := symtable.MaybeMangle(c.unit().Private, outerScope, d.Name)
+		c.addLoadConst(mangled, d.Loc)
 		c.addOp(STORE_SUBSCR, d.Loc)
 	}
 	c.addOp(RETURN_VALUE, l)
@@ -133,5 +146,135 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 	c.restoreCaches(outerCaches)
 
 	c.addLoadConst(innerUnit, l)
+	return nil
+}
+
+// emitFunctionAnnotations compiles the __annotate__ function for a
+// function definition and leaves it on the outer stack. Returns 0x04
+// (MAKE_FUNCTION_ANNOTATE) when annotations exist, 0 otherwise.
+//
+// The AnnotationBlock for the function's args is looked up via
+// Symtable.Lookup(args), which was registered by
+// symtable.visitAnnotations under the key *ast.Arguments.
+//
+// CPython: Python/codegen.c:1113 codegen_function_annotations,
+// Python/codegen.c:1081 codegen_annotations_in_scope,
+// Python/codegen.c:1029 codegen_argannotation
+func (c *Compiler) emitFunctionAnnotations(args *ast.Arguments, returns ast.Expr, l ast.Pos) (int32, error) {
+	annScope := c.Symtable.Lookup(args)
+	if annScope == nil || !annScope.AnnotationsUsed {
+		return 0, nil
+	}
+
+	closureFlag, err := c.emitClosure(annScope, l)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := c.emitFunctionAnnotateBody(annScope, args, returns, l); err != nil {
+		return 0, err
+	}
+	c.emitMakeFunction(closureFlag, l)
+	return 0x04, nil
+}
+
+// emitFunctionAnnotateBody pushes a fresh Unit for the function's
+// AnnotationBlock and emits the body: format guard, BUILD_MAP,
+// per-annotation STORE_SUBSCR for every annotated parameter and the
+// return annotation, RETURN_VALUE.
+//
+// CPython: Python/codegen.c:1081 codegen_annotations_in_scope,
+// Python/codegen.c:1029 codegen_argannotation,
+// Python/codegen.c:666  codegen_setup_annotations_scope
+func (c *Compiler) emitFunctionAnnotateBody(annScope *symtable.Entry, args *ast.Arguments, returns ast.Expr, l ast.Pos) error {
+	outerScope := c.scope
+	outerFblocks := c.fblocks
+	outerCaches := c.savedCaches()
+
+	c.enterScope(annScope)
+
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
+	c.declareArg("format")
+	body := c.newLabel()
+	c.addOpI(LOAD_FAST, 0, l)
+	c.addLoadConst(int64(2), l) // VALUE_WITH_FAKE_GLOBALS
+	c.addOpI(COMPARE_OP, int32(cmpGt), l)
+	c.addOpJump(POP_JUMP_IF_FALSE, body, l)
+	c.addOpI(LOAD_COMMON_CONSTANT, constantNotImplementedError, l)
+	c.addOpI(RAISE_VARARGS, 1, l)
+	c.useLabel(body)
+
+	c.addOpI(BUILD_MAP, 0, l)
+
+	count := 0
+	emitOne := func(name string, annot ast.Expr) error {
+		if annot == nil {
+			return nil
+		}
+		mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
+		if starred, ok := annot.(*ast.Starred); ok {
+			if err := c.visitExpr(starred.Value); err != nil {
+				return err
+			}
+			c.addOpI(UNPACK_SEQUENCE, 1, l)
+		} else {
+			if err := c.visitExpr(annot); err != nil {
+				return err
+			}
+		}
+		c.addOpI(COPY, 2, l)
+		c.addLoadConst(mangled, l)
+		c.addOp(STORE_SUBSCR, l)
+		count++
+		return nil
+	}
+
+	for _, a := range args.Posonlyargs {
+		if err := emitOne(a.Arg, a.Annotation); err != nil {
+			return err
+		}
+	}
+	for _, a := range args.Args {
+		if err := emitOne(a.Arg, a.Annotation); err != nil {
+			return err
+		}
+	}
+	if args.Vararg != nil {
+		if err := emitOne(args.Vararg.Arg, args.Vararg.Annotation); err != nil {
+			return err
+		}
+	}
+	for _, a := range args.Kwonlyargs {
+		if err := emitOne(a.Arg, a.Annotation); err != nil {
+			return err
+		}
+	}
+	if args.Kwarg != nil {
+		if err := emitOne(args.Kwarg.Arg, args.Kwarg.Annotation); err != nil {
+			return err
+		}
+	}
+	if returns != nil {
+		if err := emitOne("return", returns); err != nil {
+			return err
+		}
+	}
+
+	c.addOp(RETURN_VALUE, l)
+
+	innerUnit := c.unit()
+	innerUnit.Name = "__annotate__"
+	innerUnit.Argcount = 1
+	innerUnit.PosOnlyArgCount = 0
+	innerUnit.KwOnlyArgCount = 0
+
+	c.leaveScope()
+	c.scope = outerScope
+	c.fblocks = outerFblocks
+	c.restoreCaches(outerCaches)
+
+	c.addLoadConst(innerUnit, l)
+	_ = count
 	return nil
 }

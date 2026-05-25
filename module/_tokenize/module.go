@@ -274,7 +274,9 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 	// between iterator steps.
 	if all := it.tok.Warnings(); len(all) > it.warnIdx {
 		if lexer.WarnHook != nil {
-			lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:])
+			if err := lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:]); err != nil {
+				return nil, err
+			}
 		}
 		it.warnIdx = len(all)
 	}

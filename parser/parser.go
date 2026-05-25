@@ -114,7 +114,9 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// _PyTokenizer_parser_warn. gopy stashes them on State.warnings
 	// to keep parser/lexer leaf, then drains them here via a package
 	// hook that module/_warnings registers at init time.
-	st.FlushWarnings()
+	if flushErr := st.FlushWarnings(); flushErr != nil {
+		return nil, flushErr
+	}
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
 		// CPython promotes the pinned SyntaxError at the farthest
 		// token, and runs _Pypegen_set_syntax_error once after the

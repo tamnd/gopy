@@ -195,6 +195,9 @@ func (c *Compiler) visitCompare(e *ast.Compare) error {
 		return fmt.Errorf("compile: malformed Compare ops=%d comparators=%d",
 			len(e.Ops), len(e.Comparators))
 	}
+	if err := c.checkCompare(e); err != nil {
+		return err
+	}
 	if err := c.visitExpr(e.Left); err != nil {
 		return err
 	}

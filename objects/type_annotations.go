@@ -19,16 +19,21 @@ package objects
 
 import "fmt"
 
-// typeGetAnnotate returns the __annotate__ callable from tp's
+// typeGetAnnotate returns the __annotate__ callable from tp's own
 // descriptor table or None when absent. Built-in (non-user) types
 // raise AttributeError to match CPython's HEAPTYPE gate.
+//
+// Only the type's OWN dict is consulted, not the MRO, matching
+// CPython's PyDict_GetItemRef(PyType_GetDict(type), __annotate_func__).
+// Without this restriction, B(A).__annotate__ would inherit A's annotate
+// function and B.__annotations__ would return A's dict instead of {}.
 //
 // CPython: Objects/typeobject.c:1990 type_get_annotate
 func typeGetAnnotate(tp *Type) (Object, error) {
 	if !tp.IsUser {
 		return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__annotate__'", tp.Name)
 	}
-	if ann, _ := LookupDescriptor(tp, "__annotate__"); ann != nil {
+	if ann := lookupTypeMember(tp, "__annotate__"); ann != nil {
 		return ann, nil
 	}
 	return None(), nil
@@ -62,15 +67,19 @@ func typeSetAnnotate(tp *Type, value Object) error {
 // materializes it by calling __annotate__(VALUE) on first miss.
 // Cached back into the descriptor table on success.
 //
+// Both the cache and annotate lookups use the type's OWN dict, not MRO,
+// matching CPython's PyDict_GetItemRef(PyType_GetDict(type), ...) calls.
+// Without this restriction, B(A).__annotations__ inherits A's dict.
+//
 // CPython: Objects/typeobject.c:2069 type_get_annotations
 func typeGetAnnotations(tp *Type) (Object, error) {
 	if !tp.IsUser {
 		return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__annotations__'", tp.Name)
 	}
-	if cached, _ := LookupDescriptor(tp, "__annotations__"); cached != nil {
+	if cached := lookupTypeMember(tp, "__annotations__"); cached != nil {
 		return cached, nil
 	}
-	annotate, _ := LookupDescriptor(tp, "__annotate__")
+	annotate := lookupTypeMember(tp, "__annotate__")
 	var out Object
 	if annotate != nil && Callable(annotate) {
 		v, err := Call(annotate, NewTuple([]Object{NewInt(1)}), nil)

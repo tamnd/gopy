@@ -458,6 +458,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			if d, ok := attr.(*objects.Dict); ok {
 				fn.KwDefaults = d
 			}
+		case 0x04:
+			// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE 0x04
+			fn.Annotate = attr
+			fn.Annotations = nil
 		case 0x08:
 			if t, ok := attr.(*objects.Tuple); ok {
 				fn.Closure = t
