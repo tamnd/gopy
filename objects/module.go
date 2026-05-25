@@ -185,20 +185,20 @@ func moduleRepr(o Object) (string, error) {
 	m := o.(*Module)
 	name := moduleStrAttr(m, "__name__")
 	if file := moduleStrAttr(m, "__file__"); file != "" {
-		return fmt.Sprintf("<module %q from %q>", name, file), nil
+		return fmt.Sprintf("<module '%s' from '%s'>", name, file), nil
 	}
 	if spec, err := m.dict.GetItem(NewStr("__spec__")); err == nil && spec != nil {
 		if sm, ok := spec.(*Module); ok {
 			origin := moduleStrAttr(sm, "origin")
 			if origin == "built-in" {
-				return fmt.Sprintf("<module %q (built-in)>", name), nil
+				return fmt.Sprintf("<module '%s' (built-in)>", name), nil
 			}
 			if origin == "frozen" {
-				return fmt.Sprintf("<module %q (frozen)>", name), nil
+				return fmt.Sprintf("<module '%s' (frozen)>", name), nil
 			}
 		}
 	}
-	return fmt.Sprintf("<module %q>", name), nil
+	return fmt.Sprintf("<module '%s'>", name), nil
 }
 
 func moduleStrAttr(m *Module, attr string) string {
