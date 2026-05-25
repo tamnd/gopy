@@ -133,7 +133,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_named_expressions    |  767 | ready | **74/74 OK** | none. `actionPgenGetExprName` arg index + missing AST kinds in `GetExprName` + `PyPegen_last_item` translator |
 | test_positional_only_arg  |  452 | ready | Ran 28, FAILED (errors=4) | 24/28 OK. Positional-only kw enforcement + reordered too_many_positional ship. Remaining 4 errors are annotations lazy-eval (2), async coroutine StopIteration .value, and pickle (out of scope) |
 | test_string_literals      |  356 | ready | Ran 20, FAILED (failures=1, errors=4) | 15/20 OK. eval() now strips leading whitespace (`Python/bltinmodule.c:1036`); string-literal decode errors pin SyntaxError at the token; `\N{NAME}` routes through the full UCD lookup. Remaining 5 all gated on SyntaxWarning plumbing through warnings.catch_warnings |
-| test_type_comments        |  447 | ready | Ran 18, FAILED (errors=18) | `_feature_version` kwarg now accepted; remaining errors track PyCF_ONLY_AST + ast.Mod -> _ast bridge |
+| test_type_comments        |  447 | done  | **17/18 OK** (1 skip: `_testcapi`) | TYPE_IGNORE lexer, pegen collection, ModeFunc, Go→Python _ast bridge, set tombstone |
 | test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
 | test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
@@ -313,7 +313,7 @@ shows `done` for every non-deferred row.
 - [ ] P2: ASDL grammar + node-type parity (diff Python.asdl, regen nodes_gen.go)
 - [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
-- [x] P5 (partial): `test_fstring` 90/90 (f-string error routing, format protocol, str.__format__); `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings plumbing); `test_syntax` 45/45 (7 skipped) — see session notes below
+- [x] P5 (partial): `test_fstring` 90/90; `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings); `test_syntax` 45/45 (7 skipped); `test_type_comments` 17/18 (TYPE_IGNORE lexer, pegen collection, ModeFunc, _ast bridge, set tombstone)
 - [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
 - [x] P7 (grammar): `test_grammar` 75/75 — SyntaxWarning missed-comma, PEP 649 function annotations, name mangling, non-simple annotation targets, MRO isolation for class annotations, break-in-finally stackdepth
 - [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
@@ -2702,6 +2702,59 @@ CPython: `Parser/peg_api.c:795 PyCF_TYPE_COMMENTS → PyPARSE_TYPE_COMMENTS`,
   only check for `SyntaxError` (codeop, `_find_keyword_typos`) see a
   successful parse. The proper Python AST node tree lands with
   `_ast_unparse` (spec task #74).
+
+### P5 closer N: test_type_comments 17/18
+
+`test_type_comments.py` started at 0/18 (all `AttributeError: 'int'
+object has no attribute 'body'`) after the `_feature_version` kwarg fix;
+now 17/18 (one unavoidable skip: `_testcapi` is a CPython C-extension
+test module that does not exist in gopy).
+
+**TYPE_IGNORE lexer detection.** `maybeTypeComment` in
+`parser/lexer/lexer.go` previously emitted TYPE_COMMENT for all `# type:`
+comments. Added the `is_type_ignore` logic: the text after `# type: ` is
+compared to "ignore"; if it matches and the next byte is either
+end-of-token or ASCII non-alphanumeric, the token is TYPE_IGNORE.
+Non-ASCII bytes after "ignore" (e.g. `# type: ignoreé`) keep the comment
+as a TYPE_COMMENT. CPython: Parser/lexer/lexer.c:688 is_type_ignore.
+
+**TYPE_IGNORE collection in pegen.** `fillToken` in
+`parser/pegen/parser.go` now detects TYPE_IGNORE tokens, records them in
+`p.typeIgnoreComments` (lineno + tag), and jumps back to read the next
+real token rather than surfacing TYPE_IGNORE to grammar rules. The
+Module-building action `actionPgenMakeModule` populates
+`Module.TypeIgnores` from the collected list.
+CPython: Parser/pegen.c:251 _PyPegen_fill_token TYPE_IGNORE loop.
+
+**ModeFunc.** `parser/parser.go` adds `ModeFunc` mapped to
+`pegen.StartFunctionType`. `parseCompileMode` in `builtins/compile.go`
+returns `parser.ModeFunc` for `"func_type"` (previously raised
+`ValueError`). The validation that `func_type` requires `PyCF_ONLY_AST`
+is checked after flags are parsed so the error can reference the actual
+flag value.
+
+**Go→Python _ast bridge.** `parseOnlyResult` was returning `int(0)` as a
+sentinel, which caused every test that accessed `.body` on the compile()
+result to raise `AttributeError`. New file `builtins/ast_bridge.go` walks
+the Go `ast.Mod` tree and creates real Python `_ast` instances via
+`objects.NewInstance` + `objects.SetAttr`, looking up class types from
+the `_ast` module already loaded in `sys.modules`. Covers Module,
+FunctionType, Expression, Interactive, FunctionDef, AsyncFunctionDef,
+For, With, Assign, arguments, arg, TypeIgnore, Name, Attribute,
+Subscript, Starred. CPython: Python/bltinmodule.c:813.
+
+**actionPgenSeqAppendToEnd generic.** The `type_expressions` grammar rule
+appends expression nodes through this helper. The helper was hardcoded for
+`ast.Seq[ast.Stmt]` which caused an index-out-of-range crash when
+processing `*str, **Any` in `func_type` mode. Replaced with a
+`flattenAnySeq` helper that handles `[]any`, `Seq[Stmt]`, and `Seq[Expr]`.
+
+**Set tombstone fix (collateral).** `test_longargs` exposed that
+`set.remove()` was zeroing the slot rather than marking it as a
+tombstone. Open-addressing probe chains broken by cleared slots caused
+colliding keys to disappear from the set. Fixed in `objects/set.go` by
+adding a `dummy bool` tombstone field, matching CPython
+Objects/setobject.c:168 set_lookkey.
 - `_IncompleteInputError` registered as a builtin exception.
 - `exc.SyntaxErr.Metadata` tuple (lastStmtLineno, lastStmtColOff,
   sourceText) populated in `errors/exc_from_parser.go` for
