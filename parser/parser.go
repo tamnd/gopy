@@ -30,6 +30,12 @@ const (
 	ModeFile Mode = iota
 	ModeSingle
 	ModeEval
+	// ModeFunc parses a PEP 484 func_type annotation string.
+	// Only valid when compile() sets PyCF_ONLY_AST; CPython uses the
+	// Py_func_type_input grammar start rule.
+	//
+	// CPython: Include/cpython/code.h PY_COMPILE_FLAG_FUNC_TYPE_INPUT
+	ModeFunc
 )
 
 // ErrParserNotImplemented is returned by Parse / ParseString
@@ -262,6 +268,8 @@ func pegenStartRule(m Mode) pegen.StartRule {
 		return pegen.StartSingle
 	case ModeEval:
 		return pegen.StartEval
+	case ModeFunc:
+		return pegen.StartFunctionType
 	default:
 		return pegen.StartFile
 	}

@@ -217,9 +217,15 @@ func stmtSeqOf(v any) ast.Seq[ast.Stmt] {
 //
 // CPython: Parser/pegen.c:1203 _PyPegen_make_module
 func actionPgenMakeModule(p *Parser, args ...any) any {
-	_ = p
 	body := stmtSeqOf(argAt(args, 1))
-	return &ast.Module{Body: body}
+	var typeIgnores ast.Seq[ast.TypeIgnore]
+	for _, c := range p.TypeIgnoreComments() {
+		typeIgnores = append(typeIgnores, &ast.TypeIgnoreNode{
+			Lineno: c.Lineno,
+			Tag:    c.Tag,
+		})
+	}
+	return &ast.Module{Body: body, TypeIgnores: typeIgnores}
 }
 
 // actionPgenInteractiveExit returns the sentinel CPython uses to end
@@ -2375,15 +2381,41 @@ func actionPgenSeqFlatten(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_seq_append_to_end
 func actionPgenSeqAppendToEnd(p *Parser, args ...any) any {
 	_ = p
-	seq := stmtSeqOf(argAt(args, 1))
-	item := asStmt(argAt(args, 2))
+	// Used by both statement lists and type_expressions (expr lists).
+	// Flatten the existing sequence into []any and append the new item.
+	// CPython: Parser/action_helpers.c:52 _PyPegen_seq_append_to_end
+	seq := flattenAnySeq(argAt(args, 1))
+	item := argAt(args, 2)
 	if item == nil {
 		return seq
 	}
-	out := make([]ast.Stmt, 0, len(seq)+1)
-	out = append(out, seq...)
-	out = append(out, item)
-	return ast.Seq[ast.Stmt](out)
+	return append(seq, item)
+}
+
+// flattenAnySeq normalises the varied sequence types the generated parser
+// produces into a flat []any. Handles []any, ast.Seq[ast.Stmt],
+// ast.Seq[ast.Expr], and single-element non-slice values.
+func flattenAnySeq(v any) []any {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []any:
+		return t
+	case ast.Seq[ast.Stmt]:
+		out := make([]any, len(t))
+		for i, s := range t {
+			out[i] = s
+		}
+		return out
+	case ast.Seq[ast.Expr]:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = e
+		}
+		return out
+	}
+	return []any{v}
 }
 
 // actionPgenRegisterStmts annotates the parser's current statement

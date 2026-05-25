@@ -127,6 +127,21 @@ type Parser struct {
 	//
 	// CPython: Parser/pegen.c:218 fill_token E_EOF+level check
 	unclosedBracketAtFill bool
+	// typeIgnoreComments collects "# type: ignore" comments skipped
+	// during token advance. CPython records these in
+	// p->type_ignore_comments and folds them into Module.type_ignores.
+	//
+	// CPython: Parser/pegen.c:251 _PyPegen_fill_token TYPE_IGNORE loop
+	typeIgnoreComments []TypeIgnoreComment
+}
+
+// TypeIgnoreComment holds a single "# type: ignore" entry collected
+// while advancing tokens.
+//
+// CPython: Parser/pegen.c:256 growable_comment_array_add
+type TypeIgnoreComment struct {
+	Lineno int
+	Tag    string
 }
 
 // Location pins a (start, end) source span. The generated parser uses
@@ -167,6 +182,15 @@ func New(tok *lexer.State, start StartRule, flags int) *Parser {
 //
 // CPython: Parser/pegen.c:62 _PyPegen_fill_token
 // CPython: Parser/lexer/lexer.c PyToken_OneChar / TwoChars / ThreeChars
+// TypeIgnoreComments returns the "# type: ignore" entries collected
+// during parsing. Called by the Module-building action to populate
+// Module.type_ignores.
+//
+// CPython: Parser/pegen.c:831 Parser_new p->type_ignore_comments
+func (p *Parser) TypeIgnoreComments() []TypeIgnoreComment {
+	return p.typeIgnoreComments
+}
+
 func (p *Parser) fillToken() int {
 	if p.errorIndicator {
 		return -1
@@ -174,8 +198,21 @@ func (p *Parser) fillToken() int {
 	if p.tok == nil {
 		return -1
 	}
+restart:
 	tk := p.tok.Get()
 	kind := tk.Kind
+	// Record and skip "# type: ignore" comments just as CPython does in
+	// _PyPegen_fill_token. The tag is the bytes after "ignore".
+	//
+	// CPython: Parser/pegen.c:251 _PyPegen_fill_token TYPE_IGNORE loop
+	if kind == token.TYPE_IGNORE {
+		tag := string(tk.Bytes)
+		p.typeIgnoreComments = append(p.typeIgnoreComments, TypeIgnoreComment{
+			Lineno: tk.Start.Line,
+			Tag:    tag,
+		})
+		goto restart
+	}
 	if kind == token.OP {
 		if exact, ok := opTokenType[string(tk.Bytes)]; ok {
 			kind = exact

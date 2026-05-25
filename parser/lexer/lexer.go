@@ -1311,11 +1311,13 @@ func (s *State) endmarker() Tok {
 	return s.tokenSetup(token.ENDMARKER, -1, -1)
 }
 
-// maybeTypeComment inspects a comment span and emits a TYPE_COMMENT
-// token if it matches the `# type: ` prefix. Returns the token and
-// true if matched, zero/false otherwise.
+// maybeTypeComment inspects a comment span. Emits TYPE_IGNORE when the
+// comment is "# type: ignore" (optionally followed by a non-alphanumeric
+// ASCII tag), otherwise emits TYPE_COMMENT. Returns the token and true
+// when the comment matches the "# type:" prefix.
 //
 // CPython: Parser/lexer/lexer.c:50 type_comment_prefix
+// CPython: Parser/lexer/lexer.c:688 is_type_ignore
 func (s *State) maybeTypeComment(start, end int) (Tok, bool) {
 	const prefix = "# type:"
 	if end-start < len(prefix) {
@@ -1330,7 +1332,43 @@ func (s *State) maybeTypeComment(start, end int) (Tok, bool) {
 	for body < end && (s.buf[body] == ' ' || s.buf[body] == '\t') {
 		body++
 	}
+	// A TYPE_IGNORE is "type: ignore" followed by end of token or any
+	// ASCII non-alphanumeric character. Mirrors CPython's is_type_ignore
+	// check at Parser/lexer/lexer.c:688.
+	const ignoreWord = "ignore"
+	ignoreEnd := body + len(ignoreWord)
+	if ignoreEnd <= end {
+		match := true
+		for i := 0; i < len(ignoreWord); i++ {
+			if s.buf[body+i] != ignoreWord[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			nextOK := ignoreEnd == end
+			if !nextOK {
+				c := s.buf[ignoreEnd]
+				// TYPE_IGNORE requires that the char after "ignore" is
+				// ASCII and non-alphanumeric (tag like '[', '=', ' ').
+				// Non-ASCII bytes (>= 128) mean the word continues and
+				// the comment is NOT a type ignore.
+				// CPython: Parser/lexer/lexer.c:696 is_type_ignore
+				nextOK = c < 128 && !isAlnum(c)
+			}
+			if nextOK {
+				// Body of TYPE_IGNORE token is the part after "ignore"
+				// (the optional tag: "[excuse]", "=...", etc.).
+				// CPython: Parser/lexer/lexer.c:712 MAKE_TYPE_COMMENT_TOKEN TYPE_IGNORE
+				return s.typeCommentTokenSetup(token.TYPE_IGNORE, s.startCol, s.col, ignoreEnd, end), true
+			}
+		}
+	}
 	return s.typeCommentTokenSetup(token.TYPE_COMMENT, s.startCol, s.col, body, end), true
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // tokGetFStringMode scans inside an f-string or t-string body. Stub:
