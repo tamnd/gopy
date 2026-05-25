@@ -398,6 +398,12 @@ func (s *State) Filename() string { return s.filename }
 // SyntaxError text field at error time.
 func (s *State) SourceLine(n int) string { return nthLine(s.buf, n) }
 
+// Source returns the full source buffer as a string.
+// Used by the error-metadata path to populate SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:909 p->tok->str (full source string)
+func (s *State) Source() string { return string(s.buf) }
+
 // Encoding returns the source encoding detected from a BOM or
 // PEP 263 cookie, or "" when no cookie was seen.
 func (s *State) Encoding() string { return s.encoding }

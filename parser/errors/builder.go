@@ -24,6 +24,13 @@ const (
 	KindOverflow
 	KindUnicode
 	KindValue
+	// KindIncompleteInput maps to _IncompleteInputError, raised instead
+	// of SyntaxError when PyCF_ALLOW_INCOMPLETE_INPUT is set and the
+	// source ends inside an unclosed bracket/paren/brace.
+	//
+	// CPython: Parser/peg_api.c compute_parser_flags PyPARSE_ALLOW_INCOMPLETE_INPUT
+	// CPython: Objects/exceptions.c _IncompleteInputError
+	KindIncompleteInput
 )
 
 // Pos pairs a 1-based line with a 0-based byte column. Negative
@@ -48,6 +55,15 @@ type SyntaxError struct {
 	Filename string
 	Message  string
 	Text     string
+	// SourceText is the full source string. Set by the parser after the
+	// parse fails, mirrors p->tok->str in CPython's
+	// _PyPegen_set_syntax_error_metadata.
+	SourceText string
+	// LastStmtLineno and LastStmtColOff are the position of the last
+	// successfully parsed statement. Set by the parser after the parse
+	// fails, mirrors p->last_stmt_location in CPython.
+	LastStmtLineno int
+	LastStmtColOff int
 }
 
 // Error renders the bare message. The "File ..., line N" envelope

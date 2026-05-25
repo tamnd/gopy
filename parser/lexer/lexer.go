@@ -210,6 +210,13 @@ func (s *State) tokGetNormalMode() Tok {
 				next = s.nextC()
 			}
 			if next != '\n' {
+				// Back up to the unexpected character so recordError
+				// pins the column at that position, matching CPython's
+				// col_offset = tok->cur - tok->buf - 1 which is one
+				// before the post-read cursor.
+				//
+				// CPython: Parser/pegen_errors.c:111 E_LINECONT col_offset
+				s.backup(next)
 				s.done = eErrLine
 				s.recordError("unexpected character after line continuation character")
 				return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
@@ -454,6 +461,11 @@ func (s *State) continuationLine() (int, bool) {
 		c = s.nextC()
 	}
 	if c != '\n' {
+		// Back up so the error position lands on the bad character
+		// (tok->cur - 1 in CPython's col_offset = tok->cur - tok->buf - 1).
+		//
+		// CPython: Parser/pegen_errors.c:111 E_LINECONT col_offset
+		s.backup(c)
 		s.done = eErrLine
 		s.recordError("unexpected character after line continuation character")
 		return c, false
@@ -858,19 +870,29 @@ func (s *State) scanString(quote int) Tok {
 			return s.tokenSetup(token.STRING, s.start, s.cur)
 		}
 	}
+	// CPython: Parser/lexer/lexer.c:1229 has_escaped_quote
+	hasEscapedQuote := false
 	for {
 		c := s.nextC()
 		switch c {
 		case eof:
 			s.done = eEOFS
-			s.recordUnterminatedStringInFString(triple, quote)
+			s.recordUnterminatedStringInFString(triple, quote, hasEscapedQuote)
 			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		case '\\':
 			escaped := s.nextC()
 			if escaped == eof {
 				s.done = eEOFS
-				s.recordUnterminatedStringInFString(triple, quote)
+				s.recordUnterminatedStringInFString(triple, quote, hasEscapedQuote)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
+			}
+			if escaped == quote {
+				// CPython: Parser/lexer/lexer.c:1229 has_escaped_quote = 1
+				hasEscapedQuote = true
+			}
+			if escaped == '\r' {
+				// CPython: Parser/lexer/lexer.c:1232 skip \r after escape
+				escaped = s.nextC()
 			}
 			// `\<newline>` inside a string literal still consumes a
 			// physical line. CPython's tok_nextc bumps tok->lineno on
@@ -887,7 +909,7 @@ func (s *State) scanString(quote int) Tok {
 		case '\n':
 			if !triple {
 				s.done = eEOLS
-				s.recordUnterminatedStringInFString(false, quote)
+				s.recordUnterminatedStringInFString(false, quote, hasEscapedQuote)
 				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.pendingLineno++
@@ -924,11 +946,14 @@ func (s *State) scanString(quote int) Tok {
 // CPython: Parser/lexer/lexer.c:1178 int start = tok->lineno
 // CPython: Parser/lexer/lexer.c:1196 "unterminated triple-quoted ..."
 // CPython: Parser/lexer/lexer.c:1213 "unterminated string literal ..."
-func (s *State) recordUnterminatedString(triple bool, _ int) {
+func (s *State) recordUnterminatedString(triple bool, hasEscapedQuote bool) {
 	detectLine := s.lineno
 	var msg string
 	if triple {
 		msg = fmt.Sprintf("unterminated triple-quoted string literal (detected at line %d)", detectLine)
+	} else if hasEscapedQuote {
+		// CPython: Parser/lexer/lexer.c:1204 has_escaped_quote check
+		msg = fmt.Sprintf("unterminated string literal (detected at line %d); perhaps you escaped the end quote?", detectLine)
 	} else {
 		msg = fmt.Sprintf("unterminated string literal (detected at line %d)", detectLine)
 	}
@@ -943,7 +968,7 @@ func (s *State) recordUnterminatedString(triple bool, _ int) {
 // error becomes "%c-string: expecting '}'".
 //
 // CPython: Parser/lexer/lexer.c:1181 INSIDE_FSTRING tok_get_normal_mode
-func (s *State) recordUnterminatedStringInFString(triple bool, quote int) {
+func (s *State) recordUnterminatedStringInFString(triple bool, quote int, hasEscapedQuote bool) {
 	if s.insideFString() {
 		m := s.curMode()
 		size := 1
@@ -955,7 +980,7 @@ func (s *State) recordUnterminatedStringInFString(triple bool, quote int) {
 			return
 		}
 	}
-	s.recordUnterminatedString(triple, 0)
+	s.recordUnterminatedString(triple, hasEscapedQuote)
 }
 
 // scanOperator scans an operator or punctuation token. Multi-byte
@@ -1137,15 +1162,17 @@ func (s *State) scanOperator(c int) Tok {
 	case ',', ';', '~':
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	default:
-		// Emit ERRORTOKEN without pinning a message. CPython's
-		// tok_get_normal_mode does the same: it returns ERRORTOKEN for
-		// unrecognised characters (e.g. `$`) without calling
-		// _PyTokenizer_syntaxerror, so the parser's error-recovery path
-		// produces the context-appropriate message ("invalid syntax"
-		// outside f-strings, "f-string: expecting …" inside them).
+		// Non-printable characters get a specific error message; printable
+		// but unrecognised characters (e.g. `$`) return a bare ERRORTOKEN
+		// so the parser's error-recovery rules can produce the contextual
+		// message ("invalid syntax", "f-string: expecting …", etc.).
 		//
-		// CPython: Parser/lexer/lexer.c:1338 (default case in tok_get_normal_mode)
-		s.done = eToken
+		// CPython: Parser/lexer/lexer.c:1376 (default case in tok_get_normal_mode)
+		if !isPrintable(rune(c)) {
+			s.syntaxError("invalid non-printable character U+%04X", c)
+		} else {
+			s.done = eToken
+		}
 		tok = s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	if ftCursorValid && c != '{' {

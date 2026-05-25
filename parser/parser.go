@@ -39,14 +39,41 @@ const (
 // real parser lands.
 var ErrParserNotImplemented = fmt.Errorf("parser: generated rule bodies not yet emitted")
 
+// Python compile() flag constants that control parser behaviour.
+// Mirrors Include/cpython/code.h PyCF_* values gopy reads.
+//
+// CPython: Include/cpython/code.h PyCF_ALLOW_INCOMPLETE_INPUT
+const (
+	// PyCFAllowIncompleteInput = 0x4000 matches CPython's
+	// PyCF_ALLOW_INCOMPLETE_INPUT. When set, unclosed brackets at EOF
+	// raise _IncompleteInputError rather than SyntaxError.
+	PyCFAllowIncompleteInput = 0x4000
+	// PyCFDontImplyDedent = 0x200 matches CPython's PyCF_DONT_IMPLY_DEDENT.
+	PyCFDontImplyDedent = 0x0200
+	// PyCFTypeComments = 0x1000 matches CPython's PyCF_TYPE_COMMENTS.
+	// When set, the tokenizer emits TYPE_COMMENT tokens for `# type: ...`
+	// comments and the parser validates them. Used by ast.parse(type_comments=True).
+	//
+	// CPython: Include/cpython/compile.h:19 PyCF_TYPE_COMMENTS
+	PyCFTypeComments = 0x1000
+)
+
 // ParseString parses src under the given mode and returns the
 // AST root. Filename is used for SyntaxError text.
 //
 // CPython: Parser/peg_api.c:8 _PyParser_ASTFromString
 func ParseString(src, filename string, mode Mode) (ast.Mod, error) {
+	return ParseStringFlags(src, filename, mode, 0)
+}
+
+// ParseStringFlags is ParseString with compile() Python-level flags
+// forwarded into the pegen runtime.
+//
+// CPython: Parser/peg_api.c:8 _PyParser_ASTFromString
+func ParseStringFlags(src, filename string, mode Mode, pyFlags int) (ast.Mod, error) {
 	st := lexer.FromString(src, lexerMode(mode))
 	st.SetFilename(filename)
-	return runParse(st, mode)
+	return runParse(st, mode, pegenFlags(pyFlags))
 }
 
 // ParseBytes is the bytes-input form: src is run through
@@ -57,9 +84,17 @@ func ParseString(src, filename string, mode Mode) (ast.Mod, error) {
 // CPython: Python/bltinmodule.c:771 builtin_compile_impl (bytes branch
 // via _Py_SourceAsString)
 func ParseBytes(src []byte, filename string, mode Mode) (ast.Mod, error) {
+	return ParseBytesFlags(src, filename, mode, 0)
+}
+
+// ParseBytesFlags is ParseBytes with compile() Python-level flags
+// forwarded into the pegen runtime.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl (bytes branch via _Py_SourceAsString)
+func ParseBytesFlags(src []byte, filename string, mode Mode, pyFlags int) (ast.Mod, error) {
 	st := lexer.FromBytes(src, lexerMode(mode))
 	st.SetFilename(filename)
-	return runParse(st, mode)
+	return runParse(st, mode, pegenFlags(pyFlags))
 }
 
 // Parse reads from r. Useful for tokenize.tokenize() over file
@@ -69,10 +104,26 @@ func ParseBytes(src []byte, filename string, mode Mode) (ast.Mod, error) {
 func Parse(r io.Reader, filename string, mode Mode) (ast.Mod, error) {
 	st := lexer.FromReader(r, lexerMode(mode))
 	st.SetFilename(filename)
-	return runParse(st, mode)
+	return runParse(st, mode, 0)
 }
 
-func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
+// pegenFlags maps Python-level PyCF_* compile flags to the pegen
+// parser's PyPARSE_* internal flags.
+//
+// CPython: Parser/peg_api.c:73 compute_parser_flags
+func pegenFlags(pyFlags int) int {
+	var f int
+	if pyFlags&PyCFAllowIncompleteInput != 0 {
+		f |= pegen.FlagAllowIncompleteInput
+	}
+	// CPython: Parser/peg_api.c:795 PyCF_TYPE_COMMENTS → PyPARSE_TYPE_COMMENTS
+	if pyFlags&PyCFTypeComments != 0 {
+		f |= pegen.FlagTypeComments
+	}
+	return f
+}
+
+func runParse(st *lexer.State, mode Mode, flags int) (ast.Mod, error) {
 	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
 	// source) trump anything pegen would surface: the parser cannot
 	// progress past a broken decode. Lift the lexer's structured
@@ -108,7 +159,7 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 			Text:     e.Text,
 		}
 	}
-	p := pegen.New(st, pegenStartRule(mode), 0)
+	p := pegen.New(st, pegenStartRule(mode), flags)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
 	// CPython emits SyntaxWarnings inline from helpers.c:152
 	// _PyTokenizer_parser_warn. gopy stashes them on State.warnings
@@ -116,6 +167,16 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	// hook that module/_warnings registers at init time.
 	if flushErr := st.FlushWarnings(); flushErr != nil {
 		return nil, flushErr
+	}
+	if errors.Is(err, pegen.ErrIncompleteInput) {
+		// First pass failed at end-of-source with PyCF_ALLOW_INCOMPLETE_INPUT
+		// set. Raise _IncompleteInputError without running the second pass.
+		// CPython: Parser/pegen.c:952 _PyPegen_run_parser _is_end_of_source
+		return nil, &perrors.SyntaxError{
+			Kind:     perrors.KindIncompleteInput,
+			Filename: st.Filename(),
+			Message:  "incomplete input",
+		}
 	}
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
 		// CPython promotes the pinned SyntaxError at the farthest
@@ -135,6 +196,21 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 			}
 			if e.Filename == "" {
 				e.Filename = st.Filename()
+			}
+			// Populate metadata for traceback.py's _find_keyword_typos.
+			// CPython: Parser/pegen.c:902 _PyPegen_set_syntax_error_metadata
+			e.SourceText = st.Source()
+			e.LastStmtLineno = p.LastStmtLineno()
+			e.LastStmtColOff = p.LastStmtColOff()
+			// When PyCF_ALLOW_INCOMPLETE_INPUT is set, promote unclosed
+			// bracket errors to _IncompleteInputError so codeop's
+			// _maybe_compile loop can distinguish "incomplete" from
+			// "hard syntax error". The message check mirrors CPython's
+			// _Pypegen_check_tokenizer E_EOF + tok->level path.
+			//
+			// CPython: Parser/peg_api.c:73 compute_parser_flags / PyPARSE_ALLOW_INCOMPLETE_INPUT
+			if flags&pegen.FlagAllowIncompleteInput != 0 && p.IsUnclosedBracketError(e) {
+				e.Kind = perrors.KindIncompleteInput
 			}
 			return nil, e
 		}
