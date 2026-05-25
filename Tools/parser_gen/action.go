@@ -662,8 +662,11 @@ func translateCall(fname string, args []string) (string, bool) {
 			return args[len(args)-1], true
 		}
 	case "CHECK_VERSION":
+		// CPython: Parser/pegen.h:308 CHECK_VERSION(type, version, msg, node)
+		// → INVALID_VERSION_CHECK(p, version, msg, node).
+		// args[0]=C type (ignored), args[1]=version int, args[2]=message, args[3]=node.
 		if len(args) >= 4 {
-			return args[len(args)-1], true
+			return "checkVersion(p, " + args[1] + ", " + args[2] + ", " + args[3] + ")", true
 		}
 	case "NEW_TYPE_COMMENT":
 		// Macro that wraps an optional TYPE_COMMENT token into a
@@ -673,8 +676,12 @@ func translateCall(fname string, args []string) (string, bool) {
 			return args[1], true
 		}
 	case "INVALID_VERSION_CHECK":
-		// Version-gate macro: emits the body when the runtime is at
-		// least the named version. Pass-through to the body arg.
+		// CPython: Parser/pegen.h:294 INVALID_VERSION_CHECK(p, version, msg, node).
+		// args[0]=p (ignored), args[1]=version int, args[2]=message, args[3]=node.
+		if len(args) >= 4 {
+			return "checkVersion(p, " + args[1] + ", " + args[2] + ", " + args[3] + ")", true
+		}
+		// 3-arg form (no msg): pass through node as before.
 		if len(args) >= 3 {
 			return args[len(args)-1], true
 		}
