@@ -372,6 +372,8 @@ func exceptionSingletons() []struct {
 		{"SyntaxError", errors.PyExc_SyntaxError},
 		{"IndentationError", errors.PyExc_IndentationError},
 		{"TabError", errors.PyExc_TabError},
+		// CPython: Python/bltinmodule.c _IncompleteInputError registration
+		{"_IncompleteInputError", errors.PyExc_IncompleteInputError},
 		{"UnicodeError", errors.PyExc_UnicodeError},
 		{"UnicodeDecodeError", errors.PyExc_UnicodeDecodeError},
 		{"UnicodeEncodeError", errors.PyExc_UnicodeEncodeError},

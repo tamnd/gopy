@@ -24,6 +24,9 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 		typ = PyExc_IndentationError
 	case parsererrors.KindTab:
 		typ = PyExc_TabError
+	case parsererrors.KindIncompleteInput:
+		// CPython: Objects/exceptions.c _IncompleteInputError (SyntaxError subclass)
+		typ = PyExc_IncompleteInputError
 	}
 	filename := objects.None()
 	if se.Filename != "" {
@@ -81,6 +84,19 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 		return New(typ, objects.NewTuple([]objects.Object{
 			objects.NewStr(se.Message),
 		}))
+	}
+	// Populate _metadata so traceback.py's _find_keyword_typos can suggest
+	// "Did you mean X?" corrections for keyword-like names in SyntaxErrors.
+	// Format matches CPython's Py_BuildValue("(iiN)", ...) call.
+	//
+	// CPython: Python/errors.c:902 _PyErr_SetSyntaxErrorMetadata
+	// CPython: Lib/traceback.py:793 _find_keyword_typos
+	if se.SourceText != "" && exc.SyntaxErr != nil {
+		exc.SyntaxErr.Metadata = objects.NewTuple([]objects.Object{
+			objects.NewInt(int64(se.LastStmtLineno)),
+			objects.NewInt(int64(se.LastStmtColOff)),
+			objects.NewStr(se.SourceText),
+		})
 	}
 	return exc
 }

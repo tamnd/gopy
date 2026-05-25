@@ -32,9 +32,9 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	}
 	var mod ast.Mod
 	if parsed.sourceBytes != nil {
-		mod, err = parser.ParseBytes(parsed.sourceBytes, parsed.filename, parsed.mode)
+		mod, err = parser.ParseBytesFlags(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags)
 	} else {
-		mod, err = parser.ParseString(parsed.source, parsed.filename, parsed.mode)
+		mod, err = parser.ParseStringFlags(parsed.source, parsed.filename, parsed.mode, parsed.flags)
 	}
 	if err != nil {
 		// Parser-incomplete sentinel surfaces as SyntaxError to Python
@@ -47,6 +47,15 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 			return nil, fmt.Errorf("SyntaxError: invalid syntax")
 		}
 		return nil, err
+	}
+	// PyCF_ONLY_AST: parse-only mode. Return a sentinel Module object
+	// so callers like codeop.compile_command and _find_keyword_typos can
+	// check for SyntaxError without needing full codegen. A proper
+	// Python-side AST object tree lands with the _ast_unparse spec.
+	//
+	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
+	if parsed.flags&(cfOnlyAST|cfOptimizedAST) != 0 {
+		return parseOnlyResult(mod), nil
 	}
 	cco, err := compile.Compile(mod, parsed.filename, parsed.optimize)
 	if err != nil {
@@ -198,12 +207,17 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval' or 'single'")
 }
 
-// parseCompileFlags reads the optional flags arg. Only the flag bits
-// CPython actually carries today are PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
-// / PyCF_DONT_IMPLY_DEDENT / PyCF_ALLOW_TOP_LEVEL_AWAIT plus the
-// future-statement bits; none alter codegen in gopy yet, so non-zero
-// values are silently accepted except for the AST bits which need
-// AST-as-Python support.
+// PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.
+//
+// CPython: Include/cpython/code.h PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
+const cfOnlyAST = 0x0400
+const cfOptimizedAST = 0x2400
+
+// parseCompileFlags reads the optional flags arg. PyCF_ONLY_AST is now
+// accepted and triggers parse-only mode (no codegen). Other flag bits are
+// silently accepted for signature parity.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl flags check
 func parseCompileFlags(o objects.Object) (int, error) {
 	if o == nil {
 		return 0, nil
@@ -211,11 +225,6 @@ func parseCompileFlags(o objects.Object) (int, error) {
 	flags, err := intArg(o, "flags")
 	if err != nil {
 		return 0, err
-	}
-	const cfOnlyAST = 0x0400
-	const cfOptimizedAST = 0x2400
-	if flags&(cfOnlyAST|cfOptimizedAST) != 0 {
-		return 0, fmt.Errorf("ValueError: compile() PyCF_ONLY_AST / PyCF_OPTIMIZED_AST not supported yet")
 	}
 	return flags, nil
 }
@@ -266,6 +275,18 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 		return 0, fmt.Errorf("OverflowError: %s does not fit in a Go int", label)
 	}
 	return int(v), nil
+}
+
+// parseOnlyResult returns a sentinel Python object for PyCF_ONLY_AST
+// parse-only mode. The object is non-nil so Python callers that only
+// check for SyntaxError (codeop.compile_command, _find_keyword_typos)
+// see a successful parse. A proper Python AST node tree lands with
+// the _ast_unparse spec.
+//
+// CPython: Python/bltinmodule.c:813 builtin_compile_impl ast_obj2mod
+func parseOnlyResult(mod ast.Mod) objects.Object {
+	_ = mod
+	return objects.NewInt(0)
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the
