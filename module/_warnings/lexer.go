@@ -1,6 +1,8 @@
 package _warnings
 
 import (
+	"strings"
+
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
@@ -50,6 +52,11 @@ func FlushLexerWarnings(filename string, warns []lexer.SyntaxError) error {
 			if colOff < 0 {
 				colOff = 0
 			}
+			// CPython uses a shorter message for the SyntaxError case than for the
+			// SyntaxWarning: it omits "Such sequences will not work in the future."
+			// (Parser/string_parser.c:101-111 vs :30-41). Mirror that by stripping
+			// the sentence before building the SyntaxError.
+			errMsg := strings.ReplaceAll(w.Message, "Such sequences will not work in the future. ", "")
 			return &parsererrors.SyntaxError{
 				Kind: parsererrors.KindSyntax,
 				Pos: parsererrors.Pos{
@@ -59,7 +66,7 @@ func FlushLexerWarnings(filename string, warns []lexer.SyntaxError) error {
 					EndCol:  colOff,
 				},
 				Filename: filename,
-				Message:  w.Message,
+				Message:  errMsg,
 				Text:     w.Text,
 			}
 		}
