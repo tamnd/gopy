@@ -50,6 +50,20 @@ func argAt(args []any, i int) any {
 	return args[i]
 }
 
+// toInt converts an any value to int. Returns 0 for nil or unrecognized types.
+// Used to extract explicit position ints from RAISE_ERROR_KNOWN_LOCATION args.
+func toInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case int32:
+		return int(x)
+	}
+	return 0
+}
+
 // asExpr unwraps any layers of []any wrapping until it lands on an
 // ast.Expr or runs out of structure. Many expression rules currently
 // wrap their inner result as []any{e} or []any{e, rest}; the helpers
@@ -3173,6 +3187,86 @@ func actionPgenCheckedFutureImport(p *Parser, args ...any) any {
 // params likewise expose one.
 type positioner interface{ Position() ast.Pos }
 
+// extractLineno returns the starting line number of v. Used to
+// translate C `a->lineno` in RAISE_INDENTATION_ERROR format args.
+//
+// CPython: Parser/tokenize/tokenize.h Token.lineno
+func extractLineno(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.Lineno
+	case ast.Pos:
+		return x.Lineno
+	case positioner:
+		return x.Position().Lineno
+	case []any:
+		if len(x) > 0 {
+			return extractLineno(x[0])
+		}
+	}
+	return 0
+}
+
+// extractEndColOffset returns the exclusive end column offset of v.
+// Translates C `a->end_col_offset` in RAISE_ERROR_KNOWN_LOCATION args.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int end_col_offset
+func extractEndColOffset(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.EndCol
+	case ast.Pos:
+		return x.EndColOffset
+	case positioner:
+		return x.Position().EndColOffset
+	case []any:
+		if len(x) > 0 {
+			return extractEndColOffset(x[0])
+		}
+	}
+	return 0
+}
+
+// extractEndLineno returns the last source line number of v.
+// Translates C `a->end_lineno` in RAISE_ERROR_KNOWN_LOCATION args.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int end_lineno
+func extractEndLineno(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.EndLine
+	case ast.Pos:
+		return x.EndLineno
+	case positioner:
+		return x.Position().EndLineno
+	case []any:
+		if len(x) > 0 {
+			return extractEndLineno(x[0])
+		}
+	}
+	return 0
+}
+
+// extractColOffset returns the start column offset of v.
+// Translates C `a->col_offset` in position-bearing macros.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int col_offset
+func extractColOffset(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.ColOff
+	case ast.Pos:
+		return x.ColOffset
+	case positioner:
+		return x.Position().ColOffset
+	case []any:
+		if len(x) > 0 {
+			return extractColOffset(x[0])
+		}
+	}
+	return 0
+}
+
 // extractPos peels the variadic wrapper layers a translated action
 // emits and returns the underlying source-span. Handles tokens,
 // typed AST nodes, and pre-built position quads.
@@ -3268,8 +3362,71 @@ func raiseAction(p *Parser, kind string, args ...any) any {
 		if len(args) > 3 {
 			fmtArgs = args[3:]
 		}
-	case "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", "RAISE_SYNTAX_ERROR_INVALID_TARGET":
+	case "RAISE_SYNTAX_ERROR_KNOWN_LOCATION":
 		pos = errPosFromAst(extractPos(argAt(args, 0)))
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_INVALID_TARGET":
+		// CPython: Parser/pegen.h:240 _RAISE_SYNTAX_ERROR_INVALID_TARGET
+		// args[0] = kind string ("STAR_TARGETS", "DEL_TARGETS", "FOR_TARGETS")
+		// args[1] = the star_expressions / yield_expr node
+		kind, _ := argAt(args, 0).(string)
+		expr, _ := argAt(args, 1).(ast.Expr)
+		var invalidTarget ast.Expr
+		switch kind {
+		case "DEL_TARGETS":
+			invalidTarget = GetInvalidDelTarget(expr)
+		case "FOR_TARGETS":
+			invalidTarget = GetInvalidForTarget(expr)
+		default: // STAR_TARGETS
+			invalidTarget = GetInvalidStarTarget(expr)
+		}
+		if invalidTarget == nil {
+			return nil
+		}
+		pos = errPosFromAst(extractPos(invalidTarget))
+		exprName := GetExprName(invalidTarget)
+		if kind == "DEL_TARGETS" {
+			msg = "cannot delete %s"
+		} else {
+			msg = "cannot assign to %s"
+		}
+		fmtArgs = []any{exprName}
+	case "RAISE_ERROR_KNOWN_LOCATION":
+		// Full explicit-position form from the grammar:
+		// RAISE_ERROR_KNOWN_LOCATION(p, PyExc_SyntaxError, lineno, col_offset, end_lineno, end_col_offset, msg)
+		// Translated args: [p, excType, lineno, colOff, endLineno, endColOff, msg]
+		//
+		// CPython: Parser/pegen.h RAISE_ERROR_KNOWN_LOCATION
+		// CPython: Grammar/python.gram:1502 invalid_kvpair
+		lineno := toInt(argAt(args, 2))
+		colOff := toInt(argAt(args, 3))
+		endLineno := toInt(argAt(args, 4))
+		endCol := toInt(argAt(args, 5))
+		pos = perrors.Pos{
+			Lineno:  lineno,
+			ColOff:  colOff,
+			EndLine: endLineno,
+			EndCol:  endCol,
+		}
+		msg, _ = argAt(args, 6).(string)
+		if len(args) > 7 {
+			fmtArgs = args[7:]
+		}
+	case "RAISE_ERROR_AT_EXPR_END":
+		// CPython: Grammar/python.gram invalid_kvpair
+		// RAISE_ERROR_KNOWN_LOCATION(p, exc, a->lineno, a->end_col_offset-1, a->end_lineno, -1, msg)
+		// Points the caret at the last column of the expression (one before end_col_offset),
+		// indicating where the ':' was expected.
+		aPos := extractPos(argAt(args, 0))
+		pos = perrors.Pos{
+			Lineno:  aPos.Lineno,
+			ColOff:  aPos.EndColOffset - 1,
+			EndLine: aPos.EndLineno,
+			EndCol:  -1,
+		}
 		msg, _ = argAt(args, 1).(string)
 		if len(args) > 2 {
 			fmtArgs = args[2:]

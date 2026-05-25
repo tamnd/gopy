@@ -119,6 +119,14 @@ type Parser struct {
 	//
 	// CPython: Parser/pegen_errors.c:416 _Pypegen_set_syntax_error
 	pinnedFromTokenizer bool
+	// unclosedBracketAtFill is set when the tokenizer reported
+	// E_EOF+level during fillToken (the source truncated cleanly
+	// inside an unclosed bracket with no prior hard syntax error).
+	// Used to distinguish "incomplete input" from "syntax error
+	// inside a bracket" when PyCF_ALLOW_INCOMPLETE_INPUT is set.
+	//
+	// CPython: Parser/pegen.c:218 fill_token E_EOF+level check
+	unclosedBracketAtFill bool
 }
 
 // Location pins a (start, end) source span. The generated parser uses
@@ -137,6 +145,10 @@ type Location struct {
 //
 // CPython: Parser/pegen.c:1024 _PyPegen_Parser_New
 func New(tok *lexer.State, start StartRule, flags int) *Parser {
+	if tok != nil && flags&FlagTypeComments != 0 {
+		// CPython: Parser/pegen.c:815 tok->type_comments = (flags & PyPARSE_TYPE_COMMENTS) > 0
+		tok.SetTypeComments(true)
+	}
 	return &Parser{
 		tok:            tok,
 		startRule:      start,
@@ -230,6 +242,15 @@ func (p *Parser) fillToken() int {
 			//
 			// CPython: Parser/pegen_errors.c:81 case E_EOF: tok->level → raise_unclosed_parentheses_error
 			p.raiseUnclosedParenthesesError()
+			// Record that the unclosed bracket was the PRIMARY failure
+			// (not a secondary cleanup after a grammar error). This lets
+			// runParse promote to _IncompleteInputError when
+			// PyCF_ALLOW_INCOMPLETE_INPUT is set. If errorIndicator was
+			// already true (grammar error came first), this path is
+			// guarded by `p.pinnedErr == nil` so it won't be reached.
+			//
+			// CPython: Parser/peg_api.c compute_parser_flags / E_EOF+level
+			p.unclosedBracketAtFill = true
 		}
 		return -1
 	}
@@ -583,3 +604,47 @@ func (p *Parser) PrevTokenLevel() int {
 // Tokenizer returns the lexer state driving this parser. The driver
 // reads the source buffer through it to populate SyntaxError.text.
 func (p *Parser) Tokenizer() *lexer.State { return p.tok }
+
+// LastStmtLineno returns the line number of the last successfully
+// parsed statement, used for SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:928 p->last_stmt_location.lineno
+func (p *Parser) LastStmtLineno() int { return p.lastStmt.Lineno }
+
+// LastStmtColOff returns the column offset of the last successfully
+// parsed statement, used for SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:929 p->last_stmt_location.col_offset
+func (p *Parser) LastStmtColOff() int { return p.lastStmt.ColOff }
+
+// IsUnclosedBracketError reports whether e is a "'x' was never closed"
+// error that originated from a clean truncation (no prior grammar
+// error). When PyCF_ALLOW_INCOMPLETE_INPUT is set, only this kind of
+// error should be promoted to _IncompleteInputError.
+//
+// CPython: Parser/peg_api.c compute_parser_flags / _Pypegen_check_tokenizer
+// CPython: Parser/pegen.c:218 fill_token E_EOF+level → raise_unclosed_parentheses_error
+func (p *Parser) IsUnclosedBracketError(e *perrors.SyntaxError) bool {
+	return p.unclosedBracketAtFill
+}
+
+// IsEndOfSource reports whether the tokenizer is at end-of-source
+// (no incomplete brackets). Used by Dispatch to decide whether to
+// promote a first-pass failure to _IncompleteInputError when
+// PyCF_ALLOW_INCOMPLETE_INPUT is set, matching CPython's behaviour of
+// bypassing the second (invalid_*) pass for clean truncations.
+//
+// CPython: Parser/pegen.c:896 _is_end_of_source
+func (p *Parser) IsEndOfSource() bool {
+	if p.tok == nil {
+		return false
+	}
+	done := p.tok.Done()
+	return done == lexer.DoneEOF || done == lexer.DoneEOFS || done == lexer.DoneEOLS
+}
+
+// AllowIncompleteInput reports whether the FlagAllowIncompleteInput
+// parser flag is set.
+func (p *Parser) AllowIncompleteInput() bool {
+	return p.flags&FlagAllowIncompleteInput != 0
+}

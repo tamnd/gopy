@@ -17,6 +17,15 @@ import (
 // The real AST surface lands with the action translator (M6).
 var ErrParserNotImplemented = errors.New("pegen: generated rule bodies not yet emitted")
 
+// ErrIncompleteInput is returned by Dispatch when
+// PyCF_ALLOW_INCOMPLETE_INPUT is set and the first-pass failure
+// occurred at end-of-source (tokenizer done = E_EOF/E_EOFS/E_EOLS).
+// The caller promotes this to _IncompleteInputError without running
+// the invalid_* second pass.
+//
+// CPython: Parser/pegen.c:952 _PyPegen_run_parser _is_end_of_source
+var ErrIncompleteInput = errors.New("pegen: incomplete input")
+
 var _ = token.NAME // keep import alive when no rule uses it.
 var _ = ast.Add       // keep import alive when no rule uses it.
 
@@ -11207,7 +11216,7 @@ func parseRule_invalid_kwarg(p *Parser) any {
 			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "cannot assign to %s", nameIDOf(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_kwarg, v)
 			return v
@@ -11282,6 +11291,9 @@ func parseRule_invalid_kwarg(p *Parser) any {
 // parseRule_expression_without_invalid parses expression_without_invalid.
 func parseRule_expression_without_invalid(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	prevCallInvalid := p.CallInvalid()
+	p.SetCallInvalid(false)
+	defer func() { p.SetCallInvalid(prevCallInvalid) }()
 	if v, ok := p.IsMemoized(Rule_expression_without_invalid); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11442,16 +11454,7 @@ func parseRule_invalid_expression(p *Parser) any {
 			string_var_1 := stringToken(p)
 			if string_var_1 == nil { return nil }
 			_ = string_var_1
-			// CPython: Grammar/python.gram invalid_expression alt 0
-			// RAISE_SYNTAX_ERROR_KNOWN_RANGE(first_item(a), last_item(a), "invalid syntax. Is this intended to be part of the string?")
-			return withSpan(p, mark, func() any {
-				items, _ := a.([]any)
-				if len(items) == 0 { return nil }
-				first := asExpr(items[0])
-				last := asExpr(items[len(items)-1])
-				if first == nil || last == nil { return nil }
-				return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", first, last, "invalid syntax. Is this intended to be part of the string?")
-			}())
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqFirstAny(a), seqLastAny(a), "invalid syntax. Is this intended to be part of the string?"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -11468,15 +11471,7 @@ func parseRule_invalid_expression(p *Parser) any {
 			b := parseRule_expression_without_invalid(p)
 			if b == nil { return nil }
 			_ = b
-			// CPython: Grammar/python.gram invalid_expression alt 1
-			// _PyPegen_check_legacy_stmt(p, a) ? NULL :
-			// p->tokens[p->mark-1]->level == 0 ? NULL :
-			// RAISE_SYNTAX_ERROR_KNOWN_RANGE(a, b, "invalid syntax. Perhaps you forgot a comma?")
-			return withSpan(p, mark, func() any {
-				if truthy(actionPgenCheckLegacyStmt(p, p, a)) { return nil }
-				if p.PrevTokenLevel() == 0 { return nil }
-				return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "invalid syntax. Perhaps you forgot a comma?")
-			}())
+			return withSpan(p, mark, func() any { if truthy(actionPgenCheckLegacyStmt(p, p, a)) { return nil }; return func() any { if truthy(p.PrevTokenLevel() == 0) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "invalid syntax. Perhaps you forgot a comma?") }() }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -11744,7 +11739,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{rep, a, op}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "STAR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_assignment, v)
 			return v
@@ -11864,7 +11859,7 @@ func parseRule_invalid_del_stmt(p *Parser) any {
 			a := parseRule_star_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "DEL_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_del_stmt, v)
 			return v
@@ -12739,7 +12734,7 @@ func parseRule_invalid_with_item(p *Parser) any {
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
-			return []any{expression, kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "STAR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_item, v)
 			return v
@@ -12798,7 +12793,7 @@ func parseRule_invalid_for_target(p *Parser) any {
 			a := parseRule_star_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{opt, kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "FOR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_for_target, v)
 			return v
@@ -13101,7 +13096,7 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, gat, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'with' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
 			return v
@@ -13134,7 +13129,7 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, op, gat, opt_1, op_1, op_2, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'with' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
 			return v
@@ -13165,7 +13160,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'try' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
 			return v
@@ -13506,7 +13501,7 @@ func parseRule_invalid_finally_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'finally' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_finally_stmt, v)
 			return v
@@ -13542,7 +13537,7 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, expression, opt, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
 			return v
@@ -13562,7 +13557,7 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
 			return v
@@ -13601,7 +13596,7 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, expression, opt, op_1, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except*' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, v)
 			return v
@@ -13654,7 +13649,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, subject, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'match' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
 			return v
@@ -13711,7 +13706,7 @@ func parseRule_invalid_case_block(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, patterns, opt, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'case' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_case_block, v)
 			return v
@@ -13790,7 +13785,7 @@ func parseRule_invalid_class_pattern(p *Parser) any {
 			a := parseRule_invalid_class_argument_pattern(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{name_or_attr, op, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqFirstAny(a), seqLastAny(a), "positional patterns follow keyword patterns"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_class_pattern, v)
 			return v
@@ -13875,7 +13870,7 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, a_1, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'if' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_if_stmt, v)
 			return v
@@ -13928,7 +13923,7 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, named_expression, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'elif' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
 			return v
@@ -13959,7 +13954,7 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'else' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_else_stmt, v)
 			return v
@@ -14034,7 +14029,7 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, named_expression, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'while' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_while_stmt, v)
 			return v
@@ -14103,7 +14098,7 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, star_targets, kw, star_expressions, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'for' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_for_stmt, v)
 			return v
@@ -14151,7 +14146,7 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, name_var, opt_1, op, opt_2, op_1, opt_3, op_2, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after function definition on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_def_raw, v)
 			return v
@@ -14246,7 +14241,7 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, name_var, opt, opt_1, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after class definition on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
 			return v
@@ -14340,7 +14335,7 @@ func parseRule_invalid_kvpair(p *Parser) any {
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
-			return withSpan(p, mark, matchedOr(a))
+			return withSpan(p, mark, raiseAction(p, "RAISE_ERROR_KNOWN_LOCATION", p, "SyntaxError", extractLineno(a), extractEndColOffset(a) - 1, extractEndLineno(a), -1, "':' expected after dictionary key"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_kvpair, v)
 			return v
@@ -19416,6 +19411,13 @@ func Dispatch(p *Parser, m StartRule) (any, error) {
 		return nil, ErrParserNotImplemented
 	}
 	if result == nil {
+		// CPython: Parser/pegen.c:952 _PyPegen_run_parser
+		// When PyCF_ALLOW_INCOMPLETE_INPUT is set and the source ends at
+		// EOF (no unclosed brackets), promote the first-pass failure to
+		// _IncompleteInputError immediately, skipping the second (invalid_*) pass.
+		if p.AllowIncompleteInput() && p.IsEndOfSource() {
+			return nil, ErrIncompleteInput
+		}
 		p.ResetForErrorPass()
 		switch m {
 		case StartFile:

@@ -168,14 +168,22 @@ func (p *Parser) tokenizeFullSourceCheckForErrors() {
 	// it's already filtered by callers using ModeSingle.
 	saved := p.pinnedErr
 	savedFromTok := p.pinnedFromTokenizer
+	// CPython: Parser/pegen_errors.c:178
+	// current_token = known_err_token ?? tokens[fill - 1]
+	// current_err_line = current_token->lineno
+	// The last filled token (usually the ERRORTOKEN at EOF) gives the
+	// line of the unclosed-bracket failure, which is always ≥ the line
+	// of the opening bracket. Using the pinned error's lineno instead
+	// produced a wrong < comparison when the grammar raised "perhaps you
+	// forgot a comma?" on line 1 while the real ERRORTOKEN was line 2.
 	currentErrLine := 0
 	switch {
-	case saved != nil:
-		currentErrLine = saved.Pos.Lineno
 	case p.knownErrToken != nil:
 		currentErrLine = p.knownErrToken.Lineno
 	case p.fill > 0:
 		currentErrLine = p.tokens[p.fill-1].Lineno
+	case saved != nil:
+		currentErrLine = saved.Pos.Lineno
 	}
 	// Speculatively clear so the lexer's new error can pin itself.
 	p.pinnedErr = nil
