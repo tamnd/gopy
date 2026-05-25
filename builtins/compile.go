@@ -107,6 +107,11 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
+	// func_type requires PyCF_ONLY_AST; validate now that flags are known.
+	// CPython: Python/bltinmodule.c:771 builtin_compile_impl (mode == func_type check)
+	if mode == parser.ModeFunc && flags&(cfOnlyAST|cfOptimizedAST) == 0 {
+		return compileArgs{}, fmt.Errorf("ValueError: compile() mode 'func_type' requires flag PyCF_ONLY_AST")
+	}
 	if err := checkDontInherit(bound[4]); err != nil {
 		return compileArgs{}, err
 	}
@@ -218,8 +223,10 @@ func parseFeatureVersion(obj objects.Object) (int, error) {
 }
 
 // parseCompileMode maps the mode string to the parser mode constant.
-// func_type is recognized but rejected because gopy has no
-// PyCF_ONLY_AST path yet.
+// "func_type" is valid only when PyCF_ONLY_AST is set; that validation
+// happens in parseCompileArgs after flags are parsed.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl (mode check)
 func parseCompileMode(modeStr string) (parser.Mode, error) {
 	switch modeStr {
 	case "exec":
@@ -229,9 +236,9 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 	case "single":
 		return parser.ModeSingle, nil
 	case "func_type":
-		return 0, fmt.Errorf("ValueError: compile() mode 'func_type' requires flag PyCF_ONLY_AST")
+		return parser.ModeFunc, nil
 	}
-	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval' or 'single'")
+	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval', 'single' or 'func_type'")
 }
 
 // PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.
@@ -304,16 +311,19 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 	return int(v), nil
 }
 
-// parseOnlyResult returns a sentinel Python object for PyCF_ONLY_AST
-// parse-only mode. The object is non-nil so Python callers that only
-// check for SyntaxError (codeop.compile_command, _find_keyword_typos)
-// see a successful parse. A proper Python AST node tree lands with
-// the _ast_unparse spec.
+// parseOnlyResult converts a Go ast.Mod into a Python _ast object tree
+// for PyCF_ONLY_AST parse-only mode. The _ast module must already be
+// loaded in sys.modules (ast.parse() imports it before calling compile()).
+// Falls back to a sentinel int(0) if the bridge cannot find _ast, so
+// callers that only check for SyntaxError still see a successful parse.
 //
-// CPython: Python/bltinmodule.c:813 builtin_compile_impl ast_obj2mod
+// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
 func parseOnlyResult(mod ast.Mod) objects.Object {
-	_ = mod
-	return objects.NewInt(0)
+	obj := astModToObject(mod)
+	if obj == nil {
+		return objects.NewInt(0)
+	}
+	return obj
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the
