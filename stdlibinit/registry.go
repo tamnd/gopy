@@ -193,6 +193,13 @@ import (
 	// CPython: Modules/_sre/sre.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_sre"
 
+	// Built-in module: _suggestions. Registers itself via
+	// module/_suggestions/module.go init(). Exposes _generate_suggestions
+	// used by traceback._find_keyword_typos to rank keyword typos via
+	// CPython-faithful Levenshtein distance (MOVE_COST=2, CASE_COST=1).
+	// CPython: Modules/_suggestions.c:67 PyInit__suggestions
+	_ "github.com/tamnd/gopy/module/_suggestions"
+
 	// Built-in module: _heapq. Registers itself via
 	// module/_heapq/module.go init(). Ports Modules/_heapqmodule.c:
 	// heappush, heappop, heappushpop, heapreplace, heapify, nlargest, nsmallest.
