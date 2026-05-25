@@ -159,6 +159,9 @@ func (p *Parser) fillToken() int {
 	if p.errorIndicator {
 		return -1
 	}
+	if p.tok == nil {
+		return -1
+	}
 	tk := p.tok.Get()
 	kind := tk.Kind
 	if kind == token.OP {
@@ -204,9 +207,29 @@ func (p *Parser) fillToken() int {
 	// SyntaxError.
 	if kind == token.ERRORTOKEN {
 		p.errorIndicator = true
-		if p.pinnedErr == nil {
+		// Only pin when the lexer stored a specific error. A bare
+		// ERRORTOKEN with no stored message (e.g. an unrecognised
+		// character like `$` inside an f-string expression) must leave
+		// pinnedErr nil so the grammar's error-recovery rules can fire
+		// and produce the context-appropriate message ("f-string:
+		// expecting '=', or '!', or ':', or '}'"). Callers that reach
+		// the top of the grammar without a pinned error fall through to
+		// SetSyntaxError which emits "invalid syntax".
+		//
+		// CPython: Parser/pegen.c:218 _PyPegen_fill_token
+		if p.pinnedErr == nil && p.tok.Err() != nil {
 			p.pinnedErr = tokenizerSyntaxError(p.tok, t)
 			p.pinnedFromTokenizer = true
+		} else if p.pinnedErr == nil && p.tok.Done() == lexer.DoneEOF && p.tok.Level() > 0 {
+			// EOF with an unclosed paren: pin "'{' was never closed" at
+			// fill time. CPython's _Pypegen_tokenizer_error handles the
+			// E_EOF+level case by calling raise_unclosed_parentheses_error
+			// immediately, before any grammar rule fires. This blocks the
+			// second pass from overriding the message with a generic
+			// "f-string: expecting ..." from invalid_* rules.
+			//
+			// CPython: Parser/pegen_errors.c:81 case E_EOF: tok->level → raise_unclosed_parentheses_error
+			p.raiseUnclosedParenthesesError()
 		}
 		return -1
 	}
@@ -245,7 +268,10 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 	msg := ""
 	switch st.Done() {
 	case lexer.DoneToken:
-		msg = "invalid token"
+		// CPython maps E_TOKEN to "invalid syntax", not "invalid token".
+		//
+		// CPython: Parser/pegen_errors.c:79 E_TOKEN → "invalid syntax"
+		msg = "invalid syntax"
 	case lexer.DoneDedent:
 		kind = perrors.KindIndentation
 		msg = "unindent does not match any outer indentation level"
@@ -447,9 +473,18 @@ func (p *Parser) ResetForErrorPass() {
 	p.mark = 0
 	p.callInvalid = true
 	p.lastStmt = Location{}
-	// Do not clear errorIndicator: if it was set because the lexer
-	// raised ERRORTOKEN, the pinned error must survive and the second
-	// pass would also short-circuit on the same condition.
+	// Clear errorIndicator when no specific error is pinned so the
+	// second pass can run invalid_* rules and produce context-aware
+	// messages. This mirrors CPython's reset_parser_state_for_error_pass
+	// which clears p->error_indicator when no Python exception is set.
+	// If pinnedErr is already set (e.g. tokenizer-raised TabError), keep
+	// errorIndicator true so the second pass short-circuits and the
+	// original structured error is preserved.
+	//
+	// CPython: Parser/pegen.c:879 reset_parser_state_for_error_pass
+	if p.pinnedErr == nil {
+		p.errorIndicator = false
+	}
 }
 
 // Peek returns the token at the current mark, filling the buffer if

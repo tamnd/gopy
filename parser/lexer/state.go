@@ -284,16 +284,16 @@ func (s *State) curMode() *tokenizerMode {
 }
 
 // InsideFString reports whether the tokenizer is currently inside an
-// f-string or t-string body. Mirrors INSIDE_FSTRING, which is the
-// guard CPython's pegen helpers use before consulting the active
-// tokenizer mode.
+// f-string or t-string body. Mirrors INSIDE_FSTRING: just check the
+// stack index, regardless of whether the current mode is scanning the
+// literal body or the inner {expr}. The kind == tokFStringMode check
+// would return false while fstringMiddle is in the middle of backing
+// up a `}` (at which point it sets kind = tokRegularMode but the
+// stack index is still > 0).
 //
-// CPython: Parser/lexer/lexer.h:14 INSIDE_FSTRING
+// CPython: Parser/lexer/state.h:10 INSIDE_FSTRING
 func (s *State) InsideFString() bool {
-	if s.tokModeStackIndex <= 0 {
-		return false
-	}
-	return s.tokModeStack[s.tokModeStackIndex].kind == tokFStringMode
+	return s.tokModeStackIndex > 0
 }
 
 // CurrentFStringRaw reports the `raw` flag of the active f-string or

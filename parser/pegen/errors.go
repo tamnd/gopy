@@ -185,6 +185,19 @@ func (p *Parser) tokenizeFullSourceCheckForErrors() {
 		tk := p.tok.Get()
 		if tk.Kind == token.ERRORTOKEN {
 			if p.tok.Err() != nil {
+				// Inside an f-string the expression-level parser error
+				// should propagate; a tokenizer error produced by draining
+				// the rest of the source (e.g. the outer closing quote being
+				// scanned as an unterminated inner string → "f-string:
+				// expecting '}'") must NOT swallow it.
+				//
+				// CPython: Parser/pegen_errors.c:212
+				// if (PyErr_Occurred() && p->tok->tok_mode_stack_index <= 0)
+				if p.tok.InsideFString() {
+					// In f-string context: restore the old error, not the
+					// new tokenizer one.
+					break
+				}
 				// Lexer pinned a structured error: lift it to the
 				// parser surface, overriding the prior generic one.
 				pos := perrors.Pos{Lineno: tk.Start.Line, ColOff: tk.Start.Col, EndLine: tk.End.Line, EndCol: tk.End.Col}

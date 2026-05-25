@@ -870,9 +870,11 @@ func raiseEnsureNumberError(p *Parser, exp ast.Expr, msg string) {
 
 // actionPgenFormattedValue ports `_PyPegen_formatted_value`. Args:
 // (p, expression, debug_token, conversion_result, format_result, rbrace).
-// For the no-debug path we just build a FormattedValue. The debug-text
-// shim that wraps the value into a JoinedStr is intentionally
-// minimal until the parser exposes the metadata we'd need.
+// The debug form (`f'{x=}'`) wraps the FormattedValue in a JoinedStr
+// whose first child is a Constant carrying the source text up to and
+// including the `=`. CPython reads that text from whichever follow-on
+// token holds the metadata: conversion first, format next, then the
+// closing brace.
 //
 // CPython: Parser/action_helpers.c:1564 _PyPegen_formatted_value
 func actionPgenFormattedValue(p *Parser, args ...any) any {
@@ -884,16 +886,31 @@ func actionPgenFormattedValue(p *Parser, args ...any) any {
 	debug, _ := argAt(args, 2).(*Token)
 	conv := fstringConversionChar(argAt(args, 3))
 	format := asExpr(argAt(args, 4))
+	rbrace, _ := argAt(args, 5).(*Token)
 	if conv == 0 && debug != nil && format == nil {
 		conv = 'r'
 	} else if conv == 0 {
 		conv = -1
 	}
-	return &ast.FormattedValue{
+	formattedValue := &ast.FormattedValue{
 		Value:      value,
 		Conversion: conv,
 		FormatSpec: format,
 		Pos:        ast.NoPos,
+	}
+	if debug == nil {
+		return formattedValue
+	}
+	var exprstr string
+	if rbrace != nil && len(rbrace.Metadata) > 0 {
+		exprstr = string(rbrace.Metadata)
+	}
+	return &ast.JoinedStr{
+		Values: []ast.Expr{
+			&ast.Constant{Value: exprstr, Pos: ast.NoPos},
+			formattedValue,
+		},
+		Pos: ast.NoPos,
 	}
 }
 

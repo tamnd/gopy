@@ -256,9 +256,17 @@ func (s *State) tokGetNormalMode() Tok {
 				s.commentNewline = s.blankline
 				return tok
 			}
-			if c == eof {
+			if c == eof && s.level == 0 {
 				return s.endmarker()
 			}
+			// When level > 0 (e.g. comment consumes '}' inside
+			// f'{expr#comment}'), fall through so the c == eof check
+			// below emits ERRORTOKEN for the unclosed paren. Mirrors
+			// CPython's tok_get_normal_mode where the comment branch
+			// does not return for non-extra-tokens mode and the EOF
+			// falls to the common c == EOF check.
+			//
+			// CPython: Parser/lexer/lexer.c:725 (comment falls through to EOF check)
 		}
 
 		if c == '\n' {
@@ -964,6 +972,14 @@ func (s *State) scanOperator(c int) Tok {
 	//
 	// CPython: Parser/lexer/lexer.c:1258
 	ftCursorValid := false
+	// savedInDebug captures the mode's inDebug flag BEFORE the bracket
+	// switch below can reset it to false. CPython calls set_ftstring_expr
+	// before the bracket switch that clears in_debug; gopy must recreate
+	// the same ordering by saving the flag here.
+	//
+	// CPython: Parser/lexer/lexer.c:1258 (punctuation block precedes
+	// the bracket switch at :1299).
+	savedInDebug := false
 	if (c == ':' || c == '}' || c == '!' || c == '{') &&
 		s.insideFString() && s.insideFStringExpr() {
 		m := s.curMode()
@@ -975,7 +991,20 @@ func (s *State) scanOperator(c int) Tok {
 		cursorInFormatWithDebug := cursor == 1 && (m.inDebug || m.inFormatSpec)
 		ftCursorValid = cursor == 0 || cursorInFormatWithDebug
 		if ftCursorValid {
-			s.updateFtstringExpr(byte(c))
+			savedInDebug = m.inDebug
+			// A `!` followed immediately by `=` is the `!=` operator, NOT
+			// an f-string conversion marker. Skip updateFtstringExpr so
+			// that lastExprEnd is not pinned to the position of `!` inside
+			// a compound comparison like f'{1!=2=}'. CPython takes the same
+			// path: the two-char token check reads past `=` before the
+			// one-char `!` can be treated as a conversion start.
+			//
+			// CPython: Parser/lexer/lexer.c:1282 (two-char check follows
+			// the is_punctuation block and consumes `=` before `!` stands
+			// alone as a conversion marker).
+			if c != '!' || s.peek() != '=' {
+				s.updateFtstringExpr(byte(c))
+			}
 		}
 	}
 	var tok Tok
@@ -1030,6 +1059,18 @@ func (s *State) scanOperator(c int) Tok {
 			if s.peek() == '=' {
 				c3 = s.peek()
 				s.nextC()
+			}
+		}
+		// A bare `=` (not `==`) at the top level of an f-string expression
+		// marks the start of a debug expression: f'{x=}'. CPython sets
+		// in_debug in the same position — after the two-char token check
+		// but before emitting the single-char EQUAL token.
+		//
+		// CPython: Parser/lexer/lexer.c:1382
+		if c == '=' && c2 == 0 && s.insideFString() && s.insideFStringExpr() {
+			m := s.curMode()
+			if m.curlyBracketDepth-m.curlyBracketExprStartDepth == 1 {
+				m.inDebug = true
 			}
 		}
 		tok = s.tokenSetup(classifyOp(c, c2, c3), s.start, s.cur)
@@ -1096,12 +1137,19 @@ func (s *State) scanOperator(c int) Tok {
 	case ',', ';', '~':
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	default:
+		// Emit ERRORTOKEN without pinning a message. CPython's
+		// tok_get_normal_mode does the same: it returns ERRORTOKEN for
+		// unrecognised characters (e.g. `$`) without calling
+		// _PyTokenizer_syntaxerror, so the parser's error-recovery path
+		// produces the context-appropriate message ("invalid syntax"
+		// outside f-strings, "f-string: expecting …" inside them).
+		//
+		// CPython: Parser/lexer/lexer.c:1338 (default case in tok_get_normal_mode)
 		s.done = eToken
-		s.recordError("invalid character")
 		tok = s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	if ftCursorValid && c != '{' {
-		s.setFtstringExpr(&tok, byte(c))
+		s.setFtstringExpr(&tok, byte(c), savedInDebug)
 	}
 	return tok
 }
@@ -1167,6 +1215,20 @@ func (s *State) popParen(c byte) bool {
 		return true
 	}
 	s.done = eToken
+	// Inside an f-string expression, a closing paren that mismatches
+	// the expression-opening '{' at the outermost expression depth uses
+	// the f-string-specific "f-string: unmatched '%c'" message.
+	//
+	// CPython: Parser/lexer/lexer.c:1335 INSIDE_FSTRING && opening == '{'
+	if s.insideFString() && open == '{' {
+		m := s.curMode()
+		prevBracket := m.curlyBracketDepth - 1
+		if prevBracket == m.curlyBracketExprStartDepth {
+			s.recordError(fmt.Sprintf(
+				"%c-string: unmatched '%c'", s.CurrentFStringPrefixChar(), c))
+			return false
+		}
+	}
 	// CPython: Parser/lexer/lexer.c:1345 — same-line uses the short
 	// form without "on line N", different lines pin the opener line.
 	if s.parenLineno[s.level] != s.lineno {

@@ -78,8 +78,15 @@ func (p *Parser) UpdateMemo(mark, ruleType int, node any) {
 // CPython: Parser/pegen.c:392 _PyPegen_lookahead
 func (p *Parser) Lookahead(positive bool, fn func(*Parser) any) bool {
 	mark := p.mark
+	// CPython saves and restores error_indicator across lookaheads so
+	// that an ERRORTOKEN encountered while probing a negative lookahead
+	// doesn't permanently block the recovery rules that follow.
+	//
+	// CPython: Parser/pegen.c:392 _PyPegen_lookahead
+	ei := p.errorIndicator
 	res := fn(p)
 	p.mark = mark
+	p.errorIndicator = ei
 	matched := !isNilResult(res)
 	return matched == positive
 }
@@ -100,6 +107,10 @@ func isNilResult(v any) bool {
 // a positive-lookahead block has a label; the body is identical to
 // Lookahead, the name is propagated by the generator into the
 // surrounding rule's diagnostic plumbing.
+//
+// CPython: Parser/pegen.c:402 _PyPegen_lookahead_with_name
+// LookaheadWithName is the named variant emitted by the generator.
+// Identical to Lookahead; errorIndicator is saved/restored via that call.
 //
 // CPython: Parser/pegen.c:402 _PyPegen_lookahead_with_name
 func (p *Parser) LookaheadWithName(positive bool, fn func(*Parser) any, _ string) bool {

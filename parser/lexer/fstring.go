@@ -345,17 +345,14 @@ func (s *State) updateFtstringExpr(cur byte) {
 		m.lastExprSize = size
 		m.lastExprEnd = -1
 	case '}', '!':
-		// Match CPython lexer.c:263, which writes last_expr_end on
-		// every `}`/`!`. The gopy parser does not yet track per-token
-		// metadata for the format-spec or conversion tokens, so the
-		// closing-brace token is the only path actionPgenInterpolation
-		// can read the expression source from. Guard the write so the
-		// first `:`/`!`/`}` wins; later `}` writes (which would point
-		// past the format spec) cannot clobber the correct value.
+		// Only advance lastExprEnd on the first `}`/`!` seen. The
+		// guard is intentional: a `!` that is part of the `!=`
+		// comparison operator must not advance lastExprEnd — that is
+		// handled by NOT calling updateFtstringExpr at all for `!=`.
+		// A later `}` that closes the format spec must not overwrite
+		// the correct lastExprEnd set by `:`.
 		//
-		// CPython: Parser/action_helpers.c:1519 _PyPegen_interpolation
-		// (uses the conversion or format-spec metadata when present,
-		// falling back to closing_brace->metadata).
+		// CPython: Parser/lexer/lexer.c:263 (_PyLexer_update_ftstring_expr)
 		if m.lastExprEnd == -1 {
 			m.lastExprEnd = s.inp - s.start
 		}
@@ -379,12 +376,18 @@ func (s *State) updateFtstringExpr(cur byte) {
 // allocation cannot fail, so the gopy port is void.
 //
 // CPython: Parser/lexer/lexer.c:114 set_ftstring_expr
-func (s *State) setFtstringExpr(tok *Tok, c byte) {
+// setFtstringExpr accepts wasInDebug (the inDebug state captured before the
+// bracket switch that resets it to false) so the check matches the pre-reset
+// value, mirroring CPython's call ordering where set_ftstring_expr fires
+// before the bracket switch that clears in_debug.
+//
+// CPython: Parser/lexer/lexer.c:1268 (set_ftstring_expr call site)
+func (s *State) setFtstringExpr(tok *Tok, c byte, wasInDebug bool) {
 	if c != '}' && c != ':' && c != '!' {
 		return
 	}
 	m := s.curMode()
-	if (!m.inDebug && m.stringKind != kindTString) || tok.Metadata != nil {
+	if (!wasInDebug && m.stringKind != kindTString) || tok.Metadata != nil {
 		return
 	}
 
