@@ -17,6 +17,7 @@ package objects
 
 import (
 	"fmt"
+	"strings"
 )
 
 // TypeVar mirrors CPython's typevarobject. The bound and constraints
@@ -206,19 +207,20 @@ func init() {
 // CPython: Objects/typevarobject.c:162 constevaluator_call (STRING branch)
 func constEvaluatorString(value Object) (Object, error) {
 	if t, ok := value.(*Tuple); ok {
-		s := "("
+		var b strings.Builder
+		b.WriteByte('(')
 		for i := 0; i < t.Len(); i++ {
 			if i > 0 {
-				s += ", "
+				b.WriteString(", ")
 			}
 			r, err := typingTypeRepr(t.Item(i))
 			if err != nil {
 				return nil, err
 			}
-			s += r
+			b.WriteString(r)
 		}
-		s += ")"
-		return NewStr(s), nil
+		b.WriteByte(')')
+		return NewStr(b.String()), nil
 	}
 	r, err := typingTypeRepr(value)
 	if err != nil {
