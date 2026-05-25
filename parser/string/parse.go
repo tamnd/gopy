@@ -158,7 +158,8 @@ stripped:
 // CPython: Parser/pegen_errors.c:130 _Pypegen_raise_decode_error
 // CPython: Objects/unicodeobject.c:6854 raise "unicodeescape"
 func wrapDecodeError(err error) error {
-	if de, ok := err.(*DecodeError); ok {
+	var de *DecodeError
+	if errors.As(err, &de) {
 		pos := fmt.Sprintf("%d-%d", de.Start, de.End)
 		return fmt.Errorf("(unicode error) 'unicodeescape' codec can't decode bytes in position %s: %s", pos, de.Reason)
 	}

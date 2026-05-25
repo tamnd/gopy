@@ -500,6 +500,20 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # compileFunctionLike mirrors codegen_function's type-params /
+      # defaults / annotations / closure / decorator wiring branch-for-branch.
+      # The complexity is the parity unit with Python/codegen.c.
+      - path: compile/codegen_stmt_funclike\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # unwindFblock mirrors codegen_unwind_fblock's per-kind dispatch
+      # table branch-for-branch. The cleanup sequences are the parity
+      # unit with Python/codegen.c.
+      - path: compile/codegen_stmt_control\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:
