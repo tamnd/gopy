@@ -12,12 +12,16 @@ import (
 )
 
 // setEntry is one slot in the set's open-addressed table.
+// dummy marks a slot that was deleted: the probe chain must
+// continue past it (tombstone) so that previously inserted entries
+// further in the chain are still reachable.
 //
-// CPython: Objects/setobject.c:L78 setentry
+// CPython: Objects/setobject.c:L78 setentry (DUMMY sentinel)
 type setEntry struct {
-	hash int64
-	key  Object
-	used bool
+	hash  int64
+	key   Object
+	used  bool
+	dummy bool // tombstone: deleted but probe chain continues
 }
 
 // Set is the mutable Python set type.
@@ -196,7 +200,10 @@ func (s *Set) Discard(key Object) error {
 	if err != nil || !ok {
 		return err
 	}
-	s.entries[idx] = setEntry{}
+	// Mark as tombstone so probe chains threading through this slot
+	// remain intact. grow() rebuilds the table without tombstones.
+	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	return nil
 }
@@ -230,12 +237,25 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 	mask := uint64(len(s.entries) - 1)
 	i := uint64(h) & mask
 	perturb := uint64(h)
+	firstDummy := -1 // index of first tombstone slot in probe chain
 	for {
 		e := &s.entries[i]
 		if !e.used {
-			return int(i), false, nil
-		}
-		if e.hash == h {
+			if e.dummy {
+				// Tombstone: probe chain continues, but remember this
+				// slot as a candidate for insertion.
+				// CPython: Objects/setobject.c:L140 DUMMY sentinel
+				if firstDummy < 0 {
+					firstDummy = int(i)
+				}
+			} else {
+				// Genuinely empty: chain ends here.
+				if firstDummy >= 0 {
+					return firstDummy, false, nil
+				}
+				return int(i), false, nil
+			}
+		} else if e.hash == h {
 			eq, err := RichCmpBool(e.key, key, CompareEQ)
 			if err != nil {
 				return 0, false, err
@@ -691,20 +711,7 @@ func setDiscardMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: discard() takes exactly one argument")
 	}
-	s := args[0].(*Set)
-	h, err := Hash(args[1])
-	if err != nil {
-		return nil, err
-	}
-	idx, ok, err := s.lookup(h, args[1])
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		s.entries[idx] = setEntry{used: false}
-		s.used--
-	}
-	return None(), nil
+	return None(), args[0].(*Set).Discard(args[1])
 }
 
 func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -721,9 +728,15 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("KeyError: %v", args[1])
+		r, err2 := Repr(args[1])
+		if err2 != nil {
+			r = "?"
+		}
+		return nil, fmt.Errorf("KeyError: %s", r)
 	}
-	s.entries[idx] = setEntry{used: false}
+	// Tombstone: mark deleted but keep probe chain intact.
+	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	return None(), nil
 }
@@ -735,7 +748,7 @@ func setPopMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	for i, e := range s.entries {
 		if e.used {
-			s.entries[i] = setEntry{used: false}
+			s.entries[i] = setEntry{dummy: true}
 			s.used--
 			return e.key, nil
 		}
