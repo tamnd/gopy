@@ -137,7 +137,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
 | test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
 | test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
-| test_fstring              | 1871 | ready | parser farthest-token mis-points to `import ast` line 10 | parser drops mid-file but reports wrong location; root cause around f-string assertAllRaise corpus near line 880-900 |
+| test_fstring              | 1871 | done  | **90/90 OK** | none. f-string error routing (tokenizeFullSourceCheckForErrors InsideFString guard), UnicodeWriter.Finish slab, format protocol, str.__format__, decode/warn chain |
 | test_global               |  214 | 2 errors | Ran 20, FAILED (errors=2). test_caught_exception_group needs CHECK_EG_MATCH (PEP 654); test_type_alias needs CALL_INTRINSIC_1 oparg 12 (PEP 695). 18/20 pass after match-seq + frame back-pointer + symtable offset fixes. | spec 1719 D-test_global |
 | test_metaclass            |  302 | OK | Ran 1, OK | doctest passes end-to-end after ClassDef ex_call, __prepare__ wrap fix, StringIO encoding/errors, function-metaclass + type.__prepare__, keyword Pos via withSpan, and PyObject_GetOptionalAttr semantics on __prepare__ lookup |
 | test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
@@ -313,7 +313,7 @@ shows `done` for every non-deferred row.
 - [ ] P2: ASDL grammar + node-type parity (diff Python.asdl, regen nodes_gen.go)
 - [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
-- [ ] P5: pegen.c + action_helpers.c citation audit + close `test_syntax / test_eof / test_fstring / test_tstring / test_named_expressions / test_string_literals / test_unicode_identifiers`
+- [x] P5 (partial): `test_fstring` 90/90 (f-string error routing, format protocol, str.__format__); `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings plumbing); `test_syntax` blocked on PEP 695 typing import
 - [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
 - [ ] P7: symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
 - [ ] P8: `test_int_literal` re-run
@@ -2405,3 +2405,102 @@ CPython:
 - `Python/formatter_unicode.c:1584 format_long_internal default branch`
 - `Python/formatter_unicode.c:1642 format_float_internal default branch`
 - `Python/formatter_unicode.c:1685 format_unicode_internal default branch`
+
+### P7 closer 37: test_fstring 90/90 (f-string error routing + format protocol)
+
+The five `test_syntax_error_after_debug` cases (`f'{1=}{;'`,
+`f'{1=}{+;'`, `f'{1=}{2}{;'`, `f'{1=}{3}{;'`, `f'{1=}{1;'`) all
+expected `f-string: expecting a valid expression after '{'` but gopy
+reported `f-string: expecting '}'`. A second group of cases needed
+`PyObject_Format` and `str.__format__` wired correctly.
+
+**f-string error routing (main fix)**
+
+The root cause was in `tokenizeFullSourceCheckForErrors`
+(`parser/pegen/errors.go`). After both parse passes, `SetSyntaxError`
+drains the lexer to surface any tokenizer-side structured error. For
+`f'{;'`, the second parse pass's `invalid_fstring_replacement_field`
+rule had already pinned `"f-string: expecting a valid expression after
+'{'"` (the correct error). During the drain, the `'` at the end of
+`f'{;'` was scanned in normal mode while still inside the `{`
+expression context. The lexer saw `'` as the opening of a new string
+literal matching the outer f-string's quote style, hit EOF immediately,
+and emitted `ERRORTOKEN` + `"f-string: expecting '}'"`. That tokenizer
+error then overwrote the parser-side error, yielding the wrong message.
+
+CPython avoids this by checking `tok_mode_stack_index` before promoting
+the tokenizer error. The guard lives at
+`Parser/pegen_errors.c:212`:
+
+```c
+if (PyErr_Occurred() && p->tok->tok_mode_stack_index <= 0) {
+    /* lif the lexer error; don't touch it when inside f-string */
+}
+```
+
+The condition `p->tok->tok_mode_stack_index > 0` means "still inside at
+least one f-string expression level". When that is true the loop breaks
+immediately, restoring the old parser-side error instead.
+
+The Go port adds the matching guard using `InsideFString()`:
+
+```go
+if p.tok.Err() != nil {
+    // Inside an f-string the expression-level parser error
+    // should propagate; a tokenizer error produced by draining
+    // the rest of the source (e.g. the outer closing quote being
+    // scanned as an unterminated inner string -> "f-string:
+    // expecting '}'") must NOT swallow it.
+    //
+    // CPython: Parser/pegen_errors.c:212
+    // if (PyErr_Occurred() && p->tok->tok_mode_stack_index <= 0)
+    if p.tok.InsideFString() {
+        break
+    }
+    // ... existing code to lift the lexer error
+}
+```
+
+`InsideFString()` returns `s.tokModeStackIndex > 0`, the direct
+equivalent of CPython's `tok_mode_stack_index > 0` check. When the
+drain hits an ERRORTOKEN with a structured lexer error and the lexer
+is still inside an f-string mode stack, we break out of the drain
+loop without overwriting the saved error.
+
+**nil-tok guard in fillToken**
+
+`TestConcatenateStringsMixedBytesFails` was panicking because the test
+constructs a bare `&Parser{}` with `p.tok == nil` to exercise
+`ConcatenateStrings` directly. `ConcatenateStrings` calls
+`RaiseSyntaxError`, which calls `Peek()`, which calls `fillToken()`,
+which called `p.tok.Get()` without checking for nil. Added
+`if p.tok == nil { return -1 }` before the `p.tok.Get()` call.
+
+**format protocol + str.__format__**
+
+The remaining test_fstring failures included cases using `format()`
+and `f'{x!s}'` / `f'{x!r}'`. Three gaps fixed together:
+
+1. `objects/protocol.go PyObject_Format`: built-in types with a Go-level
+   Format slot short-circuit to `str(o)` for an empty spec; user-defined
+   types always call `__format__` via attribute lookup regardless of spec,
+   mirroring `Objects/abstract.c:698 PyObject_Format`.
+
+2. `objects/str_bind.go`: wired `str.__format__` so `format("x", "s")`
+   returns `"x"` instead of raising `AttributeError`. Also wired
+   `str.__mod__` (`%`-formatting) and the `str.__new__` type-conversion
+   path so `str(x)` dispatches through the proper slot.
+
+3. `objects/module.go module.__repr__`: was using `%q` (Go-style escaped
+   double-quoted strings), producing `<module "ast" from "/path">`.
+   CPython uses single-unescaped quotes:
+   `<module 'ast' from '/path'>`. Switched to `'%s' from '%s'` format.
+
+Net effect: `test_fstring` goes from 29F+15E to 0F+0E, 90/90 passing.
+`go test ./...` clean.
+
+CPython:
+- `Parser/pegen_errors.c:212 tokenizeFullSourceCheckForErrors f-string guard`
+- `Objects/abstract.c:698 PyObject_Format`
+- `Objects/unicodeobject.c str___format___impl`
+- `Objects/moduleobject.c:234 module_repr`
