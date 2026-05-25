@@ -313,7 +313,7 @@ shows `done` for every non-deferred row.
 - [ ] P2: ASDL grammar + node-type parity (diff Python.asdl, regen nodes_gen.go)
 - [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
-- [x] P5 (partial): `test_fstring` 90/90 (f-string error routing, format protocol, str.__format__); `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings plumbing); `test_syntax` blocked on PEP 695 typing import
+- [x] P5 (partial): `test_fstring` 90/90 (f-string error routing, format protocol, str.__format__); `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings plumbing); `test_syntax` 45/45 (7 skipped) — see session notes below
 - [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
 - [x] P7 (grammar): `test_grammar` 75/75 — SyntaxWarning missed-comma, PEP 649 function annotations, name mangling, non-simple annotation targets, MRO isolation for class annotations, break-in-finally stackdepth
 - [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
@@ -2616,3 +2616,101 @@ stack depths for `break_in_finally_after_return1`.
 CPython: `Python/codegen.c:544 codegen_unwind_fblock FB_FINALLY_TRY preserve_tos PushFBlock POP_VALUE`.
 
 **Gate result**: `test/cpython/test_grammar.py` 75/75. `go test ./...` clean.
+
+## Session notes: test_syntax.py 45/45
+
+`test/cpython/test_syntax.py` started this session at FAILED (failures=1, 3
+sub-failures). All three are fixed. Notes below.
+
+### Levenshtein suggestion: `_suggestions._generate_suggestions`
+
+Test line 1861 expected `"Did you mean 'if'?"` but gopy returned `'or'`.
+
+The `_suggestions` module didn't exist. Ported `Modules/_suggestions.c` +
+`Python/suggestions.c` as `module/_suggestions/module.go`. The algorithm
+uses `MOVE_COST=2`, `CASE_COST=1` and the LEAST_FIVE_BITS case-detection
+trick (`a&31 == b&31` checks whether two bytes share the same low five bits,
+which catches ASCII letter pairs that differ only in case).
+
+The key behavioral detail: CPython uses strict `<` when updating
+`max_distance` after finding a candidate with distance D. After finding the
+first match, `max_distance = min(original, D - 1)`. This means that if two
+candidates have the same distance, the first one in iteration order wins and
+the second is excluded. `'if'` appears before `'or'` in `keyword.kwlist`
+(index 7 vs 16), so `_generate_suggestions(keyword.kwlist, 'iff')` returns
+`'if'`.
+
+CPython: `Modules/_suggestions.c:1 PyInit__suggestions`,
+`Python/suggestions.c:1 _Py_Levenshtein_distance`.
+
+### RAISE_ERROR_KNOWN_LOCATION: `{1:2, 3:4, 5}` not raising SyntaxError
+
+The `invalid_kvpair` grammar rule's alt 0 action is:
+
+```
+RAISE_ERROR_KNOWN_LOCATION(p, PyExc_SyntaxError,
+    a->lineno, a->end_col_offset - 1, a->end_lineno, -1,
+    "':' expected after dictionary key")
+```
+
+The action translator (`tools/parser_gen/action.go`) failed to translate
+this for three independent reasons:
+
+1. `PyExc_SyntaxError` was not in `pyConstants`. Added it (and
+   `PyExc_IndentationError`, `PyExc_TabError`) as quoted kind strings.
+2. `a->end_col_offset` and `a->end_lineno` had no member-access cases.
+   Added `end_col_offset` → `extractEndColOffset`, `end_lineno` →
+   `extractEndLineno`, `col_offset` → `extractColOffset`.
+3. The arithmetic `-` was not in `parseInfix`'s operator set. Added
+   `+`, `-`, `*`, `/`, `%`.
+
+After regenerating `parser_gen.go`, `invalid_kvpair` alt 0 now emits:
+
+```go
+raiseAction(p, "RAISE_ERROR_KNOWN_LOCATION", p, "SyntaxError",
+    extractLineno(a), extractEndColOffset(a)-1,
+    extractEndLineno(a), -1,
+    "':' expected after dictionary key")
+```
+
+`raiseAction` in `action_helpers_gen.go` handles `RAISE_ERROR_KNOWN_LOCATION`
+by reading positions from args[2..5] via `toInt()` and building a `Pos`
+with an explicit caret rather than using the current farthest token.
+
+CPython: `Parser/pegen.h:211 RAISE_ERROR_KNOWN_LOCATION`,
+`Grammar/python.gram:1502 invalid_kvpair`.
+
+### PyCF_TYPE_COMMENTS: `ast.parse(source, type_comments=True)` returning 0
+
+The flag chain was broken. `ast.parse(type_comments=True)` sets
+`PyCF_TYPE_COMMENTS = 0x1000` in the compile flags, but `builtins/compile.go`
+was calling `ParseBytes` / `ParseString` (no flags arg) instead of
+`ParseBytesFlags` / `ParseStringFlags`. Fixed by threading `parsed.flags`
+through.
+
+`pegenFlags()` in `parser/parser.go` maps `PyCFTypeComments` to
+`pegen.FlagTypeComments`. `pegen.New()` calls `tok.SetTypeComments(true)` when
+that flag is set so the lexer's type-comment path activates.
+
+CPython: `Parser/peg_api.c:795 PyCF_TYPE_COMMENTS → PyPARSE_TYPE_COMMENTS`,
+`Parser/pegen.c:815 tok->type_comments = (flags & PyPARSE_TYPE_COMMENTS) > 0`.
+
+### Other fixes landed in the same session
+
+- `PyCF_ONLY_AST` / `PyCF_OPTIMIZED_AST` no longer raise `ValueError` in
+  `builtins/compile.go`. They return a sentinel `int(0)` so callers that
+  only check for `SyntaxError` (codeop, `_find_keyword_typos`) see a
+  successful parse. The proper Python AST node tree lands with
+  `_ast_unparse` (spec task #74).
+- `_IncompleteInputError` registered as a builtin exception.
+- `exc.SyntaxErr.Metadata` tuple (lastStmtLineno, lastStmtColOff,
+  sourceText) populated in `errors/exc_from_parser.go` for
+  `traceback.py._find_keyword_typos`.
+  CPython: `Python/errors.c:902 _PyErr_SetSyntaxErrorMetadata`.
+- `GetInvalidDelTarget`, `GetInvalidStarTarget`, `GetInvalidForTarget`
+  ported from `Parser/action_helpers.c:1168 _PyPegen_get_invalid_target`.
+- `seqFirstAny` helper (equivalent to `PyPegen_first_item` macro).
+- `ErrIncompleteInput` variable and incomplete-input check moved into
+  `emit.go` so regeneration is self-contained.
+
+**Gate result**: `test/cpython/test_syntax.py` 45/45 (7 skipped). `go test ./...` clean (2 pre-existing failures in `compile` and `vm` are not regressions).
