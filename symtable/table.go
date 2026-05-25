@@ -59,3 +59,17 @@ func (t *Table) LookupTypeParams(parent any) *Entry {
 	}
 	return t.Blocks[typeParamSubexprKey{parent, -1}]
 }
+
+// LookupTypeParamSubexpr returns the TypeVariableBlock for a type
+// parameter's bound or default sub-expression. The slot convention
+// mirrors visitTypeParamSubexpr: TypeVar uses slot=0 for bound and
+// slot=1 for default; TypeVarTuple and ParamSpec use slot=0 for
+// default. Returns nil if no such block was registered.
+//
+// CPython: Python/symtable.c:2597 symtable_visit_type_param_bound_or_default
+func (t *Table) LookupTypeParamSubexpr(parent any, slot int) *Entry {
+	if t == nil {
+		return nil
+	}
+	return t.Blocks[typeParamSubexprKey{parent, slot}]
+}

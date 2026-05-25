@@ -51,6 +51,7 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		return nil, fmt.Errorf("TypeError: __build_class__: name is not a string")
 	}
 	rawBases := args[2:]
+	origBasesTuple := objects.NewTuple(append([]objects.Object(nil), rawBases...))
 	resolved, err := resolveBases(rawBases)
 	if err != nil {
 		return nil, err
@@ -148,6 +149,29 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 
 	if err := runClassBody(fn, ns); err != nil {
 		return nil, err
+	}
+
+	// When __mro_entries__ rewrote the bases, store the original bases
+	// tuple as __orig_bases__ in the class namespace so typing.get_original_bases
+	// and similar introspection tools can recover the unevaluated forms.
+	//
+	// CPython: Python/bltinmodule.c:208 builtin___build_class__
+	// (if (bases != orig_bases) PyMapping_SetItemString(ns, "__orig_bases__", orig_bases))
+	if len(rawBases) > 0 {
+		basesChanged := len(resolved) != len(rawBases)
+		if !basesChanged {
+			for i, r := range resolved {
+				if r != rawBases[i] {
+					basesChanged = true
+					break
+				}
+			}
+		}
+		if basesChanged {
+			if d, ok := ns.(*objects.Dict); ok {
+				_ = d.SetItem(objects.NewStr("__orig_bases__"), origBasesTuple)
+			}
+		}
 	}
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}

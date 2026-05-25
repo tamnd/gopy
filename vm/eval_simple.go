@@ -1091,7 +1091,18 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		v := e.popObject()
 		dst := e.f.Locals
 		if dst == nil {
-			dst = e.f.Globals
+			if uint32(e.f.Code.Flags)&compile.CoOptimized != 0 {
+				// TypeParametersBlock and similar synthetic optimized scopes
+				// emit STORE_NAME for TypeVar names but have no Locals dict
+				// yet. Create one on demand so the name lives in the
+				// function's local scope and does not escape to globals.
+				// CPython: Python/frameobject.c:306 _PyFrameGetLocals (lazy)
+				ns := objects.NewDict()
+				e.f.Locals = ns
+				dst = ns
+			} else {
+				dst = e.f.Globals
+			}
 		}
 		return nil, storeIn(dst, keyObj, v)
 	case compile.STORE_GLOBAL:

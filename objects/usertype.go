@@ -101,7 +101,10 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
-	t := NewType(name, bases)
+	t, err := newTypeE(name, bases)
+	if err != nil {
+		return nil, err
+	}
 	t.IsUser = true
 	// Heap (user) types are mutable: drop the IMMUTABLETYPE flag that
 	// NewType stamps on by default so collections.abc registrations
@@ -364,6 +367,15 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			// __qualname__ is also stored on the type via the getset
 			// path (typeSetQualname), so do not also stash a raw descr
 			// for it: the descr table would shadow the getset.
+			continue
+		case "__type_params__":
+			// CPython: Objects/typeobject.c type_new_impl extracts
+			// __type_params__ from the namespace into tp_typeparams.
+			if tp, ok := v.(*Tuple); ok {
+				t.TypeParams = tp
+			}
+			// Do not install __type_params__ as a regular descr: the
+			// getset on typeType serves all lookups via the MRO.
 			continue
 		}
 		SetTypeDescr(t, s.v, v)

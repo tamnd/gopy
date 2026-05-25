@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"fmt"
 	"reflect"
 	"unsafe"
 )
@@ -156,6 +157,13 @@ type Type struct {
 	// CPython: Include/object.h Py_TPFLAGS_HEAPTYPE
 	IsUser bool
 
+	// TypeParams holds the PEP 695 type-parameter tuple set via
+	// __type_params__ in the class body. nil means "not set" which
+	// __type_params__ exposes as an empty tuple.
+	//
+	// CPython: Include/cpython/typeobject.h tp_typeparams
+	TypeParams Object
+
 	// Slots holds the resolved __slots__ names for this user type, in
 	// declaration order. Empty when the class did not declare __slots__
 	// or the class is a built-in. Each name has a fixed index into the
@@ -308,6 +316,14 @@ const (
 	//
 	// CPython: Include/object.h:289 Py_TPFLAGS_IMMUTABLETYPE
 	TpFlagImmutable uint64 = 1 << 8
+	// TpFlagBasetype mirrors Py_TPFLAGS_BASETYPE. When clear, the type
+	// cannot be used as a base class and type.__new__ raises
+	// "type '...' is not an acceptable base type". Set by default on
+	// every type created via NewType; explicitly cleared for types like
+	// TypeAliasType that prohibit subclassing.
+	//
+	// CPython: Include/object.h:264 Py_TPFLAGS_BASETYPE
+	TpFlagBasetype uint64 = 1 << 10
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
@@ -405,7 +421,7 @@ func (t *Type) SharedKeys() *SharedKeys { return t.sharedKeys }
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
 //
 // CPython: Objects/typeobject.c:L6361 PyType_Type
-var typeType = &Type{Name: "type"}
+var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype}
 
 func init() {
 	typeType.typ = typeType
@@ -417,6 +433,35 @@ func init() {
 	typeType.Bases = []*Type{objectType}
 	typeType.MRO = []*Type{typeType, objectType}
 	typeType.Hash = identityHash
+
+	// CPython: Objects/typeobject.c type_type_params getset
+	SetTypeDescr(typeType, "__type_params__", NewGetSetDescr("__type_params__",
+		func(o Object) (Object, error) {
+			t, ok := o.(*Type)
+			if !ok {
+				return NewTuple(nil), nil
+			}
+			if t.TypeParams == nil {
+				return NewTuple(nil), nil
+			}
+			return t.TypeParams, nil
+		},
+		func(o Object, v Object) error {
+			t, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: __type_params__ can only be set on types")
+			}
+			if v == None() || v == nil {
+				t.TypeParams = nil
+				return nil
+			}
+			if _, ok := v.(*Tuple); !ok {
+				return fmt.Errorf("TypeError: __type_params__ must be a tuple")
+			}
+			t.TypeParams = v
+			return nil
+		},
+	))
 }
 
 // identityHash hashes an object by its pointer address. Mirrors
@@ -446,13 +491,42 @@ func TypeType() *Type {
 
 // NewType constructs a built-in type with the given name and bases.
 // Bases must be non-empty for everything except `object`. The MRO
-// is computed via C3 linearization.
+// is computed via C3 linearization. Panics if C3 fails; use newTypeE
+// when the caller must surface MRO errors as Python exceptions.
 //
-// CPython: Objects/typeobject.c:L4153 type_new (adapted from)
+// CPython: Objects/typeobject.c:4153 type_new (adapted from)
 func NewType(name string, bases []*Type) *Type {
-	t := &Type{Name: name, Bases: bases, TpFlags: TpFlagImmutable}
+	t, err := newTypeE(name, bases)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+// newTypeE is the error-returning variant of NewType used by
+// NewUserTypeMetaE so an inconsistent MRO raises TypeError instead of
+// crashing.
+//
+// CPython: Objects/typeobject.c:4153 type_new (adapted from)
+func newTypeE(name string, bases []*Type) (*Type, error) {
+	// Check that every base allows subclassing.
+	//
+	// CPython: Objects/typeobject.c:3638 type_new_set_base
+	for _, b := range bases {
+		if b == nil {
+			continue
+		}
+		if b.TpFlags&TpFlagBasetype == 0 {
+			return nil, fmt.Errorf("TypeError: type '%s' is not an acceptable base type", b.Name)
+		}
+	}
+	t := &Type{Name: name, Bases: bases, TpFlags: TpFlagImmutable | TpFlagBasetype}
 	t.init(typeType)
-	t.MRO = c3Linearize(t)
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return nil, err
+	}
+	t.MRO = mro
 	for _, b := range bases {
 		if b == nil {
 			continue
@@ -475,7 +549,7 @@ func NewType(name string, bases []*Type) *Type {
 	//
 	// CPython: Objects/typeobject.c:8712 type_ready_inherit
 	inheritSlotsAllMRO(t)
-	return t
+	return t, nil
 }
 
 // addSubclass appends sub to t.subclasses via a weak reference. CPython

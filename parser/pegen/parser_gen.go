@@ -11381,13 +11381,16 @@ func parseRule_invalid_legacy_expression(p *Parser) any {
 }
 
 // parseRule_invalid_type_param parses invalid_type_param.
+//
+// CPython: Grammar/python.gram:1231 invalid_type_param
 func parseRule_invalid_type_param(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
 	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_type_param); ok { return v }
 	mark := p.Mark()
 	_ = mark
-	// alt 0
+	// alt 0: '*' NAME ':' expression  (TypeVarTuple with bound/constraints)
+	// CPython: Grammar/python.gram:1231 RAISE_SYNTAX_ERROR_STARTING_FROM(colon, ...)
 	{
 		if v := func() any {
 			op := p.ExpectToken(token.STAR)
@@ -11398,18 +11401,21 @@ func parseRule_invalid_type_param(p *Parser) any {
 			_ = a
 			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
-			_ = colon
 			e := parseRule_expression(p)
 			if e == nil { return nil }
-			_ = e
-			return []any{op, a, colon, e}
+			msg := "cannot use bound with TypeVarTuple"
+			if _, isTuple := e.(*ast.Tuple); isTuple {
+				msg = "cannot use constraints with TypeVarTuple"
+			}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, msg))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v
 		}
 		p.Reset(mark)
 	}
-	// alt 1
+	// alt 1: '**' NAME ':' expression  (ParamSpec with bound/constraints)
+	// CPython: Grammar/python.gram:1236 RAISE_SYNTAX_ERROR_STARTING_FROM(colon, ...)
 	{
 		if v := func() any {
 			op := p.ExpectToken(token.DOUBLESTAR)
@@ -11420,11 +11426,13 @@ func parseRule_invalid_type_param(p *Parser) any {
 			_ = a
 			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
-			_ = colon
 			e := parseRule_expression(p)
 			if e == nil { return nil }
-			_ = e
-			return []any{op, a, colon, e}
+			msg := "cannot use bound with ParamSpec"
+			if _, isTuple := e.(*ast.Tuple); isTuple {
+				msg = "cannot use constraints with ParamSpec"
+			}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, msg))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v

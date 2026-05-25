@@ -119,7 +119,16 @@ func (p *Parser) SetSyntaxError() {
 		if last.Type == token.DEDENT {
 			msg = "unexpected unindent"
 		}
-		pos := perrors.Pos{Lineno: last.Lineno, ColOff: last.ColOff, EndLine: last.EndLine, EndCol: last.EndCol}
+		colOff := last.ColOff
+		if colOff < 0 {
+			// tokExtraTokens is off, so INDENT/DEDENT carry ColOff=-1.
+			// Fall back to start-of-line (col 0) so the SyntaxError
+			// gets a non-None offset attribute.
+			// CPython: Parser/pegen_errors.c raises with col_offset=0 for
+			// these when no exact position is available.
+			colOff = 0
+		}
+		pos := perrors.Pos{Lineno: last.Lineno, ColOff: colOff, EndLine: last.EndLine, EndCol: last.EndCol}
 		p.recordError(perrors.KindIndentation, pos, msg)
 		return
 	}

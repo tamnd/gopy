@@ -155,6 +155,7 @@ func UnaryListToTuple(ts *state.Thread, v objects.Object) (objects.Object, error
 }
 
 // UnaryTypevar builds a PEP 695 TypeVar(name) runtime object.
+// PEP 695 type parameters always have infer_variance=True.
 //
 // CPython: Python/intrinsics.c:200 make_typevar
 func UnaryTypevar(ts *state.Thread, v objects.Object) (objects.Object, error) {
@@ -162,7 +163,9 @@ func UnaryTypevar(ts *state.Thread, v objects.Object) (objects.Object, error) {
 	if !ok {
 		return nil, errors.New("TypeError: TypeVar name must be a str")
 	}
-	return objects.NewTypeVar(name.Value(), nil, nil), nil
+	tv := objects.NewTypeVar(name.Value(), nil, nil)
+	tv.InferVariance = true
+	return tv, nil
 }
 
 // UnaryParamspec builds a PEP 695 ParamSpec(name) runtime object.
@@ -173,7 +176,9 @@ func UnaryParamspec(ts *state.Thread, v objects.Object) (objects.Object, error) 
 	if !ok {
 		return nil, errors.New("TypeError: ParamSpec name must be a str")
 	}
-	return objects.NewParamSpec(name.Value()), nil
+	ps := objects.NewParamSpec(name.Value())
+	ps.InferVariance = true
+	return ps, nil
 }
 
 // UnaryTypevartuple builds a PEP 695 TypeVarTuple(name) runtime object.
@@ -216,5 +221,7 @@ func UnaryTypealias(ts *state.Thread, v objects.Object) (objects.Object, error) 
 	if !ok {
 		return nil, errors.New("TypeError: type alias name must be a str")
 	}
-	return objects.NewTypeAlias(name.Value(), tup.Item(1), tup.Item(2)), nil
+	a := objects.NewTypeAlias(name.Value(), tup.Item(1), tup.Item(2))
+	a.Module = objects.TypealiasModule()
+	return a, nil
 }

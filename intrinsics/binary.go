@@ -90,9 +90,10 @@ func BinaryPrepReraiseStar(ts *state.Thread, orig, excs objects.Object) (objects
 	return group, nil
 }
 
-// BinaryTypevarWithBound builds TypeVar(name, bound=...). CPython
-// passes the bound as a lazy-eval function (the evaluate_bound thunk);
-// gopy stores whatever the caller pushed so __bound__ returns it.
+// BinaryTypevarWithBound builds TypeVar(name, bound=...). The bound
+// argument is the lazy-eval thunk compiled by codegen_type_param_bound_or_default;
+// it is stored in EvaluateBound so __bound__ calls it on first access.
+// PEP 695 type parameters always have infer_variance=True.
 //
 // CPython: Python/intrinsics.c:244 make_typevar_with_bound
 func BinaryTypevarWithBound(ts *state.Thread, name, evaluateBound objects.Object) (objects.Object, error) {
@@ -100,10 +101,15 @@ func BinaryTypevarWithBound(ts *state.Thread, name, evaluateBound objects.Object
 	if !ok {
 		return nil, errors.New("TypeError: TypeVar name must be a str")
 	}
-	return objects.NewTypeVar(n.Value(), evaluateBound, nil), nil
+	tv := objects.NewTypeVar(n.Value(), nil, nil)
+	tv.EvaluateBound = evaluateBound
+	tv.InferVariance = true
+	return tv, nil
 }
 
-// BinaryTypevarWithConstraints builds TypeVar(name, *constraints).
+// BinaryTypevarWithConstraints builds TypeVar(name, *constraints). The
+// constraints argument is the lazy-eval thunk; stored in EvaluateConstraints.
+// PEP 695 type parameters always have infer_variance=True.
 //
 // CPython: Python/intrinsics.c:252 make_typevar_with_constraints
 func BinaryTypevarWithConstraints(ts *state.Thread, name, evaluateConstraints objects.Object) (objects.Object, error) {
@@ -111,7 +117,10 @@ func BinaryTypevarWithConstraints(ts *state.Thread, name, evaluateConstraints ob
 	if !ok {
 		return nil, errors.New("TypeError: TypeVar name must be a str")
 	}
-	return objects.NewTypeVar(n.Value(), nil, evaluateConstraints), nil
+	tv := objects.NewTypeVar(n.Value(), nil, nil)
+	tv.EvaluateConstraints = evaluateConstraints
+	tv.InferVariance = true
+	return tv, nil
 }
 
 // BinarySetFunctionTypeParams attaches __type_params__ to a function.
@@ -132,20 +141,22 @@ func BinarySetFunctionTypeParams(ts *state.Thread, fn, params objects.Object) (o
 	return fn, nil
 }
 
-// BinarySetTypeparamDefault sets a TypeVar/ParamSpec/TypeVarTuple's
-// __default__ slot. Added in 3.13 alongside PEP 696.
+// BinarySetTypeparamDefault stores the lazy evaluate_default thunk on a
+// TypeVar/ParamSpec/TypeVarTuple. The thunk is called the first time
+// __default__ is read; the result is then cached. PEP 695 syntax always
+// passes a closure thunk; the constructor path sets Default directly.
 //
-// CPython: Python/intrinsics.c set_typeparam_default
-func BinarySetTypeparamDefault(ts *state.Thread, typeparam, defaultVal objects.Object) (objects.Object, error) {
+// CPython: Python/intrinsics.c:265 set_typeparam_default
+func BinarySetTypeparamDefault(ts *state.Thread, typeparam, thunk objects.Object) (objects.Object, error) {
 	switch tp := typeparam.(type) {
 	case *objects.TypeVar:
-		tp.Default = defaultVal
+		tp.EvaluateDefault = thunk
 		tp.HasDefault = true
 	case *objects.ParamSpec:
-		tp.Default = defaultVal
+		tp.EvaluateDefault = thunk
 		tp.HasDefault = true
 	case *objects.TypeVarTuple:
-		tp.Default = defaultVal
+		tp.EvaluateDefault = thunk
 		tp.HasDefault = true
 	default:
 		return nil, errors.New("TypeError: set_typeparam_default expects TypeVar/ParamSpec/TypeVarTuple")

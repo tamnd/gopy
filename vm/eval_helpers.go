@@ -695,21 +695,17 @@ func storeSlice(container, start, stop, value objects.Object) error {
 //
 // CPython: Objects/dictobject.c _PyDict_LoadGlobal
 func (e *evalState) dictLoadGlobal(globals, builtins, name objects.Object) objects.Object {
-	if d, ok := globals.(*objects.Dict); ok {
-		if v, gerr := d.GetItem(name); gerr != nil {
-			e.pendingErr = gerr
-			return nil
-		} else if v != nil {
-			return v
-		}
+	if v, found, err := objects.MappingGetOptionalItem(globals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
+		return v
 	}
-	if d, ok := builtins.(*objects.Dict); ok {
-		if v, gerr := d.GetItem(name); gerr != nil {
-			e.pendingErr = gerr
-			return nil
-		} else if v != nil {
-			return v
-		}
+	if v, found, err := objects.MappingGetOptionalItem(builtins, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
+		return v
 	}
 	return nil
 }

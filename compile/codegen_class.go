@@ -126,16 +126,21 @@ func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) erro
 	}
 
 	npos := len(s.Bases)
+	for _, b := range s.Bases {
+		if err := c.visitExpr(b); err != nil {
+			return err
+		}
+	}
+	// .generic_base (Generic[T,...]) is appended after the explicit bases,
+	// matching CPython's codegen_class ordering: SUBSCRIPT_GENERIC result
+	// lands last so orig_bases = (explicit..., Generic[T,...]).
+	//
+	// CPython: Python/codegen.c:1657-1672 codegen_class (generic bases)
 	if withGenericBase {
 		if err := c.nameOpLoad(".generic_base", loc(s)); err != nil {
 			return err
 		}
 		npos++
-	}
-	for _, b := range s.Bases {
-		if err := c.visitExpr(b); err != nil {
-			return err
-		}
 	}
 	nargs := int32(2 + npos)
 	if len(s.Keywords) > 0 {
@@ -158,7 +163,8 @@ func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) erro
 
 // emitClassCallArgsEx is the ex_call path for ClassDef. The stack at
 // entry already carries [__build_class__, NULL, body_fn, name]; with
-// withGenericBase we also load .generic_base before the user bases.
+// withGenericBase we append .generic_base after the user bases so
+// orig_bases = (user_base1, ..., Generic[T,...]).
 // The walk mirrors starunpack_helper_impl: plain bases push and either
 // stay loose (no star seen yet) or LIST_APPEND into the in-progress
 // list, while a *base triggers BUILD_LIST pushed-so-far to wrap the
@@ -170,17 +176,10 @@ func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) erro
 func (c *Compiler) emitClassCallArgsEx(s *ast.ClassDef, withGenericBase bool) error {
 	l := loc(s)
 	// pushed counts the values already on the stack that should end up
-	// at the head of the args tuple: body_fn, name, and optionally
-	// .generic_base. Plain bases get pushed inline and are wrapped via
-	// BUILD_LIST on the first star (or via BUILD_TUPLE pushed when no
-	// star is present).
+	// at the head of the args tuple: body_fn, name. Plain bases get
+	// pushed inline and are wrapped via BUILD_LIST on the first star
+	// (or via BUILD_TUPLE pushed when no star is present).
 	pushed := 2
-	if withGenericBase {
-		if err := c.nameOpLoad(".generic_base", l); err != nil {
-			return err
-		}
-		pushed++
-	}
 
 	sequenceBuilt := false
 	for i, b := range s.Bases {
@@ -202,6 +201,19 @@ func (c *Compiler) emitClassCallArgsEx(s *ast.ClassDef, withGenericBase bool) er
 		if sequenceBuilt {
 			c.addOpI(LIST_APPEND, 1, l)
 		}
+	}
+	// .generic_base goes after all explicit bases, matching CPython's
+	// codegen_class ordering where Generic[T,...] is the last positional.
+	//
+	// CPython: Python/codegen.c:1657-1672 codegen_class (generic bases)
+	if withGenericBase {
+		if err := c.nameOpLoad(".generic_base", l); err != nil {
+			return err
+		}
+		if sequenceBuilt {
+			c.addOpI(LIST_APPEND, 1, l)
+		}
+		pushed++
 	}
 	if sequenceBuilt {
 		c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, l)
@@ -473,6 +485,20 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	// CPython: Python/codegen.c:1540
 	c.addLoadConst(int64(c.unit().FirstLineno), loc(s))
 	c.addOpName(STORE_NAME, &pool, "__firstlineno__", loc(s))
+
+	// Generic classes: load .type_params from the enclosing wrapper
+	// scope's cell and store it as __type_params__ in the class namespace.
+	// The .type_params symbol is registered as a Use in the class body
+	// by the symtable visitor, so nameOpLoad resolves it as a Free var
+	// and emits LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF.
+	//
+	// CPython: Python/codegen.c:1540 codegen_class_body (type_params arm)
+	if len(s.TypeParams) > 0 {
+		if err := c.nameOpLoad(".type_params", loc(s)); err != nil {
+			return err
+		}
+		c.addOpName(STORE_NAME, &pool, "__type_params__", loc(s))
+	}
 
 	if innerScope.NeedsClassDict {
 		// MAKE_CELL is inserted by prepare_localsplus; only register

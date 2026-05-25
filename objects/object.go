@@ -19,7 +19,7 @@ import (
 //
 // CPython: Objects/typeobject.c:7970 PyBaseObject_Type
 var objectType = func() *Type {
-	t := &Type{Name: "object"}
+	t := &Type{Name: "object", TpFlags: TpFlagImmutable | TpFlagBasetype}
 	t.init(typeType)
 	t.Bases = []*Type{}
 	t.MRO = []*Type{t}

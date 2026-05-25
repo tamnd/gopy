@@ -3,6 +3,7 @@ package objects
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // c3Linearize computes the C3 linearization of t. The algorithm is
@@ -17,10 +18,10 @@ import (
 // head appears only as a head (never in the tails) of the remaining
 // lists.
 //
-// CPython: Objects/typeobject.c:L2349 mro_implementation
-func c3Linearize(t *Type) []*Type {
+// CPython: Objects/typeobject.c:2349 mro_implementation
+func c3Linearize(t *Type) ([]*Type, error) {
 	if len(t.Bases) == 0 {
-		return []*Type{t}
+		return []*Type{t}, nil
 	}
 	lists := make([][]*Type, 0, len(t.Bases)+1)
 	for _, b := range t.Bases {
@@ -38,7 +39,7 @@ func c3Linearize(t *Type) []*Type {
 			}
 		}
 		if !nonEmpty {
-			return out
+			return out, nil
 		}
 
 		var head *Type
@@ -53,11 +54,11 @@ func c3Linearize(t *Type) []*Type {
 			}
 		}
 		if head == nil {
-			names := []string{}
-			for _, b := range t.Bases {
-				names = append(names, b.Name)
+			names := make([]string, len(t.Bases))
+			for i, b := range t.Bases {
+				names[i] = tailName(b.Name)
 			}
-			panic(fmt.Sprintf("objects: cannot linearize MRO for %s bases=%v", t.Name, names))
+			return nil, fmt.Errorf("TypeError: Cannot create a consistent method resolution order (MRO) for bases %s", joinNames(names))
 		}
 		out = append(out, head)
 		for i := range lists {
@@ -66,6 +67,11 @@ func c3Linearize(t *Type) []*Type {
 			}
 		}
 	}
+}
+
+// joinNames joins base names with ", " for MRO error messages.
+func joinNames(names []string) string {
+	return strings.Join(names, ", ")
 }
 
 // isGoodHead reports whether cand appears only as a head (never in

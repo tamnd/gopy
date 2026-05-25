@@ -26,11 +26,17 @@ import (
 // CPython: Objects/typevarobject.c:30 typevarobject
 type TypeVar struct {
 	Header
-	NameStr     string
-	Bound       Object
-	Constraints Object
-	Default     Object
-	HasDefault  bool
+	NameStr             string
+	Bound               Object
+	EvaluateBound       Object
+	Constraints         Object
+	EvaluateConstraints Object
+	Default             Object
+	EvaluateDefault     Object
+	HasDefault          bool
+	Covariant           bool
+	Contravariant       bool
+	InferVariance       bool
 }
 
 // TypeVarType is the type singleton.
@@ -52,9 +58,13 @@ func NewTypeVar(name string, bound, constraints Object) *TypeVar {
 // CPython: Objects/typevarobject.c:760 paramspecobject
 type ParamSpec struct {
 	Header
-	NameStr    string
-	Default    Object
-	HasDefault bool
+	NameStr         string
+	Default         Object
+	EvaluateDefault Object
+	HasDefault      bool
+	Covariant       bool
+	Contravariant   bool
+	InferVariance   bool
 }
 
 // ParamSpecType is the type singleton.
@@ -76,9 +86,10 @@ func NewParamSpec(name string) *ParamSpec {
 // CPython: Objects/typevarobject.c:1180 typevartupleobject
 type TypeVarTuple struct {
 	Header
-	NameStr    string
-	Default    Object
-	HasDefault bool
+	NameStr         string
+	Default         Object
+	EvaluateDefault Object
+	HasDefault      bool
 }
 
 // TypeVarTupleType is the type singleton.
@@ -93,6 +104,127 @@ func NewTypeVarTuple(name string) *TypeVarTuple {
 	tvt := &TypeVarTuple{NameStr: name}
 	tvt.Init(TypeVarTupleType)
 	return tvt
+}
+
+// ConstEvaluator wraps either a constant value (constructor path) or a
+// no-arg thunk (PEP 695 path) and exposes the evaluate-function protocol:
+// callable with a format integer from annotationlib.Format.
+//
+// CPython: Objects/typevarobject.c constevaluatorobject
+type ConstEvaluator struct {
+	Header
+	Value Object // set for constructor path (TypeVar("T", bound=int))
+	Thunk Object // set for PEP 695 path (no-arg closure)
+}
+
+// ConstEvaluatorType is the type singleton for _typing._ConstEvaluator.
+//
+// CPython: Objects/typevarobject.c constevaluator_spec
+var ConstEvaluatorType = NewType("_typing._ConstEvaluator", []*Type{objectType})
+
+// NewConstEvaluator wraps a constant value for the constructor path.
+//
+// CPython: Objects/typevarobject.c constevaluator_alloc
+func NewConstEvaluator(value Object) *ConstEvaluator {
+	ce := &ConstEvaluator{Value: value}
+	ce.Init(ConstEvaluatorType)
+	return ce
+}
+
+// NewThunkEvaluator wraps a no-arg thunk for the PEP 695 path.
+//
+// CPython: Objects/typevarobject.c typevar_evaluate_bound (returns thunk directly)
+func NewThunkEvaluator(thunk Object) *ConstEvaluator {
+	ce := &ConstEvaluator{Thunk: thunk}
+	ce.Init(ConstEvaluatorType)
+	return ce
+}
+
+func init() {
+	// The type itself is immutable: ConstEvaluator.attribute = 1 raises TypeError.
+	// CPython: Objects/typevarobject.c constevaluator_spec Py_TPFLAGS_IMMUTABLETYPE
+	ConstEvaluatorType.TpFlags |= TpFlagImmutable
+
+	// Instantiation from Python is forbidden.
+	// CPython: Objects/typevarobject.c Py_TPFLAGS_DISALLOW_INSTANTIATION
+	ConstEvaluatorType.TpNew = func(_ *Type, _ []Object, _ map[string]Object) (Object, error) {
+		return nil, fmt.Errorf("TypeError: cannot create '_typing._ConstEvaluator' instances")
+	}
+
+	// CPython: Objects/typevarobject.c constevaluator_repr uses %R (repr)
+	ConstEvaluatorType.Repr = func(o Object) (string, error) {
+		ce := o.(*ConstEvaluator)
+		var val Object
+		if ce.Value != nil {
+			val = ce.Value
+		} else {
+			v, err := Call(ce.Thunk, nil, nil)
+			if err != nil {
+				return "", err
+			}
+			val = v
+		}
+		r, err := Repr(val)
+		if err != nil {
+			return "", err
+		}
+		return "<constevaluator " + r + ">", nil
+	}
+
+	// CPython: Objects/typevarobject.c constevaluator_call
+	ConstEvaluatorType.Call = func(self Object, args []Object, _ map[string]Object) (Object, error) {
+		ce := self.(*ConstEvaluator)
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: constevaluator.__call__ takes exactly 1 argument (%d given)", len(args))
+		}
+		format, err := indexAsInt(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("TypeError: constevaluator.__call__ format must be int")
+		}
+		const formatSTRING = 4
+		if ce.Value != nil {
+			if format == formatSTRING {
+				return constEvaluatorString(ce.Value)
+			}
+			return ce.Value, nil
+		}
+		// thunk path
+		val, err2 := Call(ce.Thunk, nil, nil)
+		if err2 != nil {
+			return nil, err2
+		}
+		if format == formatSTRING {
+			return constEvaluatorString(val)
+		}
+		return val, nil
+	}
+}
+
+// constEvaluatorString produces the STRING-format output for a value:
+// tuples are formatted as "(T1, T2, ...)"; other values use typingTypeRepr.
+//
+// CPython: Objects/typevarobject.c:162 constevaluator_call (STRING branch)
+func constEvaluatorString(value Object) (Object, error) {
+	if t, ok := value.(*Tuple); ok {
+		s := "("
+		for i := 0; i < t.Len(); i++ {
+			if i > 0 {
+				s += ", "
+			}
+			r, err := typingTypeRepr(t.Item(i))
+			if err != nil {
+				return nil, err
+			}
+			s += r
+		}
+		s += ")"
+		return NewStr(s), nil
+	}
+	r, err := typingTypeRepr(value)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(r), nil
 }
 
 // GenericType is the runtime stand-in for typing.Generic. CPython
@@ -125,22 +257,51 @@ func init() {
 	}, nil))
 	SetTypeDescr(TypeVarType, "__bound__", NewGetSetDescr("__bound__", func(o Object) (Object, error) {
 		tv := o.(*TypeVar)
-		if tv.Bound == nil {
-			return None(), nil
+		if tv.Bound != nil {
+			return tv.Bound, nil
 		}
-		return tv.Bound, nil
+		if tv.EvaluateBound != nil {
+			v, err := Call(tv.EvaluateBound, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			tv.Bound = v
+			return v, nil
+		}
+		return None(), nil
 	}, nil))
 	SetTypeDescr(TypeVarType, "__constraints__", NewGetSetDescr("__constraints__", func(o Object) (Object, error) {
 		tv := o.(*TypeVar)
-		if tv.Constraints == nil {
-			return NewTuple(nil), nil
+		if tv.Constraints != nil {
+			return tv.Constraints, nil
 		}
-		return tv.Constraints, nil
+		if tv.EvaluateConstraints != nil {
+			v, err := Call(tv.EvaluateConstraints, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			// constraints thunk returns a tuple; wrap in outer tuple like eager path.
+			// CPython: typevar_constraints calls PyObject_CallNoArgs and wraps if needed.
+			if t, ok := v.(*Tuple); ok {
+				tv.Constraints = t
+			} else {
+				tv.Constraints = NewTuple([]Object{v})
+			}
+			return tv.Constraints, nil
+		}
+		return NewTuple(nil), nil
 	}, nil))
 	SetTypeDescr(TypeVarType, "__default__", NewGetSetDescr("__default__", func(o Object) (Object, error) {
 		tv := o.(*TypeVar)
 		if !tv.HasDefault {
 			return NoDefault(), nil
+		}
+		if tv.Default == nil && tv.EvaluateDefault != nil {
+			v, err := Call(tv.EvaluateDefault, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			tv.Default = v
 		}
 		return tv.Default, nil
 	}, nil))
@@ -154,6 +315,50 @@ func init() {
 		}
 		return NewBool(tv.HasDefault), nil
 	}))
+	SetTypeDescr(TypeVarType, "__covariant__", NewGetSetDescr("__covariant__", func(o Object) (Object, error) {
+		return NewBool(o.(*TypeVar).Covariant), nil
+	}, nil))
+	SetTypeDescr(TypeVarType, "__contravariant__", NewGetSetDescr("__contravariant__", func(o Object) (Object, error) {
+		return NewBool(o.(*TypeVar).Contravariant), nil
+	}, nil))
+	// CPython: Objects/typevarobject.c:624 typevar_infer_variance
+	SetTypeDescr(TypeVarType, "__infer_variance__", NewGetSetDescr("__infer_variance__", func(o Object) (Object, error) {
+		return NewBool(o.(*TypeVar).InferVariance), nil
+	}, nil))
+
+	// CPython: Objects/typevarobject.c:586 typevar_evaluate_bound
+	SetTypeDescr(TypeVarType, "evaluate_bound", NewGetSetDescr("evaluate_bound", func(o Object) (Object, error) {
+		tv := o.(*TypeVar)
+		if tv.EvaluateBound != nil {
+			return NewThunkEvaluator(tv.EvaluateBound), nil
+		}
+		if tv.Bound != nil {
+			return NewConstEvaluator(tv.Bound), nil
+		}
+		return None(), nil
+	}, nil))
+	// CPython: Objects/typevarobject.c:599 typevar_evaluate_constraints
+	SetTypeDescr(TypeVarType, "evaluate_constraints", NewGetSetDescr("evaluate_constraints", func(o Object) (Object, error) {
+		tv := o.(*TypeVar)
+		if tv.EvaluateConstraints != nil {
+			return NewThunkEvaluator(tv.EvaluateConstraints), nil
+		}
+		if tv.Constraints != nil {
+			return NewConstEvaluator(tv.Constraints), nil
+		}
+		return None(), nil
+	}, nil))
+	// CPython: Objects/typevarobject.c:612 typevar_evaluate_default
+	SetTypeDescr(TypeVarType, "evaluate_default", NewGetSetDescr("evaluate_default", func(o Object) (Object, error) {
+		tv := o.(*TypeVar)
+		if tv.EvaluateDefault != nil {
+			return NewThunkEvaluator(tv.EvaluateDefault), nil
+		}
+		if tv.HasDefault && tv.Default != nil {
+			return NewConstEvaluator(tv.Default), nil
+		}
+		return None(), nil
+	}, nil))
 
 	SetTypeDescr(ParamSpecType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*ParamSpec).NameStr), nil
@@ -163,7 +368,35 @@ func init() {
 		if !ps.HasDefault {
 			return NoDefault(), nil
 		}
+		if ps.Default == nil && ps.EvaluateDefault != nil {
+			v, err := Call(ps.EvaluateDefault, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			ps.Default = v
+		}
 		return ps.Default, nil
+	}, nil))
+	// CPython: Objects/typevarobject.c:1262 paramspec_evaluate_default
+	SetTypeDescr(ParamSpecType, "evaluate_default", NewGetSetDescr("evaluate_default", func(o Object) (Object, error) {
+		ps := o.(*ParamSpec)
+		if ps.EvaluateDefault != nil {
+			return NewThunkEvaluator(ps.EvaluateDefault), nil
+		}
+		if ps.HasDefault && ps.Default != nil {
+			return NewConstEvaluator(ps.Default), nil
+		}
+		return None(), nil
+	}, nil))
+	SetTypeDescr(ParamSpecType, "__covariant__", NewGetSetDescr("__covariant__", func(o Object) (Object, error) {
+		return NewBool(o.(*ParamSpec).Covariant), nil
+	}, nil))
+	SetTypeDescr(ParamSpecType, "__contravariant__", NewGetSetDescr("__contravariant__", func(o Object) (Object, error) {
+		return NewBool(o.(*ParamSpec).Contravariant), nil
+	}, nil))
+	// CPython: Objects/typevarobject.c paramspec_getset __infer_variance__
+	SetTypeDescr(ParamSpecType, "__infer_variance__", NewGetSetDescr("__infer_variance__", func(o Object) (Object, error) {
+		return NewBool(o.(*ParamSpec).InferVariance), nil
 	}, nil))
 
 	SetTypeDescr(TypeVarTupleType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
@@ -174,7 +407,25 @@ func init() {
 		if !tvt.HasDefault {
 			return NoDefault(), nil
 		}
+		if tvt.Default == nil && tvt.EvaluateDefault != nil {
+			v, err := Call(tvt.EvaluateDefault, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			tvt.Default = v
+		}
 		return tvt.Default, nil
+	}, nil))
+	// CPython: Objects/typevarobject.c typevartuple_evaluate_default
+	SetTypeDescr(TypeVarTupleType, "evaluate_default", NewGetSetDescr("evaluate_default", func(o Object) (Object, error) {
+		tvt := o.(*TypeVarTuple)
+		if tvt.EvaluateDefault != nil {
+			return NewThunkEvaluator(tvt.EvaluateDefault), nil
+		}
+		if tvt.HasDefault && tvt.Default != nil {
+			return NewConstEvaluator(tvt.Default), nil
+		}
+		return None(), nil
 	}, nil))
 }
 
@@ -335,9 +586,9 @@ func typevarTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, err
 		tv.Default = defaultVal
 		tv.HasDefault = true
 	}
-	_ = covariant
-	_ = contravariant
-	_ = inferVariance
+	tv.Covariant = covariant
+	tv.Contravariant = contravariant
+	tv.InferVariance = inferVariance
 	return tv, nil
 }
 
@@ -391,6 +642,9 @@ func paramspecTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, e
 		ps.Default = defaultVal
 		ps.HasDefault = true
 	}
+	ps.Covariant = covariant
+	ps.Contravariant = contravariant
+	ps.InferVariance = inferVariance
 	return ps, nil
 }
 
@@ -439,6 +693,7 @@ type TypeAliasObj struct {
 	TypeParamsObj Object
 	ComputeValue  Object
 	Cached        Object
+	Module        Object // __module__: str or None
 }
 
 // TypeAliasObjType is the type singleton.
@@ -456,6 +711,12 @@ func NewTypeAlias(name string, typeParams, compute Object) *TypeAliasObj {
 }
 
 func init() {
+	// TypeAliasType does not allow subclassing, matching CPython's
+	// _PyTypeAlias_Type which carries no Py_TPFLAGS_BASETYPE.
+	//
+	// CPython: Objects/typevarobject.c:2159 _PyTypeAlias_Type (tp_flags)
+	TypeAliasObjType.TpFlags &^= TpFlagBasetype
+
 	TypeAliasObjType.Repr = func(o Object) (string, error) {
 		return o.(*TypeAliasObj).NameStr, nil
 	}
@@ -476,6 +737,65 @@ func init() {
 	SetTypeDescr(TypeAliasObjType, "__value__", NewGetSetDescr("__value__", func(o Object) (Object, error) {
 		return typealiasValue(o.(*TypeAliasObj))
 	}, nil))
+	// CPython: Objects/typevarobject.c typealias_members __module__
+	SetTypeDescr(TypeAliasObjType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) {
+			a := o.(*TypeAliasObj)
+			if a.Module == nil {
+				return None(), nil
+			}
+			return a.Module, nil
+		},
+		func(o Object, v Object) error {
+			o.(*TypeAliasObj).Module = v
+			return nil
+		},
+	))
+
+	// CPython: Objects/typevarobject.c:1900 typealias_evaluate_value
+	SetTypeDescr(TypeAliasObjType, "evaluate_value", NewGetSetDescr("evaluate_value", func(o Object) (Object, error) {
+		a := o.(*TypeAliasObj)
+		if a.ComputeValue != nil {
+			return NewThunkEvaluator(a.ComputeValue), nil
+		}
+		if a.Cached != nil {
+			return NewConstEvaluator(a.Cached), nil
+		}
+		return NewConstEvaluator(None()), nil
+	}, nil))
+
+	// CPython: Objects/typevarobject.c:2059 typealias_parameters
+	SetTypeDescr(TypeAliasObjType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
+		a := o.(*TypeAliasObj)
+		if a.TypeParamsObj == nil || a.TypeParamsObj == None() {
+			return NewTuple(nil), nil
+		}
+		return a.TypeParamsObj, nil
+	}, nil))
+
+	// CPython: Objects/typevarobject.c:2071 typealias_subscript
+	TypeAliasObjType.Mapping = &MappingMethods{
+		GetItem: func(self, item Object) (Object, error) {
+			a := self.(*TypeAliasObj)
+			hasParams := a.TypeParamsObj != nil && a.TypeParamsObj != None()
+			if hasParams {
+				if t, ok := a.TypeParamsObj.(*Tuple); ok && t.Len() == 0 {
+					hasParams = false
+				}
+			}
+			if !hasParams {
+				return nil, fmt.Errorf("TypeError: Only generic type aliases are subscriptable")
+			}
+			return NewGenericAlias(self, item), nil
+		},
+	}
+
+	// CPython: Objects/typevarobject.c:2080 typealias_or
+	TypeAliasObjType.Number = &NumberMethods{
+		Or: func(self, other Object) (Object, error) {
+			return unionTypeOr(self, other)
+		},
+	}
 
 	TypeAliasObjType.TpNew = typealiasTpNew
 }
@@ -505,14 +825,54 @@ func typealiasValue(a *TypeAliasObj) (Object, error) {
 //
 // CPython: Objects/typevarobject.c:2100 typealias_new_impl
 func typealiasTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	if len(args) != 2 {
+	// Accept name and value as positional or keyword arguments.
+	// CPython: Objects/typevarobject.c:2090 typealias_new (clinic generated)
+	var nameObj *Unicode
+	var value Object
+	switch len(args) {
+	case 0:
+		if n, ok := kwargs["name"]; ok {
+			if u, ok2 := n.(*Unicode); ok2 {
+				nameObj = u
+			} else {
+				return nil, fmt.Errorf("TypeError: TypeAliasType() argument 'name' must be str")
+			}
+			delete(kwargs, "name")
+		}
+		if v, ok := kwargs["value"]; ok {
+			value = v
+			delete(kwargs, "value")
+		}
+		if nameObj == nil || value == nil {
+			if nameObj == nil && value == nil {
+				return nil, fmt.Errorf("TypeError: TypeAliasType() missing required arguments: 'name' and 'value'")
+			} else if nameObj == nil {
+				return nil, fmt.Errorf("TypeError: TypeAliasType() missing required argument: 'name'")
+			}
+			return nil, fmt.Errorf("TypeError: TypeAliasType() missing required argument: 'value'")
+		}
+	case 1:
+		u, ok := args[0].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: TypeAliasType() argument 'name' must be str")
+		}
+		nameObj = u
+		if v, ok := kwargs["value"]; ok {
+			value = v
+			delete(kwargs, "value")
+		} else {
+			return nil, fmt.Errorf("TypeError: TypeAliasType() missing required argument: 'value'")
+		}
+	case 2:
+		u, ok := args[0].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: TypeAliasType() argument 'name' must be str")
+		}
+		nameObj = u
+		value = args[1]
+	default:
 		return nil, fmt.Errorf("TypeError: TypeAliasType() takes 2 positional arguments (%d given)", len(args))
 	}
-	nameObj, ok := args[0].(*Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: TypeAliasType() argument 'name' must be str")
-	}
-	value := args[1]
 	var typeParams Object
 	for k, v := range kwargs {
 		switch k {
@@ -527,9 +887,77 @@ func typealiasTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, e
 			return nil, fmt.Errorf("TypeError: TypeAliasType() got an unexpected keyword argument '%s'", k)
 		}
 	}
+	if typeParams != nil {
+		if err := typealiasCheckTypeParams(typeParams.(*Tuple)); err != nil {
+			return nil, err
+		}
+	}
 	a := NewTypeAlias(nameObj.Value(), typeParams, nil)
 	a.Cached = value
+	a.Module = typealiasModule()
 	return a, nil
+}
+
+// typealiasCheckTypeParams validates that no non-default type parameter
+// follows a default one. Mirrors CPython's typealias_check_type_params.
+//
+// CPython: Objects/typevarobject.c:1958 typealias_check_type_params
+func typealiasCheckTypeParams(tp *Tuple) error {
+	defaultSeen := false
+	for i := 0; i < tp.Len(); i++ {
+		p := tp.Item(i)
+		var hasDefault bool
+		switch v := p.(type) {
+		case *TypeVar:
+			hasDefault = v.HasDefault
+		case *ParamSpec:
+			hasDefault = v.HasDefault
+		case *TypeVarTuple:
+			hasDefault = v.HasDefault
+		default:
+			return fmt.Errorf("TypeError: Expected a type param, got %s", typeNameOf(p))
+		}
+		if !hasDefault {
+			if defaultSeen {
+				repr, _ := Repr(p)
+				return fmt.Errorf("TypeError: non-default type parameter '%s' follows default type parameter", repr)
+			}
+		} else {
+			defaultSeen = true
+		}
+	}
+	return nil
+}
+
+// TypealiasModule reads __name__ from the currently executing frame's globals.
+// Used by both typealiasTpNew and the MAKE_TYPEALIAS intrinsic.
+//
+// CPython: Objects/typevarobject.c:2152 typealias_new_impl (ta_module = ...)
+func TypealiasModule() Object {
+	return typealiasModule()
+}
+
+func typealiasModule() Object {
+	if CurrentFrameHook == nil {
+		return None()
+	}
+	f := CurrentFrameHook()
+	if f == nil {
+		return None()
+	}
+	g := f.FrameGlobals()
+	if g == nil {
+		return None()
+	}
+	d, ok := g.(*Dict)
+	if !ok {
+		return None()
+	}
+	v, err := d.GetItem(NewStr("__name__"))
+	if err != nil || v == nil {
+		return None()
+	}
+	return v
 }
 
 var noDefaultSingleton Object

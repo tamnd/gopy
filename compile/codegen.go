@@ -370,12 +370,26 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 // function get "Outer.<locals>.Name". Mirrors CPython's
 // compiler_set_qualname.
 //
+// Annotation, type-params, type-alias, and type-variable scopes are
+// transparent: they do not appear in the qualname chain. CPython
+// treats them all as COMPILE_SCOPE_ANNOTATIONS (which is skipped) in
+// codegen_enter_scope, so a class Foo[T] has qualname "Foo", not
+// "<generic parameters of Foo>.<locals>.Foo".
+//
 // CPython: Python/compile.c:L644 compiler_set_qualname
 func buildQualname(stack []*Unit, name string) string {
 	if len(stack) == 0 {
 		return name
 	}
+	// Walk backwards past transparent scopes to find the real parent.
 	parent := stack[len(stack)-1]
+	for isTransparentScope(parent.ScopeType) {
+		stack = stack[:len(stack)-1]
+		if len(stack) == 0 {
+			return name
+		}
+		parent = stack[len(stack)-1]
+	}
 	if parent.ScopeType == symtable.ModuleBlock {
 		return name
 	}
@@ -383,6 +397,23 @@ func buildQualname(stack []*Unit, name string) string {
 		return parent.Qualname + "." + name
 	}
 	return parent.Qualname + ".<locals>." + name
+}
+
+// isTransparentScope reports whether a scope type is invisible in
+// qualname computation. These scopes (PEP 695 generics, PEP 649
+// annotations) are entered as COMPILE_SCOPE_ANNOTATIONS in CPython,
+// which compiler_set_qualname skips when building co_qualname.
+//
+// CPython: Python/compile.c:244 (COMPILE_SCOPE_ANNOTATIONS check)
+func isTransparentScope(t symtable.Block) bool {
+	switch t {
+	case symtable.AnnotationBlock,
+		symtable.TypeParametersBlock,
+		symtable.TypeVariableBlock,
+		symtable.TypeAliasBlock:
+		return true
+	}
+	return false
 }
 
 // leaveScope pops the top unit. The unit is still reachable through

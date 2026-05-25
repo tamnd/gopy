@@ -298,8 +298,7 @@ func (ub *unionBuilder) makeUnion() (Object, error) {
 
 // isUnionable reports whether obj can sit inside a union. CPython
 // accepts None, types, GenericAliases, existing unions, and
-// TypeAlias instances. gopy has no TypeAlias yet so the test stops
-// at the first four.
+// TypeAlias instances.
 //
 // CPython: Objects/unionobject.c:244 is_unionable
 func isUnionable(obj Object) bool {
@@ -313,6 +312,9 @@ func isUnionable(obj Object) bool {
 		return true
 	}
 	if _, ok := obj.(*UnionType); ok {
+		return true
+	}
+	if _, ok := obj.(*TypeAliasObj); ok {
 		return true
 	}
 	return false

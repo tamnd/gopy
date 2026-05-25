@@ -22,6 +22,7 @@ func init() {
 	register("__bases__", typeGetBases, typeSetBases)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
+	register("__parameters__", typeGetParameters, nil)
 }
 
 // typeGetName mirrors type_name. Heap types return ht_name verbatim;
@@ -206,7 +207,11 @@ func typeSetBases(o Object, v Object) error {
 		newBases = append(newBases, b)
 	}
 	t.Bases = newBases
-	t.MRO = c3Linearize(t)
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return err
+	}
+	t.MRO = mro
 	t.InvalidateVersionTag()
 	return nil
 }
@@ -224,6 +229,26 @@ func typeGetMRO(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeGetParameters mirrors the fallback __parameters__ for PEP 695
+// generic classes. CPython sets __parameters__ on the class via
+// typing.Generic.__init_subclass__; gopy defers that machinery and
+// returns __type_params__ directly as a lightweight substitute.
+// If __parameters__ is already stored on the type (e.g. by the full
+// typing module), that value takes priority through the normal
+// descriptor lookup before this getter is ever reached.
+//
+// CPython: Lib/typing.py:1209 Generic.__init_subclass__ (sets cls.__parameters__)
+func typeGetParameters(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if t.TypeParams != nil {
+		return t.TypeParams, nil
+	}
+	return NewTuple(nil), nil
 }
 
 // typeGetDoc returns the type's __doc__. Looks in the type's own
