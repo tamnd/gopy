@@ -315,7 +315,8 @@ shows `done` for every non-deferred row.
 - [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
 - [x] P5 (partial): `test_fstring` 90/90 (f-string error routing, format protocol, str.__format__); `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings plumbing); `test_syntax` blocked on PEP 695 typing import
 - [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
-- [ ] P7: symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
+- [x] P7 (grammar): `test_grammar` 75/75 — SyntaxWarning missed-comma, PEP 649 function annotations, name mangling, non-simple annotation targets, MRO isolation for class annotations, break-in-finally stackdepth
+- [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
 - [ ] P8: `test_int_literal` re-run
 - [ ] P9: PEG generator follow-up spec (deferred)
 - [ ] P10: flip spec 1700 panel + #476 checklist
@@ -2504,3 +2505,114 @@ CPython:
 - `Objects/abstract.c:698 PyObject_Format`
 - `Objects/unicodeobject.c str___format___impl`
 - `Objects/moduleobject.c:234 module_repr`
+
+### P7 closer 38: test_grammar 75/75 gate green
+
+Six subsystems closed in one push to bring `test_grammar.py` from 4
+failures / 1 error to 75/75.
+
+**SyntaxWarning for missed-comma patterns** (`test_warn_missed_comma`)
+
+Ported `checkCaller`, `checkSubscripter`, and `checkIndex` from
+`codegen.c:3593–3710` into `compile/warn.go`. Three subtle points:
+
+- `bool` is a subclass of `int` in Python, so `True[i]` must warn
+  just like `1[i]`. Moved `bool` into the non-subscriptable branch of
+  `checkSubscripter`.
+- `inferLiteralType` returns `""` for unknown AST nodes, matching
+  CPython's NULL return, so unknown types produce no message instead of
+  a misleading `"object is not subscriptable"`.
+- PEP 750 t-strings need entries in both `checkCaller` and
+  `inferLiteralType`. `TemplateStr` / `Interpolation` map to
+  `"string.templatelib.Template"`.
+- `warnAt` normalizes `Lineno=0` to `1` before creating the elevated
+  `SyntaxError`, because t-string interpolation nodes sometimes carry
+  zero line numbers from the parser and a `SyntaxError` with
+  `lineno=None` (from `Lineno=0`) confuses the test assertions.
+
+`checkSubscripter` and `checkIndex` are called at the top of
+`visitSubscript` in `codegen_expr_container.go` when `ctx==Load`.
+
+CPython: `Python/codegen.c:3593 inferLiteralType`,
+`Python/codegen.c:3625 checkCaller`,
+`Python/codegen.c:3652 checkSubscripter`,
+`Python/codegen.c:3683 checkIndex`,
+`Python/codegen.c:5548 codegen_subscript`.
+
+**PEP 649 function annotations** (`test_funcdef`, `test_annotations_inheritance`, `test_var_annot_*`)
+
+Ported `codegen_function_annotations` (1113),
+`codegen_annotations_in_scope` (1081), and `codegen_argannotation`
+(1029) as `emitFunctionAnnotations` / `emitFunctionAnnotateBody` in
+`compile/codegen_annotations.go`. The generated `__annotate__` body
+emits: format guard (LOAD_FAST 0, LOAD_CONST 2, COMPARE_OP GT,
+POP_JUMP_IF_FALSE), BUILD_MAP 0, then per-annotation COPY 2 /
+LOAD_CONST name / STORE_SUBSCR, finally RETURN_VALUE.
+
+Placement in `compileFunctionLike` is critical: the call must happen
+*after* the `if isGeneric { }` block so that for generic functions
+`c.scope` is already the TypeParams wrapper scope where type parameters
+like `T` exist as CELLs. Placing it before that block caused
+`"free var T has scope LOCAL in outer top"` when importing `typing.py`.
+
+VM (`vm/eval_simple.go`) gained `case 0x04` in `SET_FUNCTION_ATTRIBUTE`
+to wire the callable onto `fn.Annotate`.
+
+CPython: `Python/codegen.c:1029 codegen_argannotation`,
+`Python/codegen.c:1081 codegen_annotations_in_scope`,
+`Python/codegen.c:1113 codegen_function_annotations`,
+`Python/bytecodes.c SET_FUNCTION_ATTRIBUTE`.
+
+**Name mangling in class annotation bodies** (`test_var_annot_basic_semantics`)
+
+`emitAnnotateBody` was pushing raw names like `__foo` as dict keys.
+CPython applies `_PyCompile_Mangle` in
+`codegen_deferred_annotations_body:753`. The annotation scope inherits
+`u_private` from the enclosing class unit (via
+`compile.c:698–703 private = c->u->u_private`), so
+`MaybeMangle(c.unit().Private, outerScope, d.Name)` inside the loop
+gives `_C__foo` when `Private = "C"` and `MangledNames` is nil (regular
+non-generic class).
+
+CPython: `Python/codegen.c:753 codegen_deferred_annotations_body _PyCompile_Mangle`.
+
+**Non-simple annotation targets** (`test_var_annot_module_semantics`)
+
+`(pars): bool = True` has `AnnAssign.Simple == 0`. CPython gates
+annotation recording on `if (simple)` at `codegen.c:5513`. Added a
+`if s.Simple == 0 { return nil }` guard in `visitAnnAssign` before
+the deferred-annotation append.
+
+CPython: `Python/codegen.c:5513 codegen_annassign if (simple)`.
+
+**Annotations not inherited via MRO** (`test_annotations_inheritance`)
+
+`typeGetAnnotate` and `typeGetAnnotations` in
+`objects/type_annotations.go` were calling `LookupDescriptor` (walks
+the full MRO) instead of `lookupTypeMember` (own dict only).
+
+CPython's `type_get_annotate` uses
+`PyDict_GetItemRef(PyType_GetDict(type), __annotate_func__)` — the key
+is `__annotate_func__`, stored in the type's OWN `__dict__`, not
+inherited. With MRO lookup, `B(A).__annotations__` found A's annotate
+function and returned A's dict. Switching to `lookupTypeMember` gives
+every class its own independent annotation space.
+
+CPython: `Objects/typeobject.c:1990 type_get_annotate`,
+`Objects/typeobject.c:2069 type_get_annotations`.
+
+**Break inside finally after return** (`test_control_flow_in_finally`)
+
+When `break` appears inside a `finally` block that runs while unwinding
+a `return` (`preserve_tos=true`), the return value sits on the stack.
+CPython pushes a `fblockPopValue` frame around the inline finally body
+so any `break`/`continue` inside it emits `POP_TOP` first to discard
+the return value before jumping to the loop target.
+
+The gopy port was missing this push/pop in the `fblockFinallyTry` case
+of `unwindFblock`, causing the CFG validator to report inconsistent
+stack depths for `break_in_finally_after_return1`.
+
+CPython: `Python/codegen.c:544 codegen_unwind_fblock FB_FINALLY_TRY preserve_tos PushFBlock POP_VALUE`.
+
+**Gate result**: `test/cpython/test_grammar.py` 75/75. `go test ./...` clean.
