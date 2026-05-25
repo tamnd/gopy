@@ -29,7 +29,10 @@ func TestTranslateActionShapes(t *testing.T) {
 		{"CHECK_NULL_ALLOWED(asdl_expr_seq*, _PyPegen_seq_extract_starred_exprs(p, a))", "actionPgenSeqExtractStarredExprs(p, p, a)", true},
 		{"_PyAST_Call(_PyPegen_dummy_name(p), CHECK_NULL_ALLOWED(asdl_expr_seq*, _PyPegen_seq_extract_starred_exprs(p, a)), CHECK_NULL_ALLOWED(asdl_keyword_seq*, _PyPegen_seq_delete_starred_exprs(p, a)), EXTRA)", "actionAstCall(p, actionPgenDummyName(p, p), actionPgenSeqExtractStarredExprs(p, p, a), actionPgenSeqDeleteStarredExprs(p, p, a))", true},
 		{"RAISE_SYNTAX_ERROR(\"oops\")", `raiseAction(p, "RAISE_SYNTAX_ERROR", "oops")`, true},
-		{"a->lineno", "", false}, // member access on any-typed bound
+		{"a->lineno", "extractLineno(a)", true},
+		{"a->end_col_offset", "extractEndColOffset(a)", true},
+		{"a->end_lineno", "extractEndLineno(a)", true},
+		{"a->col_offset", "extractColOffset(a)", true},
 		{"unknown_ident", "", false},
 	}
 

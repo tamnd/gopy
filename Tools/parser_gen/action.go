@@ -201,7 +201,7 @@ func (tr *cTranslator) parseInfix() (string, bool) {
 	for {
 		op := tr.peek().text
 		switch op {
-		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||", "+", "-", "*", "/", "%":
 			tr.advance()
 			right, ok := tr.parsePrimary()
 			if !ok {
@@ -326,11 +326,28 @@ var astEnumConstants = map[string]string{
 // that grammar actions reach into when building Constant nodes. The
 // Go side surfaces them through helper sentinels so the action layer
 // can land them as ast.Constant values.
+//
+// The TARGETS_TYPE enum values (STAR_TARGETS, DEL_TARGETS, FOR_TARGETS)
+// are also surfaced here as quoted strings so raiseAction can dispatch
+// to the correct GetInvalid*Target helper at runtime.
+//
+// CPython: Parser/pegen.h:211 RAISE_SYNTAX_ERROR_INVALID_TARGET
 var pyConstants = map[string]string{
 	"Py_True":     "pyTrueSentinel",
 	"Py_False":    "pyFalseSentinel",
 	"Py_None":     "pyNoneSentinel",
 	"Py_Ellipsis": "pyEllipsisSentinel",
+	"STAR_TARGETS": `"STAR_TARGETS"`,
+	"DEL_TARGETS":  `"DEL_TARGETS"`,
+	"FOR_TARGETS":  `"FOR_TARGETS"`,
+	// CPython exception type constants passed to RAISE_ERROR_KNOWN_LOCATION.
+	// The Go raiseAction handler uses the kind string to decide the error
+	// class; passing the name as a string preserves the information without
+	// requiring a live Python exception type object.
+	// CPython: Include/cpython/pyerrors.h PyExc_SyntaxError
+	"PyExc_SyntaxError":      `"SyntaxError"`,
+	"PyExc_IndentationError": `"IndentationError"`,
+	"PyExc_TabError":         `"TabError"`,
 }
 
 // cTypeNames lists the C / asdl type names the grammar uses inside
@@ -512,6 +529,34 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		// form so the surrounding call-arg join sees an exact match.
 		return recv + ".arena", true
 	}
+	if first == "tokens" && recv == "p" {
+		// p->tokens[p->mark-1]->level → p.PrevTokenLevel()
+		// CPython: Parser/pegen.h:592 p->tokens[p->mark-1]->level
+		if tr.peek().text != "[" {
+			return "", false
+		}
+		tr.advance() // consume "["
+		// consume "p->mark-1" or similar index expression
+		depth := 1
+		for depth > 0 && tr.pos < len(tr.toks) {
+			tok := tr.advance()
+			if tok.text == "[" {
+				depth++
+			} else if tok.text == "]" {
+				depth--
+			}
+		}
+		// now expect ->level
+		if tr.peek().text != "->" && tr.peek().text != "." {
+			return "", false
+		}
+		tr.advance()
+		if tr.peek().text != "level" {
+			return "", false
+		}
+		tr.advance()
+		return recv + ".PrevTokenLevel()", true
+	}
 	// KeyValuePair / KeyPatternPair / NameDefaultPair top-level
 	// fields. The Go encoding stores these as `[2]any{a, b}` so we
 	// pull out the column directly.
@@ -524,6 +569,30 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		return "kvKey(" + recv + ")", true
 	case "pattern":
 		return "kvValue(" + recv + ")", true
+	case "bytes":
+		// a->bytes on a Token* gives the token's text bytes object.
+		// nameIDOf already extracts the text string from a *Token.
+		// CPython: Parser/tokenize/tokenize.h tok_state.bytes
+		return "nameIDOf(" + recv + ")", true
+	case "lineno":
+		// a->lineno on a Token* or expr_ty gives the start line number.
+		// Used by RAISE_INDENTATION_ERROR format args ("on line %d").
+		// CPython: Parser/tokenize/tokenize.h Token.lineno / asdl lineno
+		return "extractLineno(" + recv + ")", true
+	case "end_col_offset":
+		// a->end_col_offset on an expr_ty gives the exclusive end column.
+		// Used by RAISE_ERROR_KNOWN_LOCATION to point the caret after the
+		// last character of the expression (e.g. "':' expected after dictionary key").
+		// CPython: Include/internal/pycore_ast.h asdl_int end_col_offset
+		return "extractEndColOffset(" + recv + ")", true
+	case "end_lineno":
+		// a->end_lineno on an expr_ty gives the last source line of the expression.
+		// CPython: Include/internal/pycore_ast.h asdl_int end_lineno
+		return "extractEndLineno(" + recv + ")", true
+	case "col_offset":
+		// a->col_offset on an expr_ty gives the start column offset.
+		// CPython: Include/internal/pycore_ast.h asdl_int col_offset
+		return "extractColOffset(" + recv + ")", true
 	}
 	if first != "v" {
 		return "", false
@@ -625,6 +694,21 @@ func translateCall(fname string, args []string) (string, bool) {
 		// CPython: Include/cpython/pyerrors.h PyErr_Occurred
 		if len(args) == 0 {
 			return "(p.PinnedError() != nil)", true
+		}
+	case "PyBytes_AS_STRING":
+		// PyBytes_AS_STRING(b) extracts the C string from a bytes object.
+		// In gopy, token->bytes comes through nameIDOf already as a string,
+		// so this is a pass-through.
+		// CPython: Include/cpython/bytesobject.h PyBytes_AS_STRING
+		if len(args) == 1 {
+			return args[0], true
+		}
+	case "PyPegen_first_item":
+		// PyPegen_first_item(seq, type) returns the first element of a
+		// sequence. The second arg is a C type tag dropped on the Go side.
+		// CPython: Parser/pegen.h:267 PyPegen_first_item macro
+		if len(args) >= 1 {
+			return "seqFirstAny(" + args[0] + ")", true
 		}
 	case "PyPegen_last_item":
 		// PyPegen_last_item(seq, type) returns the last element of a
