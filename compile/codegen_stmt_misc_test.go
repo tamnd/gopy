@@ -143,6 +143,7 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
 		Value:      cnst(int64(1)),
+		Simple:     1,
 	}
 	u := compileMod(t, module(a))
 	want := []string{
@@ -166,6 +167,7 @@ func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
+		Simple:     1,
 	}
 	u := compileMod(t, module(a))
 	want := []string{

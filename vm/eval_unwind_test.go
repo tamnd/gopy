@@ -41,10 +41,10 @@ func TestSynthesizeStructuredSyntaxError(t *testing.T) {
 		"msg":        "invalid syntax",
 		"filename":   "demo.py",
 		"lineno":     int64(3),
-		"offset":     int64(5),
+		"offset":     int64(6),
 		"text":       "x = +",
 		"end_lineno": int64(3),
-		"end_offset": int64(9),
+		"end_offset": int64(10),
 	}
 	checkSyntaxField(t, exc, "msg", want["msg"])
 	checkSyntaxField(t, exc, "filename", want["filename"])
