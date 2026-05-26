@@ -200,6 +200,9 @@ func typeSetAttr(o Object, name Object, value Object) error {
 			return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
 		}
 		delete(m, nameStr)
+		if tp.ClassAttrDict != nil {
+			_ = tp.ClassAttrDict.DelItem(NewStr(nameStr))
+		}
 		tp.InvalidateVersionTag()
 		return nil
 	}

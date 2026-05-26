@@ -11402,7 +11402,7 @@ func parseRule_invalid_type_param(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return []any{op, a, colon, e}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, func() any { if truthy(isTupleKind(e)) { return "cannot use constraints with TypeVarTuple" }; return "cannot use bound with TypeVarTuple" }()))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v
@@ -11424,7 +11424,7 @@ func parseRule_invalid_type_param(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return []any{op, a, colon, e}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, func() any { if truthy(isTupleKind(e)) { return "cannot use constraints with ParamSpec" }; return "cannot use bound with ParamSpec" }()))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v

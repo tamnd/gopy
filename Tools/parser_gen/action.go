@@ -203,6 +203,16 @@ func (tr *cTranslator) parseInfix() (string, bool) {
 		switch op {
 		case "==", "!=", "<", "<=", ">", ">=", "&&", "||", "+", "-", "*", "/", "%":
 			tr.advance()
+			// Special case: `<recv>->kind == Tuple_kind` is an AST node
+			// kind check. CPython's asdl enum has a Tuple_kind tag; Go
+			// has no such enum so we emit a type assertion helper instead.
+			//
+			// CPython: Grammar/python.gram invalid_type_param (Tuple_kind check)
+			if op == "==" && tr.pos < len(tr.toks) && tr.peek().kind == "id" && tr.peek().text == "Tuple_kind" {
+				tr.advance() // consume "Tuple_kind"
+				left = "isTupleKind(" + left + ")"
+				continue
+			}
 			right, ok := tr.parsePrimary()
 			if !ok {
 				return "", false

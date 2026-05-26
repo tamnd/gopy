@@ -224,6 +224,10 @@ func TypeDescrNames(t *Type) []string {
 // owner, we record t there so that descr.__objclass__ resolves the way
 // CPython exposes it via PyMemberDef.
 //
+// For user types that carry a ClassAttrDict (the live tp_dict mirror),
+// the entry is also written there so PEP 695 type alias thunks that
+// hold a __classdict__ closure cell always read the current value.
+//
 // CPython: Objects/typeobject.c:6012 type_add_method
 func SetTypeDescr(t *Type, name string, d Object) {
 	switch x := d.(type) {
@@ -242,6 +246,9 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		typeDescrTable[t] = m
 	}
 	m[name] = d
+	if t.ClassAttrDict != nil {
+		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
+	}
 }
 
 // TypeOwnDescrs returns the names and values registered directly on

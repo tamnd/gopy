@@ -199,6 +199,16 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
 
+	// ClassAttrDict is the live attribute dict for user types, mirroring
+	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
+	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the
+	// __classdict__ closure cell always see the current attribute values.
+	// nil for built-in types (they use typeDescrTable only).
+	//
+	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
+	// (CPython sets the __classdictcell__ to tp_dict, not to ns)
+	ClassAttrDict *Dict
+
 	// subclasses tracks the direct subclasses of this type in
 	// registration order. CPython stores a dict of weak references in
 	// tp_subclasses so the cycle collector can drop dead entries; gopy

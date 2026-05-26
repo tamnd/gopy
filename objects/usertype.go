@@ -305,16 +305,20 @@ func processClassNamespace(t *Type, ns *Dict) {
 		}
 		_ = ns.DelItem(classCellKey)
 	}
-	// __classdictcell__ holds the class-body namespace dict for
-	// methods that reference __classdict__ (PEP 695 generics, for
-	// instance). type_new patches it with the dict and removes the
-	// entry so it does not pollute cls.__dict__ / cls.__protocol_attrs__.
+	// __classdictcell__ is the closure cell that PEP 695 type-alias
+	// thunks hold as their __classdict__ free variable. CPython sets the
+	// cell to tp_dict (the live attribute dict), not to ns. gopy mirrors
+	// this by keeping t.ClassAttrDict as the authoritative store and
+	// making SetTypeDescr write through to it. The cell is pointed at
+	// ClassAttrDict so subsequent typeSetAttr calls (X.T = float) are
+	// visible when the thunk later reads X.Alias.__value__.
 	//
 	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
 	classDictCellKey := NewStr("__classdictcell__")
 	if cellObj, err := ns.GetItem(classDictCellKey); err == nil {
 		if cell, ok := cellObj.(*Cell); ok {
-			cell.Contents = ns
+			t.ClassAttrDict = NewDict()
+			cell.Contents = t.ClassAttrDict
 		}
 		_ = ns.DelItem(classDictCellKey)
 	}

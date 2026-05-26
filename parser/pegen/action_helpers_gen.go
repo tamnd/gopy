@@ -3080,6 +3080,18 @@ func actionAstTypeVar(p *Parser, args ...any) any {
 	}
 }
 
+// isTupleKind reports whether v is an *ast.Tuple. The grammar uses
+// `e->kind == Tuple_kind` (CPython asdl enum) to distinguish between
+// a bound annotation (`*A: str`) and a constraints annotation
+// (`*A: (int, str)`); Go has no such enum so the generator emits a
+// type assertion helper instead.
+//
+// CPython: Grammar/python.gram invalid_type_param Tuple_kind check
+func isTupleKind(v any) bool {
+	_, ok := v.(*ast.Tuple)
+	return ok
+}
+
 // actionAstTypeVarTuple builds TypeVarTuple. Args: (name_id, default).
 //
 // CPython: Parser/Python.asdl TypeVarTuple(identifier name, expr? default_value)
