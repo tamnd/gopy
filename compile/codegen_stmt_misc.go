@@ -207,10 +207,40 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 	// it lazily on first `__annotations__` access.
 	//
 	// CPython: Python/codegen.c:5476 codegen_annassign
-	c.unit().DeferredAnnotations = append(
-		c.unit().DeferredAnnotations,
-		deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s)},
+	//
+	// PEP 749: module-scope annotations and annotations inside conditional
+	// blocks get a conditional index so __annotate__ can skip them when the
+	// code path was not executed. The index is recorded in a set tracked by
+	// __conditional_annotations__.
+	//
+	// CPython: Python/compile.c:1143 _PyCompile_AddDeferredAnnotation
+	u := c.unit()
+	condIdx := -1
+	if c.scope.Type == symtable.ModuleBlock || u.InConditionalBlock > 0 {
+		condIdx = u.NextConditionalAnnotationIndex
+		u.NextConditionalAnnotationIndex++
+	}
+	u.DeferredAnnotations = append(u.DeferredAnnotations,
+		deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s), CondIdx: condIdx},
 	)
+	if condIdx >= 0 {
+		// Emit: load set, load index, SET_ADD 1, POP_TOP so the index is
+		// remembered as reached. Stack before: [], after: [].
+		//
+		// CPython: Python/codegen.c:5509 conditional_annotation_index != NULL
+		l := loc(s)
+		if c.scope.Type == symtable.ClassBlock {
+			pool := poolCellVars
+			idx := c.poolIndex(&pool, "__conditional_annotations__")
+			c.addOpI(LOAD_DEREF, int32(idx), l)
+		} else {
+			pool := poolNames
+			c.addOpName(LOAD_NAME, &pool, "__conditional_annotations__", l)
+		}
+		c.addLoadConst(int64(condIdx), l)
+		c.addOpI(SET_ADD, 1, l)
+		c.addOp(POP_TOP, l)
+	}
 	return nil
 }
 

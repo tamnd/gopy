@@ -52,7 +52,7 @@ test_subclassinit	ready	v0.10.1	__init_subclass__ hook
 test_syntax	ready	v0.10.2	parser/errors panel
 test_tstring	ready	v0.10.2	PEP 750 t-strings
 test_type_aliases	ready	v0.10.2	type Foo = ...
-test_type_annotations	ready	v0.10.2	annotation lowering
+test_type_annotations	done	v0.12.5	47/47 green (1 skip). PEP 649 stash + PEP 563 string annotations + dict.__new__ fix + dict_keys RichCmp + property descriptor __annotations__
 test_type_comments	ready	v0.10.2	parser type-comment mode
 test_type_params	ready	v0.10.2	PEP 695 type parameters
 test_unicode_identifiers	done	v0.12.5	NFKC identifier normalization; invalid char offset fixed

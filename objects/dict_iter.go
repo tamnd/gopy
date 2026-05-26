@@ -168,6 +168,7 @@ func init() {
 		Xor:      dictKeysViewXor,
 	}
 	dictKeysViewType.Repr = dictViewRepr
+	dictKeysViewType.RichCmp = dictKeysViewRichCmp
 
 	dictValuesViewType.Iter = dictViewIter
 	dictValuesViewType.Sequence = &SequenceMethods{
@@ -368,6 +369,27 @@ func dictViewBinop(a, b Object, op func(left, right *Set) (*Set, error)) (Object
 		return nil, err
 	}
 	return op(left, right)
+}
+
+// dictKeysViewRichCmp implements set-like comparisons for dict_keys views.
+// Mirrors CPython's dictviews_richcompare: converts both operands to sets
+// and compares them.
+//
+// CPython: Objects/dictobject.c:6447 dictviews_richcompare
+func dictKeysViewRichCmp(a, b Object, op CompareOp) (Object, error) {
+	v, ok := a.(*dictView)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	aSet, err := dictViewToSet(v)
+	if err != nil {
+		return nil, err
+	}
+	bSet, err := otherToSet(b)
+	if err != nil {
+		return NotImplemented(), nil
+	}
+	return setRichCmp(aSet, bSet, op)
 }
 
 func dictKeysViewAnd(a, b Object) (Object, error) {

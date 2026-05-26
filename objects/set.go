@@ -404,8 +404,9 @@ func shuffleBits(h uint64) uint64 {
 	return ((h ^ 89869747) ^ (h << 16)) * 3644798167
 }
 
-// setRichCmp implements == and != for both set and frozenset by
-// checking equal cardinality and mutual containment.
+// setRichCmp implements all comparison ops for both set and frozenset.
+// EQ/NE use mutual containment. Ordering ops are subset/superset checks:
+// a <= b means a is a subset of b; a < b is a proper subset.
 //
 // CPython: Objects/setobject.c:L1683 set_richcompare
 func setRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -430,8 +431,57 @@ func setRichCmp(a, b Object, op CompareOp) (Object, error) {
 			return nil, err
 		}
 		return NewBool(!eq), nil
+	case CompareLE:
+		sub, err := setIsSubset(as, bs)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareGE:
+		sub, err := setIsSubset(bs, as)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareLT:
+		if as.used >= bs.used {
+			return False(), nil
+		}
+		sub, err := setIsSubset(as, bs)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareGT:
+		if as.used <= bs.used {
+			return False(), nil
+		}
+		sub, err := setIsSubset(bs, as)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
 	}
 	return NotImplemented(), nil
+}
+
+// setIsSubset reports whether every element of a is contained in b.
+//
+// CPython: Objects/setobject.c:L1641 set_issubset_impl
+func setIsSubset(a, b *Set) (bool, error) {
+	if a.used > b.used {
+		return false, nil
+	}
+	for _, e := range a.entries {
+		if !e.used {
+			continue
+		}
+		ok, err := b.Contains(e.key)
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func setsEqual(a, b *Set) (bool, error) {

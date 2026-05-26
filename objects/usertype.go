@@ -382,13 +382,20 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			// getset on typeType serves all lookups via the MRO.
 			continue
 		case "__annotations__":
-			// Route through typeSetAnnotations so the value lands under
-			// "__annotations_cache__", matching CPython's type_setattro path
-			// through type_set_annotations.
+			// If the value is a descriptor (e.g. a property), install it
+			// directly under "__annotations__" so GenericGetAttr can find
+			// and invoke it for instance-level access. A plain dict/mapping
+			// goes through typeSetAnnotations so it lands under
+			// "__annotations_cache__" as the lazy-evaluation cache.
 			//
 			// CPython: Objects/typeobject.c:4526 type_new_set_attrs calls
-			// PyObject_SetAttr which hits type_setattro -> type_set_annotations.
-			_ = typeSetAnnotations(t, v)
+			// PyObject_SetAttr -> type_setattro -> type_set_annotations, which
+			// stores the value in tp_dict["__annotations__"] unchanged.
+			if v.Type().DescrGet != nil {
+				SetTypeDescr(t, "__annotations__", v)
+			} else {
+				_ = typeSetAnnotations(t, v)
+			}
 			continue
 		case "__annotate__":
 			// User-defined __annotate__ from the class body: store directly

@@ -15,6 +15,14 @@ type Module struct {
 	Header
 	dict  *Dict
 	state any // per-module state for Go-implemented modules
+	// Initializing is true while the module body is executing. When set,
+	// moduleGetAnnotations does not cache its result so that circular
+	// imports see the annotations that existed at the point of access
+	// rather than a stale cached snapshot.
+	//
+	// CPython: Objects/moduleobject.c:1307 is_initializing check via
+	// __spec__._initializing; gopy uses an explicit flag instead.
+	Initializing bool
 }
 
 // ModuleType is the type singleton for module objects.

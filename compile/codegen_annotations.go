@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/future"
 	"github.com/tamnd/gopy/symtable"
 )
 
@@ -136,9 +137,41 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 	// the evaluated expression, COPY the dict to the top, push the
 	// name, and STORE_SUBSCR. STORE_SUBSCR consumes [value, container,
 	// key] leaving the original dict at the bottom of the run.
+	//
+	// For conditional annotations (CondIdx >= 0) guard the store with:
+	//   LOAD_CONST condIdx
+	//   LOAD_DEREF/__conditional_annotations__  (class) or LOAD_GLOBAL (module)
+	//   CONTAINS_OP 0 (in)
+	//   POP_JUMP_IF_FALSE not_set
+	// so annotations from code paths that were not executed are omitted.
+	//
+	// CPython: Python/codegen.c:748 codegen_deferred_annotations_body
 	c.addOpI(BUILD_MAP, 0, l)
 	for _, d := range deferred {
-		if err := c.visitExpr(d.Value); err != nil {
+		var notSet JumpTargetLabel
+		if d.CondIdx >= 0 {
+			notSet = c.newLabel()
+			c.addLoadConst(int64(d.CondIdx), d.Loc)
+			if outerScope.Type == symtable.ClassBlock {
+				pool := poolFreeVars
+				idx := c.poolIndex(&pool, "__conditional_annotations__")
+				c.addOpI(LOAD_DEREF, int32(len(c.unit().CellVars)+idx), d.Loc)
+			} else {
+				pool := poolNames
+				c.addOpName(LOAD_GLOBAL, &pool, "__conditional_annotations__", d.Loc)
+			}
+			c.addOpI(CONTAINS_OP, 0, d.Loc)
+			c.addOpJump(POP_JUMP_IF_FALSE, notSet, d.Loc)
+		}
+		if c.Future != nil && c.Future.Bits&future.Annotations != 0 {
+			// PEP 563: store annotation as its source-text string.
+			// CPython: Python/codegen.c:676 compiler_visit_annexpr
+			s, err := ast.Unparse(d.Value)
+			if err != nil {
+				return fmt.Errorf("PEP 563 annotation unparse: %w", err)
+			}
+			c.addLoadConst(s, d.Loc)
+		} else if err := c.visitExpr(d.Value); err != nil {
 			return err
 		}
 		// Stack here: [dict, value]. COPY 2 pushes the dict (2 below
@@ -156,13 +189,19 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 		mangled := symtable.MaybeMangle(c.unit().Private, outerScope, d.Name)
 		c.addLoadConst(mangled, d.Loc)
 		c.addOp(STORE_SUBSCR, d.Loc)
+		if d.CondIdx >= 0 {
+			c.useLabel(notSet)
+		}
 	}
 	c.addOp(RETURN_VALUE, l)
 
 	innerUnit := c.unit()
 	innerUnit.Name = "__annotate__"
-	innerUnit.Argcount = 1
-	innerUnit.PosOnlyArgCount = 0
+	// format is positional-only (co_posonlyargcount=1). unit.Argcount tracks
+	// pos-or-kw args only; posonly count is separate.
+	// CPython: Python/codegen.c:676 codegen_setup_annotations_scope
+	innerUnit.Argcount = 0
+	innerUnit.PosOnlyArgCount = 1
 	innerUnit.KwOnlyArgCount = 0
 
 	c.leaveScope()
@@ -171,6 +210,42 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 	c.restoreCaches(outerCaches)
 
 	c.addLoadConst(innerUnit, l)
+	return nil
+}
+
+// stashAnnotationCode implements the CPython annotation-setup stash for
+// module (and class) bodies. It swaps out the active instruction sequence,
+// emits the __conditional_annotations__ prologue (when needed) and the
+// __annotate__ function into a fresh sequence, attaches that sequence to
+// the main seq via SetAnnotationsCode, then restores the main seq.
+// cfgFromSequence later prepends the stash before the body instructions.
+//
+// For class bodies the stash is called by visitClassBody instead.
+//
+// CPython: Python/compile.c:739 _PyCompile_StartAnnotationSetup /
+// Python/compile.c:762 _PyCompile_EndAnnotationSetup
+func (c *Compiler) stashAnnotationCode(l ast.Pos) error {
+	u := c.unit()
+	hasCondAnno := c.scope != nil && c.scope.HasConditionalAnnotations
+	if len(u.DeferredAnnotations) == 0 && !hasCondAnno {
+		return nil
+	}
+	mainSeq := u.Seq
+	annoSeq := &Sequence{}
+	u.Seq = annoSeq
+	if hasCondAnno {
+		pool := poolNames
+		c.addOpI(BUILD_SET, 0, l)
+		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", l)
+	}
+	if err := c.emitDeferredAnnotations(l); err != nil {
+		u.Seq = mainSeq
+		return err
+	}
+	u.Seq = mainSeq
+	if len(annoSeq.Instrs) > 0 {
+		mainSeq.SetAnnotationsCode(annoSeq)
+	}
 	return nil
 }
 
@@ -238,7 +313,15 @@ func (c *Compiler) emitFunctionAnnotateBody(annScope *symtable.Entry, args *ast.
 			return nil
 		}
 		mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
-		if starred, ok := annot.(*ast.Starred); ok {
+		if c.Future != nil && c.Future.Bits&future.Annotations != 0 {
+			// PEP 563: store annotation as its source-text string.
+			// CPython: Python/codegen.c:676 compiler_visit_annexpr
+			s, err := ast.Unparse(annot)
+			if err != nil {
+				return fmt.Errorf("PEP 563 annotation unparse: %w", err)
+			}
+			c.addLoadConst(s, l)
+		} else if starred, ok := annot.(*ast.Starred); ok {
 			if err := c.visitExpr(starred.Value); err != nil {
 				return err
 			}
@@ -290,8 +373,9 @@ func (c *Compiler) emitFunctionAnnotateBody(annScope *symtable.Entry, args *ast.
 
 	innerUnit := c.unit()
 	innerUnit.Name = "__annotate__"
-	innerUnit.Argcount = 1
-	innerUnit.PosOnlyArgCount = 0
+	// format is positional-only. CPython: Python/codegen.c:676
+	innerUnit.Argcount = 0
+	innerUnit.PosOnlyArgCount = 1
 	innerUnit.KwOnlyArgCount = 0
 
 	c.leaveScope()

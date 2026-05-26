@@ -14,15 +14,32 @@ package compile
 // every in-region instruction's Except is set to the handler block,
 // so subsequent flowgraph passes can ignore label ids entirely.
 //
+// When seq.AnnoCode is set (the PEP 649 annotation stash produced by
+// stashAnnotationCode), its instructions are appended to g first so
+// __annotate__ is defined before any body statement executes.
+//
 // CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
 func cfgFromSequence(seq *Sequence) *cfgBuilder {
 	seq.ApplyLabelMap(hasJumpTarget)
-
 	g := newCfgBuilder()
-	if len(seq.Instrs) == 0 {
-		return g
+	if seq.AnnoCode != nil {
+		seq.AnnoCode.ApplyLabelMap(hasJumpTarget)
+		appendSeqToGraph(g, seq.AnnoCode)
 	}
+	if len(seq.Instrs) > 0 {
+		appendSeqToGraph(g, seq)
+	}
+	return g
+}
 
+// appendSeqToGraph walks one instruction sequence and appends its
+// blocks to g, then resolves jump and exception-handler targets.
+// Extracted from cfgFromSequence so the anno-code stash and the main
+// body can be processed in two sequential passes over the same graph.
+//
+// CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
+// (inner loop; called twice when s_annotations_code is present)
+func appendSeqToGraph(g *cfgBuilder, seq *Sequence) {
 	isTarget := buildTargetSet(seq)
 
 	// Walk the sequence, calling useLabel at every target instruction.
@@ -53,7 +70,6 @@ func cfgFromSequence(seq *Sequence) *cfgBuilder {
 
 	rewriteJumpTargets(g, idxToBlock)
 	rewriteExceptTargets(seq, idxToBlock, idxToInstr)
-	return g
 }
 
 // rewriteExceptTargets resolves each in-region instruction's

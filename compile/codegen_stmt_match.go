@@ -49,6 +49,8 @@ type patternContext struct {
 //
 // CPython: Python/codegen.c:L6453 codegen_match
 func (c *Compiler) visitMatch(s *ast.Match) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	pc := &patternContext{}
 	return c.matchInner(s, pc)
 }

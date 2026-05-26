@@ -462,6 +462,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE 0x04
 			fn.Annotate = attr
 			fn.Annotations = nil
+			// gh-137814: fix the qualname of the annotation function to
+			// "enclosing_func.__qualname__ + .__annotate__" so that
+			// f.__annotate__.__qualname__ == "f.__annotate__".
+			//
+			// CPython: Python/bytecodes.c:4975
+			// SET_FUNCTION_ATTRIBUTE MAKE_FUNCTION_ANNOTATE branch
+			if af, ok := attr.(*objects.Function); ok {
+				af.Qualname = fn.Qualname + ".__annotate__"
+				af.Annotations = nil
+			}
 		case 0x08:
 			if t, ok := attr.(*objects.Tuple); ok {
 				fn.Closure = t

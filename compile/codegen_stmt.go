@@ -34,32 +34,21 @@ func (c *Compiler) visitModule(m *ast.Module) error {
 		c.addLoadConst(docstring, docLoc)
 		c.addOpName(STORE_NAME, &pool, "__doc__", ast.Pos{Lineno: -1})
 	}
-	// PEP 649 conditional-annotations prologue. Same shape as the
-	// class body emitter: when a top-level annotation hides behind a
-	// conditional, the analyzer flips HasConditionalAnnotations and
-	// we open a tracking set so __annotate__ knows which names made
-	// it through the body.
-	//
-	// CPython: Python/codegen.c:860 codegen_body (BUILD_SET 0 +
-	// STORE_NAME __conditional_annotations__)
-	if c.scope != nil && c.scope.HasConditionalAnnotations {
-		pool := poolNames
-		c.addOpI(BUILD_SET, 0, ast.Pos{Lineno: 1})
-		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", ast.Pos{Lineno: 1})
-	}
 	// PEP 649: module annotations are deferred. visitAnnAssign records
-	// each annotation into the unit's DeferredAnnotations slice, and
-	// emitDeferredAnnotations after the body emits a synthetic
-	// `__annotate__` function. moduleGetAnnotations
-	// (objects/module_annotations.go) invokes that function the first
-	// time `__annotations__` is read off the module.
+	// each annotation into the unit's DeferredAnnotations slice.
+	// After the body, annotation setup code (__conditional_annotations__
+	// + __annotate__) is emitted into a separate stash sequence that
+	// cfgFromSequence prepends at the start of the body, so __annotate__
+	// is available before any body statement executes. This matches
+	// CPython's _PyCompile_StartAnnotationSetup /
+	// _PyCompile_EndAnnotationSetup stash.
 	//
-	// CPython: Python/codegen.c codegen_body (the
-	// codegen_process_deferred_annotations call after the body loop)
+	// CPython: Python/compile.c _PyCompile_StartAnnotationSetup (L739)
+	// CPython: Python/flowgraph.c:3946 _PyCfg_FromInstructionSequence
 	if err := c.visitStmts(body); err != nil {
 		return err
 	}
-	if err := c.emitDeferredAnnotations(ast.Pos{Lineno: 1}); err != nil {
+	if err := c.stashAnnotationCode(ast.Pos{Lineno: 1}); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})

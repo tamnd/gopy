@@ -10,6 +10,8 @@ import "github.com/tamnd/gopy/ast"
 //
 // CPython: Python/codegen.c:L2043 codegen_if
 func (c *Compiler) visitIf(s *ast.If) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	end := c.newLabel()
 	var elseLbl JumpTargetLabel
 	hasElse := len(s.Orelse) > 0
@@ -41,6 +43,8 @@ func (c *Compiler) visitIf(s *ast.If) error {
 //
 // CPython: Python/codegen.c:L2165 codegen_while
 func (c *Compiler) visitWhile(s *ast.While) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	loop := c.newLabel()
 	body := c.newLabel()
 	anchor := c.newLabel()
@@ -77,6 +81,8 @@ func (c *Compiler) visitWhile(s *ast.While) error {
 //
 // CPython: Python/codegen.c:L2071 codegen_for
 func (c *Compiler) visitFor(s *ast.For) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	start := c.newLabel()
 	body := c.newLabel()
 	cleanup := c.newLabel()
@@ -126,6 +132,8 @@ func (c *Compiler) visitFor(s *ast.For) error {
 //
 // CPython: Python/codegen.c:2117 codegen_async_for
 func (c *Compiler) visitAsyncFor(s *ast.AsyncFor) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	start := c.newLabel()
 	send := c.newLabel()
 	except := c.newLabel()

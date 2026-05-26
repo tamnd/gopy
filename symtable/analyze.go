@@ -320,6 +320,7 @@ func dropClassFree(ste *Entry, scopes map[string]Scope, free nameSet) {
 	}
 	if free.discard("__conditional_annotations__") {
 		ste.HasConditionalAnnotations = true
+		stampImplicitCell(ste, scopes, "__conditional_annotations__")
 	}
 }
 

@@ -106,6 +106,23 @@ func init() {
 		d.init(cls)
 		return d, nil
 	}
+	// dict.__new__ slot wrapper. CPython installs tp_new_wrapper for every
+	// type whose tp_new is not NULL; the wrapper calls type->tp_new(subtype,
+	// args, kwds). Without this, dict.__new__(SubClass) falls through to
+	// objectNewBuiltin which creates *Instance instead of *Dict, breaking
+	// dict subclasses that define their own __new__ (e.g. collections.OrderedDict).
+	//
+	// CPython: Objects/typeobject.c:9952 tp_new_wrapper / add_tp_new_wrapper
+	SetTypeDescr(DictType, "__new__", NewBuiltinFunction("dict.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: dict.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: dict.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return DictType.TpNew(cls, args[1:], kwargs)
+	}))
 	// dict.__repr__ slot wrapper (tp_repr add_operators path).
 	//
 	// CPython: Objects/typeobject.c add_operators

@@ -78,7 +78,10 @@ func (e *vmExecutor) ExecCode(code *objects.Code, mod *objects.Module) (objects.
 			return nil, err
 		}
 	}
-	return EvalCode(e.ts, code, mod.Dict(), nil)
+	mod.Initializing = true
+	result, err := EvalCode(e.ts, code, mod.Dict(), nil)
+	mod.Initializing = false
+	return result, err
 }
 
 // tryImport handles IMPORT_NAME and IMPORT_FROM. It is consulted by

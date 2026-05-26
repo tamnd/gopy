@@ -93,6 +93,15 @@ type Unit struct {
 	CellVars            []string
 	FastHidden          map[string]bool
 	DeferredAnnotations []deferredAnnotation
+	// NextConditionalAnnotationIndex is the counter for conditional annotation
+	// indices, incremented each time a new conditional annotation is recorded.
+	// Mirrors CPython's Python/compile.c:670 u_next_conditional_annotation_index.
+	NextConditionalAnnotationIndex int
+	// InConditionalBlock is the nesting depth of conditional control-flow blocks
+	// (if/for/while/match/try/with). Annotations inside conditional blocks get
+	// a non-(-1) CondIdx so the __annotate__ function can guard their inclusion.
+	// Mirrors CPython's Python/compile.c:64 u_in_conditional_block.
+	InConditionalBlock int
 	// Private is the enclosing class name used for PEP 8 private name
 	// mangling. Set when entering a class scope and inherited by nested
 	// function / comprehension scopes so `self.__x` inside a method
@@ -117,6 +126,13 @@ type deferredAnnotation struct {
 	Name  string
 	Value ast.Expr
 	Loc   ast.Pos
+	// CondIdx is the conditional annotation index (-1 = unconditional).
+	// At the annotation site the compiler emits SET_ADD to track which
+	// indices were actually reached; emitAnnotateBody uses it to guard
+	// each annotation with CONTAINS_OP.
+	//
+	// CPython: Python/compile.c:63 u_conditional_annotation_indices
+	CondIdx int
 }
 
 // Compiler is the long-lived driver state shared by every Codegen
@@ -243,7 +259,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	}
 	u := &Unit{
 		Name:        name,
-		Qualname:    buildQualname(c.units, name),
+		Qualname:    buildQualname(c.units, name, sc.Type),
 		ScopeType:   sc.Type,
 		FirstLineno: firstLine,
 		Seq:         &Sequence{},
@@ -377,7 +393,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 // "<generic parameters of Foo>.<locals>.Foo".
 //
 // CPython: Python/compile.c:L644 compiler_set_qualname
-func buildQualname(stack []*Unit, name string) string {
+func buildQualname(stack []*Unit, name string, scopeType symtable.Block) string {
 	if len(stack) == 0 {
 		return name
 	}
@@ -394,6 +410,12 @@ func buildQualname(stack []*Unit, name string) string {
 		return name
 	}
 	if parent.ScopeType == symtable.ClassBlock {
+		return parent.Qualname + "." + name
+	}
+	// Annotation scopes use "." not ".<locals>." even when the parent
+	// is a function scope. CPython: Python/compile.c:644
+	// compiler_set_qualname (COMPILE_SCOPE_ANNOTATIONS branch).
+	if scopeType == symtable.AnnotationBlock {
 		return parent.Qualname + "." + name
 	}
 	return parent.Qualname + ".<locals>." + name

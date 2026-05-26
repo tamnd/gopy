@@ -135,7 +135,19 @@ func RichCmp(a, b Object, op CompareOp) (Object, error) {
 	case CompareNE:
 		return NewBool(a != b), nil
 	}
-	return notImplemented(), nil
+	// For ordering comparisons (LT, LE, GT, GE) where both sides return
+	// NotImplemented, CPython raises TypeError. Returning NotImplemented
+	// here would be truthy and silently mis-branch.
+	//
+	// CPython: Objects/object.c:876 do_richcompare (ordering fallthrough)
+	opStr := map[CompareOp]string{
+		CompareLT: "<",
+		CompareLE: "<=",
+		CompareGT: ">",
+		CompareGE: ">=",
+	}[op]
+	return nil, fmt.Errorf("TypeError: '%s' not supported between instances of '%s' and '%s'",
+		opStr, a.Type().Name, b.Type().Name)
 }
 
 // RichCmpBool runs RichCmp and converts the result to a Go bool.

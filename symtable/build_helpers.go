@@ -137,9 +137,32 @@ func (b *builder) visitAnnotation(annotation ast.Expr, key any) error {
 				return err
 			}
 		}
+		// When the class has conditional annotations, __conditional_annotations__
+		// must be visible as a free variable inside the annotation block so that
+		// emitAnnotateBody can emit LOAD_DEREF to test which indices were reached.
+		// The outer class scope will have the corresponding cell (via dropClassFree
+		// + stampImplicitCell). Module scope uses LOAD_GLOBAL instead, so no
+		// free-var injection is needed there.
+		//
+		// CPython: Python/compile.c:630 (implicit cellvar cook-up)
 	} else {
 		if err := b.enterExisting(parent.AnnotationBlock, false); err != nil {
 			return err
+		}
+	}
+	// When the class has conditional annotations, __conditional_annotations__
+	// must be visible as a free variable inside the annotation block so that
+	// emitAnnotateBody can emit LOAD_DEREF to test which indices were reached.
+	// The outer class scope will have the corresponding cell (via dropClassFree
+	// + stampImplicitCell). Module scope uses LOAD_GLOBAL instead, so no
+	// free-var injection is needed there. addDef is idempotent for USE flags.
+	//
+	// CPython: Python/compile.c:630 (implicit cellvar cook-up)
+	if parent.HasConditionalAnnotations && parent.Type == ClassBlock {
+		if _, exists := b.cur.Symbols["__conditional_annotations__"]; !exists {
+			if err := b.addDef("__conditional_annotations__", Use, exprPos(annotation)); err != nil {
+				return err
+			}
 		}
 	}
 	if isUnevaluated {

@@ -45,10 +45,16 @@ func mustBuildSym(t *testing.T, m ast.Mod) *symtable.Table {
 // RESUME emission before the prologue port and their tests bake it in,
 // so we leave those alone.
 func opNames(u *Unit) []string {
-	instrs := u.Seq.Instrs
-	if u.ScopeType == symtable.ModuleBlock && len(instrs) > 0 && instrs[0].Op == RESUME {
-		instrs = instrs[1:]
+	var instrs []Instr
+	// Annotation stash code (prepended by cfgFromSequence at compile time).
+	if u.Seq.AnnoCode != nil {
+		instrs = append(instrs, u.Seq.AnnoCode.Instrs...)
 	}
+	body := u.Seq.Instrs
+	if u.ScopeType == symtable.ModuleBlock && len(body) > 0 && body[0].Op == RESUME {
+		body = body[1:]
+	}
+	instrs = append(instrs, body...)
 	out := make([]string, len(instrs))
 	for i, in := range instrs {
 		out[i] = in.Op.Name()

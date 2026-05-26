@@ -82,8 +82,15 @@ func moduleGetAnnotations(m *Module) (Object, error) {
 	} else {
 		out = NewDict()
 	}
-	if err := m.dict.SetItem(NewStr("__annotations__"), out); err != nil {
-		return nil, err
+	// Do not cache while the module is still initializing. Circular
+	// imports may query __annotations__ before the body has finished;
+	// caching at that point would freeze a partial result.
+	//
+	// CPython: Objects/moduleobject.c:1340 !is_initializing
+	if !m.Initializing {
+		if err := m.dict.SetItem(NewStr("__annotations__"), out); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
