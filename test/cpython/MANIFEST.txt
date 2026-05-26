@@ -35,7 +35,7 @@ test_ast/	ready	v0.10.2	full ast.dump panel
 test_decorators	done	v0.12.5	16/16 green
 test_eof	done	v0.12.5	EOF / continuation handling in parser
 test_fstring	done	v0.12.5	90/90 green
-test_future_stmt/	done	v0.12.5	AnnotationsFutureTestCase 7/7 green. FutureTest pre-existing: test.test_future_stmt package lookup + future-not-on-top SyntaxError gaps
+test_future_stmt/	done	v0.12.5	AnnotationsFutureTestCase 7/7. FutureTest: braces/star/not-on-top/extra-string/dotted fixed; 7 pre-existing gaps need test.test_future_stmt package hierarchy or spawn_python
 test_global	done	v0.12.5	20/20 green
 test_grammar	done	v0.10.2	parser drop pinned in v0.10.2 release notes
 test_int_literal	done	v0.12.5	6/6 green

@@ -19,6 +19,7 @@ import (
 
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/future"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
@@ -122,6 +123,13 @@ func synthesizeException(err error) *pyerrors.Exception {
 	var cse *compile.SyntaxError
 	if errors.As(err, &cse) {
 		return pyerrors.SyntaxFromCompile(cse)
+	}
+	// Structured future-scanner SyntaxError: future_check_features raises
+	// for "braces" (easter egg) and unknown feature names.
+	// CPython: Python/future.c:L8 future_check_features
+	var fse *future.SyntaxError
+	if errors.As(err, &fse) {
+		return pyerrors.SyntaxFromFuture(fse)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.

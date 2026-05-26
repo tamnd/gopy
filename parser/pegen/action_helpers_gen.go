@@ -3226,11 +3226,22 @@ func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 // actionPgenAliasForStar builds the alias entry for `from X import *`.
 // CPython spells the asname as "*" and leaves asname unset.
 //
-// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+// CPython: Parser/action_helpers.c:163 _PyPegen_alias_for_star
 func actionPgenAliasForStar(p *Parser, args ...any) any {
-	_ = p
 	_ = args
-	return &ast.Alias{Name: "*", Pos: ast.NoPos}
+	// Use the last consumed token (the '*') for the alias position,
+	// matching CPython's EXTRA which captures the rule's source span.
+	pos := ast.NoPos
+	if p.Mark() > 0 && p.Mark()-1 < len(p.tokens) {
+		tok := p.tokens[p.Mark()-1]
+		pos = ast.Pos{
+			Lineno:       tok.Lineno,
+			ColOffset:    tok.ColOff,
+			EndLineno:    tok.EndLine,
+			EndColOffset: tok.EndCol,
+		}
+	}
+	return &ast.Alias{Name: "*", Pos: pos}
 }
 
 // actionPgenGetCmpops returns the operator slice from a list of

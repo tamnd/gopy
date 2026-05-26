@@ -158,7 +158,7 @@ Three packages:
 | Package | Files | Mark | Result |
 |---------|-------|------|--------|
 | `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | ready | `import _ast_unparse` SyntaxError on stdlib load. `_ast_unparse` not vendored from `Lib/_ast_unparse.py`. |
-| `test_future_stmt/`   | 9 files | **done** | AnnotationsFutureTestCase **7/7 OK**. FutureTest pre-existing gaps: `test.test_future_stmt` package lookup + future-not-on-top SyntaxError. |
+| `test_future_stmt/`   | 9 files | **done** | AnnotationsFutureTestCase **7/7 OK**. FutureTest braces/star/not-on-top/extra-string/dotted fixed. 7 pre-existing gaps: 6 need `test.test_future_stmt` package hierarchy, 1 needs `spawn_python`. |
 | `test_peg_generator/` | 6 files | deferred | PEG generator port is its own follow-up spec. |
 
 ### Blocker buckets (initial triage)

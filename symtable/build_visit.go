@@ -652,9 +652,11 @@ func (b *builder) checkImportFrom(s *ast.ImportFrom) error {
 		return nil
 	}
 	fut := b.future.Location
-	if fut == (ast.Pos{}) || fut == ast.NoPos {
-		return nil
-	}
+	// CPython: Python/symtable.c:L1813 check_import_from
+	// ff_location starts at {-1,-1,-1,-1} (ast.NoPos). Any real lineno > -1
+	// satisfies the guard, so a future import after a non-future statement
+	// (including the case where the scanner found NO future imports at all)
+	// is correctly rejected.
 	if s.Pos.Lineno > fut.Lineno ||
 		(s.Pos.Lineno == fut.EndLineno && s.Pos.ColOffset > fut.EndColOffset) {
 		return errorf(b.filename, s.Pos, msgFutureLate)
