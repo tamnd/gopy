@@ -252,27 +252,27 @@ Overridden parameters
     >>> f(x=5, **{'x': 3}, y=2)
     Traceback (most recent call last):
       ...
-    TypeError: test.test_unpack_ex.f() got multiple values for keyword argument 'x'
+    TypeError: __main__.f() got multiple values for keyword argument 'x'
 
     >>> f(**{'x': 3}, x=5, y=2)
     Traceback (most recent call last):
       ...
-    TypeError: test.test_unpack_ex.f() got multiple values for keyword argument 'x'
+    TypeError: __main__.f() got multiple values for keyword argument 'x'
 
     >>> f(**{'x': 3}, **{'x': 5}, y=2)
     Traceback (most recent call last):
       ...
-    TypeError: test.test_unpack_ex.f() got multiple values for keyword argument 'x'
+    TypeError: __main__.f() got multiple values for keyword argument 'x'
 
     >>> f(x=5, **{'x': 3}, **{'x': 2})
     Traceback (most recent call last):
       ...
-    TypeError: test.test_unpack_ex.f() got multiple values for keyword argument 'x'
+    TypeError: __main__.f() got multiple values for keyword argument 'x'
 
     >>> f(**{1: 3}, **{1: 5})
     Traceback (most recent call last):
       ...
-    TypeError: test.test_unpack_ex.f() got multiple values for keyword argument '1'
+    TypeError: __main__.f() got multiple values for keyword argument '1'
 
 Unpacking non-sequence
 
@@ -317,7 +317,7 @@ error)
     >>> a, *b, c, d, e = BadSeq()
     Traceback (most recent call last):
       ...
-    test.test_unpack_ex.BozoError
+    BozoError
 
 Now some general starred expressions (all fail).
 

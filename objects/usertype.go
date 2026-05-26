@@ -1372,8 +1372,20 @@ func installSlots(t *Type, ns *Dict) error {
 		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
-	// Strip __slots__ from ns so it does not also become a stored
-	// attribute on the type.
+	// Keep __slots__ accessible as a class attribute (cls.__slots__ returns
+	// the tuple of slot names). CPython stores a plain tuple in tp_dict so
+	// `type.__dict__['__slots__']` works, and copyreg._reduce_ex inspects
+	// getattr(inst, '__slots__') to decide whether to raise TypeError for
+	// classes without __getstate__. Storing the tuple directly (not wrapped
+	// in a GetSetDescr) makes it a non-data descriptor so instance-level
+	// assignments like `self.__slots__ = None` still land in __dict__.
+	//
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors
+	items := make([]Object, len(resolved))
+	for i, n := range resolved {
+		items[i] = NewStr(n)
+	}
+	SetTypeDescr(t, "__slots__", NewTuple(items))
 	_ = ns.DelItem(slotsKey)
 	return nil
 }

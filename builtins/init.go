@@ -411,6 +411,7 @@ func scopePanel() []struct {
 	}{
 		{"globals", Globals},
 		{"locals", Locals},
+		{"vars", Vars},
 	}
 }
 
@@ -541,5 +542,8 @@ func iterationPanel() []builtinRow {
 //
 // CPython: Python/bltinmodule.c:3451 SETBUILTIN
 func setBuiltin(dict *objects.Dict, name string, value objects.Object) error {
+	if bf, ok := value.(*objects.BuiltinFunction); ok && bf.Module == "" {
+		bf.Module = "builtins"
+	}
 	return dict.SetItem(objects.NewStr(name), value)
 }

@@ -431,6 +431,19 @@ func collectTypeParams(arg Object, seen map[Object]bool, params *[]Object) {
 		for i := 0; i < ga.parameters.Len(); i++ {
 			collectTypeParams(ga.parameters.Item(i), seen, params)
 		}
+		return
+	}
+	// Python-level generic aliases (_GenericAlias, _UnionGenericAlias, etc.)
+	// expose __parameters__ as a tuple; collect its elements.
+	//
+	// CPython: Objects/genericaliasobject.c:147 collect_parameters
+	// (the Py_GenericAlias branch then the __parameters__ fallback)
+	if p, err := GetAttr(arg, NewStr("__parameters__")); err == nil && p != nil {
+		if tup, ok := p.(*Tuple); ok {
+			for i := 0; i < tup.Len(); i++ {
+				collectTypeParams(tup.Item(i), seen, params)
+			}
+		}
 	}
 }
 

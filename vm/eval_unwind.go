@@ -185,7 +185,41 @@ func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
 			}
 		}
 	}
-	return pyerrors.New(typ, objects.NewTuple(args))
+	exc := pyerrors.New(typ, objects.NewTuple(args))
+	attachExcNameAttr(exc, typ, msg)
+	return exc
+}
+
+// attachExcNameAttr populates the `.name` (and optionally `.obj`) field on
+// AttributeError and NameError exceptions synthesized from Go error strings.
+// CPython populates these fields in PyErr_SetObject when raising via C; gopy
+// mirrors the behavior by parsing the message string.
+//
+// CPython: Objects/exceptions.c:NameError_init, AttributeError_init
+func attachExcNameAttr(exc *pyerrors.Exception, typ *objects.Type, msg string) {
+	switch typ {
+	case pyerrors.PyExc_AttributeError:
+		// Pattern: "'TYPE' object has no attribute 'NAME'"
+		if i := strings.LastIndex(msg, "no attribute '"); i >= 0 {
+			rest := msg[i+len("no attribute '"):]
+			if j := strings.IndexByte(rest, '\''); j >= 0 {
+				name := rest[:j]
+				d := exc.EnsureAttrDict()
+				_ = d.SetItem(objects.NewStr("name"), objects.NewStr(name))
+				_ = d.SetItem(objects.NewStr("obj"), objects.None())
+			}
+		}
+	case pyerrors.PyExc_NameError, pyerrors.PyExc_UnboundLocalError:
+		// Pattern: "name 'NAME' is not defined" or "free variable 'NAME' referenced..."
+		if i := strings.Index(msg, "name '"); i >= 0 {
+			rest := msg[i+len("name '"):]
+			if j := strings.IndexByte(rest, '\''); j >= 0 {
+				name := rest[:j]
+				d := exc.EnsureAttrDict()
+				_ = d.SetItem(objects.NewStr("name"), objects.NewStr(name))
+			}
+		}
+	}
 }
 
 // promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename

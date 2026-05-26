@@ -144,6 +144,9 @@ func init() {
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
 	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
 	SetTypeDescr(DictType, "popitem", NewMethodDescr(DictType, "popitem", dictPopItemMethod))
+	SetTypeDescr(DictType, "__or__", NewMethodDescr(DictType, "__or__", dictOrMethod))
+	SetTypeDescr(DictType, "__ior__", NewMethodDescr(DictType, "__ior__", dictIOrMethod))
+	SetTypeDescr(DictType, "__ror__", NewMethodDescr(DictType, "__ror__", dictROrMethod))
 	// __iter__ slot wrapper. CPython's add_operators installs this for
 	// every type with a non-NULL tp_iter; without it, things like
 	// `dict.__iter__(d)` and CrazyDict's `for x in self.d.__iter__()`
@@ -817,6 +820,88 @@ func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	atomic.OrUint64(&dst.watcherTag, had)
 	return dst, nil
+}
+
+// dictOrMethod backs dict.__or__(other). Returns a new dict with all
+// entries from self followed by entries from other (other wins on
+// duplicate keys). Mirrors PEP 584 / dict___or___impl.
+//
+// CPython: Objects/dictobject.c:3890 dict___or___impl
+func dictOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __or__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	self, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	other, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	return dst, nil
+}
+
+// dictROrMethod backs dict.__ror__(other). Same as __or__ with swapped
+// operands.
+//
+// CPython: Objects/dictobject.c:3908 dict___ror___impl
+func dictROrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ror__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	other, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	self, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	return dst, nil
+}
+
+// dictIOrMethod backs dict.__ior__(other) (the |= operator). Updates
+// self in place with entries from other and returns self.
+//
+// CPython: Objects/dictobject.c:3922 dict___ior___impl
+func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ior__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	self, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	other, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		if err := self.SetItem(k, v); err != nil {
+			return nil, err
+		}
+	}
+	return self, nil
 }
 
 // dictSetDefaultMethod backs dict.setdefault(key[, default]).

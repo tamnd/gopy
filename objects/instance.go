@@ -252,6 +252,9 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 		}
 		return Call(bound, NewTuple([]Object{name}), nil)
 	}
+	if AttributeErrorFactory != nil {
+		return nil, AttributeErrorFactory(o, attrNameStr(name))
+	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 }
 

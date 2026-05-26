@@ -875,11 +875,7 @@ func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 	if merr := dictMergeKwargs(d, b); merr != nil {
 		var dup *kwargsDuplicateErr
 		if errors.As(merr, &dup) && override == 2 {
-			if s, sok := dup.key.(*objects.Unicode); sok {
-				e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
-			} else {
-				e.pendingErr = errors.New("TypeError: got multiple values for keyword argument")
-			}
+			e.pendingErr = fmt.Errorf("%s", dup.Error())
 			return -1
 		}
 		e.pendingErr = merr
@@ -899,6 +895,10 @@ type kwargsDuplicateErr struct {
 func (e *kwargsDuplicateErr) Error() string {
 	if s, ok := e.key.(*objects.Unicode); ok {
 		return "TypeError: got multiple values for keyword argument '" + s.Value() + "'"
+	}
+	r, _ := objects.Repr(e.key)
+	if r != "" {
+		return "TypeError: got multiple values for keyword argument '" + r + "'"
 	}
 	return "TypeError: got multiple values for keyword argument"
 }
@@ -976,8 +976,14 @@ func formatKwargsError(callable objects.Object, err error) error {
 	funcstr := objectFunctionStr(callable)
 	var dup *kwargsDuplicateErr
 	if errors.As(err, &dup) {
+		var keystr string
 		if s, ok := dup.key.(*objects.Unicode); ok {
-			return fmt.Errorf("TypeError: %s got multiple values for keyword argument '%s'", funcstr, s.Value())
+			keystr = s.Value()
+		} else {
+			keystr, _ = objects.Repr(dup.key)
+		}
+		if keystr != "" {
+			return fmt.Errorf("TypeError: %s got multiple values for keyword argument '%s'", funcstr, keystr)
 		}
 		return fmt.Errorf("TypeError: %s got multiple values for keyword argument", funcstr)
 	}

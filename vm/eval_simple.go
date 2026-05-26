@@ -1252,6 +1252,10 @@ func powerOp(a, b, mod objects.Object) (objects.Object, error) {
 			return out, nil
 		}
 	}
+	// CPython: Objects/typeobject.c:8195 SLOT1BIN (__pow__ / __rpow__)
+	if out, ok, err := objects.DunderBinary(a, b, "**"); ok {
+		return out, err
+	}
 	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for ** or pow(): '%s' and '%s'", a.Type().Name, b.Type().Name)
 }
 

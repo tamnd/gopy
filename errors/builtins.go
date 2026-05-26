@@ -52,6 +52,18 @@ var (
 )
 
 func init() {
+	// Wire AttributeErrorFactory so GenericGetAttr produces rich
+	// AttributeError exceptions with .name and .obj populated.
+	//
+	// CPython: Objects/object.c:843 _PyObject_SetAttributeError
+	objects.AttributeErrorFactory = func(obj objects.Object, attrName string) error {
+		msg := "'" + obj.Type().Name + "' object has no attribute '" + attrName + "'"
+		exc := New(PyExc_AttributeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		d := exc.EnsureAttrDict()
+		_ = d.SetItem(objects.NewStr("name"), objects.NewStr(attrName))
+		_ = d.SetItem(objects.NewStr("obj"), obj)
+		return &objects.RaisedError{Exc: exc, Msg: "AttributeError: " + msg}
+	}
 	objects.IsIndexErrorHook = func(err error) bool {
 		if err == nil {
 			return false
@@ -187,16 +199,23 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 
 // excTpNew is the tp_new slot for every built-in exception type. It
 // mirrors BaseException_new: allocate a fresh PyBaseExceptionObject,
-// store positional args on .args, and return. tp_init is a no-op on
-// BaseException itself; user subclasses that override __init__ run
-// after this via typeCallViaTpNew. Kwargs are tolerated for the same
-// reason excCall tolerates them: stdlib call sites that pass
-// `name=` / `path=` to ImportError use the keyword form before the
-// proper ImportError init lands.
+// store positional args on .args, and return. Keyword arguments that
+// correspond to exception-specific attributes (name, obj, path) are
+// stored in the exception's attr dict so code like
+// `raise NameError("msg", name="x")` works correctly.
 //
 // CPython: Objects/exceptions.c:L42 BaseException_new
-func excTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return New(cls, objects.NewTuple(args)), nil
+// CPython: Objects/exceptions.c:2503 NameError_init
+// CPython: Objects/exceptions.c:2586 AttributeError_init
+func excTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	exc := New(cls, objects.NewTuple(args))
+	if len(kwargs) > 0 {
+		d := exc.EnsureAttrDict()
+		for k, v := range kwargs {
+			_ = d.SetItem(objects.NewStr(k), v)
+		}
+	}
+	return exc, nil
 }
 
 // excStr ports BaseException_str: empty for no args, str(args[0]) for

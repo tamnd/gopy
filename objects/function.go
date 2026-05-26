@@ -427,23 +427,31 @@ func funcSetAnnotateAttr(o Object, v Object) error {
 //
 // CPython: Objects/funcobject.c:1030 func_new_impl
 func funcTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	pos := append([]Object(nil), args...)
-	if v, ok := kwargs["code"]; ok && len(pos) < 1 {
-		pos = append(pos, v)
+	// Build a 6-slot positional array. Positional args fill from the
+	// front; keyword args fill their named slot regardless of whether
+	// earlier optional args were given.
+	//
+	// CPython: Objects/funcobject.c:1030 func_new_impl
+	// Signature: function(code, globals[, name[, argdefs[, closure[, kwdefaults]]]])
+	slotNames := []string{"code", "globals", "name", "argdefs", "closure", "kwdefaults"}
+	pos := make([]Object, 6)
+	for i := range pos {
+		pos[i] = None()
 	}
-	if v, ok := kwargs["globals"]; ok && len(pos) < 2 {
-		pos = append(pos, v)
+	for i, v := range args {
+		if i >= 6 {
+			break
+		}
+		pos[i] = v
 	}
-	for _, name := range []string{"name", "argdefs", "closure", "kwdefaults"} {
-		if v, ok := kwargs[name]; ok {
-			pos = append(pos, v)
+	for i, sn := range slotNames {
+		if v, ok := kwargs[sn]; ok {
+			pos[i] = v
 		}
 	}
-	for len(pos) < 6 {
-		pos = append(pos, None())
-	}
-	if len(pos) < 2 || len(pos) > 6 {
-		return nil, fmt.Errorf("TypeError: function expected 2 to 6 arguments, got %d", len(args))
+	totalArgs := len(args) + len(kwargs)
+	if totalArgs < 2 || totalArgs > 6 {
+		return nil, fmt.Errorf("TypeError: function expected 2 to 6 arguments, got %d", totalArgs)
 	}
 	code, ok := pos[0].(*Code)
 	if !ok {

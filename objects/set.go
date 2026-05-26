@@ -869,17 +869,43 @@ func setIntersectionMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	result := s
 	for _, other := range args[1:] {
-		os, ok := toSet(other)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: intersection() argument must be a set")
-		}
 		var err error
-		result, err = setIntersect(result, os)
+		if os, ok := toSet(other); ok {
+			result, err = setIntersect(result, os)
+		} else {
+			result, err = setIntersectIterable(result, other)
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	return result, nil
+}
+
+// setIntersectIterable intersects a set with an arbitrary iterable,
+// mirroring CPython's set_intersection fast path for non-set iterables.
+//
+// CPython: Objects/setobject.c:1350 set_intersection
+func setIntersectIterable(a *Set, other Object) (*Set, error) {
+	items, err := IterToSlice(other)
+	if err != nil {
+		return nil, err
+	}
+	out := NewSet()
+	for _, item := range items {
+		ok, err := a.Contains(item)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			h, err := Hash(item)
+			if err != nil {
+				return nil, err
+			}
+			out.insert(h, item)
+		}
+	}
+	return out, nil
 }
 
 func setUnionMethod(args []Object, _ map[string]Object) (Object, error) {

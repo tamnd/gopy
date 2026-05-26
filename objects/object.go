@@ -545,15 +545,26 @@ func objectGetClass(o Object) (Object, error) {
 	return o.Type(), nil
 }
 
-// objectSetClass implements object.__class__ set. CPython performs
-// elaborate compatibility checks (object_set_class_world_stopped)
-// before swapping the type pointer; gopy raises TypeError for now
-// so user code does not silently corrupt the type graph. A real
-// port is tracked under the pickle / object-protocol follow-up.
+// objectSetClass implements object.__class__ set. CPython checks that
+// old and new types have compatible C-level memory layouts; gopy only
+// supports this for *Instance objects (which share a uniform layout)
+// and rejects built-in types.
 //
 // CPython: Objects/typeobject.c:7208 object_set_class
 func objectSetClass(o Object, value Object) error {
-	return fmt.Errorf("TypeError: __class__ assignment not supported")
+	newType, ok := value.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)
+	}
+	if newType.TpFlags&TpFlagImmutable != 0 {
+		return fmt.Errorf("TypeError: can't set __class__: new type '%s' is not mutable", newType.Name)
+	}
+	inst, ok := o.(*Instance)
+	if !ok {
+		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
+	}
+	inst.Header.typ = newType
+	return nil
 }
 
 // objectGetDict implements object.__dict__ get for HasDict-bearing

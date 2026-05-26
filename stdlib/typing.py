@@ -31,6 +31,8 @@ from types import GenericAlias
 
 from _typing import (
     _idfunc,
+    _set_union_type_check,
+    _set_generic_class_getitem,
     TypeVar,
     ParamSpec,
     TypeVarTuple,
@@ -212,6 +214,11 @@ def _type_check(arg, msg, is_argument=True, module=None, *, allow_special_forms=
     if type(arg) is tuple:
         raise TypeError(f"{msg} Got {arg!r:.100}.")
     return arg
+
+
+# Wire _type_check into the C union builder so types.UnionType[ForwardRef, ...]
+# and Union["str", ...] work. Must happen right after _type_check is defined.
+_set_union_type_check(_type_check)
 
 
 def _is_param_expr(arg):
@@ -1169,6 +1176,12 @@ def _generic_class_getitem(cls, args):
         args = tuple(new_args)
 
     return _GenericAlias(cls, args)
+
+
+# Wire _generic_class_getitem as the hook for Generic[...] subscriptions
+# so that string arguments go through _type_convert -> _make_forward_ref ->
+# eager __forward_code__ validation (SyntaxError for invalid expressions).
+_set_generic_class_getitem(_generic_class_getitem)
 
 
 def _generic_init_subclass(cls, *args, **kwargs):

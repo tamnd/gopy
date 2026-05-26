@@ -253,14 +253,20 @@ func init() {
 		return "~" + o.(*TypeVar).NameStr, nil
 	}
 	TypeVarType.Str = TypeVarType.Repr
+	// CPython: Objects/typevarobject.c:687 typevar_tp_hash (id-based)
+	TypeVarType.Hash = identityHash
 	ParamSpecType.Repr = func(o Object) (string, error) {
 		return "~" + o.(*ParamSpec).NameStr, nil
 	}
 	ParamSpecType.Str = ParamSpecType.Repr
+	// CPython: Objects/typevarobject.c:1247 paramspec_tp_hash (id-based)
+	ParamSpecType.Hash = identityHash
 	TypeVarTupleType.Repr = func(o Object) (string, error) {
 		return "~" + o.(*TypeVarTuple).NameStr, nil
 	}
 	TypeVarTupleType.Str = TypeVarTupleType.Repr
+	// CPython: Objects/typevarobject.c:1567 typevartuple_tp_hash (id-based)
+	TypeVarTupleType.Hash = identityHash
 
 	SetTypeDescr(TypeVarType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*TypeVar).NameStr), nil
@@ -570,16 +576,30 @@ func init() {
 		return args[2], nil
 	}))
 
-	// TypeVarTuple.__iter__: yields self so that *Ts in a tuple literal
-	// expands to the TypeVarTuple itself. This matches the storage model
-	// used by alias.__parameters__ (which also holds TypeVarTuples directly).
+	// TypeVarTuple.__iter__: yields Unpack[self] so that *Ts in a subscript
+	// expands to Unpack[Ts]. Mirrors CPython's unpack_iter which calls
+	// typing.Unpack[self] and returns an iterator over a one-tuple.
 	//
-	// CPython: Objects/typevarobject.c typevartype_iter (yields Unpack[self])
+	// CPython: Objects/typevarobject.c:1535 unpack_iter
 	SetTypeDescr(TypeVarTupleType, "__iter__", NewMethodDescr(TypeVarTupleType, "__iter__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __iter__() missing self")
 		}
-		return listIter(NewList([]Object{args[0]}))
+		self := args[0]
+		if SysModulesGetter != nil {
+			sysmod := SysModulesGetter()
+			if sysmod != nil {
+				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
+					if unpack, err2 := GetAttr(typingMod, NewStr("Unpack")); err2 == nil && unpack != nil {
+						if unpacked, err3 := GetItem(unpack, self); err3 == nil {
+							return listIter(NewList([]Object{unpacked}))
+						}
+					}
+				}
+			}
+		}
+		// Fallback: yield self so *Ts at least expands to something.
+		return listIter(NewList([]Object{self}))
 	}))
 
 	// Install Generic.__init_subclass__ so subclasses (class Foo(Generic[T]))
@@ -618,20 +638,39 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 	// Collect all type parameters from __orig_bases__.
 	allParams := makeParameters(ob)
 	// Find the explicit Generic[T,...] base (if any) and enforce single-use.
+	// Handles both Go *GenericAlias and Python _GenericAlias instances whose
+	// __origin__ is typing.Generic.
+	//
 	// CPython: Lib/typing.py:1192 gvars loop
 	var gvars *Tuple
 	for i := 0; i < ob.Len(); i++ {
-		ga, ok2 := ob.Item(i).(*GenericAlias)
-		if !ok2 || ga.origin != Object(GenericType) {
+		base := ob.Item(i)
+		if ga, ok2 := base.(*GenericAlias); ok2 {
+			if ga.origin != Object(GenericType) {
+				continue
+			}
+			if gvars != nil {
+				return nil, fmt.Errorf("TypeError: Cannot inherit from Generic[...] multiple times.")
+			}
+			if ga.parameters == nil {
+				ga.parameters = makeParameters(ga.args)
+			}
+			gvars = ga.parameters
+			continue
+		}
+		// Python-level _GenericAlias: check __origin__ is Generic.
+		origin, err := GetAttr(base, NewStr("__origin__"))
+		if err != nil || origin != Object(GenericType) {
 			continue
 		}
 		if gvars != nil {
 			return nil, fmt.Errorf("TypeError: Cannot inherit from Generic[...] multiple times.")
 		}
-		if ga.parameters == nil {
-			ga.parameters = makeParameters(ga.args)
+		if p, err2 := GetAttr(base, NewStr("__parameters__")); err2 == nil {
+			if tup, ok2 := p.(*Tuple); ok2 {
+				gvars = tup
+			}
 		}
-		gvars = ga.parameters
 	}
 	if gvars != nil {
 		// Validate: every param in allParams must appear in gvars.

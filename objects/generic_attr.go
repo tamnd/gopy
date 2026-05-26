@@ -11,6 +11,13 @@ package objects
 
 import "fmt"
 
+// AttributeErrorFactory is wired by the errors package after init so that
+// GenericGetAttr can produce a rich AttributeError with .name and .obj set.
+// Nil until the errors package initialises.
+//
+// CPython: Objects/object.c:843 _PyObject_SetAttributeError
+var AttributeErrorFactory func(obj Object, attrName string) error
+
 // AttrDictHolder is implemented by objects that carry their own
 // per-instance attribute dict. The generic attr machinery consults it
 // for objects that are not plain *Instance so a Python subclass of a
@@ -63,6 +70,9 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 			return dt.DescrGet(descr, o, tp)
 		}
 		return descr, nil
+	}
+	if AttributeErrorFactory != nil {
+		return nil, AttributeErrorFactory(o, attrNameStr(name))
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 }

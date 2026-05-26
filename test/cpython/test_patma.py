@@ -3529,31 +3529,34 @@ if __name__ == "__main__":
          $(which python) -m test.test_patma --rigorous; \
     sudo $(which pyperf) system reset
     """
-    import pyperf
+    try:
+        import pyperf as _pyperf_mod
+    except ImportError:
+        _pyperf_mod = None
+    if _pyperf_mod is not None:
+        pyperf = _pyperf_mod
 
+        class PerfPatma(TestPatma):
 
-    class PerfPatma(TestPatma):
+            def assertEqual(*_, **__):
+                pass
 
-        def assertEqual(*_, **__):
-            pass
+            def assertIs(*_, **__):
+                pass
 
-        def assertIs(*_, **__):
-            pass
+            def assertRaises(*_, **__):
+                assert False, "this test should be a method of a different class!"
 
-        def assertRaises(*_, **__):
-            assert False, "this test should be a method of a different class!"
+            def run_perf(self, count):
+                tests = []
+                for attr in vars(TestPatma):
+                    if attr.startswith("test_"):
+                        tests.append(getattr(self, attr))
+                tests *= count
+                start = pyperf.perf_counter()
+                for test in tests:
+                    test()
+                return pyperf.perf_counter() - start
 
-        def run_perf(self, count):
-            tests = []
-            for attr in vars(TestPatma):
-                if attr.startswith("test_"):
-                    tests.append(getattr(self, attr))
-            tests *= count
-            start = pyperf.perf_counter()
-            for test in tests:
-                test()
-            return pyperf.perf_counter() - start
-
-
-    runner = pyperf.Runner()
-    runner.bench_time_func("patma", PerfPatma().run_perf)
+        runner = pyperf.Runner()
+        runner.bench_time_func("patma", PerfPatma().run_perf)
