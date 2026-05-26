@@ -31,7 +31,11 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		return nil, err
 	}
 	var mod ast.Mod
-	if parsed.sourceBytes != nil {
+	if parsed.astMod != nil {
+		// Source was a Python _ast object; use the reverse-bridged Go AST directly.
+		// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod path
+		mod = parsed.astMod
+	} else if parsed.sourceBytes != nil {
 		mod, err = parser.ParseBytesFlagsVersion(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
 	} else {
 		mod, err = parser.ParseStringFlagsVersion(parsed.source, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
@@ -67,6 +71,7 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 type compileArgs struct {
 	source         string
 	sourceBytes    []byte
+	astMod         ast.Mod // non-nil when source is a Python _ast object
 	filename       string
 	mode           parser.Mode
 	flags          int
@@ -87,9 +92,19 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
-	source, sourceBytes, err := compileSourceArg(bound[0])
-	if err != nil {
-		return compileArgs{}, err
+	// Check for Python _ast object before falling through to text source.
+	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_Check
+	var astMod ast.Mod
+	if mod, ok := PyASTObjectToMod(bound[0]); ok {
+		astMod = mod
+	}
+	var source string
+	var sourceBytes []byte
+	if astMod == nil {
+		source, sourceBytes, err = compileSourceArg(bound[0])
+		if err != nil {
+			return compileArgs{}, err
+		}
 	}
 	filename, err := stringArg(bound[1], "filename")
 	if err != nil {
@@ -126,6 +141,7 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	return compileArgs{
 		source:         source,
 		sourceBytes:    sourceBytes,
+		astMod:         astMod,
 		filename:       filename,
 		mode:           mode,
 		flags:          flags,

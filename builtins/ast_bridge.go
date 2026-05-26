@@ -252,29 +252,35 @@ func (b *astBridge) convertExpr(e ast.Expr) objects.Object {
 	switch n := e.(type) {
 	case *ast.Name:
 		return b.withPos("Name", map[string]objects.Object{
-			"id": objects.NewStr(n.Id),
+			"id":  objects.NewStr(n.Id),
+			"ctx": b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.Attribute:
 		return b.withPos("Attribute", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
 			"attr":  objects.NewStr(n.Attr),
+			"ctx":   b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.Subscript:
 		return b.withPos("Subscript", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
 			"slice": b.convertExpr(n.Slice),
+			"ctx":   b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.Starred:
 		return b.withPos("Starred", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
+			"ctx":   b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.Tuple:
 		return b.withPos("Tuple", map[string]objects.Object{
 			"elts": b.convertExprList(n.Elts),
+			"ctx":  b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.List:
 		return b.withPos("List", map[string]objects.Object{
 			"elts": b.convertExprList(n.Elts),
+			"ctx":  b.exprCtx(n.Ctx),
 		}, n.Pos)
 	case *ast.JoinedStr:
 		return b.withPos("JoinedStr", map[string]objects.Object{
@@ -381,6 +387,20 @@ func (b *astBridge) convertOperator(op ast.Operator) objects.Object {
 		return b.newInst("MatMult", nil)
 	}
 	return b.newInst("Add", nil)
+}
+
+// exprCtx converts a Go ExprContext to the matching _ast ctx instance.
+//
+// CPython: Python/Python-ast.c (context fields on Name, Attribute, etc.)
+func (b *astBridge) exprCtx(ctx ast.ExprContext) objects.Object {
+	switch ctx {
+	case ast.Store:
+		return b.newInst("Store", nil)
+	case ast.Del:
+		return b.newInst("Del", nil)
+	default:
+		return b.newInst("Load", nil)
+	}
 }
 
 // typeCommentObj converts a *string type_comment to a Python str or None.
