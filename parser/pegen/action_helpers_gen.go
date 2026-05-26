@@ -1018,7 +1018,17 @@ func actionPgenFormattedValue(p *Parser, args ...any) any {
 	}
 	debug, _ := argAt(args, 2).(*Token)
 	conv := fstringConversionChar(argAt(args, 3))
-	format := asExpr(argAt(args, 4))
+	// args[4] may be a plain ast.Expr or a fstringFormatSpecResult (when
+	// the colon token carried debug metadata). CPython: action_helpers.c:1581
+	// reads format->metadata when format is present.
+	var format ast.Expr
+	var formatMeta []byte
+	if fsr, ok := argAt(args, 4).(*fstringFormatSpecResult); ok {
+		format = fsr.Expr
+		formatMeta = fsr.Metadata
+	} else {
+		format = asExpr(argAt(args, 4))
+	}
 	rbrace, _ := argAt(args, 5).(*Token)
 	if conv == 0 && debug != nil && format == nil {
 		conv = 'r'
@@ -1034,8 +1044,13 @@ func actionPgenFormattedValue(p *Parser, args ...any) any {
 	if debug == nil {
 		return formattedValue
 	}
+	// CPython: action_helpers.c:1581 _PyPegen_formatted_value
+	// debug_metadata = conversion->metadata ?? format->metadata ?? closing_brace->metadata
 	var exprstr string
-	if rbrace != nil && len(rbrace.Metadata) > 0 {
+	switch {
+	case len(formatMeta) > 0:
+		exprstr = string(formatMeta)
+	case rbrace != nil && len(rbrace.Metadata) > 0:
 		exprstr = string(rbrace.Metadata)
 	}
 	return &ast.JoinedStr{
@@ -1091,7 +1106,14 @@ func actionPgenInterpolation(p *Parser, args ...any) any {
 	}
 	debug, _ := argAt(args, 2).(*Token)
 	conv := fstringConversionChar(argAt(args, 3))
-	format := asExpr(argAt(args, 4))
+	var format ast.Expr
+	var formatMeta []byte
+	if fsr, ok := argAt(args, 4).(*fstringFormatSpecResult); ok {
+		format = fsr.Expr
+		formatMeta = fsr.Metadata
+	} else {
+		format = asExpr(argAt(args, 4))
+	}
 	rbrace, _ := argAt(args, 5).(*Token)
 	if conv == 0 && debug != nil && format == nil {
 		conv = 'r'
@@ -1099,7 +1121,10 @@ func actionPgenInterpolation(p *Parser, args ...any) any {
 		conv = -1
 	}
 	var exprstr string
-	if rbrace != nil && len(rbrace.Metadata) > 0 {
+	switch {
+	case len(formatMeta) > 0:
+		exprstr = string(formatMeta)
+	case rbrace != nil && len(rbrace.Metadata) > 0:
 		exprstr = string(rbrace.Metadata)
 	}
 	interp := &ast.Interpolation{
@@ -2442,16 +2467,26 @@ func actionPgenSlashWithDefault(p *Parser, args ...any) any {
 	return out
 }
 
+// fstringFormatSpecResult mirrors CPython's ResultTokenWithMetadata: it
+// carries the AST expression for the format spec plus the metadata bytes
+// that the COLON token holds (the debug expression text "expr =  ").
+//
+// CPython: Parser/pegen.h ResultTokenWithMetadata
+type fstringFormatSpecResult struct {
+	Expr     ast.Expr
+	Metadata []byte
+}
+
 // actionPgenSetupFullFormatSpec wraps a format-spec body (from
 // `:spec*` in fstring_full_format_spec) into the expression that
 // FormattedValue.format_spec carries. CPython filters out empty
-// Constant nodes and either returns a JoinedStr or concatenates the
-// surviving parts; the result is then wrapped in a ResultTokenWithMetadata.
-// We return the bare expression since the FormatSpec slot reads an Expr.
+// Constant nodes, concatenates survivors, and wraps the result in a
+// ResultTokenWithMetadata so _PyPegen_formatted_value can read
+// colon->metadata for the debug expression text.
 //
 // CPython: Parser/action_helpers.c:990 _PyPegen_setup_full_format_spec
 func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
-	_ = p
+	colon, _ := argAt(args, 1).(*Token)
 	spec := joinedStrValues(argAt(args, 2))
 	filtered := make([]ast.Expr, 0, len(spec))
 	for _, item := range spec {
@@ -2463,19 +2498,26 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 		filtered = append(filtered, item)
 	}
 	n := len(filtered)
+	var expr ast.Expr
 	if n == 0 {
-		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
-	}
-	if n == 1 {
+		expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	} else if n == 1 {
 		if _, ok := filtered[0].(*ast.Constant); ok {
-			return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+			expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
 		}
 	}
-	concat := ConcatenateStrings(p, filtered)
-	if concat == nil {
-		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	if expr == nil {
+		concat := ConcatenateStrings(p, filtered)
+		if concat == nil {
+			expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+		} else {
+			expr = concat
+		}
 	}
-	return concat
+	if colon != nil && len(colon.Metadata) > 0 {
+		return &fstringFormatSpecResult{Expr: expr, Metadata: colon.Metadata}
+	}
+	return expr
 }
 
 // actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:

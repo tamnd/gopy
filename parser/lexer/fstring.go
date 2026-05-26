@@ -252,7 +252,10 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 			// CPython: Parser/lexer/lexer.c:1525
 			s.updateFtstringExpr('{')
 			peek := s.nextC()
-			if peek != '{' {
+			// CPython: Parser/lexer/lexer.c:1529
+			// In a format spec, {{ is NOT a brace escape; { always starts
+			// an expression. Outside a format spec, {{ → literal {.
+			if peek != '{' || m.inFormatSpec {
 				s.backup(peek)
 				s.backup(c)
 				m.curlyBracketExprStartDepth++
@@ -276,7 +279,10 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur)
 			}
 			peek := s.nextC()
-			if peek == '}' && m.curlyBracketDepth == 0 {
+			// CPython: Parser/lexer/lexer.c:1559
+			// }} is only a brace escape outside format specs; format specs
+			// can't legally use double brackets.
+			if peek == '}' && !m.inFormatSpec && m.curlyBracketDepth == 0 {
 				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
 			}
 			s.backup(peek)
@@ -489,6 +495,7 @@ func (s *State) setFtstringExpr(tok *Tok, c byte, wasInDebug bool) {
 			}
 			if i < len(src) {
 				out = append(out, '\n')
+				i++ // advance past \n; CPython: lexer.c:197 unconditional i++ at loop bottom
 			}
 			continue
 		}
