@@ -277,6 +277,14 @@ func (u *unpickler) load() (objects.Object, error) {
 			if err := u.loadLongBinput(); err != nil {
 				return nil, err
 			}
+		case opPut:
+			if err := u.loadPut(); err != nil {
+				return nil, err
+			}
+		case opGet:
+			if err := u.loadGet(); err != nil {
+				return nil, err
+			}
 		case opPop:
 			if _, err := u.pop(); err != nil {
 				return nil, err
@@ -872,6 +880,40 @@ func (u *unpickler) loadLongBinput() error {
 		return errors.New("UnpicklingError: LONG_BINPUT on empty stack")
 	}
 	return u.memoPutAt(idx, u.stack[len(u.stack)-1])
+}
+
+// loadPut reads a decimal integer followed by '\n' and stores the
+// stack top at that memo index. Proto 0 text-mode form.
+//
+// CPython: Modules/_pickle.c:6471 load_put
+func (u *unpickler) loadPut() error {
+	line := u.readLine()
+	var idx int
+	if _, err := fmt.Sscanf(line, "%d", &idx); err != nil {
+		return fmt.Errorf("UnpicklingError: PUT index not an integer: %q", line)
+	}
+	if len(u.stack) == 0 {
+		return errors.New("UnpicklingError: PUT on empty stack")
+	}
+	return u.memoPutAt(idx, u.stack[len(u.stack)-1])
+}
+
+// loadGet reads a decimal integer followed by '\n' and pushes the
+// object stored at that memo index. Proto 0 text-mode form.
+//
+// CPython: Modules/_pickle.c:6301 load_get
+func (u *unpickler) loadGet() error {
+	line := u.readLine()
+	var idx int
+	if _, err := fmt.Sscanf(line, "%d", &idx); err != nil {
+		return fmt.Errorf("UnpicklingError: GET index not an integer: %q", line)
+	}
+	obj, err := u.memoGet(idx)
+	if err != nil {
+		return err
+	}
+	u.push(obj)
+	return nil
 }
 
 // loadPopMark drops everything above the current MARK and the MARK
