@@ -137,22 +137,32 @@ func (b *astBridge) convertStmt(s ast.Stmt) objects.Object {
 		return b.convertFunctionDef(n)
 	case *ast.AsyncFunctionDef:
 		return b.convertAsyncFunctionDef(n)
+	case *ast.ExprStmt:
+		return b.withPos("Expr", map[string]objects.Object{
+			"value": b.convertExpr(n.Value),
+		}, n.Pos)
 	case *ast.For:
-		return b.newInst("For", map[string]objects.Object{
+		return b.withPos("For", map[string]objects.Object{
 			"type_comment": typeCommentObj(n.TypeComment),
-		})
+		}, n.Pos)
 	case *ast.With:
-		return b.newInst("With", map[string]objects.Object{
+		return b.withPos("With", map[string]objects.Object{
 			"type_comment": typeCommentObj(n.TypeComment),
-		})
+		}, n.Pos)
 	case *ast.Assign:
-		return b.newInst("Assign", map[string]objects.Object{
+		return b.withPos("Assign", map[string]objects.Object{
+			"targets":      b.convertExprList(n.Targets),
+			"value":        b.convertExpr(n.Value),
 			"type_comment": typeCommentObj(n.TypeComment),
-		})
+		}, n.Pos)
 	}
 	// All other stmt types that tests don't inspect: return a minimal
 	// stub with type_comment=None so attribute access doesn't error.
-	return b.newInst("Pass", map[string]objects.Object{})
+	pos := ast.Pos{}
+	if positioner, ok := s.(interface{ Position() ast.Pos }); ok {
+		pos = positioner.Position()
+	}
+	return b.withPos("Pass", map[string]objects.Object{}, pos)
 }
 
 func (b *astBridge) convertFunctionDef(n *ast.FunctionDef) objects.Object {
@@ -241,29 +251,136 @@ func (b *astBridge) convertExpr(e ast.Expr) objects.Object {
 	}
 	switch n := e.(type) {
 	case *ast.Name:
-		return b.newInst("Name", map[string]objects.Object{
+		return b.withPos("Name", map[string]objects.Object{
 			"id": objects.NewStr(n.Id),
-		})
+		}, n.Pos)
 	case *ast.Attribute:
-		return b.newInst("Attribute", map[string]objects.Object{
+		return b.withPos("Attribute", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
 			"attr":  objects.NewStr(n.Attr),
-		})
+		}, n.Pos)
 	case *ast.Subscript:
-		return b.newInst("Subscript", map[string]objects.Object{
+		return b.withPos("Subscript", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
 			"slice": b.convertExpr(n.Slice),
-		})
+		}, n.Pos)
 	case *ast.Starred:
-		return b.newInst("Starred", map[string]objects.Object{
+		return b.withPos("Starred", map[string]objects.Object{
 			"value": b.convertExpr(n.Value),
-		})
+		}, n.Pos)
+	case *ast.Tuple:
+		return b.withPos("Tuple", map[string]objects.Object{
+			"elts": b.convertExprList(n.Elts),
+		}, n.Pos)
+	case *ast.List:
+		return b.withPos("List", map[string]objects.Object{
+			"elts": b.convertExprList(n.Elts),
+		}, n.Pos)
+	case *ast.JoinedStr:
+		return b.withPos("JoinedStr", map[string]objects.Object{
+			"values": b.convertExprList(n.Values),
+		}, n.Pos)
+	case *ast.FormattedValue:
+		conv := objects.NewInt(int64(n.Conversion))
+		var fmtSpec objects.Object = objects.None()
+		if n.FormatSpec != nil {
+			fmtSpec = b.convertExpr(n.FormatSpec)
+		}
+		return b.withPos("FormattedValue", map[string]objects.Object{
+			"value":       b.convertExpr(n.Value),
+			"conversion":  conv,
+			"format_spec": fmtSpec,
+		}, n.Pos)
+	case *ast.Constant:
+		return b.withPos("Constant", map[string]objects.Object{
+			"value": b.convertConstantValue(n.Value),
+		}, n.Pos)
+	case *ast.BinOp:
+		return b.withPos("BinOp", map[string]objects.Object{
+			"left":  b.convertExpr(n.Left),
+			"op":    b.convertOperator(n.Op),
+			"right": b.convertExpr(n.Right),
+		}, n.Pos)
+	case *ast.Call:
+		return b.withPos("Call", map[string]objects.Object{
+			"func": b.convertExpr(n.Func),
+			"args": b.convertExprList(n.Args),
+			"keywords": objects.NewList(nil),
+		}, n.Pos)
 	}
 	// Return a minimal stub for expression types the bridge does not
 	// fully walk; func_type tests only inspect .id/.value.id/.slice.id.
-	return b.newInst("Constant", map[string]objects.Object{
+	pos := ast.Pos{}
+	if positioner, ok := e.(interface{ Position() ast.Pos }); ok {
+		pos = positioner.Position()
+	}
+	return b.withPos("Constant", map[string]objects.Object{
 		"value": objects.None(),
-	})
+	}, pos)
+}
+
+// withPos allocates a new _ast instance and stamps lineno/col_offset/
+// end_lineno/end_col_offset from the Go source position.
+//
+// CPython: Python/Python-ast.c (all AST constructors set these fields)
+func (b *astBridge) withPos(name string, attrs map[string]objects.Object, pos ast.Pos) objects.Object {
+	if pos.Lineno > 0 {
+		attrs["lineno"] = objects.NewInt(int64(pos.Lineno))
+		attrs["col_offset"] = objects.NewInt(int64(pos.ColOffset))
+		attrs["end_lineno"] = objects.NewInt(int64(pos.EndLineno))
+		attrs["end_col_offset"] = objects.NewInt(int64(pos.EndColOffset))
+	}
+	return b.newInst(name, attrs)
+}
+
+// convertConstantValue converts a Go constant value to a Python object.
+func (b *astBridge) convertConstantValue(v any) objects.Object {
+	switch x := v.(type) {
+	case int64:
+		return objects.NewInt(x)
+	case float64:
+		return objects.NewFloat(x)
+	case string:
+		return objects.NewStr(x)
+	case bool:
+		return objects.NewBool(x)
+	case []byte:
+		return objects.NewBytes(x)
+	}
+	return objects.None()
+}
+
+// convertOperator converts a Go AST operator to a Python _ast operator instance.
+func (b *astBridge) convertOperator(op ast.Operator) objects.Object {
+	switch op {
+	case ast.Add:
+		return b.newInst("Add", nil)
+	case ast.Sub:
+		return b.newInst("Sub", nil)
+	case ast.Mult:
+		return b.newInst("Mult", nil)
+	case ast.Div:
+		return b.newInst("Div", nil)
+	case ast.ModOperator:
+		return b.newInst("Mod", nil)
+	case ast.Pow:
+		return b.newInst("Pow", nil)
+	case ast.BitOr:
+		return b.newInst("BitOr", nil)
+	case ast.BitAnd:
+		return b.newInst("BitAnd", nil)
+	case ast.BitXor:
+		return b.newInst("BitXor", nil)
+	case ast.FloorDiv:
+		return b.newInst("FloorDiv", nil)
+	case ast.LShift:
+		return b.newInst("LShift", nil)
+	case ast.RShift:
+		return b.newInst("RShift", nil)
+	case ast.MatMult:
+		return b.newInst("MatMult", nil)
+	}
+	return b.newInst("Add", nil)
 }
 
 // typeCommentObj converts a *string type_comment to a Python str or None.

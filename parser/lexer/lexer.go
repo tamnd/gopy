@@ -1480,12 +1480,26 @@ func (s *State) verifyIdentifier() bool {
 	if ok {
 		return true
 	}
-	// Pin tok->cur to the bad rune so callers see the right span.
-	s.cur = s.start + off + utf8RuneLen(bad)
+	// Advance tok->cur to after the bad rune, mirroring CPython's
+	// tok->cur = tok->start + PyBytes_GET_SIZE(s) after encoding the
+	// substring up to and including the bad char.
+	//
+	// CPython: Parser/lexer/lexer.c:397 tok->cur = (char *)tok->start + PyBytes_GET_SIZE(s)
+	badBytePos := s.start + off
+	s.cur = badBytePos + utf8RuneLen(bad)
+	// CPython's _syntaxerror_range with col_offset=-1 sets:
+	//   col_offset = PyUnicode_GET_LENGTH(errtext)  (chars from line_start to tok->cur)
+	// which is the 1-indexed offset of the bad char. gopy stores 0-indexed
+	// (col = chars before the bad rune) so exc_from_parser.go's +1 gives
+	// the same 1-indexed result.
+	//
+	// CPython: Parser/tokenizer/helpers.c:35 col_offset = PyUnicode_GET_LENGTH(errtext)
+	startCol := s.charColAt(badBytePos)
+	endCol := startCol + 1
 	if isPrintable(bad) {
-		s.syntaxError("invalid character '%c' (U+%04X)", bad, bad)
+		s.syntaxErrorKnownRange(startCol, endCol, "invalid character '%c' (U+%04X)", bad, bad)
 	} else {
-		s.syntaxError("invalid non-printable character U+%04X", bad)
+		s.syntaxErrorKnownRange(startCol, endCol, "invalid non-printable character U+%04X", bad)
 	}
 	return false
 }

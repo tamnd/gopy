@@ -253,9 +253,36 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 	if !closefd {
 		return nil, fmt.Errorf("ValueError: Cannot use closefd=False with file name")
 	}
-	f, err := stdos.OpenFile(name, flag, 0o666)
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %s", err.Error())
+
+	opener := bound[3]
+	var f *stdos.File
+	if opener != nil && !objects.IsNone(opener) && objects.Callable(opener) {
+		// Call opener(name, flags) to get the file descriptor.
+		//
+		// CPython: Modules/_io/fileio.c:399 _PyObject_CallMethodIdObjArgs opener
+		nameObj := objects.NewStr(name)
+		flagObj := objects.NewInt(int64(flag))
+		fdObj, callErr := objects.Call(opener, objects.NewTuple([]objects.Object{nameObj, flagObj}), nil)
+		if callErr != nil {
+			return nil, callErr
+		}
+		fd, ok := fdObj.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: expected integer from opener, got %s", fdObj.Type().Name)
+		}
+		fdVal, fits := fd.Int64()
+		if !fits || fdVal < 0 {
+			return nil, fmt.Errorf("ValueError: opener returned invalid file descriptor")
+		}
+		f = stdos.NewFile(uintptr(fdVal), name)
+		if f == nil {
+			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
+		}
+	} else {
+		f, err = stdos.OpenFile(name, flag, 0o666)
+		if err != nil {
+			return nil, fmt.Errorf("OSError: %s", err.Error())
+		}
 	}
 	fi := &FileIO{
 		f:         f,

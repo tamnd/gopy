@@ -216,7 +216,9 @@ func buildConcatenatedStr(parts []ast.Expr) []ast.Expr {
 				if _, isConst := flattened[i+1].(*ast.Constant); isConst {
 					firstElem := c
 					kind := firstElem.Kind
+					startPos := firstElem.Pos
 					var sb strings.Builder
+					var lastPos ast.Pos
 					j := i
 					for ; j < len(flattened); j++ {
 						cc, ok := flattened[j].(*ast.Constant)
@@ -226,9 +228,21 @@ func buildConcatenatedStr(parts []ast.Expr) []ast.Expr {
 						if s, ok := cc.Value.(string); ok {
 							sb.WriteString(s)
 						}
+						lastPos = cc.Pos
 					}
 					i = j - 1
-					folded := &ast.Constant{Value: sb.String(), Kind: kind, Pos: ast.NoPos}
+					// Span: start of first piece, end of last piece.
+					// CPython: Parser/action_helpers.c:1715 _build_concatenated_str
+					foldedPos := ast.Pos{
+						Lineno:       startPos.Lineno,
+						ColOffset:    startPos.ColOffset,
+						EndLineno:    lastPos.EndLineno,
+						EndColOffset: lastPos.EndColOffset,
+					}
+					if startPos.Lineno <= 0 {
+						foldedPos = ast.NoPos
+					}
+					folded := &ast.Constant{Value: sb.String(), Kind: kind, Pos: foldedPos}
 					elem = folded
 					c = folded
 				}

@@ -8,7 +8,11 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/token"
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/token"
+)
 
 // detectStringPrefix returns the (rawFlag, kind, isFTString, ok)
 // triple for a name already scanned at start..s.cur followed by a
@@ -194,10 +198,31 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				return s.syntaxError("%c-string: newlines are not allowed in format specifiers for single quoted %c-strings", prefix, prefix)
 			}
 			start := m.firstLine
+			prefix := s.fstringPrefixChar(m)
+			var msg string
 			if m.quoteSize == 3 {
-				return s.syntaxError("unterminated triple-quoted %c-string literal (detected at line %d)", s.fstringPrefixChar(m), start)
+				msg = fmt.Sprintf("unterminated triple-quoted %c-string literal (detected at line %d)", prefix, start)
+			} else {
+				msg = fmt.Sprintf("unterminated %c-string literal (detected at line %d)", prefix, start)
 			}
-			return s.syntaxError("unterminated %c-string literal (detected at line %d)", s.fstringPrefixChar(m), start)
+			// Pin the error at the opening quote line, not at the current EOF
+			// line, mirroring CPython which restores tok->lineno / tok->line_start
+			// to the values saved when the f-string mode was pushed.
+			//
+			// CPython: Parser/lexer/lexer.c:1462 EOF arm; tok_state saves
+			// first_lineno / tok->line_start at the start of the string literal
+			// and _PyTokenizer_syntaxerror reads tok->lineno (which was restored).
+			s.recordError(msg)
+			if s.err != nil {
+				s.err.Pos.Line = m.firstLine
+				s.err.EndPos.Line = m.firstLine
+				// Column at the f-string prefix (e.g. 'f' in f""").
+				col := s.charColBetween(m.multiLineStart, m.start)
+				s.err.Pos.Col = col
+				s.err.EndPos.Col = col
+			}
+			s.done = eSyntax
+			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 		}
 		if c == int(m.quote) {
 			endQuoteSize++

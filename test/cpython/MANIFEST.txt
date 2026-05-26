@@ -33,7 +33,7 @@ test_annotationlib	ready	v0.10.1	annotation lazy resolver
 test_asdl_parser	ready	v0.5.0	ast/asdl.go
 test_ast/	ready	v0.10.2	full ast.dump panel
 test_decorators	ready	v0.5.0	decorator codegen
-test_eof	ready	v0.10.2	EOF / continuation handling in parser
+test_eof	done	v0.12.5	EOF / continuation handling in parser
 test_fstring	ready	v0.10.2	PEP 701 f-strings
 test_future_stmt/	ready	v0.5.0	__future__ flag plumbing
 test_global	ready	v0.5.0	symtable global / nonlocal
@@ -55,7 +55,7 @@ test_type_aliases	ready	v0.10.2	type Foo = ...
 test_type_annotations	ready	v0.10.2	annotation lowering
 test_type_comments	ready	v0.10.2	parser type-comment mode
 test_type_params	ready	v0.10.2	PEP 695 type parameters
-test_unicode_identifiers	ready	v0.10.2	NFKC identifier normalization
+test_unicode_identifiers	done	v0.12.5	NFKC identifier normalization; invalid char offset fixed
 test_unpack	ready	v0.5.0	tuple unpack codegen
 test_unpack_ex	ready	v0.5.0	starred unpack
 test_unparse	ready	v0.5.0	ast/unparse.go

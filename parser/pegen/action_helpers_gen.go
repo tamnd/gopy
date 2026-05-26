@@ -740,7 +740,7 @@ func actionPgenConstantFromToken(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: string(t.Bytes), Pos: ast.NoPos}
+	return &ast.Constant{Value: string(t.Bytes), Pos: tokenPos(t)}
 }
 
 // actionPgenConstantFromString builds a string-literal Constant. The
@@ -767,9 +767,9 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	}
 	forwardDecodeWarnings(p, t, warns, warnOff)
 	if isBytes {
-		return &ast.Constant{Value: []byte(body), Pos: ast.NoPos}
+		return &ast.Constant{Value: []byte(body), Pos: tokenPos(t)}
 	}
-	return &ast.Constant{Value: body, Pos: ast.NoPos}
+	return &ast.Constant{Value: body, Pos: tokenPos(t)}
 }
 
 // actionPgenDecodedConstantFromToken builds a Constant from
@@ -803,7 +803,7 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 		return placeholderMatched
 	}
 	forwardDecodeWarnings(p, t, warns, warnOff)
-	return &ast.Constant{Value: text, Pos: ast.NoPos}
+	return &ast.Constant{Value: text, Pos: tokenPos(t)}
 }
 
 // forwardDecodeWarnings funnels the SyntaxWarning-class messages the

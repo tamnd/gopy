@@ -183,16 +183,25 @@ func (c *Compiler) visitInterpolation(e *ast.Interpolation) error {
 // visitJoinedStr lowers an f-string. Each Value is either a string
 // literal (Constant) emitted as LOAD_CONST or a FormattedValue node
 // emitted via visitFormattedValue. After the parts are stacked,
-// BUILD_STRING joins them.
+// BUILD_STRING joins them. An empty JoinedStr emits LOAD_CONST "".
+// A single-value JoinedStr emits just that value (no BUILD_STRING),
+// matching CPython's optimization that skips BUILD_STRING for count 0/1.
 //
-// CPython: Python/codegen.c:L4104 codegen_joinedstr
+// CPython: Python/codegen.c:4104 codegen_joined_str
 func (c *Compiler) visitJoinedStr(e *ast.JoinedStr) error {
+	if len(e.Values) == 0 {
+		// CPython: codegen_joined_str value_count==0 branch
+		c.addLoadConst("", loc(e))
+		return nil
+	}
 	for _, v := range e.Values {
 		if err := c.visitExpr(v); err != nil {
 			return err
 		}
 	}
-	c.addOpI(BUILD_STRING, int32(len(e.Values)), loc(e))
+	if len(e.Values) > 1 {
+		c.addOpI(BUILD_STRING, int32(len(e.Values)), loc(e))
+	}
 	return nil
 }
 
