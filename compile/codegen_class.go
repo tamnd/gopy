@@ -311,6 +311,14 @@ func (c *Compiler) emitGenericClass(s *ast.ClassDef) error {
 	outerCaches := c.savedCaches()
 
 	c.enterScope(wrapperScope)
+	// The symtable sets b.private = class_name before visiting type params
+	// for a class so that dunder names like __T are mangled to _ClassName__T.
+	// Mirror that here: codegen_nameop must use the same private so the
+	// store opcode resolves to the same mangled slot.
+	//
+	// CPython: Python/compile.c compiler_enter_scope (private param = class_name
+	// for TypeParams, Python/codegen.c:1623 codegen_class)
+	c.unit().Private = s.Name
 	first := c.unit().FirstLineno
 	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
