@@ -28,6 +28,7 @@ import (
 type TypeVar struct {
 	Header
 	NameStr             string
+	Module              string // __module__, set from the calling frame's module name
 	Bound               Object
 	EvaluateBound       Object
 	Constraints         Object
@@ -60,6 +61,7 @@ func NewTypeVar(name string, bound, constraints Object) *TypeVar {
 type ParamSpec struct {
 	Header
 	NameStr         string
+	Module          string // __module__, set from the calling frame's module name
 	Default         Object
 	EvaluateDefault Object
 	HasDefault      bool
@@ -88,6 +90,7 @@ func NewParamSpec(name string) *ParamSpec {
 type TypeVarTuple struct {
 	Header
 	NameStr         string
+	Module          string // __module__, set from the calling frame's module name
 	Default         Object
 	EvaluateDefault Object
 	HasDefault      bool
@@ -257,6 +260,35 @@ func init() {
 	SetTypeDescr(TypeVarType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*TypeVar).NameStr), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:663 typevar_new_impl (sets __module__ from caller frame)
+	SetTypeDescr(TypeVarType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) {
+			tv := o.(*TypeVar)
+			if tv.Module == "" {
+				return None(), nil
+			}
+			return NewStr(tv.Module), nil
+		},
+		func(o Object, v Object) error {
+			if s, ok := v.(*Unicode); ok {
+				o.(*TypeVar).Module = s.Value()
+			} else if v == None() {
+				o.(*TypeVar).Module = ""
+			}
+			return nil
+		},
+	))
+	// CPython: Objects/typevarobject.c:829 typevar_reduce_impl
+	SetTypeDescr(TypeVarType, "__reduce__", NewMethodDescr(TypeVarType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
+		}
+		tv, ok := args[0].(*TypeVar)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __reduce__() requires TypeVar")
+		}
+		return NewStr(tv.NameStr), nil
+	}))
 	SetTypeDescr(TypeVarType, "__bound__", NewGetSetDescr("__bound__", func(o Object) (Object, error) {
 		tv := o.(*TypeVar)
 		if tv.Bound != nil {
@@ -365,6 +397,35 @@ func init() {
 	SetTypeDescr(ParamSpecType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*ParamSpec).NameStr), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:1300 paramspec_new_impl (sets __module__ from caller frame)
+	SetTypeDescr(ParamSpecType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) {
+			ps := o.(*ParamSpec)
+			if ps.Module == "" {
+				return None(), nil
+			}
+			return NewStr(ps.Module), nil
+		},
+		func(o Object, v Object) error {
+			if s, ok := v.(*Unicode); ok {
+				o.(*ParamSpec).Module = s.Value()
+			} else if v == None() {
+				o.(*ParamSpec).Module = ""
+			}
+			return nil
+		},
+	))
+	// CPython: Objects/typevarobject.c:1394 paramspec_reduce
+	SetTypeDescr(ParamSpecType, "__reduce__", NewMethodDescr(ParamSpecType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
+		}
+		ps, ok := args[0].(*ParamSpec)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __reduce__() requires ParamSpec")
+		}
+		return NewStr(ps.NameStr), nil
+	}))
 	SetTypeDescr(ParamSpecType, "__default__", NewGetSetDescr("__default__", func(o Object) (Object, error) {
 		ps := o.(*ParamSpec)
 		if !ps.HasDefault {
@@ -404,6 +465,35 @@ func init() {
 	SetTypeDescr(TypeVarTupleType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*TypeVarTuple).NameStr), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:1577 typevartuple_impl (sets __module__ from caller frame)
+	SetTypeDescr(TypeVarTupleType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) {
+			tvt := o.(*TypeVarTuple)
+			if tvt.Module == "" {
+				return None(), nil
+			}
+			return NewStr(tvt.Module), nil
+		},
+		func(o Object, v Object) error {
+			if s, ok := v.(*Unicode); ok {
+				o.(*TypeVarTuple).Module = s.Value()
+			} else if v == None() {
+				o.(*TypeVarTuple).Module = ""
+			}
+			return nil
+		},
+	))
+	// CPython: Objects/typevarobject.c:1647 typevartuple_reduce
+	SetTypeDescr(TypeVarTupleType, "__reduce__", NewMethodDescr(TypeVarTupleType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
+		}
+		tvt, ok := args[0].(*TypeVarTuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __reduce__() requires TypeVarTuple")
+		}
+		return NewStr(tvt.NameStr), nil
+	}))
 	SetTypeDescr(TypeVarTupleType, "__default__", NewGetSetDescr("__default__", func(o Object) (Object, error) {
 		tvt := o.(*TypeVarTuple)
 		if !tvt.HasDefault {
@@ -591,6 +681,7 @@ func typevarTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, err
 	tv.Covariant = covariant
 	tv.Contravariant = contravariant
 	tv.InferVariance = inferVariance
+	tv.Module = typevarCallerModule()
 	return tv, nil
 }
 
@@ -647,6 +738,7 @@ func paramspecTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, e
 	ps.Covariant = covariant
 	ps.Contravariant = contravariant
 	ps.InferVariance = inferVariance
+	ps.Module = typevarCallerModule()
 	return ps, nil
 }
 
@@ -680,6 +772,7 @@ func typevartupleTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object
 		tvt.Default = defaultVal
 		tvt.HasDefault = true
 	}
+	tvt.Module = typevarCallerModule()
 	return tvt, nil
 }
 
@@ -793,11 +886,19 @@ func init() {
 	}
 
 	// CPython: Objects/typevarobject.c:2080 typealias_or
-	TypeAliasObjType.Number = &NumberMethods{
-		Or: func(self, other Object) (Object, error) {
-			return unionTypeOr(self, other)
-		},
-	}
+	TypeAliasObjType.Number = &NumberMethods{Or: unionTypeOr}
+
+	// CPython: Objects/typevarobject.c:2059 typealias_reduce_impl
+	SetTypeDescr(TypeAliasObjType, "__reduce__", NewMethodDescr(TypeAliasObjType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
+		}
+		a, ok := args[0].(*TypeAliasObj)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __reduce__() requires TypeAliasType")
+		}
+		return NewStr(a.NameStr), nil
+	}))
 
 	TypeAliasObjType.TpNew = typealiasTpNew
 }
@@ -960,6 +1061,43 @@ func typealiasModule() Object {
 		return None()
 	}
 	return v
+}
+
+// CallerModuleName returns the module name from the currently executing
+// frame's globals dict (__name__ key), mirroring CPython's caller()
+// helper used in typevar_new_impl / paramspec_new_impl / typevartuple_impl.
+// Returns "" when no frame is live or globals has no __name__.
+//
+// CPython: Objects/typevarobject.c:387 caller
+func CallerModuleName() string {
+	return typevarCallerModule()
+}
+
+// typevarCallerModule is the unexported implementation.
+func typevarCallerModule() string {
+	if CurrentFrameHook == nil {
+		return ""
+	}
+	f := CurrentFrameHook()
+	if f == nil {
+		return ""
+	}
+	g := f.FrameGlobals()
+	if g == nil {
+		return ""
+	}
+	d, ok := g.(*Dict)
+	if !ok {
+		return ""
+	}
+	v, err := d.GetItem(NewStr("__name__"))
+	if err != nil || v == nil {
+		return ""
+	}
+	if s, ok := v.(*Unicode); ok {
+		return s.Value()
+	}
+	return ""
 }
 
 var noDefaultSingleton Object

@@ -165,6 +165,7 @@ func UnaryTypevar(ts *state.Thread, v objects.Object) (objects.Object, error) {
 	}
 	tv := objects.NewTypeVar(name.Value(), nil, nil)
 	tv.InferVariance = true
+	tv.Module = objects.CallerModuleName()
 	return tv, nil
 }
 
@@ -178,6 +179,7 @@ func UnaryParamspec(ts *state.Thread, v objects.Object) (objects.Object, error) 
 	}
 	ps := objects.NewParamSpec(name.Value())
 	ps.InferVariance = true
+	ps.Module = objects.CallerModuleName()
 	return ps, nil
 }
 
@@ -189,7 +191,9 @@ func UnaryTypevartuple(ts *state.Thread, v objects.Object) (objects.Object, erro
 	if !ok {
 		return nil, errors.New("TypeError: TypeVarTuple name must be a str")
 	}
-	return objects.NewTypeVarTuple(name.Value()), nil
+	tvt := objects.NewTypeVarTuple(name.Value())
+	tvt.Module = objects.CallerModuleName()
+	return tvt, nil
 }
 
 // UnarySubscriptGeneric implements Generic[T] subscription. The

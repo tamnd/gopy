@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -283,10 +285,188 @@ func (u *unpickler) load() (objects.Object, error) {
 			if err := u.loadPopMark(); err != nil {
 				return nil, err
 			}
+		case opGlobal:
+			if err := u.loadGlobal(); err != nil {
+				return nil, err
+			}
+		case opStackGlobal:
+			if err := u.loadStackGlobal(); err != nil {
+				return nil, err
+			}
+		case opReduce:
+			if err := u.loadReduce(); err != nil {
+				return nil, err
+			}
+		case opBuild:
+			if err := u.loadBuild(); err != nil {
+				return nil, err
+			}
+		case opNewobj:
+			if err := u.loadNewobj(); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("UnpicklingError: unknown opcode 0x%02x", op)
 		}
 	}
+}
+
+// lookupGlobal resolves "module" + "name" against sys.modules, walking
+// dotted name components for nested attributes (e.g. "os.path" → "join").
+//
+// CPython: Modules/_pickle.c:5671 load_global (find_class call)
+func lookupGlobal(module, name string) (objects.Object, error) {
+	mod, ok := imp.GetModule(module)
+	if !ok {
+		return nil, fmt.Errorf("ModuleNotFoundError: No module named %q", module)
+	}
+	// Walk dotted name components.
+	var obj objects.Object = mod
+	for _, part := range strings.Split(name, ".") {
+		v, err := objects.GetAttr(obj, objects.NewStr(part))
+		if err != nil {
+			return nil, fmt.Errorf("AttributeError: %s: %q", module, part)
+		}
+		obj = v
+	}
+	return obj, nil
+}
+
+// loadGlobal reads two newline-terminated strings (module and name)
+// and pushes the resolved global onto the stack.
+//
+// CPython: Modules/_pickle.c:5671 load_global
+func (u *unpickler) loadGlobal() error {
+	// Proto < 4: two NL-terminated ASCII lines.
+	module := u.readLine()
+	name := u.readLine()
+	obj, err := lookupGlobal(module, name)
+	if err != nil {
+		return err
+	}
+	u.push(obj)
+	return nil
+}
+
+// readLine reads bytes until '\n', returning the content without the newline.
+func (u *unpickler) readLine() string {
+	start := u.pos
+	for u.pos < len(u.buf) && u.buf[u.pos] != '\n' {
+		u.pos++
+	}
+	line := string(u.buf[start:u.pos])
+	if u.pos < len(u.buf) {
+		u.pos++ // consume '\n'
+	}
+	return line
+}
+
+// loadStackGlobal pops (name, module) from the stack and pushes the
+// resolved global. Proto >= 4.
+//
+// CPython: Modules/_pickle.c:5707 load_stack_global
+func (u *unpickler) loadStackGlobal() error {
+	nameObj, err := u.pop()
+	if err != nil {
+		return err
+	}
+	moduleObj, err := u.pop()
+	if err != nil {
+		return err
+	}
+	modStr, ok1 := moduleObj.(*objects.Unicode)
+	nameStr, ok2 := nameObj.(*objects.Unicode)
+	if !ok1 || !ok2 {
+		return errors.New("UnpicklingError: STACK_GLOBAL requires two str objects")
+	}
+	obj, err := lookupGlobal(modStr.Value(), nameStr.Value())
+	if err != nil {
+		return err
+	}
+	u.push(obj)
+	return nil
+}
+
+// loadReduce pops (callable, args) from the stack, calls
+// callable(*args), and pushes the result.
+//
+// CPython: Modules/_pickle.c:5734 load_reduce
+func (u *unpickler) loadReduce() error {
+	args, err := u.pop()
+	if err != nil {
+		return err
+	}
+	callable, err := u.pop()
+	if err != nil {
+		return err
+	}
+	argTuple, ok := args.(*objects.Tuple)
+	if !ok {
+		return errors.New("UnpicklingError: REDUCE requires a tuple as args")
+	}
+	result, err := objects.Call(callable, argTuple, nil)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: REDUCE call failed: %w", err)
+	}
+	u.push(result)
+	return nil
+}
+
+// loadBuild applies state to the top of the stack via __setstate__
+// or dict-update.
+//
+// CPython: Modules/_pickle.c:5752 load_build
+func (u *unpickler) loadBuild() error {
+	state, err := u.pop()
+	if err != nil {
+		return err
+	}
+	if len(u.stack) == 0 {
+		return errors.New("UnpicklingError: BUILD on empty stack")
+	}
+	obj := u.stack[len(u.stack)-1]
+	setstate, err := objects.GetAttr(obj, objects.NewStr("__setstate__"))
+	if err == nil {
+		_, err = objects.CallOneArg(setstate, state)
+		return err
+	}
+	if d, ok := state.(*objects.Dict); ok {
+		for _, k := range d.Keys() {
+			v, err := d.GetItem(k)
+			if err != nil || v == nil {
+				continue
+			}
+			if err := objects.SetAttr(obj, k, v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// loadNewobj implements NEWOBJ: pops (cls, args), calls cls(*args),
+// pushes the result.
+//
+// CPython: Modules/_pickle.c:5760 load_newobj
+func (u *unpickler) loadNewobj() error {
+	args, err := u.pop()
+	if err != nil {
+		return err
+	}
+	cls, err := u.pop()
+	if err != nil {
+		return err
+	}
+	argTuple, ok := args.(*objects.Tuple)
+	if !ok {
+		return errors.New("UnpicklingError: NEWOBJ requires a tuple as args")
+	}
+	result, err := objects.Call(cls, argTuple, nil)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: NEWOBJ call failed: %w", err)
+	}
+	u.push(result)
+	return nil
 }
 
 // loadProto consumes the protocol byte and stashes it.

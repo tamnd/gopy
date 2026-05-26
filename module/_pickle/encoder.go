@@ -30,7 +30,9 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -498,11 +500,218 @@ func (p *pickler) save(obj objects.Object) error {
 			return p.saveFrozenset(v)
 		}
 		return p.saveSet(v)
+	case *objects.Function:
+		return p.saveFunctionGlobal(v)
+	case *objects.Type:
+		return p.saveTypeGlobal(v)
 	}
-	return errUnsupportedType
+
+	// Fall back to __reduce__ for objects that define it.
+	// CPython: Modules/_pickle.c:4425 save -> __reduce_ex__ fallback
+	return p.saveViaReduce(obj)
 }
 
 var errUnsupportedType = errors.New("PicklingError: unsupported type in encoder")
+
+// saveGlobal emits the module and name strings followed by
+// STACK_GLOBAL (proto >= 4) or GLOBAL (proto < 4). The memo is
+// updated after the STACK_GLOBAL opcode, matching CPython's
+// Modules/_pickle.c:3191 save_global.
+//
+// CPython: Modules/_pickle.c:3191 save_global
+func (p *pickler) saveGlobal(module, name string) error {
+	if p.proto >= 4 {
+		if err := p.saveUnicode(module); err != nil {
+			return err
+		}
+		if err := p.memoPut(objects.NewStr(module)); err != nil {
+			return err
+		}
+		if err := p.saveUnicode(name); err != nil {
+			return err
+		}
+		if err := p.memoPut(objects.NewStr(name)); err != nil {
+			return err
+		}
+		p.writeByte(opStackGlobal)
+	} else {
+		// Proto < 4: GLOBAL "module\nname\n"
+		p.write([]byte{opGlobal})
+		p.write([]byte(module + "\n" + name + "\n"))
+	}
+	return nil
+}
+
+// moduleForObj extracts the __module__ string from an object. Falls
+// back to scanning sys.modules for an entry whose attribute matches
+// obj (whichmodule). Returns "" when no module is found.
+//
+// CPython: Modules/_pickle.c:2990 whichmodule
+func moduleForObj(obj objects.Object, name string) string {
+	modAttr, err := objects.GetAttr(obj, objects.NewStr("__module__"))
+	if err == nil && modAttr != nil {
+		if s, ok := modAttr.(*objects.Unicode); ok && s.Value() != "" {
+			return s.Value()
+		}
+	}
+	// Scan sys.modules for the module containing obj under `name`.
+	// CPython: Modules/_pickle.c:2990 whichmodule scans sys.modules
+	sysmod := imp.SysModules()
+	if sysmod == nil {
+		return ""
+	}
+	for _, k := range sysmod.Keys() {
+		mn, ok := k.(*objects.Unicode)
+		if !ok {
+			continue
+		}
+		v, err := sysmod.GetItem(k)
+		if err != nil || v == nil {
+			continue
+		}
+		mod, ok := v.(*objects.Module)
+		if !ok {
+			continue
+		}
+		attr, err := mod.Dict().GetItem(objects.NewStr(name))
+		if err != nil || attr == nil {
+			continue
+		}
+		if attr == obj {
+			return mn.Value()
+		}
+	}
+	return ""
+}
+
+// saveFunctionGlobal pickles a function as a GLOBAL / STACK_GLOBAL
+// reference using the function's __module__ and __qualname__.
+//
+// CPython: Modules/_pickle.c:3191 save_global (function path)
+func (p *pickler) saveFunctionGlobal(fn *objects.Function) error {
+	module := ""
+	if fn.Module != nil {
+		if s, ok := fn.Module.(*objects.Unicode); ok {
+			module = s.Value()
+		}
+	}
+	name := fn.Qualname
+	if name == "" {
+		name = fn.Name
+	}
+	if module == "" {
+		module = moduleForObj(fn, name)
+	}
+	if module == "" {
+		return fmt.Errorf("PicklingError: can't pickle %q: failed to determine module", name)
+	}
+	if err := p.saveGlobal(module, name); err != nil {
+		return err
+	}
+	return p.memoPut(fn)
+}
+
+// saveTypeGlobal pickles a type object as a GLOBAL / STACK_GLOBAL
+// reference using the type's __module__ and __qualname__.
+//
+// CPython: Modules/_pickle.c:3191 save_global (type path)
+func (p *pickler) saveTypeGlobal(t *objects.Type) error {
+	name := t.Qualname
+	if name == "" {
+		name = t.Name
+	}
+	module := t.Module
+	// When Name embeds the module (e.g. "typing.TypeVar"), split it.
+	if module == "" && strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		module = parts[0]
+		name = parts[1]
+	}
+	if module == "" {
+		module = moduleForObj(t, name)
+	}
+	if module == "" {
+		return fmt.Errorf("PicklingError: can't pickle type %q: failed to determine module", name)
+	}
+	if err := p.saveGlobal(module, name); err != nil {
+		return err
+	}
+	return p.memoPut(t)
+}
+
+// saveViaReduce calls __reduce__ on obj and dispatches on the result.
+// A string result → save_global; a tuple result → save_reduce.
+//
+// CPython: Modules/_pickle.c:4425 save -> __reduce_ex__ fallback
+func (p *pickler) saveViaReduce(obj objects.Object) error {
+	reduceAttr, err := objects.GetAttr(obj, objects.NewStr("__reduce__"))
+	if err != nil {
+		return errUnsupportedType
+	}
+	result, err := objects.CallNoArgs(reduceAttr)
+	if err != nil {
+		return fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+	}
+	switch rv := result.(type) {
+	case *objects.Unicode:
+		// String result: obj is a global; look it up by name.
+		name := rv.Value()
+		module := moduleForObj(obj, name)
+		if module == "" {
+			return fmt.Errorf("PicklingError: can't pickle %q: failed to determine module", name)
+		}
+		if err := p.saveGlobal(module, name); err != nil {
+			return err
+		}
+		return p.memoPut(obj)
+	case *objects.Tuple:
+		// Tuple result: (callable, args, state?, listitems?, dictitems?)
+		return p.saveReduceTuple(rv, obj)
+	default:
+		return fmt.Errorf("PicklingError: __reduce__ must return string or tuple, got %T", result)
+	}
+}
+
+// saveReduceTuple implements the tuple-form of reduce:
+// (callable, args[, state[, listitems[, dictitems]]]).
+//
+// CPython: Modules/_pickle.c:2857 save_reduce
+func (p *pickler) saveReduceTuple(rv *objects.Tuple, obj objects.Object) error {
+	n := rv.Len()
+	if n < 2 {
+		return errors.New("PicklingError: __reduce__ tuple must have at least 2 elements")
+	}
+	callable := rv.Item(0)
+	args, ok := rv.Item(1).(*objects.Tuple)
+	if !ok {
+		return errors.New("PicklingError: __reduce__ tuple second element must be a tuple")
+	}
+	var state objects.Object
+	if n >= 3 {
+		state = rv.Item(2)
+	}
+
+	// Emit callable + args + REDUCE.
+	if err := p.save(callable); err != nil {
+		return err
+	}
+	if err := p.saveTuple(args); err != nil {
+		return err
+	}
+	p.writeByte(opReduce)
+	if err := p.memoPut(obj); err != nil {
+		return err
+	}
+
+	// Apply state via __setstate__ / BUILD opcode.
+	if state != nil && !objects.IsNone(state) {
+		if err := p.save(state); err != nil {
+			return err
+		}
+		p.writeByte(opBuild)
+	}
+	return nil
+}
 
 // dumpsAtom is the Phase 2/3 driver: PROTO header, save the object,
 // STOP, commit the frame. The result is a fresh []byte holding the

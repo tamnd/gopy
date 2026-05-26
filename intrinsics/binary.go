@@ -104,6 +104,7 @@ func BinaryTypevarWithBound(ts *state.Thread, name, evaluateBound objects.Object
 	tv := objects.NewTypeVar(n.Value(), nil, nil)
 	tv.EvaluateBound = evaluateBound
 	tv.InferVariance = true
+	tv.Module = objects.CallerModuleName()
 	return tv, nil
 }
 
@@ -120,6 +121,7 @@ func BinaryTypevarWithConstraints(ts *state.Thread, name, evaluateConstraints ob
 	tv := objects.NewTypeVar(n.Value(), nil, nil)
 	tv.EvaluateConstraints = evaluateConstraints
 	tv.InferVariance = true
+	tv.Module = objects.CallerModuleName()
 	return tv, nil
 }
 
