@@ -145,6 +145,20 @@ func synthesizeException(err error) *pyerrors.Exception {
 			return buildExceptionForType(typ, strings.TrimSpace(msg[i+len(prefix):]))
 		}
 	}
+	// Third pass: bare-name match. setPendingErr("NameError") produces
+	// "NameError" with no colon, so neither HasPrefix nor Index finds
+	// "NameError:" in it. Check for an exact match against the name
+	// portion (prefix without the trailing colon).
+	//
+	// CPython: Python/errors.c PyErr_SetNone / _PyErr_SetString — callers
+	// always pass a typed exception; this compensates for generator code
+	// that can only emit the bare type name.
+	for prefix, typ := range errorPrefixToType {
+		bare := strings.TrimSuffix(prefix, ":")
+		if msg == bare {
+			return buildExceptionForType(typ, "")
+		}
+	}
 	return pyerrors.New(pyerrors.PyExc_Exception, objects.NewTuple([]objects.Object{
 		objects.NewStr(msg),
 	}))
