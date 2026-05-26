@@ -612,15 +612,14 @@ func (s *State) recordError(msg string) {
 }
 
 // recordStringError pins an unterminated-string error at the opening
-// quote, matching CPython which rewinds:
+// quote, matching CPython which rewinds tok->cur and tok->line_start to
+// the opening-quote position before calling _PyTokenizer_syntaxerror.
 //
-//	tok->cur = tok->start; tok->cur++;
-//	tok->line_start = tok->multi_line_start;
-//	tok->lineno = tok->first_lineno;
-//
-// before _PyTokenizer_syntaxerror. The col offset is then character
-// count from the opening line's start to one past the opening quote,
-// so a `"` at column 0 reports offset 1.
+// CPython's _syntaxerror_range decodes [tok->line_start, tok->cur) and
+// calls PyUnicode_GET_LENGTH, yielding a 1-indexed char count that
+// equals col_offset (= SyntaxError.offset). gopy stores the 0-indexed
+// char position (col = chars before the opening quote) so that
+// exc_from_parser.go's +1 produces the same 1-indexed value.
 //
 // CPython: Parser/lexer/lexer.c:1175 tok->cur = (char *)tok->start; tok->cur++
 // CPython: Parser/lexer/lexer.c:1177 tok->line_start = tok->multi_line_start
@@ -629,7 +628,7 @@ func (s *State) recordStringError(msg string) {
 	if s.err != nil {
 		return
 	}
-	col := s.charColBetween(s.multiLineStart, s.start+1)
+	col := s.charColBetween(s.multiLineStart, s.start)
 	s.err = &SyntaxError{
 		Pos:     Pos{Line: s.firstLine, Col: col},
 		EndPos:  Pos{Line: s.firstLine, Col: col},

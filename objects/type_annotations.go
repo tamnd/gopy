@@ -57,7 +57,7 @@ func typeSetAnnotate(tp *Type, value Object) error {
 	}
 	SetTypeDescr(tp, "__annotate__", value)
 	if !IsNone(value) {
-		DelTypeDescr(tp, "__annotations__")
+		DelTypeDescr(tp, "__annotations_cache__")
 	}
 	tp.InvalidateVersionTag()
 	return nil
@@ -65,7 +65,8 @@ func typeSetAnnotate(tp *Type, value Object) error {
 
 // typeGetAnnotations returns the cached __annotations__ dict or
 // materializes it by calling __annotate__(VALUE) on first miss.
-// Cached back into the descriptor table on success.
+// Cached back into the descriptor table under __annotations_cache__ on
+// success, matching CPython 3.14's storage key.
 //
 // Both the cache and annotate lookups use the type's OWN dict, not MRO,
 // matching CPython's PyDict_GetItemRef(PyType_GetDict(type), ...) calls.
@@ -76,7 +77,7 @@ func typeGetAnnotations(tp *Type) (Object, error) {
 	if !tp.IsUser {
 		return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__annotations__'", tp.Name)
 	}
-	if cached := lookupTypeMember(tp, "__annotations__"); cached != nil {
+	if cached := lookupTypeMember(tp, "__annotations_cache__"); cached != nil {
 		return cached, nil
 	}
 	annotate := lookupTypeMember(tp, "__annotate__")
@@ -94,14 +95,14 @@ func typeGetAnnotations(tp *Type) (Object, error) {
 	} else {
 		out = NewDict()
 	}
-	SetTypeDescr(tp, "__annotations__", out)
+	SetTypeDescr(tp, "__annotations_cache__", out)
 	tp.InvalidateVersionTag()
 	return out, nil
 }
 
 // typeSetAnnotations writes __annotations__ on tp or deletes it, then
 // drops __annotate__ so a stale annotate function never overrides the
-// explicit write.
+// explicit write. Stores under __annotations_cache__ (CPython 3.14 key).
 //
 // CPython: Objects/typeobject.c:2139 type_set_annotations
 func typeSetAnnotations(tp *Type, value Object) error {
@@ -109,8 +110,8 @@ func typeSetAnnotations(tp *Type, value Object) error {
 		return fmt.Errorf("TypeError: cannot set '__annotations__' attribute of immutable type '%s'", tp.Name)
 	}
 	if value != nil {
-		SetTypeDescr(tp, "__annotations__", value)
-	} else if !DelTypeDescr(tp, "__annotations__") {
+		SetTypeDescr(tp, "__annotations_cache__", value)
+	} else if !DelTypeDescr(tp, "__annotations_cache__") {
 		return fmt.Errorf("AttributeError: __annotations__")
 	}
 	DelTypeDescr(tp, "__annotate__")

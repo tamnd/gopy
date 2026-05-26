@@ -381,6 +381,23 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			// Do not install __type_params__ as a regular descr: the
 			// getset on typeType serves all lookups via the MRO.
 			continue
+		case "__annotations__":
+			// Route through typeSetAnnotations so the value lands under
+			// "__annotations_cache__", matching CPython's type_setattro path
+			// through type_set_annotations.
+			//
+			// CPython: Objects/typeobject.c:4526 type_new_set_attrs calls
+			// PyObject_SetAttr which hits type_setattro -> type_set_annotations.
+			_ = typeSetAnnotations(t, v)
+			continue
+		case "__annotate__":
+			// Route through typeSetAnnotate so the cache is invalidated
+			// correctly, matching CPython's type_setattro path.
+			//
+			// CPython: Objects/typeobject.c:4526 type_new_set_attrs calls
+			// PyObject_SetAttr which hits type_setattro -> type_set_annotate.
+			_ = typeSetAnnotate(t, v)
+			continue
 		}
 		SetTypeDescr(t, s.v, v)
 	}

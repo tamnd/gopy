@@ -27,6 +27,41 @@ func init() {
 	ModuleType.Setattro = moduleSetattr
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
+
+	// tp_new: allocate an empty module with an empty __dict__. The name
+	// and optional doc are populated by __init__ below, matching CPython's
+	// two-step new_module + module___init___impl.
+	//
+	// CPython: Objects/moduleobject.c:91 new_module_notrack
+	ModuleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		m := &Module{dict: NewDict()}
+		m.init(cls)
+		return m, nil
+	}
+
+	// module.__init__(name, doc=None): set __name__ and optionally __doc__
+	// in the module's __dict__. Called by typeCallViaTpNew with self as
+	// args[0], matching the MethodDescr calling convention.
+	//
+	// CPython: Objects/moduleobject.c:804 module___init___impl
+	SetTypeDescr(ModuleType, "__init__", NewMethodDescr(ModuleType, "__init__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: module.__init__() requires at least a name argument")
+		}
+		m, ok := args[0].(*Module)
+		if !ok {
+			return None(), nil
+		}
+		nameObj, ok := args[1].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: module.__init__() argument 'name' must be str, not '%s'", typeNameOf(args[1]))
+		}
+		_ = m.dict.SetItem(NewStr("__name__"), nameObj)
+		if len(args) >= 3 && args[2] != None() {
+			_ = m.dict.SetItem(NewStr("__doc__"), args[2])
+		}
+		return None(), nil
+	}))
 }
 
 // NewModule creates an empty module with the given name in its __dict__.

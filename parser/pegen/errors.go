@@ -109,8 +109,28 @@ func (p *Parser) SetSyntaxError() {
 		if p.tok.Level() > 0 {
 			p.raiseUnclosedParenthesesError()
 		} else {
-			pos := perrors.Pos{Lineno: last.Lineno, ColOff: last.ColOff, EndLine: last.EndLine, EndCol: last.EndCol}
+			colOff := last.ColOff
+			endCol := last.EndCol
+			if colOff == 0 {
+				// Backslash at column 0 followed by EOF. CPython's
+				// tok_continuation_line sets E_EOF with offset=0, so the
+				// traceback computes colno=-1 and suppresses the caret.
+				// Mirror by setting ColOff=-1 (→ offset=None → no caret).
+				//
+				// CPython: Parser/tokenizer/tokenizer.c:1053 tok_continuation_line
+				colOff = -1
+				endCol = -1
+			}
+			pos := perrors.Pos{Lineno: last.Lineno, ColOff: colOff, EndLine: last.EndLine, EndCol: endCol}
 			p.recordError(perrors.KindSyntax, pos, "unexpected EOF while parsing")
+			// Mirror tokenizerSyntaxError's DoneEOF text path: include the
+			// trailing '\n' that translate_newlines appended so .text
+			// round-trips the same way CPython's string-input path does.
+			//
+			// CPython: Parser/pegen_errors.c:362 PyUnicode_DecodeUTF8(line_start, inp - line_start)
+			if p.pinnedErr != nil && p.pinnedErr.Text == "" {
+				p.pinnedErr.Text = p.tok.EOFLineText()
+			}
 		}
 		return
 	}
