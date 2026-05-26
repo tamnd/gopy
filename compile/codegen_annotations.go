@@ -49,15 +49,16 @@ func (c *Compiler) emitDeferredAnnotations(l ast.Pos) error {
 	}
 	deferred := u.DeferredAnnotations
 
-	// PEP 563 class body: CPython emits SETUP_ANNOTATIONS + inline
-	// STORE_SUBSCR for each annotation rather than generating __annotate_func__.
-	// get_annotate_from_class_namespace expects None (no __annotate__ key)
-	// when the source was compiled under `from __future__ import annotations`.
+	// PEP 563 class or module body: CPython emits SETUP_ANNOTATIONS + inline
+	// STORE_SUBSCR for each annotation rather than generating __annotate__ /
+	// __annotate_func__. Direct namespace access (scope['__annotations__'])
+	// is the required behavior; annotationlib also accepts the dict directly.
 	//
 	// CPython: Python/codegen.c:874 codegen_body SETUP_ANNOTATIONS branch
 	// CPython: Python/codegen.c:5498 codegen_annassign future_annotations path
+	// CPython: Python/codegen.c:906 codegen_body (skip codegen_process_deferred_annotations)
 	if c.Future != nil && c.Future.Bits&future.Annotations != 0 &&
-		c.scope.Type == symtable.ClassBlock {
+		(c.scope.Type == symtable.ClassBlock || c.scope.Type == symtable.ModuleBlock) {
 		pool := poolNames
 		c.addOp(SETUP_ANNOTATIONS, l)
 		for _, d := range deferred {

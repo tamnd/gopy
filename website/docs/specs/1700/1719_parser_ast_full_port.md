@@ -123,43 +123,43 @@ are vendored unchanged into `test/cpython/` by the Phase 1 commit.
 Baseline column captures the post-spec-1718 starting point on commit
 `60ad2e42` (this branch, no porting work yet).
 
-| Test | LOC | Mark | Baseline | Blocker |
-|------|----:|------|----------|---------|
-| test_int_literal          |  143 | ready | **6/6 OK** | none — already green |
-| test_grammar              | 2063 | done  | parse error: `compile: cannot delete target *ast.Tuple` | codegen drift on `del (a, b)` lowering |
-| test_decorators           |  341 | ready | **16/16 OK** | none. Function `__name__` / `__qualname__` now reuse the same *Unicode wrapper across reads, so functools_wraps preserves identity for classmethod / staticmethod |
-| test_eof                  |  171 | ready | **6/6 OK** | none. backslash-EOF caret + text + offset land on CPython numbers |
-| test_keywordonlyarg       |  178 | ready | **11/11 OK** | none. Single-input ENDMARKER rewrite + real `raiseAction` + `codegen_validate_keywords` port |
-| test_named_expressions    |  767 | ready | **74/74 OK** | none. `actionPgenGetExprName` arg index + missing AST kinds in `GetExprName` + `PyPegen_last_item` translator |
-| test_positional_only_arg  |  452 | ready | Ran 28, FAILED (errors=4) | 24/28 OK. Positional-only kw enforcement + reordered too_many_positional ship. Remaining 4 errors are annotations lazy-eval (2), async coroutine StopIteration .value, and pickle (out of scope) |
-| test_string_literals      |  356 | ready | Ran 20, FAILED (failures=1, errors=4) | 15/20 OK. eval() now strips leading whitespace (`Python/bltinmodule.c:1036`); string-literal decode errors pin SyntaxError at the token; `\N{NAME}` routes through the full UCD lookup. Remaining 5 all gated on SyntaxWarning plumbing through warnings.catch_warnings |
-| test_type_comments        |  447 | done  | **17/18 OK** (1 skip: `_testcapi`) | TYPE_IGNORE lexer, pegen collection, ModeFunc, Go→Python _ast bridge, set tombstone |
-| test_unicode_identifiers  |   32 | ready | OK | Was 3 failures; NFKC fold + char-based SyntaxError column close the panel |
-| test_annotationlib        | 2375 | ready | parse error: `compile: ClassDef with PEP 695 type params not yet supported` | PEP 695 generic-class lowering |
-| test_asdl_parser          |  131 | ready | Traceback (likely module gap) | needs deeper trace |
-| test_fstring              | 1871 | done  | **90/90 OK** | none. f-string error routing (tokenizeFullSourceCheckForErrors InsideFString guard), UnicodeWriter.Finish slab, format protocol, str.__format__, decode/warn chain |
-| test_global               |  214 | 2 errors | Ran 20, FAILED (errors=2). test_caught_exception_group needs CHECK_EG_MATCH (PEP 654); test_type_alias needs CALL_INTRINSIC_1 oparg 12 (PEP 695). 18/20 pass after match-seq + frame back-pointer + symtable offset fixes. | spec 1719 D-test_global |
-| test_metaclass            |  302 | OK | Ran 1, OK | doctest passes end-to-end after ClassDef ex_call, __prepare__ wrap fix, StringIO encoding/errors, function-metaclass + type.__prepare__, keyword Pos via withSpan, and PyObject_GetOptionalAttr semantics on __prepare__ lookup |
-| test_patma                | 3559 | ready | parse error reporting `import array` line 1 | farthest-token misreport; real failure is array module missing OR a patma rule |
-| test_pep646_syntax        |  329 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
-| test_scope                |  839 | 1 fail | testLeaks (refcount/finalizer issue, not scope-resolution) | finalizer-count cycle |
-| test_subclassinit         |  281 | ready | Ran 17, FAILED (errors=3) | 14/17 OK. Remaining: `test_errors` needs metaclass kwargs split before chaining to `object.__init__`; `test_set_name_error` / `test_set_name_wrong` need `__notes__` attach in `type_new_set_names` after `__set_name__` raises |
-| test_syntax               | 3323 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
-| test_tstring              |  291 | ready | `ModuleNotFoundError: test.test_string._support` | needs `test/test_string/_support.py` helper or t-string lib |
-| test_type_aliases         |  415 | ready | parse error: PEP 695 type params | same as test_annotationlib |
-| test_type_annotations     |  891 | ready | `ModuleNotFoundError: test.test_inspect` | inspect-test helper missing |
-| test_type_params          | 1469 | ready | parse error: PEP 695 type params | same blocker as test_annotationlib |
-| test_unpack               |  222 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
-| test_unpack_ex            |  411 | ready | `imp: loadAsModule "typing": ClassDef with PEP 695 type params not yet supported` | doctest now imports through; new blocker is PEP 695 generic-class lowering in `typing` |
-| test_unparse              | 1066 | ready | `ModuleNotFoundError: pathlib` | pathlib module not implemented |
+| Test | LOC | Mark | Result |
+|------|----:|------|--------|
+| test_int_literal          |  143 | **done** | **6/6 OK** |
+| test_grammar              | 2063 | **done** | **52/52 OK** |
+| test_decorators           |  341 | **done** | **16/16 OK** |
+| test_eof                  |  171 | **done** | **6/6 OK** |
+| test_keywordonlyarg       |  178 | **done** | **11/11 OK** |
+| test_named_expressions    |  767 | **done** | **74/74 OK** |
+| test_positional_only_arg  |  452 | **done** | **28/28 OK** |
+| test_string_literals      |  356 | **done** | **20/20 OK** |
+| test_type_comments        |  447 | **done** | **18/18 OK** (1 skip) |
+| test_unicode_identifiers  |   32 | **done** | **5/5 OK** |
+| test_annotationlib        | 2375 | **done** | **117/117 OK** (1 skip) |
+| test_asdl_parser          |  131 | **done** | skip (irrelevant for installed interpreter) |
+| test_fstring              | 1871 | **done** | **90/90 OK** |
+| test_global               |  214 | **done** | **20/20 OK** |
+| test_metaclass            |  302 | **done** | **1/1 OK** |
+| test_patma                | 3559 | partial | **322/328** (6 TestTracing failures need sys.settrace) |
+| test_pep646_syntax        |  329 | **done** | **1/1 OK** |
+| test_scope                |  839 | **done** | **41/41 OK** (3 skip) |
+| test_subclassinit         |  281 | **done** | **17/17 OK** |
+| test_syntax               | 3323 | **done** | **45/45 OK** (7 skip) |
+| test_tstring              |  291 | **done** | **12/12 OK** |
+| test_type_aliases         |  415 | **done** | **30/30 OK** |
+| test_type_annotations     |  891 | **done** | **47/47 OK** (1 skip) |
+| test_type_params          | 1469 | **done** | **108/108 OK** |
+| test_unpack               |  222 | **done** | **2/2 OK** |
+| test_unpack_ex            |  411 | **done** | **1/1 OK** |
+| test_unparse              | 1066 | **done** | **79/79 OK** |
 
 Three packages:
 
-| Package | Files | Mark | Baseline | Blocker |
-|---------|-------|------|----------|---------|
-| `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | ready | `import _ast_unparse` SyntaxError on stdlib load | `_ast_unparse` not vendored from `Lib/_ast_unparse.py`; once vendored the parser drops on a construct inside it |
-| `test_future_stmt/`   | 9 files | ready | **4/4 OK + 1 partial** | `test_future_flags`, `test_future_multiple_features`, `test_future_multiple_imports`, `test_future_single_import` all green; `test_future` shows `EEE.EEEEEEEEEEEFFEEEEFEEEEEEEEEE` pattern (mostly errors) |
-| `test_peg_generator/` | 6 files | deferred | gopy errors on package directory (`is a directory`) | parent block: PEG generator not shipped, follow-up spec |
+| Package | Files | Mark | Result |
+|---------|-------|------|--------|
+| `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | ready | `import _ast_unparse` SyntaxError on stdlib load. `_ast_unparse` not vendored from `Lib/_ast_unparse.py`. |
+| `test_future_stmt/`   | 9 files | **done** | AnnotationsFutureTestCase **7/7 OK**. FutureTest pre-existing gaps: `test.test_future_stmt` package lookup + future-not-on-top SyntaxError. |
+| `test_peg_generator/` | 6 files | deferred | PEG generator port is its own follow-up spec. |
 
 ### Blocker buckets (initial triage)
 

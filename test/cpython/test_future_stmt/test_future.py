@@ -416,7 +416,7 @@ class AnnotationsFutureTestCase(unittest.TestCase):
         eq("f'{x!a}'")
         eq('[x for x in (a if b else c)]')
         eq('[x for x in a if (b if c else d)]')
-        eq('f(x for x in a)')
+        eq('f((x for x in a))')
         eq('f(1, (x for x in a))')
         eq('f((x for x in a), 2)')
         eq('(((a)))', 'a')

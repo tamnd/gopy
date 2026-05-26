@@ -769,7 +769,17 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	if isBytes {
 		return &ast.Constant{Value: []byte(body), Pos: tokenPos(t)}
 	}
-	return &ast.Constant{Value: body, Pos: tokenPos(t)}
+	// Detect u/U prefix: CPython sets Constant.kind = "u" for u'...'
+	// so that ast.unparse() can reproduce the original source form.
+	//
+	// CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
+	// CPython: Python/ast_unparse.c (kind check in append_repr)
+	var kind *string
+	if raw := string(t.Bytes); len(raw) > 0 && (raw[0] == 'u' || raw[0] == 'U') {
+		k := "u"
+		kind = &k
+	}
+	return &ast.Constant{Value: body, Kind: kind, Pos: tokenPos(t)}
 }
 
 // actionPgenDecodedConstantFromToken builds a Constant from

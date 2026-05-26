@@ -22,7 +22,9 @@ import (
 func Unparse(e Expr) (string, error) {
 	var b strings.Builder
 	w := unparser{w: &b}
-	if err := w.expr(e, prTuple); err != nil {
+	// CPython: Python/ast_unparse.c _PyAST_ExprAsUnicode uses PR_TEST as the
+	// starting level so top-level tuples and generators get parenthesized.
+	if err := w.expr(e, prTest); err != nil {
 		return "", err
 	}
 	return b.String(), nil
@@ -710,7 +712,15 @@ func (u *unparser) call(n *Call) error {
 // constant renders a Constant node. Mirrors append_repr from
 // ast_unparse.c: floats and complex with infinite components render
 // their inf component as "1e309" so the result evaluates to inf.
+//
+// CPython: Python/ast_unparse.c:append_repr (kind == "u" prefix)
 func (u *unparser) constant(n *Constant) error {
+	if n.Kind != nil && *n.Kind == "u" {
+		if s, ok := n.Value.(string); ok {
+			u.ws("u" + pythonStrRepr(s))
+			return nil
+		}
+	}
 	return u.constValue(n.Value)
 }
 
@@ -865,21 +875,39 @@ func (u *unparser) floatRepr(f float64) {
 	}
 }
 
+// imagPartRepr formats the imaginary part of a complex literal.
+// CPython: Python/ast_unparse.c - imaginary parts don't get trailing .0 for whole numbers.
+func (u *unparser) imagPartRepr(f float64) {
+	switch {
+	case math.IsInf(f, 1):
+		u.ws("1e309")
+	case math.IsInf(f, -1):
+		u.ws("-1e309")
+	case math.IsNaN(f):
+		u.ws("nan")
+	default:
+		s := strconv.FormatFloat(f, 'g', -1, 64)
+		u.ws(s)
+	}
+}
+
 func (u *unparser) complexRepr(c complex128) {
 	r, im := real(c), imag(c)
 	if r == 0 {
-		u.floatRepr(im)
+		u.imagPartRepr(im)
 		u.wc('j')
 		return
 	}
+	// CPython: Objects/complexobject.c complex_repr uses integer format for
+	// whole-number components (no trailing .0).
 	u.wc('(')
-	u.floatRepr(r)
+	u.imagPartRepr(r)
 	if math.Signbit(im) {
 		u.wc('-')
-		u.floatRepr(-im)
+		u.imagPartRepr(-im)
 	} else {
 		u.wc('+')
-		u.floatRepr(im)
+		u.imagPartRepr(im)
 	}
 	u.wc('j')
 	u.wc(')')
@@ -890,9 +918,10 @@ func (u *unparser) attr(n *Attribute) error {
 		return err
 	}
 	// Constants like 1.attr need a space so the dot is not parsed as
-	// part of the float literal.
+	// part of the float literal. The parser stores small integers as int64.
 	if c, ok := n.Value.(*Constant); ok {
-		if _, isInt := c.Value.(int); isInt {
+		switch c.Value.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, *big.Int:
 			u.wc(' ')
 		}
 	}
@@ -975,37 +1004,82 @@ func (u *unparser) slice(n *Slice) error {
 }
 
 func (u *unparser) joinedStr(n *JoinedStr, isFormatSpec bool) error {
-	if !isFormatSpec {
-		u.wc('f')
-		u.wc('"')
+	if isFormatSpec {
+		// Inside a format spec there are no outer quotes; emit raw body.
+		for i := 0; i < n.Values.Len(); i++ {
+			v := n.Values.Get(i)
+			switch x := v.(type) {
+			case *Constant:
+				s, _ := x.Value.(string)
+				u.ws(s)
+			case *FormattedValue:
+				if err := u.formattedValue(x); err != nil {
+					return err
+				}
+			default:
+				if err := u.expr(v, prTest); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
+
+	// CPython: Python/ast_unparse.c append_joinedstr builds the body then
+	// calls append_repr(body) which uses Python repr() quote selection:
+	// prefer single quotes unless the body contains a single quote.
+	// Literal string segments have braces escaped ({{/}}); expression
+	// segments are emitted verbatim as {expr}.
+	var body strings.Builder
+	bodyU := &unparser{w: &body}
 	for i := 0; i < n.Values.Len(); i++ {
 		v := n.Values.Get(i)
 		switch x := v.(type) {
 		case *Constant:
 			s, _ := x.Value.(string)
-			u.ws(escapeFString(s, isFormatSpec))
+			// Escape braces in literal segments (CPython: escape_braces).
+			body.WriteString(escapeFStringBraces(s))
 		case *FormattedValue:
-			if err := u.formattedValue(x); err != nil {
+			if err := bodyU.formattedValue(x); err != nil {
 				return err
 			}
 		default:
-			if err := u.expr(v, prTest); err != nil {
+			if err := bodyU.expr(v, prTest); err != nil {
 				return err
 			}
 		}
 	}
-	if !isFormatSpec {
-		u.wc('"')
+	bodyStr := body.String()
+
+	// CPython: choose quote char matching Python's repr() preference:
+	// single quotes if the body has no single quotes, else double quotes.
+	quote := byte('\'')
+	if strings.ContainsRune(bodyStr, '\'') {
+		quote = '"'
 	}
+
+	u.wc('f')
+	u.wc(quote)
+	u.ws(escapeFStringQuoteAndSlashes(bodyStr, quote))
+	u.wc(quote)
 	return nil
 }
 
 func (u *unparser) formattedValue(n *FormattedValue) error {
-	u.wc('{')
-	if err := u.expr(n.Value, prTest+1); err != nil {
+	// CPython: Python/ast_unparse.c append_interpolation_str - if the
+	// expression starts with '{', insert a space to avoid '{{'.
+	var exprBuf strings.Builder
+	exprU := &unparser{w: &exprBuf}
+	if err := exprU.expr(n.Value, prTest+1); err != nil {
 		return err
 	}
+	exprStr := exprBuf.String()
+	if len(exprStr) > 0 && exprStr[0] == '{' {
+		u.ws("{ ")
+	} else {
+		u.wc('{')
+	}
+	u.ws(exprStr)
 	if n.Conversion > 0 {
 		u.wc('!')
 		u.wc(byte(n.Conversion))
@@ -1025,50 +1099,104 @@ func (u *unparser) formattedValue(n *FormattedValue) error {
 }
 
 func (u *unparser) interpolation(n *Interpolation) error {
-	return u.formattedValue(&FormattedValue{
-		Value:      n.Value,
-		Conversion: n.Conversion,
-		FormatSpec: n.FormatSpec,
-		Pos:        n.Pos,
-	})
+	// CPython: Python/ast_unparse.c append_interpolation uses interp.str
+	// (raw source text) to preserve the original whitespace and formatting.
+	rawStr, _ := n.Str.(string)
+	if rawStr == "" {
+		// Fallback: re-render via expression unparser.
+		return u.formattedValue(&FormattedValue{
+			Value:      n.Value,
+			Conversion: n.Conversion,
+			FormatSpec: n.FormatSpec,
+			Pos:        n.Pos,
+		})
+	}
+	if len(rawStr) > 0 && rawStr[0] == '{' {
+		u.ws("{ ")
+	} else {
+		u.wc('{')
+	}
+	u.ws(rawStr)
+	if n.Conversion > 0 {
+		u.wc('!')
+		u.wc(byte(n.Conversion))
+	}
+	if n.FormatSpec != nil {
+		u.wc(':')
+		if js, ok := n.FormatSpec.(*JoinedStr); ok {
+			if err := u.joinedStr(js, true); err != nil {
+				return err
+			}
+		} else if err := u.expr(n.FormatSpec, prTest); err != nil {
+			return err
+		}
+	}
+	u.wc('}')
+	return nil
 }
 
 func (u *unparser) templateStr(n *TemplateStr) error {
-	u.wc('t')
-	u.wc('"')
+	// Same quote selection as joinedStr: prefer single quotes unless body has single quotes.
+	var body strings.Builder
+	bodyU := &unparser{w: &body}
 	for i := 0; i < n.Values.Len(); i++ {
 		v := n.Values.Get(i)
 		switch x := v.(type) {
 		case *Constant:
 			s, _ := x.Value.(string)
-			u.ws(escapeFString(s, false))
+			body.WriteString(escapeFStringBraces(s))
 		case *Interpolation:
-			if err := u.interpolation(x); err != nil {
+			if err := bodyU.interpolation(x); err != nil {
 				return err
 			}
 		default:
-			if err := u.expr(v, prTest); err != nil {
+			if err := bodyU.expr(v, prTest); err != nil {
 				return err
 			}
 		}
 	}
-	u.wc('"')
+	bodyStr := body.String()
+	quote := byte('\'')
+	if strings.ContainsRune(bodyStr, '\'') {
+		quote = '"'
+	}
+	u.wc('t')
+	u.wc(quote)
+	u.ws(escapeFStringQuoteAndSlashes(bodyStr, quote))
+	u.wc(quote)
 	return nil
 }
 
-// escapeFString escapes braces inside the literal segments of an
-// f-string so the round-tripped source still parses as f-string.
-func escapeFString(s string, isFormatSpec bool) string {
-	if isFormatSpec {
-		return s
+// escapeFStringBraces escapes literal `{` and `}` in a constant segment of
+// an f-string so they are not confused with expression delimiters.
+// CPython: Python/ast_unparse.c escape_braces
+func escapeFStringBraces(s string) string {
+	s = strings.ReplaceAll(s, "{", "{{")
+	s = strings.ReplaceAll(s, "}", "}}")
+	return s
+}
+
+// escapeFStringQuoteAndSlashes escapes the chosen quote character and
+// backslash/newline in the f-string body (after braces are already escaped).
+// CPython: Python/ast_unparse.c append_repr on the assembled body string.
+func escapeFStringQuoteAndSlashes(s string, quote byte) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == rune(quote):
+			b.WriteByte('\\')
+			b.WriteByte(quote)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
 	}
-	r := strings.NewReplacer(
-		`\`, `\\`,
-		"\n", `\n`,
-		"\t", `\t`,
-		`"`, `\"`,
-		`{`, `{{`,
-		`}`, `}}`,
-	)
-	return r.Replace(s)
+	return b.String()
 }

@@ -48,9 +48,9 @@ func TestUnparseSimple(t *testing.T) {
 		{"float_whole", &Constant{Value: 2.0}, "2.0"},
 		{"float_inf", &Constant{Value: math.Inf(1)}, "1e309"},
 		{"float_neg_inf", &Constant{Value: math.Inf(-1)}, "-1e309"},
-		{"complex_pure", &Constant{Value: complex(0, 1)}, "1.0j"},
-		{"complex_full", &Constant{Value: complex(1, 2)}, "(1.0+2.0j)"},
-		{"complex_neg_im", &Constant{Value: complex(1, -2)}, "(1.0-2.0j)"},
+		{"complex_pure", &Constant{Value: complex(0, 1)}, "1j"},
+		{"complex_full", &Constant{Value: complex(1, 2)}, "(1+2j)"},
+		{"complex_neg_im", &Constant{Value: complex(1, -2)}, "(1-2j)"},
 		{"empty_tuple_const", &Constant{Value: []any{}}, "()"},
 		{"singleton_tuple_const", &Constant{Value: []any{int(1)}}, "(1,)"},
 		{"frozenset_const", &Constant{Value: FrozenSet{int(1), int(2)}}, "frozenset({1, 2})"},
@@ -332,10 +332,11 @@ func TestUnparseListAndTuple(t *testing.T) {
 	if got, want := mustUnparse(t, &Tuple{Elts: NewSeq[Expr](0)}), "()"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	if got, want := mustUnparse(t, &Tuple{Elts: seqExpr(cint(1))}), "1,"; got != want {
+	if got, want := mustUnparse(t, &Tuple{Elts: seqExpr(cint(1))}), "(1,)"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	if got, want := mustUnparse(t, &Tuple{Elts: seqExpr(cint(1), cint(2))}), "1, 2"; got != want {
+	if got, want := mustUnparse(t, &Tuple{Elts: seqExpr(cint(1), cint(2))}), "(1, 2)"; got != want {
+
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -350,7 +351,7 @@ func TestUnparseStarred(t *testing.T) {
 func TestUnparseNamedExpr(t *testing.T) {
 	// Top-level mirrors ast_unparse.c: no parens at PR_TUPLE.
 	e := &NamedExpr{Target: name("x"), Value: cint(1)}
-	if got, want := mustUnparse(t, e), "x := 1"; got != want {
+	if got, want := mustUnparse(t, e), "(x := 1)"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	// Inside a call argument the level rises to PR_TEST, forcing parens.
@@ -365,14 +366,14 @@ func TestUnparseFString(t *testing.T) {
 		cstr("hi "),
 		&FormattedValue{Value: name("x")},
 	)}
-	if got, want := mustUnparse(t, js), `f"hi {x}"`; got != want {
+	if got, want := mustUnparse(t, js), `f'hi {x}'`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	conv := 'r'
 	js2 := &JoinedStr{Values: seqExpr(
 		&FormattedValue{Value: name("x"), Conversion: int(conv)},
 	)}
-	if got, want := mustUnparse(t, js2), `f"{x!r}"`; got != want {
+	if got, want := mustUnparse(t, js2), `f'{x!r}'`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	js3 := &JoinedStr{Values: seqExpr(
@@ -381,7 +382,7 @@ func TestUnparseFString(t *testing.T) {
 			FormatSpec: &JoinedStr{Values: seqExpr(cstr(".2f"))},
 		},
 	)}
-	if got, want := mustUnparse(t, js3), `f"{x:.2f}"`; got != want {
+	if got, want := mustUnparse(t, js3), `f'{x:.2f}'`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -391,7 +392,7 @@ func TestUnparseTemplateStr(t *testing.T) {
 		cstr("hi "),
 		&Interpolation{Value: name("x")},
 	)}
-	if got, want := mustUnparse(t, ts), `t"hi {x}"`; got != want {
+	if got, want := mustUnparse(t, ts), `t'hi {x}'`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -400,7 +401,7 @@ func TestUnparseFStringEscapesBraces(t *testing.T) {
 	// Literal braces in the string segment must be doubled so the
 	// reparser still treats them as literals.
 	js := &JoinedStr{Values: seqExpr(cstr("{n}"))}
-	if got, want := mustUnparse(t, js), `f"{{n}}"`; got != want {
+	if got, want := mustUnparse(t, js), `f'{{n}}'`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
