@@ -21,7 +21,9 @@ package _pickle
 import (
 	"errors"
 	"fmt"
+	"strings"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -56,9 +58,28 @@ func pickleDumps(args []objects.Object, kwargs map[string]objects.Object) (objec
 	}
 	data, err := dumpsAtom(obj, proto)
 	if err != nil {
-		return nil, err
+		return nil, asPicklingError(err)
 	}
 	return objects.NewBytes(data), nil
+}
+
+// asPicklingError wraps a Go error from the encoder in a Python
+// PicklingError exception so that `except pickle.PickleError` catches it.
+// Errors that already match another typed prefix (TypeError, etc.) are
+// passed through unchanged.
+//
+// CPython: Modules/_pickle.c raises PyExc_PicklingError directly.
+func asPicklingError(err error) error {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "PicklingError:") || strings.HasPrefix(msg, "PickleError:") {
+		if picklingErrorType == nil {
+			return err
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(msg, "PicklingError:"), "PickleError:"))
+		exc := pyerrors.New(picklingErrorType, objects.NewTuple([]objects.Object{objects.NewStr(body)}))
+		return objects.NewRaisedError(exc, body)
+	}
+	return err
 }
 
 // pickleDump is the file-output variant. The C signature is

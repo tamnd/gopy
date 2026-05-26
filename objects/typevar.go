@@ -20,6 +20,11 @@ import (
 	"strings"
 )
 
+// SysModulesGetter is wired by the imp package after its init completes.
+// It returns the live sys.modules dict so that objects code can perform
+// lazy module lookups without importing imp (which would be circular).
+var SysModulesGetter func() *Dict
+
 // TypeVar mirrors CPython's typevarobject. The bound and constraints
 // fields are nil unless the caller supplied them via the binary
 // intrinsics (TYPEVAR_WITH_BOUND / TYPEVAR_WITH_CONSTRAINTS).
@@ -565,6 +570,18 @@ func init() {
 		return args[2], nil
 	}))
 
+	// TypeVarTuple.__iter__: yields self so that *Ts in a tuple literal
+	// expands to the TypeVarTuple itself. This matches the storage model
+	// used by alias.__parameters__ (which also holds TypeVarTuples directly).
+	//
+	// CPython: Objects/typevarobject.c typevartype_iter (yields Unpack[self])
+	SetTypeDescr(TypeVarTupleType, "__iter__", NewMethodDescr(TypeVarTupleType, "__iter__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __iter__() missing self")
+		}
+		return listIter(NewList([]Object{args[0]}))
+	}))
+
 	// Install Generic.__init_subclass__ so subclasses (class Foo(Generic[T]))
 	// get their __parameters__ populated from __orig_bases__.
 	// This is the Go port of _generic_init_subclass in typing.py.
@@ -983,6 +1000,30 @@ func init() {
 		}
 		return NewConstEvaluator(None()), nil
 	}, nil))
+
+	// TypeAliasType.__iter__: yields Unpack[self] so that (*Alias,) works.
+	// Unpack is fetched lazily from sys.modules['typing'] via SysModulesGetter.
+	//
+	// CPython: Objects/typevarobject.c typealias_iter
+	SetTypeDescr(TypeAliasObjType, "__iter__", NewMethodDescr(TypeAliasObjType, "__iter__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __iter__() missing self")
+		}
+		self := args[0]
+		if SysModulesGetter != nil {
+			sysmod := SysModulesGetter()
+			if sysmod != nil {
+				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
+					if unpack, err2 := GetAttr(typingMod, NewStr("Unpack")); err2 == nil && unpack != nil {
+						if unpacked, err3 := GetItem(unpack, self); err3 == nil {
+							return listIter(NewList([]Object{unpacked}))
+						}
+					}
+				}
+			}
+		}
+		return nil, fmt.Errorf("TypeError: 'typing.TypeAliasType' object is not iterable")
+	}))
 
 	// CPython: Objects/typevarobject.c:2059 typealias_parameters
 	SetTypeDescr(TypeAliasObjType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {

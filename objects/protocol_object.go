@@ -129,6 +129,17 @@ func Iter(o Object) (Object, error) {
 	if tp.Iter != nil {
 		return tp.Iter(o)
 	}
+	// Fall back to __iter__ descriptor lookup. This handles Go-level types
+	// that have __iter__ installed via SetTypeDescr (e.g. after typing.py
+	// wires TypeVarTuple and TypeAliasType iteration).
+	//
+	// CPython: Objects/typeobject.c slot_tp_iter (analogous path)
+	if descr, _ := LookupDescriptor(tp, "__iter__"); descr != nil {
+		iterFn, err := bindDescriptor(descr, o)
+		if err == nil && iterFn != nil {
+			return CallObject(iterFn, nil)
+		}
+	}
 	if s := tp.Sequence; s != nil && s.GetItem != nil {
 		return NewSeqIter(o), nil
 	}

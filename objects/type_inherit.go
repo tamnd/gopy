@@ -75,6 +75,23 @@ func inheritSlotsAllMRO(t *Type) {
 	if len(t.Bases) > 0 && t.Bases[0] != nil {
 		inheritProtocolPointers(t, t.Bases[0])
 	}
+	// Scalar slots like RichCmp are only copied from Bases[0] in
+	// inheritProtocolPointers. When Bases[0] has nil RichCmp but a later MRO
+	// entry (e.g. a mixin that defines __eq__) has it set, scan the full MRO.
+	//
+	// CPython: Objects/typeobject.c:8227 inherit_slots SLOTDEFINED check
+	// walks all ancestors for each slot.
+	if t.RichCmp == nil && !typeOverridesHash(t) {
+		for _, anc := range t.MRO[1:] {
+			if anc != nil && anc.RichCmp != nil {
+				t.RichCmp = anc.RichCmp
+				if t.Hash == nil {
+					t.Hash = anc.Hash
+				}
+				break
+			}
+		}
+	}
 }
 
 // inheritBundleSlotsFromAncestor walks one MRO entry and fills in

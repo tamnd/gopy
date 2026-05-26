@@ -584,6 +584,27 @@ func moduleForObj(obj objects.Object, name string) string {
 	return ""
 }
 
+// objReachableAsGlobal checks that sys.modules[module].name is obj.
+// Returns false for local aliases and TypeVars defined inside functions
+// that are not importable from the module level.
+//
+// CPython: Modules/_pickle.c:3191 save_global identity check
+func objReachableAsGlobal(obj objects.Object, module, name string) bool {
+	sysmod := imp.SysModules()
+	if sysmod == nil {
+		return false
+	}
+	modObj, err := sysmod.GetItem(objects.NewStr(module))
+	if err != nil || modObj == nil {
+		return false
+	}
+	attr, err := objects.GetAttr(modObj, objects.NewStr(name))
+	if err != nil || attr == nil {
+		return false
+	}
+	return attr == obj
+}
+
 // saveFunctionGlobal pickles a function as a GLOBAL / STACK_GLOBAL
 // reference using the function's __module__ and __qualname__.
 //
@@ -655,10 +676,16 @@ func (p *pickler) saveViaReduce(obj objects.Object) error {
 	switch rv := result.(type) {
 	case *objects.Unicode:
 		// String result: obj is a global; look it up by name.
+		// CPython: Modules/_pickle.c:3191 save_global validates the round-trip.
 		name := rv.Value()
 		module := moduleForObj(obj, name)
 		if module == "" {
-			return fmt.Errorf("PicklingError: can't pickle %q: failed to determine module", name)
+			return fmt.Errorf("PicklingError: can't pickle %s: it's not found as a module-level name", name)
+		}
+		// Verify the object is reachable from the module under that name.
+		// If not, it's a local alias/typevar and cannot be pickled.
+		if !objReachableAsGlobal(obj, module, name) {
+			return fmt.Errorf("PicklingError: can't pickle %s: it's not found as %s.%s", name, module, name)
 		}
 		if err := p.saveGlobal(module, name); err != nil {
 			return err

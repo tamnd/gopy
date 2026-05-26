@@ -373,7 +373,8 @@ func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 // dictMappingGet is the type-level __getitem__. Mirrors dict_subscript:
 // on miss it raises KeyError with the key as the value, so user code
 // `except KeyError` catches the failure instead of seeing the raw
-// errKeyNotFound sentinel.
+// errKeyNotFound sentinel. For dict subclasses, calls __missing__(key)
+// on a cache miss before raising KeyError.
 //
 // CPython: Objects/dictobject.c:2229 dict_subscript
 func dictMappingGet(o, key Object) (Object, error) {
@@ -381,6 +382,13 @@ func dictMappingGet(o, key Object) (Object, error) {
 	v, err := d.GetItem(key)
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
+			// For dict subclasses, invoke __missing__ before raising KeyError.
+			// CPython: Objects/dictobject.c:2242 (non-exact dict __missing__ path)
+			if d.Type() != DictType {
+				if missingFn, merr := GetAttr(o, NewStr("__missing__")); merr == nil && missingFn != nil {
+					return CallOneArg(missingFn, key)
+				}
+			}
 			repr, rerr := Repr(key)
 			if rerr != nil {
 				repr = "?"
