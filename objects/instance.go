@@ -18,6 +18,14 @@ package objects
 
 import "fmt"
 
+// GCTrackHook is called from NewInstance whenever the type declares a
+// Finalize slot (tp_finalize), so the cycle collector sees the object.
+// The gc module registers its Track function here at startup to avoid
+// an import cycle (objects cannot import gc).
+//
+// CPython: Include/internal/pycore_object.h:225 _PyObject_GC_TRACK
+var GCTrackHook func(Object)
+
 // Instance backs a Python-level object whose type is a user-defined
 // class. Header.typ is the class; dict holds per-instance attributes
 // (nil when the class declared __slots__ without __dict__); slots
@@ -86,6 +94,14 @@ func NewInstance(t *Type) *Instance {
 	// CPython: Objects/object.c _PyObject_InitInlineValues
 	inst.inlineValid = true
 	inst.init(t)
+	// Register the new instance with the cycle collector when the type
+	// has a Finalize slot (tp_finalize), so gc.collect() can call __del__.
+	// CPython: Objects/typeobject.c type_call _PyObject_GC_TRACK for tp_finalize types
+	if t.Finalize != nil {
+		if h := GCTrackHook; h != nil {
+			h(inst)
+		}
+	}
 	return inst
 }
 

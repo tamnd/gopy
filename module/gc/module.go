@@ -18,6 +18,11 @@ import (
 
 func init() {
 	_ = imp.AppendInittab("gc", buildModule)
+	// Wire objects.GCTrackHook so instances with __del__ (Finalize != nil)
+	// are automatically tracked when created. This avoids an import cycle:
+	// objects cannot import gc, but gc can register a callback into objects.
+	// CPython: Objects/typeobject.c type_call _PyObject_GC_TRACK path
+	objects.GCTrackHook = Track
 }
 
 // buildModule constructs the gc module dict. Mirrors gcmodule_exec
