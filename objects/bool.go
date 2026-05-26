@@ -21,6 +21,13 @@ var (
 func init() {
 	BoolType.Repr = boolRepr
 	BoolType.Str = boolRepr
+	// bool inherits int's ordering but overrides hash (True→1, False→0).
+	// intRichCmp is assigned to IntType.RichCmp in int.go's init, which
+	// may run after NewType("bool") already ran inheritSlotsAllMRO, so we
+	// must set it explicitly here rather than relying on inheritance.
+	//
+	// CPython: Objects/boolobject.c:L222 PyBool_Type (no tp_richcompare)
+	BoolType.RichCmp = intRichCmp
 	BoolType.Hash = func(o Object) (int64, error) {
 		if o == trueSingleton {
 			return 1, nil

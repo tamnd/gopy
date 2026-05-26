@@ -89,6 +89,19 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaCall(args, kwargs)
 	}
 
+	// User-defined metaclasses (subtypes of type with IsUser=true) must go
+	// through typeMetaclassCall so ABCMeta.__new__ and similar overrides
+	// are honoured. The TpNew check below fires first because user
+	// metaclasses inherit objectNew from objectType via the MRO (typeType
+	// leaves TpNew nil), and objectNew would create an *Instance instead
+	// of a *Type. CPython avoids this by always routing through type_new
+	// for metaclass calls.
+	//
+	// CPython: Objects/typeobject.c:1748 type_call (metaclass path)
+	if cls.IsUser && IsSubtype(cls, typeType) {
+		return typeMetaclassCall(cls, args, kwargs)
+	}
+
 	// Types that publish a tp_new slot: allocate via TpNew, then call
 	// __init__ if the type has one registered as a descriptor. For most
 	// built-in types TpNew handles everything itself and there is no
@@ -111,15 +124,6 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 
 	if !cls.IsUser {
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
-	}
-
-	// If cls is a subtype of type (a metaclass), dispatch through __new__
-	// to build a new *Type. This covers user-defined metaclasses like
-	// ABCMeta that override type.__new__ to customize class creation.
-	//
-	// CPython: Objects/typeobject.c:1748 type_call (tp_new/tp_init path)
-	if IsSubtype(cls, typeType) {
-		return typeMetaclassCall(cls, args, kwargs)
 	}
 
 	if err := checkNotAbstract(cls); err != nil {

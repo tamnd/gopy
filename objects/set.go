@@ -892,16 +892,40 @@ func setIsSupersetMethod(args []Object, _ map[string]Object) (Object, error) {
 	return setIsSubsetMethod([]Object{args[1], args[0]}, nil)
 }
 
+// setIsDisjointMethod implements set.isdisjoint(other). CPython accepts any
+// iterable for other; when other is a set or frozenset the Contains fast
+// path is used, otherwise each element from other is hashed and looked up.
+//
+// CPython: Objects/setobject.c:1424 set_isdisjoint_impl
 func setIsDisjointMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: isdisjoint() takes exactly one argument")
 	}
-	a, b := args[0].(*Set), args[1].(*Set)
-	for _, e := range a.entries {
-		if !e.used {
-			continue
+	a := args[0].(*Set)
+	other := args[1]
+	if b, ok := other.(*Set); ok {
+		for _, e := range a.entries {
+			if !e.used {
+				continue
+			}
+			ok, err := b.Contains(e.key)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return False(), nil
+			}
 		}
-		ok, err := b.Contains(e.key)
+		return True(), nil
+	}
+	// Generic iterable: iterate other and check membership in a.
+	items, err := SequenceList(other)
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: isdisjoint() argument is not iterable")
+	}
+	for i := 0; i < items.Len(); i++ {
+		item := items.Item(i)
+		ok, err := a.Contains(item)
 		if err != nil {
 			return nil, err
 		}

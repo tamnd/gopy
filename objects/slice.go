@@ -35,6 +35,31 @@ func init() {
 	SliceType.Repr = sliceRepr
 	SliceType.Str = sliceRepr
 	SliceType.Dealloc = sliceDealloc
+	// slice(stop) / slice(start, stop) / slice(start, stop, step).
+	// CPython: Objects/sliceobject.c:319 slice_new
+	SliceType.TpNew = sliceTpNew
+}
+
+// sliceTpNew implements the slice constructor: slice(stop),
+// slice(start, stop), or slice(start, stop, step).
+//
+// CPython: Objects/sliceobject.c:319 slice_new
+func sliceTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: slice() takes no keyword arguments")
+	}
+	var start, stop, step Object
+	switch len(args) {
+	case 1:
+		stop = args[0]
+	case 2:
+		start, stop = args[0], args[1]
+	case 3:
+		start, stop, step = args[0], args[1], args[2]
+	default:
+		return nil, fmt.Errorf("TypeError: slice expected at most 3 arguments, got %d", len(args))
+	}
+	return NewSlice(start, stop, step), nil
 }
 
 // NewSlice builds a slice. Any of start/stop/step may be None. The

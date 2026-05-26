@@ -195,6 +195,12 @@ func lookupTypeMember(t *Type, name string) Object {
 // CPython: Objects/typeobject.c:1057 type_dict (analog)
 var typeDescrTable = map[*Type]map[string]Object{}
 
+// typeDescrOrder records the insertion order of keys in typeDescrTable[t].
+// This mirrors the tp_dict insertion order that CPython's dict preserves,
+// and is required so that type.__dict__ iterates attributes in definition
+// order (e.g. enum members, dataclass fields).
+var typeDescrOrder = map[*Type][]string{}
+
 // TypeDescrNames returns the names registered on t through
 // SetTypeDescr, walking the MRO and de-duplicating. Used by builtins
 // dir() to introspect a class.
@@ -245,6 +251,9 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		m = map[string]Object{}
 		typeDescrTable[t] = m
 	}
+	if _, exists := m[name]; !exists {
+		typeDescrOrder[t] = append(typeDescrOrder[t], name)
+	}
 	m[name] = d
 	if t.ClassAttrDict != nil {
 		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
@@ -264,6 +273,26 @@ func TypeOwnDescrs(t *Type) map[string]Object {
 	return typeDescrTable[t]
 }
 
+// TypeOwnDescrItems iterates the descriptors registered on t in insertion
+// order, calling f(name, value) for each. Used by type.__dict__ to expose
+// attributes in definition order, matching CPython's tp_dict behaviour.
+//
+// CPython: Objects/typeobject.c:1057 type_dict
+func TypeOwnDescrItems(t *Type, f func(name string, value Object)) {
+	if t == nil {
+		return
+	}
+	m := typeDescrTable[t]
+	if m == nil {
+		return
+	}
+	for _, name := range typeDescrOrder[t] {
+		if v, ok := m[name]; ok {
+			f(name, v)
+		}
+	}
+}
+
 // DelTypeDescr removes name from t's own descriptor table. Returns
 // true when the entry existed. Mirrors a PyDict_DelItem on tp_dict.
 //
@@ -277,5 +306,12 @@ func DelTypeDescr(t *Type, name string) bool {
 		return false
 	}
 	delete(m, name)
+	order := typeDescrOrder[t]
+	for i, n := range order {
+		if n == name {
+			typeDescrOrder[t] = append(order[:i], order[i+1:]...)
+			break
+		}
+	}
 	return true
 }

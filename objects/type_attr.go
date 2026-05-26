@@ -51,12 +51,15 @@ func init() {
 				return nil, fmt.Errorf("TypeError: descriptor '__dict__' requires 'type' object")
 			}
 			d := NewDict()
-			if descrs, ok2 := typeDescrTable[tp]; ok2 {
-				for k, v := range descrs {
-					if err := d.SetItem(NewStr(k), v); err != nil {
-						return nil, err
-					}
+			var setErr error
+			TypeOwnDescrItems(tp, func(k string, v Object) {
+				if setErr != nil {
+					return
 				}
+				setErr = d.SetItem(NewStr(k), v)
+			})
+			if setErr != nil {
+				return nil, setErr
 			}
 			return d, nil
 		},
@@ -101,12 +104,15 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 	// tp_dict / PyObject_GenericGetDict)
 	if nameStr == "__dict__" {
 		d := NewDict()
-		if descrs, ok2 := typeDescrTable[tp]; ok2 {
-			for k, v := range descrs {
-				if err := d.SetItem(NewStr(k), v); err != nil {
-					return nil, err
-				}
+		var setErr error
+		TypeOwnDescrItems(tp, func(k string, v Object) {
+			if setErr != nil {
+				return
 			}
+			setErr = d.SetItem(NewStr(k), v)
+		})
+		if setErr != nil {
+			return nil, setErr
 		}
 		return d, nil
 	}

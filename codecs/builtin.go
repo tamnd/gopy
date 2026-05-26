@@ -55,6 +55,8 @@ func builtinSearch(name string) (*CodecInfo, error) {
 		"iso_8859_1_1987", "l1", "ibm819", "cp819", "csisolatin1",
 		"iso_ir_100", "8859":
 		return latin1Codec, nil
+	case "unicode_escape":
+		return unicodeEscapeCodec, nil
 	case "raw_unicode_escape":
 		return rawUnicodeEscapeCodec, nil
 	case "utf_16", "utf16", "u16":

@@ -163,20 +163,9 @@ class Dict(expr):
 
 class BinOp(expr):
     _fields = ('left', 'op', 'right')
-    def __init__(self, left=None, op=None, right=None, **kw):
-        self.left = left
-        self.op = op
-        self.right = right
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class UnaryOp(expr):
     _fields = ('op', 'operand')
-    def __init__(self, op=None, operand=None, **kw):
-        self.op = op
-        self.operand = operand
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class BoolOp(expr):
     _fields = ('op', 'values')
@@ -206,37 +195,15 @@ class Call(expr):
 
 class IfExp(expr):
     _fields = ('test', 'body', 'orelse')
-    def __init__(self, test=None, body=None, orelse=None, **kw):
-        self.test = test
-        self.body = body
-        self.orelse = orelse
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Slice(expr):
     _fields = ('lower', 'upper', 'step')
-    def __init__(self, lower=None, upper=None, step=None, **kw):
-        self.lower = lower
-        self.upper = upper
-        self.step = step
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Lambda(expr):
     _fields = ('args', 'body')
-    def __init__(self, args=None, body=None, **kw):
-        self.args = args
-        self.body = body
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class NamedExpr(expr):
     _fields = ('target', 'value')
-    def __init__(self, target=None, value=None, **kw):
-        self.target = target
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 # -- misc nodes --
 
@@ -311,49 +278,67 @@ class FunctionType(mod):
 class FunctionDef(stmt):
     _fields = ('name', 'args', 'body', 'decorator_list', 'returns',
                'type_comment', 'type_params')
-    def __init__(self, **kw):
+    def __init__(self, name=None, args=None, body=None, decorator_list=None,
+                 returns=None, type_comment=None, type_params=None, **kw):
+        self.name = name
+        self.args = args
+        self.body = body if body is not None else []
+        self.decorator_list = decorator_list if decorator_list is not None else []
+        self.returns = returns
+        self.type_comment = type_comment
+        self.type_params = type_params if type_params is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class AsyncFunctionDef(stmt):
     _fields = ('name', 'args', 'body', 'decorator_list', 'returns',
                'type_comment', 'type_params')
-    def __init__(self, **kw):
+    def __init__(self, name=None, args=None, body=None, decorator_list=None,
+                 returns=None, type_comment=None, type_params=None, **kw):
+        self.name = name
+        self.args = args
+        self.body = body if body is not None else []
+        self.decorator_list = decorator_list if decorator_list is not None else []
+        self.returns = returns
+        self.type_comment = type_comment
+        self.type_params = type_params if type_params is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class ClassDef(stmt):
     _fields = ('name', 'bases', 'keywords', 'body', 'decorator_list',
                'type_params')
-    def __init__(self, **kw):
+    def __init__(self, name=None, bases=None, keywords=None, body=None,
+                 decorator_list=None, type_params=None, **kw):
+        self.name = name
+        self.bases = bases if bases is not None else []
+        self.keywords = keywords if keywords is not None else []
+        self.body = body if body is not None else []
+        self.decorator_list = decorator_list if decorator_list is not None else []
+        self.type_params = type_params if type_params is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Return(stmt):
     _fields = ('value',)
-    def __init__(self, value=None, **kw):
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Assign(stmt):
     _fields = ('targets', 'value', 'type_comment')
-    def __init__(self, **kw):
+
+class AugAssign(stmt):
+    _fields = ('target', 'op', 'value')
+    def __init__(self, target=None, op=None, value=None, **kw):
+        self.target = target
+        self.op = op
+        self.value = value
         for k, v in kw.items():
             setattr(self, k, v)
 
 class AnnAssign(stmt):
     _fields = ('target', 'annotation', 'value', 'simple')
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Expr(stmt):
     _fields = ('value',)
-    def __init__(self, value=None, **kw):
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Pass(stmt): _fields = ()
 class Break(stmt): _fields = ()
@@ -361,51 +346,88 @@ class Continue(stmt): _fields = ()
 
 class Raise(stmt):
     _fields = ('exc', 'cause')
-    def __init__(self, exc=None, cause=None, **kw):
-        self.exc = exc
-        self.cause = cause
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class If(stmt):
     _fields = ('test', 'body', 'orelse')
-    def __init__(self, **kw):
+    def __init__(self, test=None, body=None, orelse=None, **kw):
+        self.test = test
+        self.body = body if body is not None else []
+        self.orelse = orelse if orelse is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class For(stmt):
     _fields = ('target', 'iter', 'body', 'orelse', 'type_comment')
-    def __init__(self, **kw):
+    def __init__(self, target=None, iter=None, body=None, orelse=None,
+                 type_comment=None, **kw):
+        self.target = target
+        self.iter = iter
+        self.body = body if body is not None else []
+        self.orelse = orelse if orelse is not None else []
+        self.type_comment = type_comment
         for k, v in kw.items():
             setattr(self, k, v)
 
 class While(stmt):
     _fields = ('test', 'body', 'orelse')
-    def __init__(self, **kw):
+    def __init__(self, test=None, body=None, orelse=None, **kw):
+        self.test = test
+        self.body = body if body is not None else []
+        self.orelse = orelse if orelse is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class With(stmt):
     _fields = ('items', 'body', 'type_comment')
-    def __init__(self, **kw):
+    def __init__(self, items=None, body=None, type_comment=None, **kw):
+        self.items = items if items is not None else []
+        self.body = body if body is not None else []
+        self.type_comment = type_comment
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class AsyncFor(stmt):
+    _fields = ('target', 'iter', 'body', 'orelse', 'type_comment')
+    def __init__(self, target=None, iter=None, body=None, orelse=None,
+                 type_comment=None, **kw):
+        self.target = target
+        self.iter = iter
+        self.body = body if body is not None else []
+        self.orelse = orelse if orelse is not None else []
+        self.type_comment = type_comment
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class AsyncWith(stmt):
+    _fields = ('items', 'body', 'type_comment')
+    def __init__(self, items=None, body=None, type_comment=None, **kw):
+        self.items = items if items is not None else []
+        self.body = body if body is not None else []
+        self.type_comment = type_comment
         for k, v in kw.items():
             setattr(self, k, v)
 
 class withitem(AST):
     _fields = ('context_expr', 'optional_vars')
-    def __init__(self, **kw):
+    def __init__(self, context_expr=None, optional_vars=None, **kw):
+        self.context_expr = context_expr
+        self.optional_vars = optional_vars
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Import(stmt):
     _fields = ('names',)
-    def __init__(self, **kw):
+    def __init__(self, names=None, **kw):
+        self.names = names if names is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class ImportFrom(stmt):
     _fields = ('module', 'names', 'level')
-    def __init__(self, **kw):
+    def __init__(self, module=None, names=None, level=None, **kw):
+        self.module = module
+        self.names = names if names is not None else []
+        self.level = level
         for k, v in kw.items():
             setattr(self, k, v)
 
@@ -419,75 +441,169 @@ class alias(AST):
 
 class Global(stmt):
     _fields = ('names',)
-    def __init__(self, **kw):
+    def __init__(self, names=None, **kw):
+        self.names = names if names is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Nonlocal(stmt):
     _fields = ('names',)
-    def __init__(self, **kw):
+    def __init__(self, names=None, **kw):
+        self.names = names if names is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Delete(stmt):
     _fields = ('targets',)
-    def __init__(self, **kw):
+    def __init__(self, targets=None, **kw):
+        self.targets = targets if targets is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Assert(stmt):
     _fields = ('test', 'msg')
-    def __init__(self, **kw):
+
+class Match(stmt):
+    _fields = ('subject', 'cases')
+    def __init__(self, subject=None, cases=None, **kw):
+        self.subject = subject
+        self.cases = cases if cases is not None else []
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class match_case(AST):
+    _fields = ('pattern', 'guard', 'body')
+    def __init__(self, pattern=None, guard=None, body=None, **kw):
+        self.pattern = pattern
+        self.guard = guard
+        self.body = body if body is not None else []
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class pattern(AST): pass
+
+class MatchValue(pattern):
+    _fields = ('value',)
+    def __init__(self, value=None, **kw):
+        self.value = value
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchSingleton(pattern):
+    _fields = ('value',)
+    def __init__(self, value=None, **kw):
+        self.value = value
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchSequence(pattern):
+    _fields = ('patterns',)
+    def __init__(self, patterns=None, **kw):
+        self.patterns = patterns if patterns is not None else []
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchMapping(pattern):
+    _fields = ('keys', 'patterns', 'rest')
+    def __init__(self, keys=None, patterns=None, rest=None, **kw):
+        self.keys = keys if keys is not None else []
+        self.patterns = patterns if patterns is not None else []
+        self.rest = rest
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchClass(pattern):
+    _fields = ('cls', 'patterns', 'kwd_attrs', 'kwd_patterns')
+    def __init__(self, cls=None, patterns=None, kwd_attrs=None,
+                 kwd_patterns=None, **kw):
+        self.cls = cls
+        self.patterns = patterns if patterns is not None else []
+        self.kwd_attrs = kwd_attrs if kwd_attrs is not None else []
+        self.kwd_patterns = kwd_patterns if kwd_patterns is not None else []
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchStar(pattern):
+    _fields = ('name',)
+    def __init__(self, name=None, **kw):
+        self.name = name
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchAs(pattern):
+    _fields = ('pattern', 'name')
+    def __init__(self, pattern=None, name=None, **kw):
+        self.pattern = pattern
+        self.name = name
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+class MatchOr(pattern):
+    _fields = ('patterns',)
+    def __init__(self, patterns=None, **kw):
+        self.patterns = patterns if patterns is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Try(stmt):
     _fields = ('body', 'handlers', 'orelse', 'finalbody')
-    def __init__(self, **kw):
+    def __init__(self, body=None, handlers=None, orelse=None, finalbody=None, **kw):
+        self.body = body if body is not None else []
+        self.handlers = handlers if handlers is not None else []
+        self.orelse = orelse if orelse is not None else []
+        self.finalbody = finalbody if finalbody is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class TryStar(stmt):
     _fields = ('body', 'handlers', 'orelse', 'finalbody')
-    def __init__(self, **kw):
+    def __init__(self, body=None, handlers=None, orelse=None, finalbody=None, **kw):
+        self.body = body if body is not None else []
+        self.handlers = handlers if handlers is not None else []
+        self.orelse = orelse if orelse is not None else []
+        self.finalbody = finalbody if finalbody is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class ExceptHandler(AST):
     _fields = ('type', 'name', 'body')
-    def __init__(self, **kw):
+    def __init__(self, type=None, name=None, body=None, **kw):
+        self.type = type
+        self.name = name
+        self.body = body if body is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class TypeIgnore(AST):
     _fields = ('lineno', 'tag')
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class TypeVar(AST):
     _fields = ('name', 'bound', 'default_value')
-    def __init__(self, **kw):
+    def __init__(self, name=None, bound=None, default_value=None, **kw):
+        self.name = name
+        self.bound = bound
+        self.default_value = default_value
         for k, v in kw.items():
             setattr(self, k, v)
 
 class TypeVarTuple(AST):
     _fields = ('name', 'default_value')
-    def __init__(self, **kw):
+    def __init__(self, name=None, default_value=None, **kw):
+        self.name = name
+        self.default_value = default_value
         for k, v in kw.items():
             setattr(self, k, v)
 
 class ParamSpec(AST):
     _fields = ('name', 'default_value')
-    def __init__(self, **kw):
+    def __init__(self, name=None, default_value=None, **kw):
+        self.name = name
+        self.default_value = default_value
         for k, v in kw.items():
             setattr(self, k, v)
 
 class TypeAlias(stmt):
     _fields = ('name', 'type_params', 'value')
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 # Template string nodes (PEP 750)
 class TemplateStr(expr):
@@ -528,51 +644,52 @@ class FormattedValue(expr):
 # Comprehension
 class comprehension(AST):
     _fields = ('target', 'iter', 'ifs', 'is_async')
-    def __init__(self, **kw):
+    def __init__(self, target=None, iter=None, ifs=None, is_async=0, **kw):
+        self.target = target
+        self.iter = iter
+        self.ifs = ifs if ifs is not None else []
+        self.is_async = is_async
         for k, v in kw.items():
             setattr(self, k, v)
 
 class ListComp(expr):
     _fields = ('elt', 'generators')
-    def __init__(self, **kw):
+    def __init__(self, elt=None, generators=None, **kw):
+        self.elt = elt
+        self.generators = generators if generators is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class SetComp(expr):
     _fields = ('elt', 'generators')
-    def __init__(self, **kw):
+    def __init__(self, elt=None, generators=None, **kw):
+        self.elt = elt
+        self.generators = generators if generators is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class GeneratorExp(expr):
     _fields = ('elt', 'generators')
-    def __init__(self, **kw):
+    def __init__(self, elt=None, generators=None, **kw):
+        self.elt = elt
+        self.generators = generators if generators is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class DictComp(expr):
     _fields = ('key', 'value', 'generators')
-    def __init__(self, **kw):
+    def __init__(self, key=None, value=None, generators=None, **kw):
+        self.key = key
+        self.value = value
+        self.generators = generators if generators is not None else []
         for k, v in kw.items():
             setattr(self, k, v)
 
 class Await(expr):
     _fields = ('value',)
-    def __init__(self, value=None, **kw):
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class Yield(expr):
     _fields = ('value',)
-    def __init__(self, value=None, **kw):
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)
 
 class YieldFrom(expr):
     _fields = ('value',)
-    def __init__(self, value=None, **kw):
-        self.value = value
-        for k, v in kw.items():
-            setattr(self, k, v)

@@ -391,12 +391,16 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			_ = typeSetAnnotations(t, v)
 			continue
 		case "__annotate__":
-			// Route through typeSetAnnotate so the cache is invalidated
-			// correctly, matching CPython's type_setattro path.
+			// User-defined __annotate__ from the class body: store directly
+			// under __annotate__ so typeGetAnnotate's priority check
+			// (user-defined __annotate__ beats compiler-generated
+			// __annotate_func__) works correctly. CPython type_new_impl copies
+			// the class namespace directly into tp_dict without special-casing
+			// __annotate__, so the user's function survives alongside the
+			// synthetic __annotate_func__ the compiler emits at end-of-body.
 			//
-			// CPython: Objects/typeobject.c:4526 type_new_set_attrs calls
-			// PyObject_SetAttr which hits type_setattro -> type_set_annotate.
-			_ = typeSetAnnotate(t, v)
+			// CPython: Objects/typeobject.c:4618 type_new_init (PyDict_Copy)
+			SetTypeDescr(t, "__annotate__", v)
 			continue
 		}
 		SetTypeDescr(t, s.v, v)

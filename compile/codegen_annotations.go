@@ -33,7 +33,14 @@ import (
 // the annotation expressions resolve via the closure machinery the
 // symtable's AnnotationBlock already classified.
 //
+// For class bodies the synthetic function is stored as __annotate_func__
+// so that a user-defined `def __annotate__` inside the class body is not
+// overwritten. type_get_annotate checks __annotate__ first, then falls
+// back to __annotate_func__. Module bodies keep __annotate__ (CPython
+// uses the same split: ClassBlock → __annotate_func__, else __annotate__).
+//
 // CPython: Python/codegen.c:786 codegen_process_deferred_annotations
+// CPython: Python/codegen.c:832 (ClassBlock ? __annotate_func__ : __annotate__)
 func (c *Compiler) emitDeferredAnnotations(l ast.Pos) error {
 	u := c.unit()
 	if u == nil || len(u.DeferredAnnotations) == 0 {
@@ -54,7 +61,25 @@ func (c *Compiler) emitDeferredAnnotations(l ast.Pos) error {
 	}
 	c.emitMakeFunction(closureFlag, l)
 	pool := poolNames
-	c.addOpName(STORE_NAME, &pool, "__annotate__", l)
+	// For class bodies, the synthetic annotate is stored as __annotate_func__
+	// so a user-defined `def __annotate__` in the class body is not overwritten.
+	// typeGetAnnotate checks __annotate__ first and falls back to __annotate_func__.
+	//
+	// For module/function bodies, the user-defined __annotate__ (if any) is
+	// classified as DefLocal in the symtable. When one is present we also use
+	// __annotate_func__ so the user's definition wins. Otherwise we use __annotate__
+	// so that module namespace consumers (e.g. ConditionalAnnotationTests that access
+	// ns["__annotate__"] directly) continue to work.
+	//
+	// CPython: Python/codegen.c:832
+	// (ste_type == ClassBlock ? __annotate_func__ : __annotate__)
+	storeName := "__annotate__"
+	if c.scope.Type == symtable.ClassBlock {
+		storeName = "__annotate_func__"
+	} else if c.scope.Symbols["__annotate__"]&symtable.DefLocal != 0 {
+		storeName = "__annotate_func__"
+	}
+	c.addOpName(STORE_NAME, &pool, storeName, l)
 	return nil
 }
 

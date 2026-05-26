@@ -551,6 +551,9 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 	if o == nil || o == objects.None() {
 		return nil
 	}
+	if objects.IsEllipsis(o) {
+		return ast.EllipsisType{}
+	}
 	switch v := o.(type) {
 	case *objects.Unicode:
 		return v.Value()
@@ -563,6 +566,12 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 		return o == objects.True()
 	case *objects.Bytes:
 		return v.Bytes()
+	case *objects.Tuple:
+		items := make([]any, v.Len())
+		for i := range items {
+			items[i] = r.convertConstantValue(v.Item(i))
+		}
+		return items
 	}
 	return nil
 }

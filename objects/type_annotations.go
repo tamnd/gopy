@@ -28,12 +28,19 @@ import "fmt"
 // Without this restriction, B(A).__annotate__ would inherit A's annotate
 // function and B.__annotations__ would return A's dict instead of {}.
 //
+// Lookup order mirrors CPython type_get_annotate: __annotate__ (user-defined
+// in class body via def __annotate__) wins over __annotate_func__ (compiler-
+// generated synthetic for the class's own annotations).
+//
 // CPython: Objects/typeobject.c:1990 type_get_annotate
 func typeGetAnnotate(tp *Type) (Object, error) {
 	if !tp.IsUser {
 		return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__annotate__'", tp.Name)
 	}
 	if ann := lookupTypeMember(tp, "__annotate__"); ann != nil {
+		return ann, nil
+	}
+	if ann := lookupTypeMember(tp, "__annotate_func__"); ann != nil {
 		return ann, nil
 	}
 	return None(), nil
@@ -55,7 +62,7 @@ func typeSetAnnotate(tp *Type, value Object) error {
 	if !IsNone(value) && !Callable(value) {
 		return fmt.Errorf("TypeError: __annotate__ must be callable or None")
 	}
-	SetTypeDescr(tp, "__annotate__", value)
+	SetTypeDescr(tp, "__annotate_func__", value)
 	if !IsNone(value) {
 		DelTypeDescr(tp, "__annotations_cache__")
 	}
@@ -81,6 +88,9 @@ func typeGetAnnotations(tp *Type) (Object, error) {
 		return cached, nil
 	}
 	annotate := lookupTypeMember(tp, "__annotate__")
+	if annotate == nil {
+		annotate = lookupTypeMember(tp, "__annotate_func__")
+	}
 	var out Object
 	if annotate != nil && Callable(annotate) {
 		v, err := Call(annotate, NewTuple([]Object{NewInt(1)}), nil)
@@ -114,6 +124,7 @@ func typeSetAnnotations(tp *Type, value Object) error {
 	} else if !DelTypeDescr(tp, "__annotations_cache__") {
 		return fmt.Errorf("AttributeError: __annotations__")
 	}
+	DelTypeDescr(tp, "__annotate_func__")
 	DelTypeDescr(tp, "__annotate__")
 	tp.InvalidateVersionTag()
 	return nil
