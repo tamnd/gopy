@@ -22,7 +22,7 @@ func init() {
 	register("__bases__", typeGetBases, typeSetBases)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
-	register("__parameters__", typeGetParameters, nil)
+	register("__parameters__", typeGetParameters, typeSetParameters)
 }
 
 // typeGetName mirrors type_name. Heap types return ht_name verbatim;
@@ -231,24 +231,44 @@ func typeGetMRO(o Object) (Object, error) {
 	return NewTuple(items), nil
 }
 
-// typeGetParameters mirrors the fallback __parameters__ for PEP 695
-// generic classes. CPython sets __parameters__ on the class via
-// typing.Generic.__init_subclass__; gopy defers that machinery and
-// returns __type_params__ directly as a lightweight substitute.
-// If __parameters__ is already stored on the type (e.g. by the full
-// typing module), that value takes priority through the normal
-// descriptor lookup before this getter is ever reached.
+// typeGetParameters returns the class's __parameters__ tuple. Priority:
+// 1. TypingParameters set by typing.Generic.__init_subclass__ (traditional generics)
+// 2. TypeParams set from the PEP 695 class body (__type_params__)
+// 3. Empty tuple fallback
 //
-// CPython: Lib/typing.py:1209 Generic.__init_subclass__ (sets cls.__parameters__)
+// CPython: Lib/typing.py:1209 Generic.__init_subclass__ sets cls.__parameters__
+// CPython: Include/cpython/typeobject.h tp_typeparams (PEP 695 source)
 func typeGetParameters(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
+	if t.TypingParameters != nil {
+		return t.TypingParameters, nil
+	}
 	if t.TypeParams != nil {
 		return t.TypeParams, nil
 	}
 	return NewTuple(nil), nil
+}
+
+// typeSetParameters stores a __parameters__ tuple assigned by user code
+// (typically typing.Generic.__init_subclass__).
+//
+// CPython: Lib/typing.py:1209 cls.__parameters__ = tuple(tvars)
+func typeSetParameters(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if tup, ok2 := v.(*Tuple); ok2 {
+		t.TypingParameters = tup
+	} else if v == None() {
+		t.TypingParameters = nil
+	} else {
+		return fmt.Errorf("TypeError: __parameters__ must be a tuple")
+	}
+	return nil
 }
 
 // typeGetDoc returns the type's __doc__. Looks in the type's own

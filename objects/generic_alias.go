@@ -379,15 +379,59 @@ func gaIter(o Object) (Object, error) {
 	return NewList([]Object{starred}).Type().Iter(NewList([]Object{starred}))
 }
 
-// makeParameters walks args looking for typevar-like entries. Since
-// gopy has no TypeVar / ParamSpec / TypeVarTuple types yet, the result
-// is always an empty tuple; the helper still exists so the
-// __parameters__ getset returns the right shape and so the gate code
-// in subsParameters can detect "no parameters".
+// makeParameters walks args collecting type-parameter-like entries.
+// An entry qualifies if it has a __typing_subst__ attribute (TypeVar,
+// ParamSpec, TypeVarTuple) or itself carries a non-empty __parameters__
+// tuple (a nested generic alias). Deduplication preserves first-appearance
+// order, matching CPython's _Py_make_parameters.
 //
 // CPython: Objects/genericaliasobject.c:186 _Py_make_parameters
-func makeParameters(_ *Tuple) *Tuple {
-	return NewTuple(nil)
+func makeParameters(args *Tuple) *Tuple {
+	seen := map[Object]bool{}
+	var params []Object
+	for i := 0; i < args.Len(); i++ {
+		arg := args.Item(i)
+		collectTypeParams(arg, seen, &params)
+	}
+	return NewTuple(params)
+}
+
+// collectTypeParams adds type-parameter-like objects from arg into params,
+// deduplicating by pointer identity.
+//
+// CPython: Objects/genericaliasobject.c:147 collect_parameters
+func collectTypeParams(arg Object, seen map[Object]bool, params *[]Object) {
+	// TypeVar / ParamSpec / TypeVarTuple: has __typing_subst__
+	if _, ok := arg.(*TypeVar); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	if _, ok := arg.(*ParamSpec); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	if _, ok := arg.(*TypeVarTuple); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	// Nested generic alias: recurse into its __parameters__.
+	if ga, ok := arg.(*GenericAlias); ok {
+		if ga.parameters == nil {
+			ga.parameters = makeParameters(ga.args)
+		}
+		for i := 0; i < ga.parameters.Len(); i++ {
+			collectTypeParams(ga.parameters.Item(i), seen, params)
+		}
+	}
 }
 
 // subsParameters substitutes typevars in args with the values in item.

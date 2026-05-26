@@ -394,6 +394,22 @@ func init() {
 		return None(), nil
 	}, nil))
 
+	// CPython: Objects/typevarobject.c:755 typevar_typing_subst_impl
+	SetTypeDescr(TypeVarType, "__typing_subst__", NewMethodDescr(TypeVarType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
+		}
+		return args[1], nil
+	}))
+	// CPython: Objects/typevarobject.c:780 typevar_typing_prepare_subst_impl
+	SetTypeDescr(TypeVarType, "__typing_prepare_subst__", NewMethodDescr(TypeVarType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 3 {
+			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
+		}
+		// alias is args[1], subst_args is args[2]; just return the args tuple unchanged
+		return args[2], nil
+	}))
+
 	SetTypeDescr(ParamSpecType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*ParamSpec).NameStr), nil
 	}, nil))
@@ -462,6 +478,21 @@ func init() {
 		return NewBool(o.(*ParamSpec).InferVariance), nil
 	}, nil))
 
+	// CPython: Objects/typevarobject.c:1365 paramspec_typing_subst_impl
+	SetTypeDescr(ParamSpecType, "__typing_subst__", NewMethodDescr(ParamSpecType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
+		}
+		return args[1], nil
+	}))
+	// CPython: Objects/typevarobject.c:1385 paramspec_typing_prepare_subst_impl
+	SetTypeDescr(ParamSpecType, "__typing_prepare_subst__", NewMethodDescr(ParamSpecType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 3 {
+			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
+		}
+		return args[2], nil
+	}))
+
 	SetTypeDescr(TypeVarTupleType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*TypeVarTuple).NameStr), nil
 	}, nil))
@@ -519,6 +550,100 @@ func init() {
 		}
 		return None(), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:1619 typevartuple_typing_subst_impl
+	SetTypeDescr(TypeVarTupleType, "__typing_subst__", NewMethodDescr(TypeVarTupleType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
+		}
+		return args[1], nil
+	}))
+	// CPython: Objects/typevarobject.c:1640 typevartuple_typing_prepare_subst_impl
+	SetTypeDescr(TypeVarTupleType, "__typing_prepare_subst__", NewMethodDescr(TypeVarTupleType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 3 {
+			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
+		}
+		return args[2], nil
+	}))
+
+	// Install Generic.__init_subclass__ so subclasses (class Foo(Generic[T]))
+	// get their __parameters__ populated from __orig_bases__.
+	// This is the Go port of _generic_init_subclass in typing.py.
+	//
+	// CPython: Lib/typing.py:1174 _generic_init_subclass
+	SetTypeDescr(GenericType, "__init_subclass__", NewClassMethod(
+		NewBuiltinFunction("__init_subclass__", genericInitSubclass),
+	))
+}
+
+// genericInitSubclass implements Generic.__init_subclass__(cls). It
+// collects type parameters from cls.__orig_bases__ and stores them as
+// cls.__parameters__, mirroring typing._generic_init_subclass.
+//
+// CPython: Lib/typing.py:1174 _generic_init_subclass
+func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return None(), nil
+	}
+	cls, ok := args[0].(*Type)
+	if !ok {
+		return None(), nil
+	}
+	origBases, _ := GetAttr(cls, NewStr("__orig_bases__"))
+	if origBases == nil {
+		cls.TypingParameters = NewTuple(nil)
+		return None(), nil
+	}
+	ob, ok := origBases.(*Tuple)
+	if !ok {
+		cls.TypingParameters = NewTuple(nil)
+		return None(), nil
+	}
+	// Collect all type parameters from __orig_bases__.
+	allParams := makeParameters(ob)
+	// Find the explicit Generic[T,...] base (if any) and enforce single-use.
+	// CPython: Lib/typing.py:1192 gvars loop
+	var gvars *Tuple
+	for i := 0; i < ob.Len(); i++ {
+		ga, ok2 := ob.Item(i).(*GenericAlias)
+		if !ok2 || ga.origin != Object(GenericType) {
+			continue
+		}
+		if gvars != nil {
+			return nil, fmt.Errorf("TypeError: Cannot inherit from Generic[...] multiple times.")
+		}
+		if ga.parameters == nil {
+			ga.parameters = makeParameters(ga.args)
+		}
+		gvars = ga.parameters
+	}
+	if gvars != nil {
+		// Validate: every param in allParams must appear in gvars.
+		// CPython: Lib/typing.py:1200 subset check
+		gvarSet := map[Object]bool{}
+		for i := 0; i < gvars.Len(); i++ {
+			gvarSet[gvars.Item(i)] = true
+		}
+		var extra []string
+		for i := 0; i < allParams.Len(); i++ {
+			p := allParams.Item(i)
+			if !gvarSet[p] {
+				extra = append(extra, fmt.Sprintf("%v", p))
+			}
+		}
+		if len(extra) > 0 {
+			s := fmt.Sprintf("%v", gvars)
+			return nil, fmt.Errorf("TypeError: Some type variables (%s) are not listed in Generic[%s]",
+				joinStrings(extra, ", "), s)
+		}
+		cls.TypingParameters = gvars
+	} else {
+		cls.TypingParameters = allParams
+	}
+	return None(), nil
+}
+
+func joinStrings(ss []string, sep string) string {
+	return strings.Join(ss, sep)
 }
 
 // ParamSpecAttr is the shared object behind ParamSpec.args / .kwargs.

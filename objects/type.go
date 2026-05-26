@@ -164,6 +164,13 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_typeparams
 	TypeParams Object
 
+	// TypingParameters holds the __parameters__ tuple set by
+	// typing.Generic.__init_subclass__ for traditional-style generic
+	// classes (class Foo(Generic[T])). nil means use TypeParams as fallback.
+	//
+	// CPython: Lib/typing.py:1209 cls.__parameters__ = tuple(tvars)
+	TypingParameters *Tuple
+
 	// Slots holds the resolved __slots__ names for this user type, in
 	// declaration order. Empty when the class did not declare __slots__
 	// or the class is a built-in. Each name has a fixed index into the
