@@ -29,36 +29,36 @@ test_tokenize	pending	v0.12.5	spec 1718 P5 ported the string-name-string adjacen
 test_utf8source	done	v0.12.4	3/3 green after compile(bytes), str.encode latin-1, sys.exit, and lexer non-UTF-8 byte check landed
 
 # ---- Parser / grammar / AST ----------------------------------------
-test_annotationlib	ready	v0.10.1	annotation lazy resolver
+test_annotationlib	done	v0.12.5	117/117 green (1 skip). Template.__new__ + PEP 563 class body inline __annotations__ + partial.__wrapped__ removed
 test_asdl_parser	ready	v0.5.0	ast/asdl.go
 test_ast/	ready	v0.10.2	full ast.dump panel
-test_decorators	ready	v0.5.0	decorator codegen
+test_decorators	done	v0.12.5	16/16 green
 test_eof	done	v0.12.5	EOF / continuation handling in parser
-test_fstring	ready	v0.10.2	PEP 701 f-strings
+test_fstring	done	v0.12.5	90/90 green
 test_future_stmt/	ready	v0.5.0	__future__ flag plumbing
-test_global	ready	v0.5.0	symtable global / nonlocal
+test_global	done	v0.12.5	20/20 green
 test_grammar	done	v0.10.2	parser drop pinned in v0.10.2 release notes
-test_int_literal	ready	v0.4.0	int parsing in pystrconv
-test_keywordonlyarg	ready	v0.5.0	parser kw-only args
-test_metaclass	ready	v0.10.1	__build_class__ + type creation
-test_named_expressions	ready	v0.10.2	walrus parser/codegen
+test_int_literal	done	v0.12.5	6/6 green
+test_keywordonlyarg	done	v0.12.5	11/11 green
+test_metaclass	done	v0.12.5	1/1 green
+test_named_expressions	done	v0.12.5	74/74 green
 test_patma	ready	v0.9.0	PEP 634 pattern matching
 test_peg_generator/	deferred	v0.5.5	tools/parser_gen/ still WIP
-test_pep646_syntax	ready	v0.10.2	starred type-param syntax
-test_positional_only_arg	ready	v0.5.0	parser pos-only args
-test_scope	ready	v0.5.0	symtable scoping
-test_string_literals	ready	v0.10.2	string parser corner cases
-test_subclassinit	ready	v0.10.1	__init_subclass__ hook
-test_syntax	ready	v0.10.2	parser/errors panel
-test_tstring	ready	v0.10.2	PEP 750 t-strings
-test_type_aliases	ready	v0.10.2	type Foo = ...
+test_pep646_syntax	done	v0.12.5	1/1 green
+test_positional_only_arg	done	v0.12.5	28/28 green
+test_scope	done	v0.12.5	41/41 green (3 skip)
+test_string_literals	done	v0.12.5	20/20 green
+test_subclassinit	done	v0.12.5	17/17 green
+test_syntax	done	v0.12.5	45/45 green (7 skip)
+test_tstring	done	v0.12.5	12/12 green
+test_type_aliases	done	v0.12.5	30/30 green
 test_type_annotations	done	v0.12.5	47/47 green (1 skip). PEP 649 stash + PEP 563 string annotations + dict.__new__ fix + dict_keys RichCmp + property descriptor __annotations__
-test_type_comments	ready	v0.10.2	parser type-comment mode
-test_type_params	ready	v0.10.2	PEP 695 type parameters
+test_type_comments	done	v0.12.5	18/18 green (1 skip). contextlib GenThrowHook fix preserves SkipTest type through @contextmanager throw path
+test_type_params	done	v0.12.5	108/108 green
 test_unicode_identifiers	done	v0.12.5	NFKC identifier normalization; invalid char offset fixed
-test_unpack	ready	v0.5.0	tuple unpack codegen
-test_unpack_ex	ready	v0.5.0	starred unpack
-test_unparse	ready	v0.5.0	ast/unparse.go
+test_unpack	done	v0.12.5	2/2 green. BozoError __main__ module fix
+test_unpack_ex	done	v0.12.5	1/1 green. __main__.f() module prefix + integer key repr in kwargs error
+test_unparse	done	v0.12.5	79/79 green
 
 # ---- Compile / codegen / dis ---------------------------------------
 test__opcode	ready	v0.5.0	_opcode module surface

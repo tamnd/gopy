@@ -384,8 +384,6 @@ func partialGetattr(o objects.Object, name objects.Object) (objects.Object, erro
 			p.Dict = objects.NewDict()
 		}
 		return p.Dict, nil
-	case "__wrapped__":
-		return p.Fn, nil
 	}
 	if p.Dict != nil {
 		if v, err := p.Dict.GetItem(name); err == nil {

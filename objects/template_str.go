@@ -23,6 +23,69 @@ func init() {
 	TemplateStrType.Repr = templateStrRepr
 	TemplateStrType.Str = templateStrRepr
 	TemplateStrType.Iter = templateStrIter
+	// Template(*args) - accepts interleaved str and Interpolation objects.
+	// Adjacent strings are merged; an Interpolation not preceded by a string
+	// gets an implicit empty string inserted.
+	//
+	// CPython: Objects/templateobject.c:93 template_new
+	TemplateStrType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: Template.__new__ only accepts *args arguments")
+		}
+		stringsLen := 0
+		interpolationsLen := 0
+		lastWasStr := false
+		for _, item := range args {
+			switch item.(type) {
+			case *Unicode:
+				if !lastWasStr {
+					stringsLen++
+				}
+				lastWasStr = true
+			case *Interpolation:
+				if !lastWasStr {
+					stringsLen++
+				}
+				interpolationsLen++
+				lastWasStr = false
+			default:
+				return nil, fmt.Errorf("TypeError: Template.__new__ *args need to be of type 'str' or 'Interpolation', got %s", typeNameOf(item))
+			}
+		}
+		if !lastWasStr {
+			stringsLen++
+		}
+		stringsItems := make([]Object, stringsLen)
+		interpolationsItems := make([]Object, interpolationsLen)
+		stringsIdx := 0
+		interpolationsIdx := 0
+		lastWasStr = false
+		for _, item := range args {
+			switch v := item.(type) {
+			case *Unicode:
+				if lastWasStr {
+					prev := stringsItems[stringsIdx-1].(*Unicode)
+					stringsItems[stringsIdx-1] = NewStr(prev.Value() + v.Value())
+				} else {
+					stringsItems[stringsIdx] = v
+					stringsIdx++
+				}
+				lastWasStr = true
+			case *Interpolation:
+				if !lastWasStr {
+					stringsItems[stringsIdx] = NewStr("")
+					stringsIdx++
+				}
+				interpolationsItems[interpolationsIdx] = v
+				interpolationsIdx++
+				lastWasStr = false
+			}
+		}
+		if !lastWasStr {
+			stringsItems[stringsIdx] = NewStr("")
+		}
+		return NewTemplateStr(NewTuple(stringsItems), NewTuple(interpolationsItems)), nil
+	}
 	// strings / interpolations / values match the PyMemberDef +
 	// PyGetSetDef rows on PyTemplate_Type so attribute access from
 	// templatelib.py (`t.interpolations[0]`) resolves to the tuples
@@ -303,6 +366,72 @@ func init() {
 		NewStr("conversion"),
 		NewStr("format_spec"),
 	}))
+	// Interpolation(value, expression="", conversion=None, format_spec="")
+	//
+	// CPython: Objects/interpolationobject.c:54 interpolation_new
+	InterpolationType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		value := Object(nil)
+		expression := Object(NewStr(""))
+		conversion := Object(None())
+		formatSpec := Object(NewStr(""))
+		switch len(args) {
+		case 4:
+			formatSpec = args[3]
+			fallthrough
+		case 3:
+			conversion = args[2]
+			fallthrough
+		case 2:
+			expression = args[1]
+			fallthrough
+		case 1:
+			value = args[0]
+		case 0:
+			if v, ok := kwargs["value"]; ok {
+				value = v
+			} else {
+				return nil, fmt.Errorf("TypeError: Interpolation() missing required argument: 'value'")
+			}
+		default:
+			return nil, fmt.Errorf("TypeError: Interpolation() takes from 1 to 4 positional arguments (%d given)", len(args))
+		}
+		for k, v := range kwargs {
+			switch k {
+			case "value":
+				value = v
+			case "expression":
+				expression = v
+			case "conversion":
+				conversion = v
+			case "format_spec":
+				formatSpec = v
+			}
+		}
+		if value == nil {
+			return nil, fmt.Errorf("TypeError: Interpolation() missing required argument: 'value'")
+		}
+		// Validate conversion: must be None or one-char string 's', 'r', 'a'.
+		//
+		// CPython: Objects/interpolationobject.c:9 _conversion_converter
+		convInt := 0
+		if !IsNone(conversion) {
+			u, ok := conversion.(*Unicode)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: Interpolation() argument 'conversion' must be str, not %s", typeNameOf(conversion))
+			}
+			switch u.v {
+			case "s":
+				convInt = 1
+			case "r":
+				convInt = 2
+			case "a":
+				convInt = 3
+			default:
+				return nil, fmt.Errorf("ValueError: Interpolation() argument 'conversion' must be one of 's', 'a' or 'r'")
+			}
+		}
+		return NewInterpolation(value, expression, convInt, formatSpec)
+	}
 }
 
 // NewInterpolation mirrors _PyInterpolation_Build. conversion encodes

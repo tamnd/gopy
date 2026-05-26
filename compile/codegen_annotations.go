@@ -47,11 +47,37 @@ func (c *Compiler) emitDeferredAnnotations(l ast.Pos) error {
 	if u == nil || len(u.DeferredAnnotations) == 0 {
 		return nil
 	}
+	deferred := u.DeferredAnnotations
+
+	// PEP 563 class body: CPython emits SETUP_ANNOTATIONS + inline
+	// STORE_SUBSCR for each annotation rather than generating __annotate_func__.
+	// get_annotate_from_class_namespace expects None (no __annotate__ key)
+	// when the source was compiled under `from __future__ import annotations`.
+	//
+	// CPython: Python/codegen.c:874 codegen_body SETUP_ANNOTATIONS branch
+	// CPython: Python/codegen.c:5498 codegen_annassign future_annotations path
+	if c.Future != nil && c.Future.Bits&future.Annotations != 0 &&
+		c.scope.Type == symtable.ClassBlock {
+		pool := poolNames
+		c.addOp(SETUP_ANNOTATIONS, l)
+		for _, d := range deferred {
+			s, err := ast.Unparse(d.Value)
+			if err != nil {
+				return fmt.Errorf("PEP 563 annotation unparse: %w", err)
+			}
+			c.addLoadConst(s, d.Loc)
+			c.addOpName(LOAD_NAME, &pool, "__annotations__", d.Loc)
+			mangled := symtable.MaybeMangle(c.unit().Private, c.scope, d.Name)
+			c.addLoadConst(mangled, d.Loc)
+			c.addOp(STORE_SUBSCR, d.Loc)
+		}
+		return nil
+	}
+
 	annScope := c.scope.AnnotationBlock
 	if annScope == nil {
 		return fmt.Errorf("compile: deferred annotations present but no AnnotationBlock in symtable (scope=%q)", c.scope.Name)
 	}
-	deferred := u.DeferredAnnotations
 
 	closureFlag, err := c.emitClosure(annScope, l)
 	if err != nil {

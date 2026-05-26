@@ -748,13 +748,36 @@ func (u *unparser) constSingleton(v any) bool {
 func (u *unparser) constString(v any) bool {
 	switch x := v.(type) {
 	case string:
-		u.ws(strconv.Quote(x))
+		u.ws(pythonStrRepr(x))
 	case []byte:
-		u.ws("b" + strconv.Quote(string(x)))
+		u.ws("b" + pythonStrRepr(string(x)))
 	default:
 		return false
 	}
 	return true
+}
+
+// pythonStrRepr renders a string constant using CPython's quote-selection
+// logic: prefer single quotes, switch to double when the value contains a
+// single quote but no double quote, otherwise single-quote and escape.
+//
+// CPython: Objects/unicodeobject.c:12956 unicode_repr
+func pythonStrRepr(s string) string {
+	hasSingle := strings.ContainsRune(s, '\'')
+	hasDouble := strings.ContainsRune(s, '"')
+	if hasSingle && !hasDouble {
+		return strconv.Quote(s)
+	}
+	// Use single-quote delimiter (Go's strconv.Quote uses double-quote;
+	// we rebuild with single-quote by replacing outer quotes and escaping).
+	dq := strconv.Quote(s)
+	inner := dq[1 : len(dq)-1]
+	// The Go double-quoted form may have escaped double-quotes (\") that
+	// are not needed inside single-quoted form; unescape them.
+	inner = strings.ReplaceAll(inner, `\"`, `"`)
+	// Single-quotes inside the value need escaping.
+	inner = strings.ReplaceAll(inner, `'`, `\'`)
+	return "'" + inner + "'"
 }
 
 func (u *unparser) constNumeric(v any) bool {

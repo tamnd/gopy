@@ -41,8 +41,8 @@ func TestUnparseSimple(t *testing.T) {
 		{"true", &Constant{Value: true}, "True"},
 		{"false", &Constant{Value: false}, "False"},
 		{"ellipsis", &Constant{Value: Ellipsis}, "..."},
-		{"str", cstr("hi"), `"hi"`},
-		{"bytes", &Constant{Value: []byte("hi")}, `b"hi"`},
+		{"str", cstr("hi"), `'hi'`},
+		{"bytes", &Constant{Value: []byte("hi")}, `b'hi'`},
 		{"bigint", &Constant{Value: big.NewInt(99)}, "99"},
 		{"float", &Constant{Value: 1.5}, "1.5"},
 		{"float_whole", &Constant{Value: 2.0}, "2.0"},
@@ -194,7 +194,7 @@ func TestUnparseDictAndSet(t *testing.T) {
 		Keys:   seqExpr(cstr("a"), nil),
 		Values: seqExpr(cint(1), name("rest")),
 	}
-	if got, want := mustUnparse(t, d), `{"a": 1, **rest}`; got != want {
+	if got, want := mustUnparse(t, d), `{'a': 1, **rest}`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	s := &Set{Elts: seqExpr(cint(1), cint(2))}
