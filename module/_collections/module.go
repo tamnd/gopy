@@ -1323,7 +1323,7 @@ func defaultDictSetup(dd *DefaultDictObject, args []objects.Object, kwargs map[s
 }
 
 // defaultDictGetItem dispatches through __missing__ on key absence.
-// Mirrors defdict's mp_subscript behaviour.
+// Mirrors defdict's mp_subscript behavior.
 //
 // CPython: Modules/_collectionsmodule.c:2229 defdict_missing (called from getitem)
 func defaultDictGetItem(o, key objects.Object) (objects.Object, error) {

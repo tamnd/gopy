@@ -99,7 +99,10 @@ func numberToken(p *Parser) ast.Expr {
 		p.errorIndicator = true
 		return nil
 	}
-	v, ok := parseNumberLiteral(raw)
+	v, ok, limitErr := parseNumberLiteral(raw)
+	if limitErr != "" {
+		panic(NumberLitTooLargeError{Msg: limitErr, Line: t.Lineno, Col: t.ColOff})
+	}
 	if !ok {
 		p.errorIndicator = true
 		return nil

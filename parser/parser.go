@@ -45,7 +45,7 @@ const (
 // real parser lands.
 var ErrParserNotImplemented = fmt.Errorf("parser: generated rule bodies not yet emitted")
 
-// Python compile() flag constants that control parser behaviour.
+// Python compile() flag constants that control parser behavior.
 // Mirrors Include/cpython/code.h PyCF_* values gopy reads.
 //
 // CPython: Include/cpython/code.h PyCF_ALLOW_INCOMPLETE_INPUT
@@ -146,7 +146,31 @@ func pegenFlags(pyFlags int) int {
 	return f
 }
 
-func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (ast.Mod, error) {
+//nolint:gocognit // mirrors CPython Parser/parser.c mode-dispatch + error-promotion; all branches are linear.
+func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (mod ast.Mod, retErr error) {
+	// Recover numberLitTooLargeError panics raised from tokenToExpr when a
+	// decimal integer literal exceeds sys.int_max_str_digits. The panic
+	// bypasses the generated grammar without changing return signatures.
+	//
+	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+	defer func() {
+		if r := recover(); r != nil {
+			if ne, ok := r.(pegen.NumberLitTooLargeError); ok {
+				retErr = &perrors.SyntaxError{
+					Kind: perrors.KindSyntax,
+					Pos: perrors.Pos{
+						Lineno: ne.Line,
+						ColOff: ne.Col,
+					},
+					Filename: st.Filename(),
+					Message:  ne.Msg,
+					Text:     st.SourceLine(ne.Line),
+				}
+				return
+			}
+			panic(r)
+		}
+	}()
 	// Lexer-recorded errors (PEP 263 cookie / BOM conflicts, non-utf-8
 	// source) trump anything pegen would surface: the parser cannot
 	// progress past a broken decode. Lift the lexer's structured

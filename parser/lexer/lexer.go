@@ -434,7 +434,11 @@ loop:
 	}
 
 	if col == s.indstack[s.indent] {
-		// Same level.
+		// Same level — check alt-column consistency.
+		// CPython: Parser/lexer/lexer.c:576 altcol != tok->altindstack
+		if altcol != s.altstack[s.indent] {
+			return s.indentError(), true
+		}
 		return Tok{}, false
 	}
 	if col > s.indstack[s.indent] {
@@ -442,6 +446,10 @@ loop:
 			s.done = eToodeep
 			s.recordError("too many levels of indentation")
 			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
+		}
+		// CPython: Parser/lexer/lexer.c:587 altcol <= tok->altindstack
+		if altcol <= s.altstack[s.indent] {
+			return s.indentError(), true
 		}
 		s.pendin++
 		s.indent++
@@ -457,6 +465,10 @@ loop:
 		s.done = eDedent
 		s.recordError("unindent does not match any outer indentation level")
 		return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
+	}
+	// CPython: Parser/lexer/lexer.c:606 altcol != tok->altindstack
+	if altcol != s.altstack[s.indent] {
+		return s.indentError(), true
 	}
 	return Tok{}, false
 }
@@ -1175,7 +1187,7 @@ func (s *State) scanOperator(c int) Tok {
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	default:
 		// Non-printable characters get a specific error message; printable
-		// but unrecognised characters (e.g. `$`) return a bare ERRORTOKEN
+		// but unrecognized characters (e.g. `$`) return a bare ERRORTOKEN
 		// so the parser's error-recovery rules can produce the contextual
 		// message ("invalid syntax", "f-string: expecting …", etc.).
 		//

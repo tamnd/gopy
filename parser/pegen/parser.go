@@ -34,6 +34,13 @@ const (
 	FlagAllowIncompleteInput = 0x0100
 )
 
+// IntMaxStrDigitsHook returns the current sys.int_max_str_digits limit.
+// Zero means unlimited. module/sys sets this during its init so the
+// parser can enforce the limit while building integer Constant nodes.
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+var IntMaxStrDigitsHook func() int32
+
 // StartRule selects the entry point of the generated parser table.
 // Mirrors the Py_*_input constants.
 //
@@ -257,7 +264,7 @@ restart:
 	if kind == token.ERRORTOKEN {
 		p.errorIndicator = true
 		// Only pin when the lexer stored a specific error. A bare
-		// ERRORTOKEN with no stored message (e.g. an unrecognised
+		// ERRORTOKEN with no stored message (e.g. an unrecognized
 		// character like `$` inside an f-string expression) must leave
 		// pinnedErr nil so the grammar's error-recovery rules can fire
 		// and produce the context-appropriate message ("f-string:
@@ -668,7 +675,7 @@ func (p *Parser) IsUnclosedBracketError(e *perrors.SyntaxError) bool {
 // IsEndOfSource reports whether the tokenizer is at end-of-source
 // (no incomplete brackets). Used by Dispatch to decide whether to
 // promote a first-pass failure to _IncompleteInputError when
-// PyCF_ALLOW_INCOMPLETE_INPUT is set, matching CPython's behaviour of
+// PyCF_ALLOW_INCOMPLETE_INPUT is set, matching CPython's behavior of
 // bypassing the second (invalid_*) pass for clean truncations.
 //
 // CPython: Parser/pegen.c:896 _is_end_of_source

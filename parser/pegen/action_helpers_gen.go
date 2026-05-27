@@ -17,6 +17,7 @@ package pegen
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"strconv"
 	"strings"
@@ -108,8 +109,10 @@ func tokenToExpr(t *Token) ast.Expr {
 	case token.NAME:
 		return &ast.Name{Id: string(t.Bytes), Ctx: ast.Load, Pos: pos}
 	case token.NUMBER:
-		if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+		if v, ok, limitErr := parseNumberLiteral(string(t.Bytes)); ok {
 			return &ast.Constant{Value: v, Pos: pos}
+		} else if limitErr != "" {
+			panic(NumberLitTooLargeError{Msg: limitErr, Line: t.Lineno, Col: t.ColOff})
 		}
 	case token.STRING:
 		if s, ok := decodeStringToken(string(t.Bytes)); ok {
@@ -1800,31 +1803,46 @@ func intOf(v any) *int {
 	return nil
 }
 
+// NumberLitTooLargeError is the panic payload raised when a decimal
+// integer literal exceeds sys.int_max_str_digits. tokenToExpr panics
+// with this type so the error can propagate through the generated
+// grammar without changing return signatures; parser.runParse recovers
+// it and converts it to a *perrors.SyntaxError.
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+type NumberLitTooLargeError struct {
+	Msg  string
+	Line int
+	Col  int
+}
+
 // parseNumberLiteral turns a NUMBER token's text into the Go value
 // CPython's PyAST_Num would land on: int (math/big when oversized,
 // kept as int64 for now), float64, or complex128 for the j-suffixed
 // form. Returns ok=false if the literal does not parse cleanly.
+// Returns a non-nil string when the decimal literal exceeds the
+// sys.int_max_str_digits ceiling; tokenToExpr turns that into a panic.
 //
 // CPython: Parser/string_parser.c parsenumber
-func parseNumberLiteral(s string) (any, bool) {
+func parseNumberLiteral(s string) (any, bool, string) {
 	if s == "" {
-		return nil, false
+		return nil, false, ""
 	}
 	clean := strings.ReplaceAll(s, "_", "")
 	last := clean[len(clean)-1]
 	if last == 'j' || last == 'J' {
 		f, err := strconv.ParseFloat(clean[:len(clean)-1], 64)
 		if err != nil && !isFloatRange(err) {
-			return nil, false
+			return nil, false, ""
 		}
-		return complex(0, f), true
+		return complex(0, f), true, ""
 	}
 	if strings.ContainsAny(clean, ".eE") && !strings.HasPrefix(clean, "0x") && !strings.HasPrefix(clean, "0X") {
 		f, err := strconv.ParseFloat(clean, 64)
 		if err != nil && !isFloatRange(err) {
-			return nil, false
+			return nil, false, ""
 		}
-		return f, true
+		return f, true, ""
 	}
 	base := 10
 	body := clean
@@ -1839,17 +1857,31 @@ func parseNumberLiteral(s string) (any, bool) {
 		base = 2
 		body = body[2:]
 	}
+	// Check sys.int_max_str_digits: decimal literals with more digits than
+	// the limit trigger a SyntaxError during compilation, matching CPython's
+	// _PyLong_FromTokenString which calls PyLong_FromString → limit check.
+	//
+	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+	if base == 10 && IntMaxStrDigitsHook != nil {
+		if limit := IntMaxStrDigitsHook(); limit > 0 && int32(len(body)) > limit {
+			msg := fmt.Sprintf(
+				"Exceeds the limit (%d digits) for integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit"+
+					" - Consider hexadecimal for huge integer literals to avoid decimal conversion limits.",
+				limit, len(body))
+			return nil, false, msg
+		}
+	}
 	if n, err := strconv.ParseInt(body, base, 64); err == nil {
-		return n, true
+		return n, true, ""
 	}
 	// Out of int64 range: lift to *big.Int. CPython routes this through
 	// PyLong_FromString (Parser/string_parser.c parsenumber), which is
 	// arbitrary-precision; the validator accepts *big.Int.
 	bi, ok := new(big.Int).SetString(body, base)
 	if !ok {
-		return nil, false
+		return nil, false, ""
 	}
-	return bi, true
+	return bi, true, ""
 }
 
 // isFloatRange reports whether err from strconv.ParseFloat indicates an
@@ -2212,7 +2244,7 @@ func constantValue(v any) any {
 		}
 		switch t.Type {
 		case token.NUMBER:
-			if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+			if v, ok, _ := parseNumberLiteral(string(t.Bytes)); ok {
 				return v
 			}
 		case token.STRING:
@@ -2523,6 +2555,20 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 		} else {
 			expr = concat
 		}
+	}
+	// CPython: Parser/action_helpers.c:1030 _PyPegen_setup_full_format_spec
+	// The format-spec JoinedStr starts at the colon token and ends at the
+	// last spec element so the position tuple is emitted in the Python AST.
+	if colon != nil && colon.Lineno > 0 {
+		pos := tokenPos(colon)
+		if n > 0 {
+			lastPos := filtered[n-1].Position()
+			if lastPos.Lineno > 0 {
+				pos.EndLineno = lastPos.EndLineno
+				pos.EndColOffset = lastPos.EndColOffset
+			}
+		}
+		expr.SetPos(pos)
 	}
 	if colon != nil && len(colon.Metadata) > 0 {
 		return &fstringFormatSpecResult{Expr: expr, Metadata: colon.Metadata}

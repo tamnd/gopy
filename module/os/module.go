@@ -211,6 +211,7 @@ func buildOS() (*objects.Module, error) {
 		{"fsencode", objects.NewBuiltinFunction("fsencode", osFsencode)},
 		{"open", objects.NewBuiltinFunction("open", osOpen)},
 		{"scandir", objects.NewBuiltinFunction("scandir", osScandir)},
+		{"strerror", objects.NewBuiltinFunction("strerror", osStrerror)},
 		// Open flags. CPython: Modules/posixmodule.c posixmodule_exec
 		{"O_RDONLY", objects.NewInt(int64(syscall.O_RDONLY))},
 		{"O_WRONLY", objects.NewInt(int64(syscall.O_WRONLY))},
@@ -1121,4 +1122,23 @@ func osGetExportsList(args []objects.Object, _ map[string]objects.Object) (objec
 		out = append(out, objects.NewStr(s))
 	}
 	return objects.NewList(out), nil
+}
+
+// osStrerror translates an errno integer to its human-readable message.
+//
+// CPython: Modules/posixmodule.c:13193 os_strerror_impl
+func osStrerror(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: strerror() takes exactly one argument (%d given)", len(args))
+	}
+	code, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required (got type %s)", args[0].Type().Name)
+	}
+	v, _ := code.Int64()
+	msg := syscall.Errno(v).Error()
+	if msg == "" {
+		return nil, fmt.Errorf("ValueError: strerror() argument out of range")
+	}
+	return objects.NewStr(msg), nil
 }

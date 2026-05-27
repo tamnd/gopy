@@ -104,7 +104,7 @@ func preprocessUnicodeEscapes(s []byte) []byte {
 }
 
 // decodeUnicodeEscapesInternal is the inner escape-decoder loop. It
-// matches _PyUnicode_DecodeUnicodeEscapeInternal2's behaviour and is
+// matches _PyUnicode_DecodeUnicodeEscapeInternal2's behavior and is
 // only entered from decodeUnicodeEscapes after the buffer rewrite.
 //
 // CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal2

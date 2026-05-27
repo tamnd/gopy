@@ -604,9 +604,14 @@ func (s *State) recordError(msg string) {
 		return
 	}
 	col := s.charColAt(s.cur)
+	// EndPos uses sentinel values (Line=0, Col=-1) meaning "not set".
+	// CPython's _syntaxerror_range only populates end_lineno/end_offset
+	// when the caller passes them explicitly; lexer error paths do not.
+	//
+	// CPython: Parser/tokenizer/helpers.c:11 _syntaxerror_range
 	s.err = &SyntaxError{
 		Pos:     Pos{Line: s.lineno, Col: col},
-		EndPos:  Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
 		Message: msg,
 	}
 }
@@ -631,7 +636,7 @@ func (s *State) recordStringError(msg string) {
 	col := s.charColBetween(s.multiLineStart, s.start)
 	s.err = &SyntaxError{
 		Pos:     Pos{Line: s.firstLine, Col: col},
-		EndPos:  Pos{Line: s.firstLine, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
 		Message: msg,
 	}
 }
@@ -651,7 +656,7 @@ func (s *State) recordErrorWithText(msg, text string) {
 	col := s.charColAt(s.cur)
 	s.err = &SyntaxError{
 		Pos:     Pos{Line: s.lineno, Col: col},
-		EndPos:  Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
 		Message: msg,
 		Text:    text,
 	}

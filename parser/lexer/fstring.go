@@ -267,7 +267,15 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur)
 			}
 			// {{ literal: emit through to one open brace as middle.
-			return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+			// The token byte slice ends before the second { (cur-1),
+			// so End.Col must point at the second { not past it.
+			// Temporarily step back s.col so tokenSetup captures col-1.
+			//
+			// CPython: Parser/lexer/lexer.c:1533 p_end = tok->cur - 1
+			s.col--
+			tok := s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+			s.col++
+			return tok
 		}
 		if c == '}' {
 			if unicodeEscape {
@@ -283,7 +291,13 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 			// }} is only a brace escape outside format specs; format specs
 			// can't legally use double brackets.
 			if peek == '}' && !m.inFormatSpec && m.curlyBracketDepth == 0 {
-				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+				// Same End.Col correction as {{ above.
+				//
+				// CPython: Parser/lexer/lexer.c:1563 p_end = tok->cur - 1
+				s.col--
+				tok := s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+				s.col++
+				return tok
 			}
 			s.backup(peek)
 			s.backup(c)

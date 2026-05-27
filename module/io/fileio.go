@@ -71,6 +71,7 @@ func init() {
 	FileIOType.Repr = fileIORepr
 	FileIOType.Str = fileIORepr
 	FileIOType.Getattro = fileIOGetattr
+	FileIOType.Setattro = fileIOSetattr
 	// FileIO inherits object's identity-based __hash__ so it can be
 	// used as a dict key (selectors and subprocess store fileobjs that way).
 	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type tp_hash
@@ -721,6 +722,42 @@ func fileIOGetattr(o objects.Object, name objects.Object) (objects.Object, error
 		return fn, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '_io.FileIO' object has no attribute '%s'", n.Value())
+}
+
+// fileIOSetattr handles attribute assignment on FileIO. Only .name is
+// writable; tempfile.py assigns raw.name after the opener returns.
+//
+// CPython: Modules/_io/fileio.c:1195 fileio_name (member T_OBJECT, writable)
+func fileIOSetattr(o, name, value objects.Object) error {
+	fi, ok := o.(*FileIO)
+	if !ok {
+		return fmt.Errorf("TypeError: expected _io.FileIO self")
+	}
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: attribute name must be string")
+	}
+	switch n.Value() {
+	case "name":
+		if value == nil || objects.IsNone(value) {
+			fi.name = ""
+			fi.nameIsInt = false
+			return nil
+		}
+		if s, ok := value.(*objects.Unicode); ok {
+			fi.name = s.Value()
+			fi.nameIsInt = false
+			return nil
+		}
+		if i, ok := value.(*objects.Int); ok {
+			v, _ := i.Int64()
+			fi.nameFd = v
+			fi.nameIsInt = true
+			return nil
+		}
+		return fmt.Errorf("TypeError: name must be a str or int")
+	}
+	return fmt.Errorf("AttributeError: '_io.FileIO' object attribute '%s' is read-only", n.Value())
 }
 
 // fileIOMethod maps method names to BuiltinFunctions.

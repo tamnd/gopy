@@ -108,6 +108,15 @@ func init() {
 	}
 	bindS("match", scannerMatch)
 	bindS("search", scannerSearch)
+
+	// match[key] is equivalent to match.group(key).
+	//
+	// CPython: Modules/_sre/sre.c:2433 match_getitem
+	MatchType.Mapping = &objects.MappingMethods{
+		GetItem: func(o, key objects.Object) (objects.Object, error) {
+			return matchGroup([]objects.Object{o, key}, nil)
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------

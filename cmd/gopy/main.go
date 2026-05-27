@@ -392,11 +392,14 @@ func runFile(path string, stdout, stderr *os.File) int {
 	}
 	var rc int
 	if suffix, ok := unittestRunnerSuffix(path); ok {
-		src, readErr := os.ReadFile(path) //nolint:gosec
+		src, readErr := os.ReadFile(path) //nolint:gosec // reading a caller-supplied test file path is the entire contract
 		if readErr != nil {
 			fmt.Fprintln(stderr, readErr)
 			return 1
 		}
+		// RunSimpleString uses "<string>" as the filename so __file__ is
+		// never set; set it here so test methods can open the script.
+		_ = mainGlobals.SetItem(objects.NewStr("__file__"), objects.NewStr(path))
 		combined := string(src) + suffix
 		rc = pythonrun.RunSimpleString(ts, combined, mainGlobals, stderr)
 	} else {
@@ -417,7 +420,7 @@ func unittestRunnerSuffix(path string) (string, bool) {
 	if !strings.HasPrefix(base, "test_") || !strings.HasSuffix(base, ".py") {
 		return "", false
 	}
-	src, err := os.ReadFile(path) //nolint:gosec
+	src, err := os.ReadFile(path) //nolint:gosec // reading a caller-supplied test file path is the entire contract
 	if err != nil {
 		return "", false
 	}

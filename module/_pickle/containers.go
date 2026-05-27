@@ -69,7 +69,7 @@ func (p *pickler) batchListExact(l *objects.List) error {
 }
 
 // saveTuple picks the narrowest tuple opcode. Empty -> EMPTY_TUPLE
-// (and no MEMOIZE, matching CPython's behaviour: a zero-length tuple
+// (and no MEMOIZE, matching CPython's behavior: a zero-length tuple
 // is a singleton in CPython, so memoizing it would waste a slot).
 // Sizes 1..3 -> save items then TUPLE1 / TUPLE2 / TUPLE3 then MEMOIZE.
 // Sizes >3 -> MARK + items + TUPLE + MEMOIZE.

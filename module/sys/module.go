@@ -384,6 +384,18 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
 		return nil, err
 	}
+	// sys.get_int_max_str_digits / sys.set_int_max_str_digits guard
+	// integer-to-string conversion length. Added in CPython 3.11 to
+	// mitigate quadratic-time attacks via enormous int repr.
+	//
+	// CPython: Python/sysmodule.c:2001 sys_get_int_max_str_digits_impl,
+	// Python/sysmodule.c:2026 sys_set_int_max_str_digits_impl
+	if err := setItem(md, "get_int_max_str_digits", objects.NewBuiltinFunction("get_int_max_str_digits", getIntMaxStrDigits)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_int_max_str_digits", objects.NewBuiltinFunction("set_int_max_str_digits", setIntMaxStrDigits)); err != nil {
+		return nil, err
+	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
 	// stack. depth=0 is the immediate caller's frame.
 	//
@@ -401,12 +413,13 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "_getframemodulename", objects.NewBuiltinFunction("_getframemodulename", getFrameModuleName)); err != nil {
 		return nil, err
 	}
-	// sys.gettrace / settrace stubs. doctest hits gettrace at runner setup;
-	// trace functions aren't wired through the gopy frame yet, so report
-	// "no trace function installed" (None) and accept any callable that
-	// settrace is passed.
+	// sys.gettrace / settrace stubs. The vm package overwrites these with the
+	// real monitoring-aware implementations via SysTraceBuiltinsHook (set in
+	// vm's init). The stubs exist so the attributes are present before vm
+	// wires in; callers that run without vm (e.g. pure-parse paths) get the
+	// no-op fallback.
 	//
-	// CPython: Python/sysmodule.c:gettrace / settrace
+	// CPython: Python/sysmodule.c:1145 sys_settrace, 1202 sys_gettrace_impl
 	if err := setItem(md, "gettrace", objects.NewBuiltinFunction("gettrace", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.None(), nil
 	})); err != nil {
@@ -416,6 +429,12 @@ func buildModule() (*objects.Module, error) {
 		return objects.None(), nil
 	})); err != nil {
 		return nil, err
+	}
+	// Overwrite stubs with real implementations when the vm hook is wired.
+	if SysTraceBuiltinsHook != nil {
+		if err := SysTraceBuiltinsHook(md); err != nil {
+			return nil, err
+		}
 	}
 	// sys.displayhook prints the value to sys.stdout and stores it in
 	// builtins._, skipping None. doctest's runner installs its own

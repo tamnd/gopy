@@ -362,7 +362,7 @@ func matchSpan(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 
 // matchExpand implements SRE_Match.expand(template). Parses the
 // template with the same rules CPython's _parser.parse_template uses:
-// `\g<name>`, `\g<N>`, `\N` (one to ninety-nine), `\\`, and recognised
+// `\g<name>`, `\g<N>`, `\N` (one to ninety-nine), `\\`, and recognized
 // escape sequences `\n \r \t \a \b \f \v \0`. Backreferences to
 // unmatched groups expand to the empty string, matching CPython.
 //

@@ -150,6 +150,7 @@ type ioOpenArgs struct {
 	errors    string
 	newline   string
 	closefd   bool
+	opener    objects.Object
 	creating  bool
 	reading   bool
 	writing   bool
@@ -232,6 +233,9 @@ func bindIOOpenArgs(args []objects.Object, kwargs map[string]objects.Object) (*i
 	}
 	if bound[6] != nil && !objects.IsNone(bound[6]) {
 		a.closefd = objects.IsTrue(bound[6])
+	}
+	if bound[7] != nil && !objects.IsNone(bound[7]) && objects.Callable(bound[7]) {
+		a.opener = bound[7]
 	}
 	if err := ioParseMode(a); err != nil {
 		return nil, err
@@ -390,6 +394,28 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 			return nil, err
 		}
 		raw = obj
+	} else if a.opener != nil {
+		// opener(path, flags) returns a file descriptor.
+		// CPython: Modules/_io/fileio.c:399 opener call path
+		flagObj := objects.NewInt(int64(flag))
+		nameObj := objects.NewStr(a.file)
+		fdObj, callErr := objects.Call(a.opener, objects.NewTuple([]objects.Object{nameObj, flagObj}), nil)
+		if callErr != nil {
+			return nil, callErr
+		}
+		fdInt, ok := fdObj.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: expected integer from opener, got %s", fdObj.Type().Name)
+		}
+		fdVal, _ := fdInt.Int64()
+		if fdVal < 0 {
+			return nil, fmt.Errorf("ValueError: opener returned invalid file descriptor")
+		}
+		f := os.NewFile(uintptr(fdVal), a.file)
+		if f == nil {
+			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
+		}
+		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	} else {
 		f, err := os.OpenFile(a.file, flag, 0o600)
 		if err != nil {
@@ -439,7 +465,11 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	// Text mode: wrap in TextIOWrapper.
 	// CPython: Modules/_io/_iomodule.c:427 TextIOWrapper construction.
 	enc := a.encoding
-	if enc == "" {
+	if enc == "" || enc == "locale" {
+		// "locale" is CPython's sentinel for the preferred locale encoding.
+		// On modern POSIX systems this is UTF-8; gopy defaults to UTF-8.
+		//
+		// CPython: Modules/_io/_iomodule.c:463 _io_text_encoding_impl locale branch
 		enc = "utf-8"
 	}
 	errHandler := a.errors

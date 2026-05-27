@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/tamnd/gopy/imp"
@@ -159,6 +160,34 @@ func (u *unpickler) load() (objects.Object, error) {
 			u.push(objects.True())
 		case opNewfalse:
 			u.push(objects.False())
+		case opInt:
+			if err := u.loadTextInt(); err != nil {
+				return nil, err
+			}
+		case opFloat:
+			if err := u.loadTextFloat(); err != nil {
+				return nil, err
+			}
+		case opLong:
+			if err := u.loadTextLong(); err != nil {
+				return nil, err
+			}
+		case opString:
+			if err := u.loadTextString(); err != nil {
+				return nil, err
+			}
+		case opUnicode:
+			if err := u.loadTextUnicode(); err != nil {
+				return nil, err
+			}
+		case opDict:
+			if err := u.loadDictFromMark(); err != nil {
+				return nil, err
+			}
+		case opList:
+			if err := u.loadListFromMark(); err != nil {
+				return nil, err
+			}
 		case opBinint:
 			if err := u.loadBinintX(4, true); err != nil {
 				return nil, err
@@ -927,6 +956,238 @@ func (u *unpickler) loadPopMark() error {
 	}
 	u.stack = u.stack[:mark]
 	return nil
+}
+
+// loadTextInt reads the decimal-text INT opcode (proto 0).
+// "01" and "00" are the canonical True / False encodings.
+//
+// CPython: Modules/_pickle.c:5396 load_int
+func (u *unpickler) loadTextInt() error {
+	line := u.readLine()
+	switch line {
+	case "01":
+		u.push(objects.True())
+	case "00":
+		u.push(objects.False())
+	default:
+		v, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			return fmt.Errorf("UnpicklingError: invalid INT data: %q", line)
+		}
+		u.push(objects.NewInt(v))
+	}
+	return nil
+}
+
+// loadTextFloat reads the decimal-text FLOAT opcode (proto 0).
+//
+// CPython: Modules/_pickle.c:5545 load_float
+func (u *unpickler) loadTextFloat() error {
+	line := u.readLine()
+	v, err := strconv.ParseFloat(line, 64)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: invalid FLOAT data: %q", line)
+	}
+	u.push(objects.NewFloat(v))
+	return nil
+}
+
+// loadTextLong reads the decimal-text LONG opcode (proto 0).
+// The line may have a trailing 'L' (Python 2 legacy).
+//
+// CPython: Modules/_pickle.c:5418 load_long
+func (u *unpickler) loadTextLong() error {
+	line := u.readLine()
+	line = strings.TrimRight(line, "L")
+	b := new(big.Int)
+	if _, ok := b.SetString(line, 10); !ok {
+		return fmt.Errorf("UnpicklingError: invalid LONG data: %q", line)
+	}
+	u.push(objects.NewIntFromBig(b))
+	return nil
+}
+
+// loadTextString reads the STRING opcode (proto 0 bytes). The line is
+// a Python-repr-escaped string literal enclosed in single or double
+// quotes.
+//
+// CPython: Modules/_pickle.c:5563 load_string
+func (u *unpickler) loadTextString() error {
+	line := u.readLine()
+	if len(line) < 2 {
+		return fmt.Errorf("UnpicklingError: invalid STRING data: %q", line)
+	}
+	q := line[0]
+	if (q != '\'' && q != '"') || line[len(line)-1] != q {
+		return fmt.Errorf("UnpicklingError: STRING not quoted: %q", line)
+	}
+	inner := line[1 : len(line)-1]
+	decoded, err := unescapePickleString(inner)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: STRING decode error: %v", err)
+	}
+	u.push(objects.NewBytes(decoded))
+	return nil
+}
+
+// loadTextUnicode reads the UNICODE opcode (proto 0 str).
+// The line uses \u, \U, \x, and \\ escapes.
+//
+// CPython: Modules/_pickle.c:5608 load_unicode
+func (u *unpickler) loadTextUnicode() error {
+	line := u.readLine()
+	decoded, err := unescapePickleUnicode(line)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: UNICODE decode error: %v", err)
+	}
+	u.push(objects.NewStr(decoded))
+	return nil
+}
+
+// loadDictFromMark pops all items above the MARK and builds a dict.
+// Items must be interleaved key/value pairs.
+//
+// CPython: Modules/_pickle.c:5843 load_dict
+func (u *unpickler) loadDictFromMark() error {
+	mark, err := u.popMark()
+	if err != nil {
+		return err
+	}
+	n := len(u.stack) - mark
+	if n%2 != 0 {
+		return errors.New("UnpicklingError: odd number of items for DICT")
+	}
+	d := objects.NewDict()
+	for i := mark; i < len(u.stack); i += 2 {
+		if err := d.SetItem(u.stack[i], u.stack[i+1]); err != nil {
+			return err
+		}
+	}
+	u.stack = u.stack[:mark]
+	u.push(d)
+	return nil
+}
+
+// loadListFromMark pops all items above the MARK and builds a list.
+//
+// CPython: Modules/_pickle.c:5856 load_list
+func (u *unpickler) loadListFromMark() error {
+	mark, err := u.popMark()
+	if err != nil {
+		return err
+	}
+	items := make([]objects.Object, len(u.stack)-mark)
+	copy(items, u.stack[mark:])
+	u.stack = u.stack[:mark]
+	u.push(objects.NewList(items))
+	return nil
+}
+
+// unescapePickleString decodes the C-style backslash escapes used by
+// the proto 0 STRING opcode.
+//
+// CPython: Modules/_pickle.c:5563 load_string (uses PyBytes_DecodeEscape)
+func unescapePickleString(s string) ([]byte, error) {
+	var out []byte
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			out = append(out, s[i])
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return nil, errors.New("trailing backslash")
+		}
+		switch s[i+1] {
+		case 'n':
+			out = append(out, '\n')
+		case 'r':
+			out = append(out, '\r')
+		case 't':
+			out = append(out, '\t')
+		case '\\':
+			out = append(out, '\\')
+		case '\'':
+			out = append(out, '\'')
+		case '"':
+			out = append(out, '"')
+		case 'x':
+			if i+3 >= len(s) {
+				return nil, errors.New("short \\x escape")
+			}
+			v, err := strconv.ParseUint(s[i+2:i+4], 16, 8)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, byte(v))
+			i += 4
+			continue
+		default:
+			out = append(out, s[i+1])
+		}
+		i += 2
+	}
+	return out, nil
+}
+
+// unescapePickleUnicode decodes the \uXXXX / \UXXXXXXXX / \xXX / \\
+// escapes used by the proto 0 UNICODE opcode.
+//
+// CPython: Modules/_pickle.c:5608 load_unicode (uses PyUnicode_DecodeRawUnicodeEscape)
+func unescapePickleUnicode(s string) (string, error) {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return "", errors.New("trailing backslash")
+		}
+		switch s[i+1] {
+		case 'u':
+			if i+5 > len(s) {
+				return "", errors.New("short \\u escape")
+			}
+			v, err := strconv.ParseUint(s[i+2:i+6], 16, 16)
+			if err != nil {
+				return "", err
+			}
+			out.WriteRune(rune(v))
+			i += 6
+			continue
+		case 'U':
+			if i+9 > len(s) {
+				return "", errors.New("short \\U escape")
+			}
+			v, err := strconv.ParseUint(s[i+2:i+10], 16, 32)
+			if err != nil {
+				return "", err
+			}
+			out.WriteRune(rune(v))
+			i += 10
+			continue
+		case 'x':
+			if i+3 > len(s) {
+				return "", errors.New("short \\x escape")
+			}
+			v, err := strconv.ParseUint(s[i+2:i+4], 16, 8)
+			if err != nil {
+				return "", err
+			}
+			out.WriteRune(rune(v))
+			i += 4
+			continue
+		case '\\':
+			out.WriteByte('\\')
+		default:
+			out.WriteByte('\\')
+			out.WriteByte(s[i+1])
+		}
+		i += 2
+	}
+	return out.String(), nil
 }
 
 // loadsAtom is the round-trip Phase 5 driver: reads the byte slice

@@ -6,6 +6,7 @@ import (
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
+	pegen "github.com/tamnd/gopy/parser/pegen"
 	"github.com/tamnd/gopy/state"
 )
 
@@ -26,8 +27,22 @@ const DefaultRecursionLimit = 1000
 // Python/sysmodule.c:1612 sys_getrecursionlimit_impl
 var recursionLimit atomic.Int32
 
+// intMaxStrDigits guards integer↔string conversion length. CPython added
+// this in 3.11 to mitigate quadratic-time attacks via enormous int repr.
+// Default is 4300 (CPython's _Py_STR_MAX_LEN).
+//
+// CPython: Python/sysmodule.c:2001 sys_get_int_max_str_digits_impl,
+// Python/sysmodule.c:2026 sys_set_int_max_str_digits_impl
+var intMaxStrDigits atomic.Int32
+
 func init() {
 	recursionLimit.Store(DefaultRecursionLimit)
+	intMaxStrDigits.Store(4300)
+	// Wire the parser hook so decimal integer literals exceeding the
+	// current ceiling get a SyntaxError at parse/compile time.
+	//
+	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+	pegen.IntMaxStrDigitsHook = intMaxStrDigits.Load
 }
 
 // Bind stamps the runtime helpers onto d: exit, setrecursionlimit,
@@ -47,6 +62,8 @@ func Bind(d *objects.Dict, ts *state.Thread) error {
 		{"getrecursionlimit", getRecursionLimit},
 		{"getrefcount", getRefcount},
 		{"intern", makeIntern(ts)},
+		{"get_int_max_str_digits", getIntMaxStrDigits},
+		{"set_int_max_str_digits", setIntMaxStrDigits},
 	}
 	for _, h := range helpers {
 		if err := setItem(d, h.name, objects.NewBuiltinFunction(h.name, h.fn)); err != nil {
@@ -110,6 +127,32 @@ func makeSetRecursionLimit(ts *state.Thread) func([]objects.Object, map[string]o
 // CPython: Python/sysmodule.c:1612 sys_getrecursionlimit_impl
 func getRecursionLimit(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return objects.NewInt(int64(recursionLimit.Load())), nil
+}
+
+// getIntMaxStrDigits ports sys.get_int_max_str_digits().
+//
+// CPython: Python/sysmodule.c:2001 sys_get_int_max_str_digits_impl
+func getIntMaxStrDigits(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewInt(int64(intMaxStrDigits.Load())), nil
+}
+
+// setIntMaxStrDigits ports sys.set_int_max_str_digits(maxdigits).
+//
+// CPython: Python/sysmodule.c:2026 sys_set_int_max_str_digits_impl
+func setIntMaxStrDigits(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: set_int_max_str_digits() takes exactly one argument")
+	}
+	iv, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	v, _ := iv.Int64()
+	if v != 0 && v < 640 {
+		return nil, fmt.Errorf("ValueError: set_int_max_str_digits() limit must be 0 or >= 640")
+	}
+	intMaxStrDigits.Store(int32(v))
+	return objects.None(), nil
 }
 
 // getRefcount ports sys.getrefcount. CPython warns the value is one
