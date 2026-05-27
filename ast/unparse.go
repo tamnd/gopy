@@ -1074,7 +1074,7 @@ func (u *unparser) formattedValue(n *FormattedValue) error {
 		return err
 	}
 	exprStr := exprBuf.String()
-	if len(exprStr) > 0 && exprStr[0] == '{' {
+	if exprStr != "" && exprStr[0] == '{' {
 		u.ws("{ ")
 	} else {
 		u.wc('{')
@@ -1111,7 +1111,7 @@ func (u *unparser) interpolation(n *Interpolation) error {
 			Pos:        n.Pos,
 		})
 	}
-	if len(rawStr) > 0 && rawStr[0] == '{' {
+	if rawStr != "" && rawStr[0] == '{' {
 		u.ws("{ ")
 	} else {
 		u.wc('{')

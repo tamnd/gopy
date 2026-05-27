@@ -336,7 +336,6 @@ func TestUnparseListAndTuple(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	if got, want := mustUnparse(t, &Tuple{Elts: seqExpr(cint(1), cint(2))}), "(1, 2)"; got != want {
-
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
