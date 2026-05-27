@@ -253,11 +253,9 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		// outputs: result
 		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.COPY:
-		bottom := e.peek(int(oparg - 1))
-		_ = bottom
-		var top stackref.Ref
-		top = bottom.Dup()
-		e.setPeek(int(oparg-1), bottom)
+		// CPython: Python/ceval.c COPY: push a dup of stack[-(oparg)].
+		// Do NOT setPeek on the source slot - it is still owned by the stack.
+		top := e.peek(int(oparg - 1)).Dup()
 		e.push(top)
 		return e.advance(), nil
 	case compile.COPY_FREE_VARS:
