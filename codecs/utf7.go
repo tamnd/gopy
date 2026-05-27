@@ -86,7 +86,7 @@ func encodeUTF7(input, _ string) ([]byte, int, error) {
 		}
 		enc := base64.StdEncoding.EncodeToString(u16)
 		// strip trailing '='
-		for len(enc) > 0 && enc[len(enc)-1] == '=' {
+		for enc != "" && enc[len(enc)-1] == '=' {
 			enc = enc[:len(enc)-1]
 		}
 		out = append(out, '+')
@@ -100,7 +100,7 @@ func encodeUTF7(input, _ string) ([]byte, int, error) {
 // decodeUTF7 decodes UTF-7 bytes to a string.
 //
 // CPython: Objects/unicodeobject.c:7133 PyUnicode_DecodeUTF7Stateful
-func decodeUTF7(input []byte, errors string) (string, int, error) {
+func decodeUTF7(input []byte, errors string) (string, int, error) { //nolint:gocognit // direct CPython port
 	handler, herr := LookupError(errors)
 	if herr != nil {
 		return "", 0, herr

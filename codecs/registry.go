@@ -79,7 +79,7 @@ type searchEntry struct {
 //
 // CPython: Lib/encodings/__init__.py CodecInfo._is_text_encoding
 var (
-	nonTextMu       sync.RWMutex
+	nonTextMu        sync.RWMutex
 	nonTextEncodings = map[string]bool{}
 )
 

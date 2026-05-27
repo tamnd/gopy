@@ -54,7 +54,7 @@ func encodeRawUnicodeEscape(input, _ string) ([]byte, int, error) {
 // its raw byte value as the resulting codepoint.
 //
 // CPython: Objects/unicodeobject.c:7043 _PyUnicode_DecodeRawUnicodeEscapeStateful
-func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) {
+func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) { //nolint:gocognit,gocyclo // direct CPython port
 	var b strings.Builder
 	i := 0
 	for i < len(input) {

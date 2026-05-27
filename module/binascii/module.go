@@ -125,7 +125,7 @@ func a2bUU(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	if len(asciiData) == 0 {
 		return nil, binasciiError("Missing length byte")
 	}
-	binLen := int((asciiData[0] - ' ') & 077)
+	binLen := int((asciiData[0] - ' ') & 0o77)
 	asciiData = asciiData[1:]
 	asciiLen := len(asciiData)
 
@@ -147,7 +147,7 @@ func a2bUU(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 			if thisCh < ' ' || thisCh > (' '+64) {
 				return nil, binasciiError("Illegal char")
 			}
-			thisCh = (thisCh - ' ') & 077
+			thisCh = (thisCh - ' ') & 0o77
 		}
 		leftchar = (leftchar << 6) | uint32(thisCh)
 		leftbits += 6
@@ -224,7 +224,7 @@ func b2aUU(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 
 // a2b_base64 decodes a line of base64 data.
 // CPython: Modules/binascii.c:386 binascii_a2b_base64_impl
-func a2bBase64(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func a2bBase64(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) { //nolint:gocognit,gocyclo // direct CPython port
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: a2b_base64() takes at least 1 argument")
 	}
@@ -347,9 +347,10 @@ func b2aBase64(args []objects.Object, kwargs map[string]objects.Object) (objects
 			asciiData = append(asciiData, tableB2ABase64[thisCh])
 		}
 	}
-	if leftbits == 2 {
+	switch leftbits {
+	case 2:
 		asciiData = append(asciiData, tableB2ABase64[(leftchar&3)<<4], '=', '=')
-	} else if leftbits == 4 {
+	case 4:
 		asciiData = append(asciiData, tableB2ABase64[(leftchar&0xf)<<2], '=')
 	}
 	if newline {
@@ -405,7 +406,7 @@ func binasciiCRC32(args []objects.Object, kwargs map[string]objects.Object) (obj
 
 // b2a_hex / hexlify converts binary data to hex representation.
 // CPython: Modules/binascii.c:850 binascii_b2a_hex_impl
-func b2aHex(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func b2aHex(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) { //nolint:gocognit,gocyclo // direct CPython port
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: b2a_hex() takes at least 1 argument")
 	}
@@ -513,7 +514,7 @@ func a2bHex(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 
 // a2b_qp decodes quoted-printable data.
 // CPython: Modules/binascii.c:971 binascii_a2b_qp_impl
-func a2bQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func a2bQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) { //nolint:gocognit // direct CPython port
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: a2b_qp() takes at least 1 argument")
 	}
@@ -535,12 +536,12 @@ func a2bQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	in := 0
 
 	for in < datalen {
-		if asciiData[in] == '=' {
+		if asciiData[in] == '=' { //nolint:gocritic // complex CPython QP decode chain
 			in++
 			if in >= datalen {
 				break
 			}
-			if asciiData[in] == '\n' || asciiData[in] == '\r' {
+			if asciiData[in] == '\n' || asciiData[in] == '\r' { //nolint:gocritic // QP decode inner chain
 				if asciiData[in] != '\n' {
 					for in < datalen && asciiData[in] != '\n' {
 						in++
@@ -576,7 +577,7 @@ func isHexChar(c byte) bool {
 
 // b2a_qp encodes data using quoted-printable encoding.
 // CPython: Modules/binascii.c:1073 binascii_b2a_qp_impl
-func b2aQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+func b2aQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) { //nolint:gocognit,gocyclo // direct CPython port
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: b2a_qp() takes at least 1 argument")
 	}
@@ -641,7 +642,7 @@ func b2aQP(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 			((ch == '\t' || ch == ' ') && in+1 == datalen) ||
 			(ch < 33 && ch != '\r' && ch != '\n' && (quotetabs || (ch != '\t' && ch != ' ')))
 
-		if needsEncode {
+		if needsEncode { //nolint:gocritic // complex CPython QP encode chain
 			if linelen+3 >= maxlinesize {
 				odata = append(odata, '=')
 				if crlf {

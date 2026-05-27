@@ -386,7 +386,7 @@ func strLenientRunes(s string) []rune {
 	var out []rune
 	for i := 0; i < len(b); {
 		c := b[i]
-		if c < 0x80 {
+		if c < 0x80 { //nolint:gocritic // manual UTF-8 decoder needed for surrogate pass-through
 			out = append(out, rune(c))
 			i++
 		} else if c&0xE0 == 0xC0 && i+1 < len(b) && b[i+1]&0xC0 == 0x80 {
@@ -409,14 +409,6 @@ func strLenientRunes(s string) []rune {
 	return out
 }
 
-// encodeUCS1 fills the kind-1 latin1 slab. Reached only for non-ASCII
-// strings whose max codepoint is < 0x100; every codepoint fits a byte.
-//
-// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS1 branch)
-func encodeUCS1(s string, n int) []uint8 {
-	return encodeUCS1Runes(strLenientRunes(s))
-}
-
 func encodeUCS1Runes(runes []rune) []uint8 {
 	out := make([]uint8, len(runes))
 	for i, r := range runes {
@@ -425,29 +417,12 @@ func encodeUCS1Runes(runes []rune) []uint8 {
 	return out
 }
 
-// encodeUCS2 fills the kind-2 BMP slab. Reached only when the max
-// codepoint is in [0x100, 0x10000); every codepoint fits a uint16.
-//
-// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS2 branch)
-func encodeUCS2(s string, n int) []uint16 {
-	return encodeUCS2Runes(strLenientRunes(s))
-}
-
 func encodeUCS2Runes(runes []rune) []uint16 {
 	out := make([]uint16, len(runes))
 	for i, r := range runes {
 		out[i] = uint16(r)
 	}
 	return out
-}
-
-// encodeUCS4 fills the kind-4 full-unicode slab. Reached when the max
-// codepoint is >= 0x10000; codepoints are stored as raw uint32 (no
-// surrogate encoding).
-//
-// CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS4 branch)
-func encodeUCS4(s string, n int) []uint32 {
-	return encodeUCS4Runes(strLenientRunes(s))
 }
 
 func encodeUCS4Runes(runes []rune) []uint32 {

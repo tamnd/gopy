@@ -170,13 +170,14 @@ func newUTF32BOMIncrementalDecoder() func([]byte, string, bool) (string, []byte,
 				}
 				return "", data, nil
 			}
-			if data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00 {
+			switch {
+			case data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00:
 				bo = binary.LittleEndian
 				data = data[4:]
-			} else if data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF {
+			case data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF:
 				bo = binary.BigEndian
 				data = data[4:]
-			} else {
+			default:
 				bo = binary.LittleEndian
 			}
 			bomConsumed = true

@@ -12,11 +12,12 @@ package vm
 // See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
 import (
-	"github.com/tamnd/gopy/codecs"
 	"errors"
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/tamnd/gopy/codecs"
 
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
