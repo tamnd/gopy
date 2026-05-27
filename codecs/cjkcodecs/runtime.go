@@ -212,7 +212,7 @@ func runEncodeStateful(encoding string, fn encodeFunc, reset encodeResetFunc, co
 // wtf8ToRunes decodes a WTF-8 string to runes, preserving lone surrogates.
 // Python strings may contain lone surrogates (U+D800-U+DFFF); gopy stores
 // them using WTF-8 (same byte pattern as standard UTF-8 3-byte encoding) so
-// they survive Go string storage. This decoder recognises those 3-byte
+// they survive Go string storage. This decoder recognizes those 3-byte
 // patterns and yields the actual surrogate rune values instead of RuneError.
 //
 // CPython: Objects/unicodeobject.c handles surrogates as raw code points.

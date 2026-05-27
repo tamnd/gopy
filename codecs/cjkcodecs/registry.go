@@ -20,7 +20,10 @@ func newInfo(name string, enc encodeFunc, dec decodeFunc, config int) *codecs.Co
 		var pending []rune
 		encodeFn := func(input string, errors string, final bool) ([]byte, int, error) {
 			savedPending := pending
-			runes := append(pending, wtf8ToRunes(input)...)
+			inputRunes := wtf8ToRunes(input)
+			runes := make([]rune, len(pending)+len(inputRunes))
+			copy(runes, pending)
+			copy(runes[len(pending):], inputRunes)
 			pending = nil
 			out, remaining, n, err := runEncodeStatefulWithState(name, enc, nil, st, runes, errors, final)
 			if err != nil {
@@ -91,7 +94,10 @@ func newStatefulInfo(name string, enc encodeFunc, dec decodeFunc, reset encodeRe
 		var pending []rune
 		encodeFn := func(input string, errors string, final bool) ([]byte, int, error) {
 			savedPending := pending
-			runes := append(pending, wtf8ToRunes(input)...)
+			inputRunes := wtf8ToRunes(input)
+			runes := make([]rune, len(pending)+len(inputRunes))
+			copy(runes, pending)
+			copy(runes[len(pending):], inputRunes)
 			pending = nil
 			out, remaining, n, err := runEncodeStatefulWithState(name, enc, reset, st, runes, errors, final)
 			if err != nil {
