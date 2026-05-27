@@ -98,9 +98,14 @@ func (r *Runner) Run(ctx context.Context, e Entry) Result {
 	}
 
 	if e.IsPackage() {
-		res.Outcome = OutcomeError
-		res.Err = fmt.Errorf("regrtest: package entries (%s) need -m support; not yet wired", e.Name)
-		return res
+		trimmed := strings.TrimSuffix(e.Name, "/")
+		mainFile := filepath.Join(path, trimmed+".py")
+		if _, err := os.Stat(mainFile); err != nil {
+			res.Outcome = OutcomeError
+			res.Err = fmt.Errorf("regrtest: package %s: no entry point %s", e.Name, mainFile)
+			return res
+		}
+		path = mainFile
 	}
 
 	timeout := r.Timeout
@@ -133,6 +138,9 @@ func (r *Runner) Run(ctx context.Context, e Entry) Result {
 		if errors.As(err, &exitErr) {
 			res.Outcome = OutcomeFail
 			res.ExitCode = exitErr.ExitCode()
+			if strings.Contains(res.Stderr, "SkipTest:") && strings.Contains(res.Stderr, "in <module>") {
+				res.Outcome = OutcomeSkip
+			}
 		} else {
 			res.Outcome = OutcomeError
 			res.Err = err

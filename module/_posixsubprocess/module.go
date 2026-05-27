@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -131,8 +132,17 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// Wire stdin: p2cread is the read-end of the pipe. Wrap it as an
 	// os.File so exec.Cmd can duplicate it into the child's fd 0.
 	// CPython: Modules/_posixsubprocess.c:723 dup2(p2cread, 0)
+	//
+	// Clear the GC finalizer on each os.File wrapper: the raw fds are
+	// owned by Python's subprocess machinery (subprocess.py closes them
+	// explicitly after fork_exec returns). If Go's GC fires the default
+	// finalizer before Python calls os.close(), the fd is closed out from
+	// under the caller and subsequent os.close() raises EBADF.
+	// Pattern mirrors module/os/stat_darwin.go osFstat runtime.SetFinalizer.
 	if p2cread >= 0 {
-		cmd.Stdin = os.NewFile(uintptr(p2cread), "pipe:stdin")
+		f := os.NewFile(uintptr(p2cread), "pipe:stdin")
+		runtime.SetFinalizer(f, nil)
+		cmd.Stdin = f
 	} else {
 		cmd.Stdin = io.NopCloser(os.Stdin)
 	}
@@ -140,7 +150,9 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// Wire stdout: c2pwrite is the write-end that becomes the child's fd 1.
 	// CPython: Modules/_posixsubprocess.c:730 dup2(c2pwrite, 1)
 	if c2pwrite >= 0 {
-		cmd.Stdout = os.NewFile(uintptr(c2pwrite), "pipe:stdout")
+		f := os.NewFile(uintptr(c2pwrite), "pipe:stdout")
+		runtime.SetFinalizer(f, nil)
+		cmd.Stdout = f
 	} else {
 		cmd.Stdout = os.Stdout
 	}
@@ -148,7 +160,9 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// Wire stderr: errwrite is the write-end that becomes the child's fd 2.
 	// CPython: Modules/_posixsubprocess.c:737 dup2(errwrite, 2)
 	if errwrite >= 0 {
-		cmd.Stderr = os.NewFile(uintptr(errwrite), "pipe:stderr")
+		f := os.NewFile(uintptr(errwrite), "pipe:stderr")
+		runtime.SetFinalizer(f, nil)
+		cmd.Stderr = f
 	} else {
 		cmd.Stderr = os.Stderr
 	}

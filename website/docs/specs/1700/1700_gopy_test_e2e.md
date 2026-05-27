@@ -32,7 +32,7 @@ fixes the underlying gopy package on red):
 - [ ] v0.9.0 vm tail panel (#483)
 - [ ] v0.10.0 gc panel (#474)
 - [ ] v0.10.1 language / stdlib panel (#486)
-- [x] v0.10.2 parser panel (#476) — spec [1719](1719_parser_ast_full_port.md) shipped (PR #78, `9d0a3199`); test_asdl_parser + test_ast/ + test_patma pending
+- [x] v0.10.2 parser panel (#476) — spec [1719](1719_parser_ast_full_port.md) shipped (PR #78, `9d0a3199`); test_asdl_parser + test_ast/ + test_patma closed (PR #81, `00546397`)
 - [ ] v0.11.0 specializer / monitor panel (#477)
 - [ ] v0.12.0 optimizer panel (#478)
 
@@ -150,13 +150,13 @@ release is named.
 
 ### Lexer / tokenizer (5 files)
 
-| Test | Owner | Mark | Notes |
-|------|-------|------|-------|
-| test_tokenize | v0.9 | done | Closed by spec 1718 P29..P59 (PR #76, `bd1e9cce`) |
-| test_tabnanny | v0.9 | done | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76, `bd1e9cce`) |
-| test_source_encoding | v0.5.5 | done | Closed by spec 1718 P6..P29 cookie/BOM + P60 long-cookie line (PR #76, `bd1e9cce`) |
-| test_utf8source | v0.5.5 | done | parser/lexer utf-8 default; greens with spec 1718 (PR #76, `bd1e9cce`) |
-| test_keyword | v0.5.5 | done | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76, `bd1e9cce`) |
+| Test | Owner | Mark | Commit | Notes |
+|------|-------|------|--------|-------|
+| test_tokenize | v0.9 | done | `bd1e9cce` | Closed by spec 1718 P29..P59 (PR #76) 130/130 green |
+| test_tabnanny | v0.9 | done | `bd1e9cce` | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76) 20/20 green |
+| test_source_encoding | v0.5.5 | done | `7db2ad9b` | Closed by spec 1718 P6..P29 + P60 (PR #76, `bd1e9cce`); subprocess EBADF fixed (`7db2ad9b`) 91/91 green (1 skip) |
+| test_utf8source | v0.5.5 | done | `bd1e9cce` | parser/lexer utf-8 default; greens with spec 1718 (PR #76) 3/3 green |
+| test_keyword | v0.5.5 | done | `bd1e9cce` | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76) 11/11 green |
 
 ### Parser / grammar / AST (27 files + test_ast/, test_future_stmt/, test_peg_generator/)
 
@@ -171,7 +171,7 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_tstring | v0.12.5 | done | `9d0a3199` | 12/12 green — spec 1719 (PR #78) |
 | test_named_expressions | v0.12.5 | done | `9d0a3199` | 74/74 green — spec 1719 (PR #78) |
 | test_unparse | v0.12.5 | done | `9d0a3199` | 79/79 green — spec 1719 (PR #78) |
-| test_asdl_parser | v0.5 | ready | | ast/asdl.go |
+| test_asdl_parser | v0.12.5 | done | `7db2ad9b` | 6/6 green; vendor Parser/asdl.py + Python.asdl, sysconfig.is_python_build() probe, importlib.util.spec_from_loader + module_from_spec |
 | test_pep646_syntax | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
 | test_type_params | v0.12.5 | done | `9d0a3199` | 108/108 green — spec 1719 (PR #78) |
 | test_type_aliases | v0.12.5 | done | `9d0a3199` | 30/30 green — spec 1719 (PR #78) |
@@ -181,7 +181,7 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_string_literals | v0.12.5 | done | `9d0a3199` | 20/20 green — spec 1719 (PR #78) |
 | test_int_literal | v0.12.5 | done | `9d0a3199` | 6/6 green — spec 1719 (PR #78) |
 | test_unicode_identifiers | v0.12.5 | done | `9d0a3199` | 5/5 green — spec 1719 (PR #78) |
-| test_patma | v0.9 | ready | | 322/328 partial (6 TestTracing need sys.settrace) |
+| test_patma | v0.12.5 | done | `00546397` | 328/328 green (sys.settrace landed in v0.12.5) |
 | test_decorators | v0.12.5 | done | `9d0a3199` | 16/16 green — spec 1719 (PR #78) |
 | test_global | v0.12.5 | done | `9d0a3199` | 20/20 green — spec 1719 (PR #78) |
 | test_scope | v0.12.5 | done | `9d0a3199` | 41/41 green (3 skipped) — spec 1719 (PR #78) |
@@ -191,7 +191,7 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_unpack_ex | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
 | test_metaclass | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
 | test_subclassinit | v0.12.5 | done | `9d0a3199` | 17/17 green — spec 1719 (PR #78) |
-| test_ast/ (dir) | v0.10.2 | ready | | blocked on `_ast_unparse` (task #74) |
+| test_ast/ (dir) | v0.12.5 | done | `00546397` | 215/215 green (7 skipped); package entry support + refcounting fixes (PR #81) |
 | test_future_stmt/ (dir) | v0.12.5 | done | `9d0a3199` | 7/7 green (AnnotationsFutureTestCase); 7 FutureTest rows need spawn_python — spec 1719 (PR #78) |
 | test_peg_generator/ (dir) | v0.5.5 | deferred | | tools/parser_gen still WIP |
 

@@ -30,8 +30,8 @@ test_utf8source	done	v0.12.4	3/3 green after compile(bytes), str.encode latin-1,
 
 # ---- Parser / grammar / AST ----------------------------------------
 test_annotationlib	done	v0.12.5	117/117 green (1 skip). Template.__new__ + PEP 563 class body inline __annotations__ + partial.__wrapped__ removed
-test_asdl_parser	ready	v0.5.0	ast/asdl.go
-test_ast/	ready	v0.10.2	full ast.dump panel
+test_asdl_parser	done	v0.12.5	6/6 green. Vendor Parser/asdl.py + Python.asdl; sysconfig.is_python_build() returns True; importlib.util.spec_from_loader + module_from_spec implemented (7db2ad9b, eb91a139)
+test_ast/	done	v0.12.5	215/215 green (7 skipped). Package entry support + refcounting fixes
 test_decorators	done	v0.12.5	16/16 green
 test_eof	done	v0.12.5	EOF / continuation handling in parser
 test_fstring	done	v0.12.5	90/90 green
@@ -42,7 +42,7 @@ test_int_literal	done	v0.12.5	6/6 green
 test_keywordonlyarg	done	v0.12.5	11/11 green
 test_metaclass	done	v0.12.5	1/1 green
 test_named_expressions	done	v0.12.5	74/74 green
-test_patma	ready	v0.9.0	PEP 634 pattern matching
+test_patma	done	v0.12.5	328/328 green
 test_peg_generator/	deferred	v0.5.5	tools/parser_gen/ still WIP
 test_pep646_syntax	done	v0.12.5	1/1 green
 test_positional_only_arg	done	v0.12.5	28/28 green

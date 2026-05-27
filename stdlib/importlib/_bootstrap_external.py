@@ -250,6 +250,18 @@ class SourceFileLoader(FileLoader):
         st = _os.stat(path)
         return {'mtime': st.st_mtime, 'size': st.st_size}
 
+    # CPython: Lib/importlib/_bootstrap_external.py:977 SourceFileLoader.get_code
+    def get_code(self, fullname=None):
+        if fullname is None:
+            fullname = self.name
+        source = self.get_data(self.get_filename(fullname))
+        return self.source_to_code(source, self.path)
+
+    # CPython: Lib/importlib/_bootstrap_external.py:886 SourceLoader.exec_module
+    def exec_module(self, module):
+        code = self.get_code(module.__name__)
+        exec(code, module.__dict__)
+
 
 # CPython: Lib/importlib/_bootstrap_external.py:101 _path_join
 def _path_join(*path_parts):

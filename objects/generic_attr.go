@@ -61,6 +61,7 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 	}
 	if d := instanceAttrDict(o); d != nil {
 		if v, err := d.GetItem(name); err == nil {
+			Incref(v)
 			return v, nil
 		}
 	}

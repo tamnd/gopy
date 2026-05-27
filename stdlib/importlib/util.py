@@ -117,16 +117,63 @@ def find_spec(name, package=None):
 
 
 def module_from_spec(spec):
-    raise NotImplementedError("importlib.util.module_from_spec is unavailable in gopy")
+    """Create a new module based on spec and spec.loader.create_module.
+
+    CPython: Lib/importlib/_bootstrap.py:571 module_from_spec
+    """
+    import types
+    module = None
+    if hasattr(spec.loader, 'create_module'):
+        module = spec.loader.create_module(spec)
+    if module is None:
+        module = types.ModuleType(spec.name)
+    module.__loader__ = spec.loader
+    module.__spec__ = spec
+    module.__package__ = spec.name.rpartition('.')[0]
+    if spec.origin is not None:
+        module.__file__ = spec.origin
+    if spec.submodule_search_locations is not None:
+        module.__path__ = list(spec.submodule_search_locations)
+    return module
 
 
 def spec_from_loader(name, loader, *, origin=None, is_package=None):
-    raise NotImplementedError("importlib.util.spec_from_loader is unavailable in gopy")
+    """Return a ModuleSpec based on a loader.
+
+    CPython: Lib/importlib/util.py:44 spec_from_loader
+    """
+    if origin is None and hasattr(loader, 'get_filename'):
+        try:
+            origin = loader.get_filename(name)
+        except (ImportError, AttributeError):
+            pass
+    if is_package is None:
+        if hasattr(loader, 'is_package'):
+            try:
+                is_package = loader.is_package(name)
+            except ImportError:
+                is_package = False
+        else:
+            is_package = False
+    return _ModuleSpec(name, loader, origin=origin, is_package=bool(is_package))
 
 
 def spec_from_file_location(name, location=None, *, loader=None,
                             submodule_search_locations=None):
-    raise NotImplementedError("importlib.util.spec_from_file_location is unavailable in gopy")
+    """Return a ModuleSpec for the specified module, using file location.
+
+    CPython: Lib/importlib/util.py:132 spec_from_file_location
+    """
+    if location is None and loader is None:
+        return None
+    if loader is None and location is not None:
+        loader = _SourceFileLoader(name, str(location))
+    origin = str(location) if location is not None else getattr(loader, 'path', None)
+    is_package = submodule_search_locations is not None
+    spec = _ModuleSpec(name, loader, origin=origin, is_package=is_package)
+    if submodule_search_locations is not None:
+        spec.submodule_search_locations = list(submodule_search_locations)
+    return spec
 
 
 def resolve_name(name, package):

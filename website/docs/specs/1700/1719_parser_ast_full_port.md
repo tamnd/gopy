@@ -136,11 +136,11 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_type_comments        |  447 | **done** | **18/18 OK** (1 skip) |
 | test_unicode_identifiers  |   32 | **done** | **5/5 OK** |
 | test_annotationlib        | 2375 | **done** | **117/117 OK** (1 skip) |
-| test_asdl_parser          |  131 | **done** | skip (irrelevant for installed interpreter) |
+| test_asdl_parser          |  131 | **done** | **6/6 OK** (`7db2ad9b`) |
 | test_fstring              | 1871 | **done** | **90/90 OK** |
 | test_global               |  214 | **done** | **20/20 OK** |
 | test_metaclass            |  302 | **done** | **1/1 OK** |
-| test_patma                | 3559 | partial | **322/328** (6 TestTracing failures need sys.settrace) |
+| test_patma                | 3559 | **done** | **328/328** green — sys.settrace shipped, all TestTracing pass (`00546397`) |
 | test_pep646_syntax        |  329 | **done** | **1/1 OK** |
 | test_scope                |  839 | **done** | **41/41 OK** (3 skip) |
 | test_subclassinit         |  281 | **done** | **17/17 OK** |
@@ -157,7 +157,7 @@ Three packages:
 
 | Package | Files | Mark | Result |
 |---------|-------|------|--------|
-| `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | ready | `import _ast_unparse` SyntaxError on stdlib load. `_ast_unparse` not vendored from `Lib/_ast_unparse.py`. |
+| `test_ast/`           | `__init__.py` (empty), `test_ast.py` (4267 LOC), `snippets.py`, `utils.py`, `data/ast_repr.txt` | **done** | **215/215 green** (7 skipped) — package entry support + refcounting fixes (`00546397`) |
 | `test_future_stmt/`   | 9 files | **done** | AnnotationsFutureTestCase **7/7 OK**. FutureTest braces/star/not-on-top/extra-string/dotted fixed. 7 pre-existing gaps: 6 need `test.test_future_stmt` package hierarchy, 1 needs `spawn_python`. |
 | `test_peg_generator/` | 6 files | deferred | PEG generator port is its own follow-up spec. |
 
@@ -319,7 +319,7 @@ shows `done` for every non-deferred row.
 - [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
 - [ ] P8: `test_int_literal` re-run
 - [ ] P9: PEG generator follow-up spec (deferred)
-- [ ] P10: flip spec 1700 panel + #476 checklist
+- [x] P10: flip spec 1700 panel + #476 checklist — test_asdl_parser (skip at `00546397`, 6/6 green at `7db2ad9b`), test_patma (328/328), test_ast/ (215/215) closed (PR #81, `00546397`)
 
 ## Working notes
 
