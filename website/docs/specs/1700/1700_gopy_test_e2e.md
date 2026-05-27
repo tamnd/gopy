@@ -23,7 +23,7 @@ Infrastructure (gates the panel work below):
 Per-version panel tasks (each lands its slice of `test/cpython/` and
 fixes the underlying gopy package on red):
 - [ ] v0.2.0 type panel (#479)
-- [ ] v0.3.0 exceptions panel (#485)
+- [ ] v0.3.0 exceptions panel (#485) — spec [1721](1721_exceptions_traceback_test_panel.md) open
 - [ ] v0.4.0 number / string panel (#487)
 - [x] v0.5.0 compile panel (#475) — spec [1720](1720_compile_codegen_test_panel.md) shipped (all 9 phases green)
 - [x] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md) (closed by [spec 1718](1718_lexer_gate_closers.md), PR #76, `bd1e9cce`)
@@ -197,19 +197,19 @@ release is named.
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_compile | v0.10.1 | ready | full compile() builtin panel |
-| test_compileall | v0.10.1 | ready | needs py_compile + filesystem walk |
-| test_compiler_assemble | v0.5 | done | gated in v05test |
-| test_compiler_codegen | v0.5 | done | gated in v05test |
-| test_codeop | v0.10.1 | ready | codeop on top of compile() |
-| test_peepholer | v0.5 | ready | flowgraph optimization panel |
-| test_dis | v0.5 | done | gated via golden corpus in v05test |
-| test_opcodes | v0.5 | ready | bytecode opcode table |
-| test_generated_cases | v0.12 | ready | tools/uops_gen panel |
-| test__opcode | v0.5 | ready | _opcode module surface |
-| test_code | v0.5 | ready | Code object reflection |
-| test_code_module | v0.10.1 | ready | code module (REPL helper) |
-| test_codeccallbacks | v0.8 | ready | codecs error-callback registry |
+| test_compile | v0.10.1 | done | 185/185 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_compileall | v0.10.1 | done | 145/145 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_compiler_assemble | v0.5 | done | 145/145 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_compiler_codegen | v0.5 | done | 5/5 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_codeop | v0.10.1 | done | 9/9 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_peepholer | v0.5 | done | 130/130 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_dis | v0.5 | done | 145/145 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_opcodes | v0.5 | done | 8/8 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_generated_cases | v0.12 | out-of-scope | CPython-internal Tier1/Tier2 JIT generator toolchain |
+| test__opcode | v0.5 | done | 7/7 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_code | v0.5 | done | 37/37 (25 skipped) — spec 1720 (PR #79, `9cb0f44d`) |
+| test_code_module | v0.10.1 | done | 17/17 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_codeccallbacks | v0.8 | done | 43/43 — spec 1720 (PR #79, `9cb0f44d`) |
 | test_codecencodings_cn | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_hk | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_iso2022 | v0.8 | deferred | iso2022 codecs not shipped |
@@ -221,18 +221,18 @@ release is named.
 | test_codecmaps_jp | v0.8 | deferred | CJK codec maps |
 | test_codecmaps_kr | v0.8 | deferred | CJK codec maps |
 | test_codecmaps_tw | v0.8 | deferred | CJK codec maps |
-| test_codecs | v0.8 | ready | utf-8 / ascii / latin-1 panel |
+| test_codecs | v0.8 | done | 287/287 (13 skipped) — spec 1720 (PR #79, `9cb0f44d`) |
 | test_charmapcodec | v0.8 | deferred | charmap codec not shipped |
 | test_multibytecodec | v0.8 | deferred | multibyte codec base class |
 | test_clinic | v0.5 | out-of-scope | CPython tooling, not a runtime feature |
-| test_dictcomps | v0.5 | ready | dict comprehension codegen |
-| test_listcomps | v0.5 | ready | list comprehension codegen |
-| test_setcomps | v0.5 | ready | set comprehension codegen |
-| test_genexps | v0.9 | ready | generator expressions |
+| test_dictcomps | v0.5 | done | 10/10 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_listcomps | v0.5 | done | 61/61 (1 skipped PEP 667) — spec 1720 (PR #79, `9cb0f44d`) |
+| test_setcomps | v0.5 | done | 2/2 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_genexps | v0.9 | done | doctest green — spec 1720 (PR #79, `9cb0f44d`) |
 | test_lltrace | v0.6 | out-of-scope | low-level dispatch trace, build-time |
 | test_thread_local_bytecode | v0.11 | deferred | per-thread quickening (post-v0.12) |
-| test_print | v0.7 | ready | print() builtin |
-| test_format | v0.4 | done | gated in v04test |
+| test_print | v0.7 | done | 9/9 — spec 1720 (PR #79, `9cb0f44d`) |
+| test_format | v0.4 | done | green — spec 1720 (PR #79, `9cb0f44d`) |
 
 ### VM / eval loop (22 files)
 
@@ -262,6 +262,8 @@ release is named.
 | test_typechecks | v0.2 | ready | type-check fast paths |
 
 ### Exceptions / traceback (8 files)
+
+Spec [1721](1721_exceptions_traceback_test_panel.md) open.
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
