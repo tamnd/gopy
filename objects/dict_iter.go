@@ -387,7 +387,7 @@ func dictKeysViewRichCmp(a, b Object, op CompareOp) (Object, error) {
 	}
 	bSet, err := otherToSet(b)
 	if err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to set
 	}
 	return setRichCmp(aSet, bSet, op)
 }

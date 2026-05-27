@@ -30,7 +30,8 @@ type setEntry struct {
 type Set struct {
 	Header
 	entries    []setEntry
-	used       int
+	used       int // live entries only
+	fill       int // live + tombstone entries (CPython: so->fill)
 	frozen     bool
 	cachedHash int64 // only valid for frozenset when hashValid is true
 	hashValid  bool
@@ -271,18 +272,26 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 }
 
 // insert places (h, key) into the table, growing first if the
-// fill ratio crosses 2/3. Mirrors CPython's set_add_entry which
-// resizes before placing the new element.
+// fill ratio crosses 3/5. fill = used + tombstones; mirrors CPython's
+// set_add_entry which resizes on fill*5 > (mask+1)*3.
 //
 // CPython: Objects/setobject.c:220 set_add_entry
 func (s *Set) insert(h int64, key Object) {
-	if (s.used+1)*3 >= len(s.entries)*2 {
+	// Resize when fill (used+tombstones) exceeds 60% of capacity.
+	// CPython: Objects/setobject.c:391 (so->fill+1)*5 > (so->mask+1)*3
+	if (s.fill+1)*5 >= len(s.entries)*3 {
 		s.grow()
 	}
 	idx, ok, _ := s.lookup(h, key)
+	wasTombstone := !s.entries[idx].used && s.entries[idx].dummy
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	if !ok {
 		s.used++
+		// Only increment fill when replacing a genuinely empty slot.
+		// Tombstone → live does not change fill (tombstone was already counted).
+		if !wasTombstone {
+			s.fill++
+		}
 	}
 }
 
@@ -299,11 +308,20 @@ func (s *Set) insertClean(h int64, key Object) {
 
 func (s *Set) grow() {
 	old := s.entries
-	s.entries = make([]setEntry, len(old)*2)
+	// CPython: Objects/setobject.c:266 set_table_resize
+	// New table is 4x used (so post-rehash fill == used, no tombstones).
+	newSize := setMinSize
+	for newSize < s.used*4 {
+		newSize <<= 1
+	}
+	s.entries = make([]setEntry, newSize)
 	s.used = 0
+	s.fill = 0
 	for _, e := range old {
 		if e.used {
 			s.insertClean(e.hash, e.key)
+			s.used++
+			s.fill++
 		}
 	}
 }
@@ -813,6 +831,7 @@ func setClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	s.entries = make([]setEntry, setMinSize)
 	s.used = 0
+	s.fill = 0
 	return None(), nil
 }
 

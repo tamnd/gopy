@@ -196,17 +196,58 @@ func UnaryTypevartuple(ts *state.Thread, v objects.Object) (objects.Object, erro
 	return tvt, nil
 }
 
-// UnarySubscriptGeneric implements Generic[T] subscription. The
-// returned GenericAlias has Generic as its origin and the type-param
-// tuple as args, so __mro_entries__ pulls Generic itself into the
-// derived class's bases.
+// UnarySubscriptGeneric implements Generic[T] subscription via
+// typing.Generic.__class_getitem__(params). This produces a Python
+// typing._GenericAlias (not a bare Go GenericAlias), which is required
+// so typing._GenericAlias.__mro_entries__ fires correctly and the
+// isinstance(..., _BaseGenericAlias) dedup in __mro_entries__ works.
 //
 // CPython: Python/intrinsics.c _Py_subscript_generic
+// CPython: Lib/typing.py _subscript_generic
+//
+//nolint:gocognit // mirrors CPython's generic subscript dispatch; complexity is the number of special cases, not algorithmic.
 func UnarySubscriptGeneric(ts *state.Thread, v objects.Object) (objects.Object, error) {
 	params, ok := v.(*objects.Tuple)
 	if !ok {
 		return nil, errors.New("TypeError: Generic[...] requires a tuple of type parameters")
 	}
+	// Try to call Generic.__class_getitem__(params) via typing module.
+	// typing._is_typevar_like rejects raw TypeVarTuple; pre-process to
+	// Unpack[TypeVarTuple] so the validation passes (same shape CPython
+	// emits from CALL_INTRINSIC_1 INTRINSIC_SUBSCRIPT_GENERIC).
+	//
+	// CPython: Python/intrinsics.c _Py_subscript_generic
+	// CPython: Lib/typing.py _subscript_generic
+	if objects.SysModulesGetter != nil {
+		if sysmod := objects.SysModulesGetter(); sysmod != nil {
+			if typingMod, err := sysmod.GetItem(objects.NewStr("typing")); err == nil && typingMod != nil {
+				var unpackObj objects.Object
+				if u, err2 := objects.GetAttr(typingMod, objects.NewStr("Unpack")); err2 == nil {
+					unpackObj = u
+				}
+				processedItems := make([]objects.Object, params.Len())
+				for i := 0; i < params.Len(); i++ {
+					param := params.Item(i)
+					if _, isTvt := param.(*objects.TypeVarTuple); isTvt && unpackObj != nil {
+						if wrapped, werr := objects.GetItem(unpackObj, param); werr == nil {
+							processedItems[i] = wrapped
+							continue
+						}
+					}
+					processedItems[i] = param
+				}
+				processedParams := objects.NewTuple(processedItems)
+				if generic, err3 := objects.GetAttr(typingMod, objects.NewStr("Generic")); err3 == nil && generic != nil {
+					if fn, err4 := objects.GetAttr(generic, objects.NewStr("__class_getitem__")); err4 == nil && fn != nil {
+						if result, err5 := objects.Call(fn, objects.NewTuple([]objects.Object{processedParams}), nil); err5 == nil {
+							return result, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	// Fallback to Go GenericAlias when typing is not yet loaded.
 	return objects.NewGenericAlias(objects.GenericType, params), nil
 }
 

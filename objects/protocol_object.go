@@ -48,6 +48,36 @@ func GetItem(o, key Object) (Object, error) {
 		}
 		return s.GetItem(o, i)
 	}
+	// Type objects: __class_getitem__ (PEP 560 / PEP 695 generic classes).
+	// This mirrors the PyType_Check branch in PyObject_GetItem.
+	//
+	// CPython: Objects/abstract.c:181 PyObject_GetItem
+	if cls, ok := o.(*Type); ok {
+		if descr, _ := LookupDescriptor(cls, "__class_getitem__"); descr != nil {
+			dt := descr.Type()
+			bound := descr
+			if dt.DescrGet != nil {
+				v, err := dt.DescrGet(descr, cls, cls)
+				if err != nil {
+					return nil, err
+				}
+				bound = v
+			}
+			return Call(bound, NewTuple([]Object{key}), nil)
+		}
+		return NewGenericAlias(o, key), nil
+	}
+	// User-defined objects: fall back to __getitem__ descriptor lookup.
+	// This covers typing._SpecialForm (Unpack.__getitem__) and any other
+	// Python-level __getitem__ that is not wired as a Go Mapping slot.
+	//
+	// CPython: Objects/abstract.c:188 PyObject_GetItem (fallback path)
+	if descr, _ := LookupDescriptor(tp, "__getitem__"); descr != nil {
+		fn, err := bindDescriptor(descr, o)
+		if err == nil && fn != nil {
+			return Call(fn, NewTuple([]Object{key}), nil)
+		}
+	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", tp.Name)
 }
 
@@ -111,7 +141,9 @@ func Contains(o, v Object) (bool, error) {
 			}
 			return false, err
 		}
-		eq, err := RichCmpBool(x, v, CompareEQ)
+		// CPython: Objects/abstract.c:2113 _PySequence_IterSearch
+		// PyObject_RichCompareBool(obj, item, Py_EQ) — needle (v) is left.
+		eq, err := RichCmpBool(v, x, CompareEQ)
 		if err != nil {
 			return false, err
 		}

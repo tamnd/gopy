@@ -563,7 +563,7 @@ func objectSetClass(o Object, value Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
 	}
-	inst.Header.typ = newType
+	inst.Header.typ = newType //nolint:staticcheck // QF1008: explicit Header field access mirrors CPython's ob_type layout
 	return nil
 }
 
@@ -573,11 +573,22 @@ func objectSetClass(o Object, value Object) error {
 //
 // CPython: Objects/typeobject.c subtype_dict
 func objectGetDict(o Object) (Object, error) {
-	if inst, ok := o.(*Instance); ok {
-		if inst.dict == nil {
+	switch v := o.(type) {
+	case *Instance:
+		if v.dict == nil {
 			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 		}
-		return inst.dict, nil
+		return v.dict, nil
+	case *Int:
+		if v.attrs == nil {
+			v.attrs = NewDict()
+		}
+		return v.attrs, nil
+	case *Unicode:
+		if v.attrs == nil {
+			v.attrs = NewDict()
+		}
+		return v.attrs, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 }

@@ -156,6 +156,12 @@ type Thread struct {
 	id         uint64
 	ctx        any
 	ctxVersion uint64
+	// Tracing counts active trace/profile calls. Non-zero means a
+	// trace callback is currently running; instrumentation entry
+	// points skip firing to prevent infinite recursion.
+	//
+	// CPython: Include/cpython/pystate.h:128 tracing
+	Tracing int
 }
 
 // HandledException returns the currently-handled exception (the one a
@@ -184,6 +190,18 @@ func (t *Thread) SetHandledException(exc Exception) {
 	}
 	t.handled.Store(excHolder{e: exc})
 }
+
+// EnterTracing increments the re-entrance depth counter so
+// instrumentation callbacks know not to fire while a trace function is
+// running on this thread.
+//
+// CPython: Python/ceval.c:2607 PyThreadState_EnterTracing
+func (t *Thread) EnterTracing() { t.Tracing++ }
+
+// LeaveTracing decrements the re-entrance depth counter.
+//
+// CPython: Python/ceval.c:2614 PyThreadState_LeaveTracing
+func (t *Thread) LeaveTracing() { t.Tracing-- }
 
 // threadIDCounter feeds Thread.id. Starts at 1 so 0 is reserved as a
 // "never seen" sentinel for the ContextVar cache.

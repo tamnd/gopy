@@ -23,6 +23,13 @@ var ellipsisSingleton = func() *ellipsisObject {
 func init() {
 	ellipsisType.Repr = func(_ Object) (string, error) { return "Ellipsis", nil }
 	ellipsisType.Str = ellipsisType.Repr
+	// CPython: Objects/object.c ellipsis_reduce - returning a string causes
+	// pickle to serialize as "builtins.Ellipsis" (GLOBAL opcode) so loads
+	// returns the singleton rather than creating a new instance.
+	SetTypeDescr(ellipsisType, "__reduce__", NewMethodDescr(ellipsisType, "__reduce__",
+		func(_ []Object, _ map[string]Object) (Object, error) {
+			return NewStr("Ellipsis"), nil
+		}))
 }
 
 // Ellipsis returns the singleton Ellipsis value. Mirrors Py_Ellipsis.
@@ -37,4 +44,11 @@ func Ellipsis() Object {
 // CPython: Objects/object.c Py_IsEllipsis (3.14+)
 func IsEllipsis(o Object) bool {
 	return o == ellipsisSingleton
+}
+
+// EllipsisType returns the type singleton for ellipsis. Mirrors PyEllipsis_Type.
+//
+// CPython: Objects/object.c:1972 PyEllipsis_Type
+func EllipsisType() *Type {
+	return ellipsisType
 }

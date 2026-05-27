@@ -49,6 +49,20 @@ func init() {
 			return objects.NewTuple(items), true
 		case ast.EllipsisType:
 			return objects.Ellipsis(), true
+		case ast.FrozenSet:
+			items := make([]objects.Object, len(x))
+			for i, raw := range x {
+				item, err := wrapConst(raw)
+				if err != nil {
+					return nil, false
+				}
+				items[i] = item
+			}
+			fs, err := objects.NewFrozenset(items)
+			if err != nil {
+				return nil, false
+			}
+			return fs, true
 		}
 		return nil, false
 	}
@@ -130,6 +144,8 @@ func liftConst(v any) any {
 //
 // CPython: Python/bytecodes.c:LOAD_CONST (CPython stores PyObject*
 // directly so this conversion is a no-op there).
+//
+//nolint:gocyclo // mirrors CPython's constant-kind switch; arms added as constant types land
 func wrapConst(v any) (objects.Object, error) {
 	switch x := v.(type) {
 	case nil:
@@ -177,6 +193,16 @@ func wrapConst(v any) (objects.Object, error) {
 		return objects.NewComplex(real(x), imag(x)), nil
 	case ast.EllipsisType:
 		return objects.Ellipsis(), nil
+	case ast.FrozenSet:
+		items := make([]objects.Object, len(x))
+		for i, raw := range x {
+			item, err := wrapConst(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewFrozenset(items)
 	case objects.Object:
 		return x, nil
 	}

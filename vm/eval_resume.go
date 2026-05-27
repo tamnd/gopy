@@ -10,7 +10,10 @@ package vm
 // DEPRECATED (spec 1714): Spec 1714 phases 5+6: RESUME family bodies migrate to typed op<NAME> functions invoked from vm/eval_dispatch_gen.go.
 // See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
-import "github.com/tamnd/gopy/compile"
+import (
+	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/monitor"
+)
 
 // handleResume is the hand-written RESUME arm. CPython distinguishes
 // initial resume vs yield re-entry vs awaitable re-entry via the
@@ -21,6 +24,16 @@ import "github.com/tamnd/gopy/compile"
 // CPython: Python/bytecodes.c RESUME
 func (e *evalState) handleResume(op compile.Opcode, oparg uint32) (next int, err error) {
 	_ = op
+	// Instrument the code object when the global monitoring version has
+	// changed since the last entry. This inserts INSTRUMENTED_LINE markers
+	// so that sys.settrace line callbacks fire for this frame.
+	//
+	// CPython: Python/bytecodes.c:196 _Py_Instrument(_PyFrame_GetCode(frame), tstate->interp)
+	if interp := e.ts.Interp(); interp != nil && interp.Monitors != nil {
+		if merr := monitor.Instrument(e.f.Code, interp.Monitors); merr != nil {
+			return 0, merr
+		}
+	}
 	if oparg < 2 {
 		if e.gilTimer != nil {
 			e.gilTimer.poll(e.gil, e.breaker)

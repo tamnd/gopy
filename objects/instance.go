@@ -94,10 +94,13 @@ func NewInstance(t *Type) *Instance {
 	// CPython: Objects/object.c _PyObject_InitInlineValues
 	inst.inlineValid = true
 	inst.init(t)
-	// Register the new instance with the cycle collector when the type
-	// has a Finalize slot (tp_finalize), so gc.collect() can call __del__.
-	// CPython: Objects/typeobject.c type_call _PyObject_GC_TRACK for tp_finalize types
-	if t.Finalize != nil {
+	// Register with the cycle collector for any type that has tp_traverse
+	// (not only types with tp_finalize). CPython calls _PyObject_GC_TRACK
+	// for all heap types, which always have tp_traverse; restricting to
+	// tp_finalize-only excluded plain user instances from cycle detection.
+	//
+	// CPython: Objects/typeobject.c:1748 type_call _PyObject_GC_TRACK
+	if t.TpTraverse != nil {
 		if h := GCTrackHook; h != nil {
 			h(inst)
 		}

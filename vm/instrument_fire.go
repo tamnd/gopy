@@ -68,6 +68,11 @@ func (e *evalState) fireInstrumented(op compile.Opcode, oparg uint32) error {
 // the marker. Returns NOP when the offset is not actually marked or
 // when no monitoring data is present.
 //
+// The re-entrance guard (ts.Tracing) lives in sysTraceLineFunc and
+// traceLine, not here. CallInstrumentationLine always resolves the
+// original opcode so the dispatcher can execute the real instruction;
+// the registered callbacks themselves bail early when Tracing > 0.
+//
 // CPython: Python/instrumentation.c:1297 _Py_call_instrumentation_line
 func (e *evalState) handleInstrumentedLine() (compile.Opcode, error) {
 	co := e.f.Code

@@ -69,7 +69,7 @@ func (e *evalState) execMatchSequence() (next int, handled bool, err error) {
 // CPython uses `map.get(key, dummy)` rather than `map[key]` so that
 // dict subclasses defining __missing__ (collections.defaultdict and
 // friends) don't get mutated by a probing lookup, and so that absence
-// is signalled without exception handling.
+// is signaled without exception handling.
 //
 // CPython: Python/bytecodes.c:3071 MATCH_KEYS
 // CPython: Python/ceval.c:728 _PyEval_MatchKeys

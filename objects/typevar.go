@@ -478,6 +478,17 @@ func init() {
 		}
 		return None(), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:1258 paramspec_has_default_impl
+	SetTypeDescr(ParamSpecType, "has_default", NewMethodDescr(ParamSpecType, "has_default", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: has_default() missing self")
+		}
+		ps, ok := args[0].(*ParamSpec)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: has_default() requires ParamSpec")
+		}
+		return NewBool(ps.HasDefault), nil
+	}))
 	SetTypeDescr(ParamSpecType, "__covariant__", NewGetSetDescr("__covariant__", func(o Object) (Object, error) {
 		return NewBool(o.(*ParamSpec).Covariant), nil
 	}, nil))
@@ -561,6 +572,17 @@ func init() {
 		}
 		return None(), nil
 	}, nil))
+	// CPython: Objects/typevarobject.c:1615 typevartuple_has_default_impl
+	SetTypeDescr(TypeVarTupleType, "has_default", NewMethodDescr(TypeVarTupleType, "has_default", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: has_default() missing self")
+		}
+		tvt, ok := args[0].(*TypeVarTuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: has_default() requires TypeVarTuple")
+		}
+		return NewBool(tvt.HasDefault), nil
+	}))
 	// CPython: Objects/typevarobject.c:1619 typevartuple_typing_subst_impl
 	SetTypeDescr(TypeVarTupleType, "__typing_subst__", NewMethodDescr(TypeVarTupleType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 2 {
@@ -569,11 +591,30 @@ func init() {
 		return args[1], nil
 	}))
 	// CPython: Objects/typevarobject.c:1640 typevartuple_typing_prepare_subst_impl
+	// Delegates to typing._typevartuple_prepare_subst(self, alias, args) which
+	// groups variadic positional args into a single replacement tuple for the
+	// TypeVarTuple slot. Returning args unchanged caused "Too many arguments"
+	// because the expected_len check fires before the variadic grouping.
 	SetTypeDescr(TypeVarTupleType, "__typing_prepare_subst__", NewMethodDescr(TypeVarTupleType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 3 {
 			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
 		}
-		return args[2], nil
+		self, alias, subArgs := args[0], args[1], args[2]
+		if SysModulesGetter != nil {
+			sysmod := SysModulesGetter()
+			if sysmod != nil {
+				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
+					if fn, err2 := GetAttr(typingMod, NewStr("_typevartuple_prepare_subst")); err2 == nil && fn != nil {
+						result, err3 := Call(fn, NewTuple([]Object{self, alias, subArgs}), nil)
+						if err3 == nil {
+							return result, nil
+						}
+						return nil, err3
+					}
+				}
+			}
+		}
+		return subArgs, nil
 	}))
 
 	// TypeVarTuple.__iter__: yields Unpack[self] so that *Ts in a subscript
@@ -591,6 +632,7 @@ func init() {
 			if sysmod != nil {
 				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
 					if unpack, err2 := GetAttr(typingMod, NewStr("Unpack")); err2 == nil && unpack != nil {
+						// CPython: Objects/typevarobject.c:1535 unpack_iter
 						if unpacked, err3 := GetItem(unpack, self); err3 == nil {
 							return listIter(NewList([]Object{unpacked}))
 						}
@@ -1054,6 +1096,8 @@ func init() {
 			if sysmod != nil {
 				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
 					if unpack, err2 := GetAttr(typingMod, NewStr("Unpack")); err2 == nil && unpack != nil {
+						// GetItem only routes through Go Mapping/Sequence slots.
+						// CPython: Objects/typevarobject.c:2038 typealias_iter
 						if unpacked, err3 := GetItem(unpack, self); err3 == nil {
 							return listIter(NewList([]Object{unpacked}))
 						}
@@ -1065,12 +1109,43 @@ func init() {
 	}))
 
 	// CPython: Objects/typevarobject.c:2059 typealias_parameters
+	// _Py_make_parameters wraps every TypeVarTuple entry in Unpack[tvt]
+	// so that __parameters__ contains Unpack[Ts] rather than Ts.
+	//
+	// CPython: Objects/typevarobject.c:2059 typealias_parameters -> _Py_make_parameters
 	SetTypeDescr(TypeAliasObjType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
 		a := o.(*TypeAliasObj)
 		if a.TypeParamsObj == nil || a.TypeParamsObj == None() {
 			return NewTuple(nil), nil
 		}
-		return a.TypeParamsObj, nil
+		tp, ok := a.TypeParamsObj.(*Tuple)
+		if !ok {
+			return a.TypeParamsObj, nil
+		}
+		// Wrap TypeVarTuple entries in Unpack[...]. Get the Unpack _SpecialForm
+		// from typing; if unavailable, return params as-is.
+		var unpackObj Object
+		if SysModulesGetter != nil {
+			if sysmod := SysModulesGetter(); sysmod != nil {
+				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
+					if u, err2 := GetAttr(typingMod, NewStr("Unpack")); err2 == nil {
+						unpackObj = u
+					}
+				}
+			}
+		}
+		out := make([]Object, tp.Len())
+		for i := 0; i < tp.Len(); i++ {
+			param := tp.Item(i)
+			if _, isTvt := param.(*TypeVarTuple); isTvt && unpackObj != nil {
+				if wrapped, err := GetItem(unpackObj, param); err == nil {
+					out[i] = wrapped
+					continue
+				}
+			}
+			out[i] = param
+		}
+		return NewTuple(out), nil
 	}, nil))
 
 	// CPython: Objects/typevarobject.c:2071 typealias_subscript

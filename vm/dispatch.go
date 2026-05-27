@@ -12,6 +12,7 @@ package vm
 
 import (
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/monitor"
 )
 
 // dispatch executes one instruction and returns the next-pc and any
@@ -28,6 +29,8 @@ import (
 //   - otherwise: the loop sets InstrPtr = next and continues.
 //
 // CPython: Python/ceval.c switch over op
+//
+//nolint:gocognit // mirrors CPython's ceval.c per-opcode dispatch; complexity is the surface, not algorithmic branching
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err error) {
 	// CPython: Python/ceval_macros.h:63 INSTRUCTION_STATS. Bumps the
 	// per-opcode counter + pair counter before any specializer / fast
@@ -85,6 +88,23 @@ afterInstrument:
 			// fresh op and give the fast-path arm a shot before
 			// falling back to the generic body.
 			op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+			// The re-read may yield INSTRUMENTED_LINE when the slot
+			// was overwritten by the monitoring shadow walk. Resolve
+			// the original opcode without re-firing the line event;
+			// the fire already happened above.
+			//
+			// CPython: Python/ceval.c DISPATCH_GOTO avoids this by
+			// jumping directly to TARGET(INSTRUMENTED_LINE) from the
+			// adaptive rewrite path, which then re-enters the line
+			// handler. Here we short-circuit to the opcode lookup.
+			if op == compile.INSTRUMENTED_LINE {
+				instr := e.f.InstrPtr / 2
+				data := monitor.CoMonitoring(e.f.Code)
+				op = monitor.GetOriginalOpcode(data, instr)
+				if op == 0 {
+					op = compile.NOP
+				}
+			}
 			if next, ok, err := e.trySpecialized(op, oparg); ok {
 				return next, err
 			}

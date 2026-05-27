@@ -247,38 +247,76 @@ func kwargsToDict(kwargs map[string]Object) *Dict {
 }
 
 // gaRichCompare implements __eq__ / __ne__ for generic aliases: two
-// aliases are equal when their starred flag, origin, and args tuple
-// match. Other comparison operators return NotImplemented.
+// aliases are equal when their origin and args match. Handles both
+// Go *GenericAlias (types.GenericAlias) and Python _GenericAlias
+// objects (from typing.py) by reading __origin__ and __args__ via
+// GetAttr when the other side is not a Go GenericAlias.
 //
 // CPython: Objects/genericaliasobject.c:705 ga_richcompare
 func gaRichCompare(a, b Object, op CompareOp) (Object, error) {
-	bb, ok := b.(*GenericAlias)
-	if !ok || (op != CompareEQ && op != CompareNE) {
+	if op != CompareEQ && op != CompareNE {
 		return NotImplemented(), nil
 	}
 	aa := a.(*GenericAlias)
-	if op == CompareNE {
-		eq, err := gaRichCompare(a, b, CompareEQ)
-		if err != nil {
-			return nil, err
+
+	var bOrigin, bArgs Object
+	if bb, ok := b.(*GenericAlias); ok {
+		// Fast path: both are Go GenericAlias.
+		if op == CompareNE {
+			eq, err := gaRichCompare(a, b, CompareEQ)
+			if err != nil {
+				return nil, err
+			}
+			t, err := IsTruthy(eq)
+			if err != nil {
+				return nil, err
+			}
+			return NewBool(!t), nil
 		}
+		if aa.starred != bb.starred {
+			return False(), nil
+		}
+		bOrigin = bb.origin
+		bArgs = bb.args
+	} else {
+		// Slow path: b might be a Python-level _GenericAlias from typing.py.
+		// Read __origin__ and __args__ via attribute lookup.
+		//
+		// CPython: Objects/genericaliasobject.c:706 ga_richcompare (handles
+		// both ga_type and _GenericAlias via __origin__/__args__ duck-typing)
+		var err error
+		bOrigin, err = GetAttr(b, NewStr("__origin__"))
+		if err != nil {
+			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+		}
+		bArgs, err = GetAttr(b, NewStr("__args__"))
+		if err != nil {
+			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+		}
+	}
+
+	eqOrigin, err := RichCmpBool(aa.origin, bOrigin, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if !eqOrigin {
+		if op == CompareNE {
+			return True(), nil
+		}
+		return False(), nil
+	}
+	eq, err := RichCmp(aa.args, bArgs, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if op == CompareNE {
 		t, err := IsTruthy(eq)
 		if err != nil {
 			return nil, err
 		}
 		return NewBool(!t), nil
 	}
-	if aa.starred != bb.starred {
-		return False(), nil
-	}
-	eqOrigin, err := RichCmpBool(aa.origin, bb.origin, CompareEQ)
-	if err != nil {
-		return nil, err
-	}
-	if !eqOrigin {
-		return False(), nil
-	}
-	return RichCmp(aa.args, bb.args, CompareEQ)
+	return eq, nil
 }
 
 // gaAttrBlocked is the set of names that must never proxy to origin.

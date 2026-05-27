@@ -13,7 +13,7 @@ import "fmt"
 
 // AttributeErrorFactory is wired by the errors package after init so that
 // GenericGetAttr can produce a rich AttributeError with .name and .obj set.
-// Nil until the errors package initialises.
+// Nil until the errors package initializes.
 //
 // CPython: Objects/object.c:843 _PyObject_SetAttributeError
 var AttributeErrorFactory func(obj Object, attrName string) error

@@ -275,7 +275,7 @@ func TypeOwnDescrs(t *Type) map[string]Object {
 
 // TypeOwnDescrItems iterates the descriptors registered on t in insertion
 // order, calling f(name, value) for each. Used by type.__dict__ to expose
-// attributes in definition order, matching CPython's tp_dict behaviour.
+// attributes in definition order, matching CPython's tp_dict behavior.
 //
 // CPython: Objects/typeobject.c:1057 type_dict
 func TypeOwnDescrItems(t *Type, f func(name string, value Object)) {

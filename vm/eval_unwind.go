@@ -307,9 +307,6 @@ func (e *evalState) handleException(err error) bool {
 	// hang the frame entry off of. Synthesize once at the bottom frame
 	// and let it propagate up, picking up one TB entry per frame.
 	if pyerrors.Occurred(e.ts) == nil {
-		// Restore (not Raise) so we skip __context__ chaining: this
-		// exception is being born here, it has no causal predecessor
-		// in the currently-handled chain.
 		exc := synthesizeException(err)
 		// Attach any __notes__ queued by FormatNoteHook before this
 		// Go error became a typed Exception (e.g. arg-binding
@@ -324,7 +321,13 @@ func (e *evalState) handleException(err error) bool {
 				exc.Notes.Append(objects.NewStr(n))
 			}
 		}
-		pyerrors.Restore(e.ts, exc.ExcType, exc, nil)
+		// Use Raise (not Restore) so that __context__ is chained when this
+		// exception is born inside an active except-block, matching CPython's
+		// _PyErr_SetObject which always chains. This makes
+		// `except E: <Go-raised SyntaxError>` set SyntaxError.__context__=E.
+		//
+		// CPython: Python/errors.c:83 _PyErr_SetObject (chaining branch)
+		pyerrors.Raise(e.ts, exc)
 	}
 	// Prepend a traceback entry for this frame before considering
 	// handlers. CPython does the same in exception_unwind so an

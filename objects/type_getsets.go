@@ -23,6 +23,27 @@ func init() {
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
 	register("__parameters__", typeGetParameters, typeSetParameters)
+	// CPython: Objects/typeobject.c:5915 type___subclasses___impl
+	SetTypeDescr(typeType, "__subclasses__", NewMethodDescr(typeType, "__subclasses__", typeSubclassesMeth))
+}
+
+// typeSubclassesMeth implements type.__subclasses__() -> list.
+//
+// CPython: Objects/typeobject.c:5915 type___subclasses___impl
+func typeSubclassesMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasses__' of 'type' object needs an argument")
+	}
+	t, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasses__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	subs := t.Subclasses()
+	items := make([]Object, len(subs))
+	for i, s := range subs {
+		items[i] = s
+	}
+	return NewList(items), nil
 }
 
 // typeGetName mirrors type_name. Heap types return ht_name verbatim;
