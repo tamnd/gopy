@@ -78,7 +78,9 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	}
 	slot := &d.entries[idx]
 	if found {
+		Decref(slot.value)
 		slot.value = value
+		Incref(value)
 		// CPython fires MODIFIED in insertdict's replace branch
 		// (dictobject.c:1875). The key set didn't change, but
 		// watchers still need to know the value did.
@@ -89,6 +91,7 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 		d.fill++
 	}
 	*slot = dictEntry{hash: h, key: key, value: value, used: true}
+	Incref(value)
 	d.order = append(d.order, idx)
 	d.used++
 	d.downgradeKindOnInsert(key)
@@ -129,10 +132,13 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 		return dictInsert(d, h, key, value)
 	}
 	if d.splitValues[idx] != nil {
+		Decref(d.splitValues[idx])
 		d.splitValues[idx] = value
+		Incref(value)
 		notifyDictEvent(DictEventModified, d, key, value)
 		return nil
 	}
+	Incref(value)
 	d.splitValues[idx] = value
 	d.order = append(d.order, idx)
 	d.used++
@@ -161,8 +167,15 @@ func dictDelete(d *Dict, key Object) error {
 		return errKeyNotFound
 	}
 	if d.sharedKeys != nil {
+		if d.splitValues[idx] != nil {
+			Decref(d.splitValues[idx])
+		}
 		d.splitValues[idx] = nil
 	} else {
+		if d.entries[idx].key != nil {
+			Decref(d.entries[idx].key)
+		}
+		Decref(d.entries[idx].value)
 		d.entries[idx] = dictEntry{dummy: true}
 	}
 	for i, slot := range d.order {

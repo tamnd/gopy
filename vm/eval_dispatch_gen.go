@@ -1127,17 +1127,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		return e.advance(), nil
 	case compile.STORE_FAST:
-		value := e.peek(0)
-		_ = value
+		value := e.pop()
 		tmp := e.localAt(int(oparg))
-		_ = tmp
 		e.setLocal(int(oparg), value)
 		tmp.Close()
-		e.drop(1)
 		return e.advance(), nil
 	case compile.STORE_FAST_LOAD_FAST:
-		value1 := e.peek(0)
-		_ = value1
+		value1 := e.pop()
 		var value2 stackref.Ref
 		oparg1 := oparg >> 4
 		_ = oparg1
@@ -1148,14 +1144,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.setLocal(int(oparg1), value1)
 		value2 = e.localAt(int(oparg2)).Dup()
 		tmp.Close()
-		e.drop(1)
 		e.push(value2)
 		return e.advance(), nil
 	case compile.STORE_FAST_STORE_FAST:
-		value2 := e.peek(1)
-		_ = value2
-		value1 := e.peek(0)
-		_ = value1
+		value1 := e.pop()
+		value2 := e.pop()
 		oparg1 := oparg >> 4
 		_ = oparg1
 		oparg2 := oparg & 15
@@ -1167,7 +1160,6 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		tmp = e.localAt(int(oparg2))
 		e.setLocal(int(oparg2), value2)
 		tmp.Close()
-		e.drop(1 + 1)
 		return e.advance(), nil
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)

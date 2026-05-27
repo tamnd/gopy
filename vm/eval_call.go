@@ -211,7 +211,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		bound = npos
 	}
 	for i := 0; i < bound; i++ {
-		f.SetLocal(i, stackref.FromObject(args[i]))
+		f.SetLocal(i, stackref.FromObjectNew(args[i]))
 	}
 	// *args: pack any extra positionals into a tuple at the varargs slot.
 	if hasVarargs {

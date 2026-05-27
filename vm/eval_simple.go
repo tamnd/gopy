@@ -342,18 +342,26 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		// Stack layout (3.14): [callable, NULL_or_self, arg0, ..., argN].
 		// oparg is N (positional arg count).
 		argc := int(oparg)
-		args := make([]objects.Object, argc)
+		origArgs := make([]objects.Object, argc)
 		for i := argc - 1; i >= 0; i-- {
-			args[i] = e.popObject()
+			origArgs[i] = e.popObject()
 		}
 		selfOrNull := e.popObject()
 		callable := e.popObject()
+		callArgs := origArgs
 		if selfOrNull != nil {
-			// Method-style call: self_or_null is the bound instance.
-			// Prepend it to the positional args.
-			args = append([]objects.Object{selfOrNull}, args...)
+			callArgs = append([]objects.Object{selfOrNull}, origArgs...)
 		}
-		out, cerr := objects.Vectorcall(callable, args, uint(len(args)), nil)
+		out, cerr := objects.Vectorcall(callable, callArgs, uint(len(callArgs)), nil)
+		objects.Decref(callable)
+		if selfOrNull != nil {
+			objects.Decref(selfOrNull)
+		}
+		for _, arg := range origArgs {
+			if arg != nil {
+				objects.Decref(arg)
+			}
+		}
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -1001,6 +1009,7 @@ func (e *evalState) execLoadAttr(oparg uint32) error {
 	owner := e.popObject()
 	name := co.NameObj(idx)
 	attr, err := objects.GetAttr(owner, name)
+	objects.Decref(owner)
 	if err != nil {
 		return err
 	}
@@ -1029,7 +1038,10 @@ func (e *evalState) execStoreAttr(oparg uint32) error {
 	owner := e.popObject()
 	value := e.popObject()
 	name := co.NameObj(idx)
-	return objects.SetAttr(owner, name, value)
+	err := objects.SetAttr(owner, name, value)
+	objects.Decref(owner)
+	objects.Decref(value)
+	return err
 }
 
 // execDeleteAttr implements DELETE_ATTR: pop owner, delete
