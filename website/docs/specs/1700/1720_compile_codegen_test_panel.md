@@ -634,4 +634,4 @@ fixtures for these four files removed or stubbed out.
 - [x] Phase 8: test_compileall (145/145, 2 skipped), test_code_module (17/17) done
 - [x] Phase 9: test_compiler_assemble (145/145), test_compiler_codegen, test_dis,
       test_format re-gated to test/cpython/
-- [ ] spec 1700 "Compile / codegen" checklist item flipped to `[x]`
+- [x] spec 1700 "Compile / codegen" checklist item flipped to `[x]`

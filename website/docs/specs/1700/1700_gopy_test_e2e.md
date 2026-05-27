@@ -25,7 +25,7 @@ fixes the underlying gopy package on red):
 - [ ] v0.2.0 type panel (#479)
 - [x] v0.3.0 exceptions panel (#485) — spec [1721](1721_exceptions_traceback_test_panel.md) shipped (all 7 phases green)
 - [ ] v0.4.0 number / string panel (#487)
-- [x] v0.5.0 compile panel (#475) — spec [1720](1720_compile_codegen_test_panel.md) shipped (all 9 phases green)
+- [x] v0.5.0 compile panel (#475) — spec [1720](1720_compile_codegen_test_panel.md) shipped (all 9 phases + spec 1700 checklist green; `1d2a89f6`)
 - [x] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md) (closed by [spec 1718](1718_lexer_gate_closers.md), PR #76, `bd1e9cce`)
 - [ ] v0.7.0 lifecycle panel (#482)
 - [ ] v0.8.0 import panel (#481)
@@ -218,14 +218,14 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_codecencodings_jp | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_kr | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_tw | v0.8 | deferred | CJK codecs not shipped |
-| test_codecmaps_cn | v0.8 | deferred | CJK codec maps |
-| test_codecmaps_hk | v0.8 | deferred | CJK codec maps |
-| test_codecmaps_jp | v0.8 | deferred | CJK codec maps |
-| test_codecmaps_kr | v0.8 | deferred | CJK codec maps |
-| test_codecmaps_tw | v0.8 | deferred | CJK codec maps |
-| test_codecs | v0.8 | done | 287/287 (13 skipped) — spec 1720 (PR #79, `9cb0f44d`) |
+| test_codecmaps_cn | v0.8 | done | 9/9 green (9 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecmaps_hk | v0.8 | done | 3/3 green (3 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecmaps_jp | v0.8 | done | 15/15 green (15 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecmaps_kr | v0.8 | done | 9/9 green (9 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecmaps_tw | v0.8 | done | 6/6 green (6 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecs | v0.8 | done | 287/287 (13 skipped) — UTF-16/32 incremental, charmap sentinel, CodecInfo Iter, utf_8_decode final, surrogates (`1d2a89f6`) |
 | test_charmapcodec | v0.8 | deferred | charmap codec not shipped |
-| test_multibytecodec | v0.8 | deferred | multibyte codec base class |
+| test_multibytecodec | v0.8 | done | 35/36 green (1 skipped, cpython_only) — `0bb38b3e` |
 | test_clinic | v0.5 | out-of-scope | CPython tooling, not a runtime feature |
 | test_dictcomps | v0.5 | done | 10/10 — spec 1720 (PR #79, `9cb0f44d`) |
 | test_listcomps | v0.5 | done | 61/61 (1 skipped PEP 667) — spec 1720 (PR #79, `9cb0f44d`) |
