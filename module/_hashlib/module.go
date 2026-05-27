@@ -413,6 +413,12 @@ func buildModule() (*objects.Module, error) {
 	if err := d.SetItem(objects.NewStr("algorithms_available"), fs); err != nil {
 		return nil, err
 	}
+	// openssl_md_meth_names: frozenset of digest names understood by OpenSSL.
+	// hashlib.py uses it to extend algorithms_available.
+	// CPython: Modules/_hashopenssl.c PyDoc for METH_MD_METH_NAMES
+	if err := d.SetItem(objects.NewStr("openssl_md_meth_names"), fs); err != nil {
+		return nil, err
+	}
 
 	return m, nil
 }

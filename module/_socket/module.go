@@ -15,15 +15,30 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/vm"
+)
+
+var (
+	// socketErrorType = OSError. CPython: Modules/socketmodule.c:7071 PySocketModule_InsertConstants.
+	socketErrorType   = pyerrors.PyExc_OSError
+	socketGAIError    = pyerrors.NewExcType("socket.gaierror", []*objects.Type{pyerrors.PyExc_OSError})
+	socketHError      = pyerrors.NewExcType("socket.herror", []*objects.Type{pyerrors.PyExc_OSError})
+	socketTimeoutType = pyerrors.NewExcType("socket.timeout", []*objects.Type{pyerrors.PyExc_TimeoutError})
 )
 
 func init() {
+	vm.RegisterErrorPrefix("socket.gaierror:", socketGAIError)
+	vm.RegisterErrorPrefix("socket.herror:", socketHError)
+	vm.RegisterErrorPrefix("socket.timeout:", socketTimeoutType)
+	vm.RegisterErrorPrefix("socket.error:", socketErrorType)
 	_ = imp.AppendInittab("_socket", buildModule)
 }
 
@@ -64,11 +79,13 @@ type sockObj struct {
 	proto   int
 	timeout float64 // -1 = blocking, 0 = non-blocking, >0 = timeout in seconds
 	mu      sync.Mutex
+	attrs   *objects.Dict // instance __dict__ for Python-level attributes
 }
 
 func newSocketType() *objects.Type {
 	t := objects.NewType("socket", []*objects.Type{objects.ObjectType()})
 	t.Getattro = sockGetattr
+	t.Setattro = sockSetattr
 	t.Repr = sockRepr
 	t.Str = sockRepr
 
@@ -90,6 +107,12 @@ func newSocketType() *objects.Type {
 	objects.SetTypeDescr(t, "settimeout", objects.NewMethodDescr(t, "settimeout", sockSettimeout))
 	objects.SetTypeDescr(t, "gettimeout", objects.NewMethodDescr(t, "gettimeout", sockGettimeout))
 	objects.SetTypeDescr(t, "shutdown", objects.NewMethodDescr(t, "shutdown", sockShutdown))
+	objects.SetTypeDescr(t, "sendall", objects.NewMethodDescr(t, "sendall", sockSendall))
+	objects.SetTypeDescr(t, "recvinto", objects.NewMethodDescr(t, "recvinto", sockRecvinto))
+	objects.SetTypeDescr(t, "recv_into", objects.NewMethodDescr(t, "recv_into", sockRecvInto))
+	objects.SetTypeDescr(t, "connect_ex", objects.NewMethodDescr(t, "connect_ex", sockConnectEx))
+	objects.SetTypeDescr(t, "dup", objects.NewMethodDescr(t, "dup", sockDup))
+	objects.SetTypeDescr(t, "detach", objects.NewMethodDescr(t, "detach", sockDetach))
 
 	objects.SetTypeDescr(t, "family", objects.NewGetSetDescr(
 		"family",
@@ -124,12 +147,129 @@ func newSocketType() *objects.Type {
 		nil,
 	))
 
+	// __init__ descriptor: socket.__init__(self, family=AF_INET, type=SOCK_STREAM,
+	// proto=0, fileno=None). Called by socket.py's socket.__init__.
+	// CPython: Modules/socketmodule.c:3453 sock_initobj
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", sockInitDescr))
+
+	// TpNew allocates a bare sockObj so TpNew + __init__ work together.
+	// CPython: Modules/socketmodule.c:3390 sock_new
+	t.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+		s := &sockObj{fd: -1}
+		s.Init(cls)
+		return s, nil
+	}
+
 	return t
 }
 
-// sockGetattr routes attribute lookups through the type descriptor table.
+// AttrDict implements objects.AttrDictHolder so MemberDescr slot descriptors
+// from Python subclasses (e.g. socket.socket's __slots__) work on sockObj.
+func (s *sockObj) AttrDict() *objects.Dict { return s.attrs }
+
+// EnsureAttrDict implements objects.AttrDictHolder.
+func (s *sockObj) EnsureAttrDict() *objects.Dict {
+	if s.attrs == nil {
+		s.attrs = objects.NewDict()
+	}
+	return s.attrs
+}
+
+// sockGetattr routes attribute lookups: type descriptors first, then attrs dict.
 func sockGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	return objects.GenericGetAttr(o, name)
+	// Check type descriptors first via GenericGetAttr.
+	v, err := objects.GenericGetAttr(o, name)
+	if err == nil {
+		return v, nil
+	}
+	// Fall back to instance attrs dict.
+	s, ok := o.(*sockObj)
+	if ok && s.attrs != nil {
+		if v2, err2 := s.attrs.GetItem(name); err2 == nil {
+			return v2, nil
+		}
+	}
+	return nil, err
+}
+
+// sockSetattr stores non-descriptor attributes in the instance attrs dict.
+func sockSetattr(o objects.Object, name objects.Object, value objects.Object) error {
+	// If the type has a data descriptor, route through it.
+	tp := o.Type()
+	nameStr, err := objects.Str(name)
+	if err != nil {
+		return fmt.Errorf("TypeError: attribute name must be a string")
+	}
+	if descr, _ := objects.LookupDescriptor(tp, nameStr); descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	s, ok := o.(*sockObj)
+	if !ok {
+		return fmt.Errorf("TypeError: expected socket object")
+	}
+	if s.attrs == nil {
+		s.attrs = objects.NewDict()
+	}
+	return s.attrs.SetItem(name, value)
+}
+
+// sockInitDescr implements _socket.socket.__init__(self, family, type, proto, fileno).
+// Called by socket.py's socket.__init__ to actually create the OS socket.
+//
+// CPython: Modules/socketmodule.c:3453 sock_initobj
+func sockInitDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __init__() requires at least 1 argument")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __init__() argument must be socket object")
+	}
+	family := syscall.AF_INET
+	typ := syscall.SOCK_STREAM
+	proto := 0
+
+	if len(args) >= 2 {
+		f, ok2 := args[1].(*objects.Int)
+		if ok2 {
+			f64, _ := f.Int64()
+			family = int(f64)
+		}
+	}
+	if len(args) >= 3 {
+		tp, ok2 := args[2].(*objects.Int)
+		if ok2 {
+			t64, _ := tp.Int64()
+			typ = int(t64)
+		}
+	}
+	if len(args) >= 4 {
+		pr, ok2 := args[3].(*objects.Int)
+		if ok2 {
+			p64, _ := pr.Int64()
+			proto = int(p64)
+		}
+	}
+	// fileno arg (args[4]) would be for dup; not implemented yet
+	if s.fd >= 0 {
+		_ = syscall.Close(s.fd)
+	}
+	fd, err := syscall.Socket(family, typ, proto)
+	if err != nil {
+		return nil, osError(err)
+	}
+	defaultTimeoutMu.Lock()
+	timeout := defaultTimeoutVal
+	defaultTimeoutMu.Unlock()
+
+	s.fd = fd
+	s.family = family
+	s.typ = typ
+	s.proto = proto
+	s.timeout = timeout
+	return objects.None(), nil
 }
 
 // sockRepr returns a repr string for the socket object.
@@ -523,6 +663,191 @@ func sockSend(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	return objects.NewInt(int64(n)), nil
 }
 
+// sockSendall implements socket.sendall(data[, flags]).
+// Keeps sending until all bytes are written.
+//
+// CPython: Modules/socketmodule.c:4649 sock_sendall
+func sockSendall(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: sendall() takes at least 1 argument (data)")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'sendall' requires a 'socket' object")
+	}
+	data, err := toBytes(args[1])
+	if err != nil {
+		return nil, err
+	}
+	for len(data) > 0 {
+		s.mu.Lock()
+		n, werr := writeFd(s.fd, data)
+		s.mu.Unlock()
+		if werr != nil {
+			return nil, osError(werr)
+		}
+		data = data[n:]
+	}
+	return objects.None(), nil
+}
+
+// sockRecvinto implements socket.recv_into(buffer[, nbytes[, flags]]).
+//
+// CPython: Modules/socketmodule.c:3958 sock_recv_into_impl
+func sockRecvinto(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: recv_into() takes at least 1 argument (buffer)")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'recv_into' requires a 'socket' object")
+	}
+	bufsize := 4096
+	if len(args) >= 3 {
+		if n, ok2 := args[2].(*objects.Int); ok2 {
+			n64, _ := n.Int64()
+			bufsize = int(n64)
+		}
+	}
+	buf := make([]byte, bufsize)
+	s.mu.Lock()
+	n, err := readFd(s.fd, buf)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, osError(err)
+	}
+	return objects.NewInt(int64(n)), nil
+}
+
+// sockRecvInto implements socket.recv_into(buffer[, nbytes[, flags]]).
+// Reads directly into a writable buffer (bytearray or similar).
+//
+// CPython: Modules/socketmodule.c:3958 sock_recv_into_impl
+func sockRecvInto(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: recv_into() takes at least 1 argument (buffer)")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'recv_into' requires a 'socket' object")
+	}
+	// Get the writable buffer object.
+	bufObj := args[1]
+	var buf []byte
+	var n int
+	var err error
+	switch b := bufObj.(type) {
+	case *objects.ByteArray:
+		buf = b.Bytes()
+		if len(buf) == 0 {
+			return objects.NewInt(0), nil
+		}
+		s.mu.Lock()
+		n, err = readFd(s.fd, buf)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, osError(err)
+		}
+		// Write back into the bytearray.
+		raw := b.Bytes()
+		copy(raw, buf[:n])
+	case *objects.Bytes:
+		// bytes is immutable; fallback to a temp buffer.
+		buf = make([]byte, b.Len())
+		s.mu.Lock()
+		n, err = readFd(s.fd, buf)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, osError(err)
+		}
+	default:
+		// Generic writable buffer: use a temporary read buffer.
+		bufsize := 4096
+		if len(args) >= 3 {
+			if iv, ok2 := args[2].(*objects.Int); ok2 {
+				v, _ := iv.Int64()
+				bufsize = int(v)
+			}
+		}
+		buf = make([]byte, bufsize)
+		s.mu.Lock()
+		n, err = readFd(s.fd, buf)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, osError(err)
+		}
+	}
+	return objects.NewInt(int64(n)), nil
+}
+
+// sockConnectEx implements socket.connect_ex(address).
+// Returns the error number instead of raising an exception.
+//
+// CPython: Modules/socketmodule.c:3565 sock_connect_ex
+func sockConnectEx(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: connect_ex() takes 1 argument (address)")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'connect_ex' requires a 'socket' object")
+	}
+	sa, err := tupleToSockaddr(s.family, args[1])
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	err = syscall.Connect(s.fd, sa)
+	s.mu.Unlock()
+	if err != nil {
+		if errno, ok2 := err.(syscall.Errno); ok2 {
+			return objects.NewInt(int64(errno)), nil
+		}
+		return objects.NewInt(int64(syscall.ECONNREFUSED)), nil
+	}
+	return objects.NewInt(0), nil
+}
+
+// sockDup implements socket.dup(). Returns a new socket with a duplicated fd.
+//
+// CPython: Modules/socketmodule.c:3148 sock_dup
+func sockDup(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor 'dup' requires a 'socket' object")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'dup' requires a 'socket' object")
+	}
+	s.mu.Lock()
+	newfd, err := syscall.Dup(s.fd)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, osError(err)
+	}
+	ns := &sockObj{fd: newfd, family: s.family, typ: s.typ, proto: s.proto, timeout: s.timeout}
+	ns.Init(s.Type())
+	return ns, nil
+}
+
+// sockDetach implements socket.detach(). Returns the fd and marks the socket closed.
+//
+// CPython: Modules/socketmodule.c:3127 sock_detach
+func sockDetach(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor 'detach' requires a 'socket' object")
+	}
+	s, ok := args[0].(*sockObj)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'detach' requires a 'socket' object")
+	}
+	s.mu.Lock()
+	fd := s.fd
+	s.fd = invalidFd
+	s.mu.Unlock()
+	return objects.NewInt(int64(fd)), nil
+}
+
 // sockSendto implements socket.sendto(data, address) or
 // socket.sendto(data, flags, address).
 //
@@ -890,6 +1215,85 @@ func socketGethostbyname(args []objects.Object, _ map[string]objects.Object) (ob
 	return objects.NewStr(addrs[0]), nil
 }
 
+// socketGethostbyaddr implements _socket.gethostbyaddr(ip_address).
+// Returns (hostname, aliases, ipaddrs) tuple.
+//
+// CPython: Modules/socketmodule.c:6235 socket_gethostbyaddr
+func socketGethostbyaddr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: gethostbyaddr() takes exactly one argument")
+	}
+	ipStr, err := objects.Str(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: gethostbyaddr() argument must be str")
+	}
+	names, err := net.LookupAddr(ipStr)
+	if err != nil {
+		// fallback: try resolving as a hostname to get the canonical name
+		cname, err2 := net.LookupCNAME(ipStr)
+		if err2 != nil {
+			return nil, fmt.Errorf("socket.gaierror: [Errno 11001] getaddrinfo failed")
+		}
+		// strip trailing dot from CNAME
+		hostname := strings.TrimSuffix(cname, ".")
+		addrs, _ := net.LookupHost(ipStr)
+		ipList := make([]objects.Object, len(addrs))
+		for i, a := range addrs {
+			ipList[i] = objects.NewStr(a)
+		}
+		result := []objects.Object{
+			objects.NewStr(hostname),
+			objects.NewList([]objects.Object{}),
+			objects.NewList(ipList),
+		}
+		return objects.NewTuple(result), nil
+	}
+	hostname := strings.TrimSuffix(names[0], ".")
+	aliases := make([]objects.Object, 0, len(names)-1)
+	for _, n := range names[1:] {
+		aliases = append(aliases, objects.NewStr(strings.TrimSuffix(n, ".")))
+	}
+	result := []objects.Object{
+		objects.NewStr(hostname),
+		objects.NewList(aliases),
+		objects.NewList([]objects.Object{objects.NewStr(ipStr)}),
+	}
+	return objects.NewTuple(result), nil
+}
+
+// socketGethostbynameEx implements _socket.gethostbyname_ex(hostname).
+// Returns (hostname, aliases, ipaddrs) tuple.
+//
+// CPython: Modules/socketmodule.c:6008 setipaddr (shared by gethostbyname_ex/gethostbyaddr)
+func socketGethostbynameEx(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: gethostbyname_ex() takes exactly one argument")
+	}
+	host, err := objects.Str(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: gethostbyname_ex() argument must be str")
+	}
+	cname, err := net.LookupCNAME(host)
+	if err != nil {
+		return nil, fmt.Errorf("socket.gaierror: [Errno 11001] getaddrinfo failed")
+	}
+	hostname := strings.TrimSuffix(cname, ".")
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return nil, fmt.Errorf("socket.gaierror: [Errno 11001] getaddrinfo failed")
+	}
+	ipList := make([]objects.Object, len(addrs))
+	for i, a := range addrs {
+		ipList[i] = objects.NewStr(a)
+	}
+	result := []objects.Object{
+		objects.NewStr(hostname),
+		objects.NewList([]objects.Object{}),
+		objects.NewList(ipList),
+	}
+	return objects.NewTuple(result), nil
+}
+
 // socketGetaddrinfo implements _socket.getaddrinfo(host, port[, family, type, proto, flags]).
 //
 // CPython: Modules/socketmodule.c:6898 socket_getaddrinfo
@@ -1195,6 +1599,8 @@ func buildModule() (*objects.Module, error) {
 		{"socket", socketSocket},
 		{"gethostname", socketGethostname},
 		{"gethostbyname", socketGethostbyname},
+		{"gethostbyname_ex", socketGethostbynameEx},
+		{"gethostbyaddr", socketGethostbyaddr},
 		{"getaddrinfo", socketGetaddrinfo},
 		{"getservbyname", socketGetservbyname},
 		{"setdefaulttimeout", socketSetdefaulttimeout},
@@ -1216,6 +1622,22 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 
+	// CPython: Modules/socketmodule.c:7071 PySocketModule_InsertConstants
+	excTypes := []struct {
+		name string
+		t    *objects.Type
+	}{
+		{"error", socketErrorType},
+		{"gaierror", socketGAIError},
+		{"herror", socketHError},
+		{"timeout", socketTimeoutType},
+	}
+	for _, e := range excTypes {
+		if err := set(e.name, e.t); err != nil {
+			return nil, err
+		}
+	}
+
 	constants := []struct {
 		name string
 		val  int
@@ -1235,10 +1657,63 @@ func buildModule() (*objects.Module, error) {
 
 		{"IPPROTO_TCP", syscall.IPPROTO_TCP},
 		{"IPPROTO_UDP", syscall.IPPROTO_UDP},
+		{"IPPROTO_IP", syscall.IPPROTO_IP},
+
+		{"TCP_NODELAY", syscall.TCP_NODELAY},
 
 		{"SHUT_RD", syscall.SHUT_RD},
 		{"SHUT_WR", syscall.SHUT_WR},
 		{"SHUT_RDWR", syscall.SHUT_RDWR},
+
+		{"SO_ERROR", syscall.SO_ERROR},
+		{"SO_TYPE", syscall.SO_TYPE},
+		{"SO_SNDBUF", syscall.SO_SNDBUF},
+		{"SO_RCVBUF", syscall.SO_RCVBUF},
+		{"SO_BROADCAST", syscall.SO_BROADCAST},
+		{"SO_OOBINLINE", syscall.SO_OOBINLINE},
+		{"SO_LINGER", syscall.SO_LINGER},
+		{"SO_RCVLOWAT", syscall.SO_RCVLOWAT},
+		{"SO_SNDLOWAT", syscall.SO_SNDLOWAT},
+		{"SO_RCVTIMEO", syscall.SO_RCVTIMEO},
+		{"SO_SNDTIMEO", syscall.SO_SNDTIMEO},
+
+		{"IP_TOS", syscall.IP_TOS},
+		{"IP_TTL", syscall.IP_TTL},
+		{"IP_MULTICAST_IF", syscall.IP_MULTICAST_IF},
+		{"IP_MULTICAST_TTL", syscall.IP_MULTICAST_TTL},
+		{"IP_MULTICAST_LOOP", syscall.IP_MULTICAST_LOOP},
+		{"IP_ADD_MEMBERSHIP", syscall.IP_ADD_MEMBERSHIP},
+		{"IP_DROP_MEMBERSHIP", syscall.IP_DROP_MEMBERSHIP},
+
+		{"INADDR_ANY", inaddr_any},
+		{"INADDR_BROADCAST", inaddr_broadcast},
+		{"INADDR_LOOPBACK", inaddr_loopback},
+		{"INADDR_NONE", inaddr_none},
+
+		{"EAI_NONAME", eai_noname},
+		{"EAI_AGAIN", eai_again},
+		{"EAI_FAIL", eai_fail},
+		{"EAI_NODATA", eai_nodata},
+
+		{"AI_PASSIVE", ai_passive},
+		{"AI_CANONNAME", ai_canonname},
+		{"AI_NUMERICHOST", ai_numerichost},
+		{"AI_V4MAPPED", ai_v4mapped},
+		{"AI_ALL", ai_all},
+		{"AI_ADDRCONFIG", ai_addrconfig},
+		{"AI_NUMERICSERV", ai_numericserv},
+
+		{"NI_NOFQDN", ni_nofqdn},
+		{"NI_NUMERICHOST", ni_numerichost},
+		{"NI_NAMEREQD", ni_namereqd},
+		{"NI_NUMERICSERV", ni_numericserv},
+		{"NI_DGRAM", ni_dgram},
+
+		{"MSG_OOB", syscall.MSG_OOB},
+		{"MSG_PEEK", syscall.MSG_PEEK},
+		{"MSG_DONTROUTE", syscall.MSG_DONTROUTE},
+		{"MSG_WAITALL", msg_waitall},
+		{"MSG_DONTWAIT", msg_dontwait},
 	}
 	for _, c := range constants {
 		if err := set(c.name, objects.NewInt(int64(c.val))); err != nil {

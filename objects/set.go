@@ -146,6 +146,28 @@ func NewSet() *Set {
 	return s
 }
 
+// newSetFromIterable drains an arbitrary iterable into a fresh mutable set.
+// Used by issubset / issuperset when the argument is not already a set.
+//
+// CPython: Objects/setobject.c:2267 PySet_New (iterable case)
+func newSetFromIterable(o Object) (*Set, error) {
+	s := NewSet()
+	iter, err := Iter(o)
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: argument must be an iterable, not '%s'", typeNameOf(o))
+	}
+	for {
+		item, err := IterNext(iter)
+		if err != nil {
+			break
+		}
+		if err := s.add(item); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
 // NewFrozenset creates a frozenset from the given items.
 //
 // CPython: Objects/setobject.c:L2300 PyFrozenSet_New
@@ -966,7 +988,20 @@ func setIsSubsetMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: issubset() takes exactly one argument")
 	}
-	a, b := args[0].(*Set), args[1].(*Set)
+	a := args[0].(*Set)
+	// CPython: Objects/setobject.c:2087 set_issubset_impl — converts other to
+	// a temporary set when it is not already a set/frozenset.
+	var b *Set
+	switch v := args[1].(type) {
+	case *Set:
+		b = v
+	default:
+		tmp, err := newSetFromIterable(args[1])
+		if err != nil {
+			return nil, err
+		}
+		b = tmp
+	}
 	for _, e := range a.entries {
 		if !e.used {
 			continue
@@ -983,7 +1018,24 @@ func setIsSubsetMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func setIsSupersetMethod(args []Object, _ map[string]Object) (Object, error) {
-	return setIsSubsetMethod([]Object{args[1], args[0]}, nil)
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: issuperset() takes exactly one argument")
+	}
+	// CPython: Objects/setobject.c:2132 set_issuperset_impl — converts other
+	// to a temporary set when it is not already a set/frozenset.
+	a := args[0].(*Set)
+	var b *Set
+	switch v := args[1].(type) {
+	case *Set:
+		b = v
+	default:
+		tmp, err := newSetFromIterable(args[1])
+		if err != nil {
+			return nil, err
+		}
+		b = tmp
+	}
+	return setIsSubsetMethod([]Object{b, a}, nil)
 }
 
 // setIsDisjointMethod implements set.isdisjoint(other). CPython accepts any

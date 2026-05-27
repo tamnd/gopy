@@ -296,10 +296,10 @@ func signedFromKwarg(kwargs map[string]Object) (bool, error) {
 	return false, fmt.Errorf("TypeError: signed must be bool, not '%s'", typeNameOf(v))
 }
 
-// bytesLike extracts the underlying byte slice from a bytes/bytearray
-// object, mirroring CPython's PyObject_Bytes coercion path.
+// bytesLike extracts the underlying byte slice from a bytes/bytearray/iterable
+// object. CPython 3.14 int.from_bytes accepts any iterable of ints.
 //
-// CPython: Objects/longobject.c:6380 PyObject_Bytes
+// CPython: Objects/longobject.c:6380 int_from_bytes_impl
 func bytesLike(o Object) ([]byte, error) {
 	switch v := o.(type) {
 	case *Bytes:
@@ -307,7 +307,28 @@ func bytesLike(o Object) ([]byte, error) {
 	case *ByteArray:
 		return v.Bytes(), nil
 	}
-	return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))
+	// Fall back: try to iterate and collect int values 0-255.
+	iter, err := Iter(o)
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))
+	}
+	var out []byte
+	for {
+		item, err := IterNext(iter)
+		if err != nil {
+			break
+		}
+		iv, ok := item.(*Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: bytes must be in range(0, 256)")
+		}
+		n, ok2 := iv.Int64()
+		if !ok2 || n < 0 || n > 255 {
+			return nil, fmt.Errorf("ValueError: bytes must be in range(0, 256)")
+		}
+		out = append(out, byte(n))
+	}
+	return out, nil
 }
 
 // intToByteArray ports _PyLong_AsByteArray: pack v as `length` bytes in

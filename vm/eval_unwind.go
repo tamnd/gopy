@@ -74,6 +74,13 @@ var errorPrefixToType = map[string]*objects.Type{
 	"IndentationError:":        pyerrors.PyExc_IndentationError,
 }
 
+// RegisterErrorPrefix lets extension modules register their own typed
+// exception prefixes (e.g. "socket.gaierror:" -> socketGAIError). Must
+// be called before any VM is created (typically from package init()).
+func RegisterErrorPrefix(prefix string, typ *objects.Type) {
+	errorPrefixToType[prefix] = typ
+}
+
 // synthesizeException promotes an unmatched Go error into the closest
 // typed Python exception. When the message lacks a recognized prefix
 // the result falls back to a plain Exception, matching the previous

@@ -72,6 +72,13 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 		}
 		return descr, nil
 	}
+	// CPython: Objects/typeobject.c:7254 object_getsets — every object
+	// exposes __doc__; when not registered as a descriptor it defaults
+	// to None (the type's tp_doc, or the instance-dict entry written by
+	// `self.__doc__ = ...`).
+	if attrNameStr(name) == "__doc__" {
+		return None(), nil
+	}
 	if AttributeErrorFactory != nil {
 		return nil, AttributeErrorFactory(o, attrNameStr(name))
 	}

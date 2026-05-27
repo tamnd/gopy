@@ -93,6 +93,7 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
 	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, nil))
+
 }
 
 // excessArgs reports whether args / kwargs carry any non-self payload.

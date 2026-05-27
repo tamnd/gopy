@@ -51,6 +51,147 @@ func setupIOBaseType() {
 	IOBaseType.Iter = iobaseIter
 	IOBaseType.IterNext = iobaseIternext
 	objects.AddIterSlotWrappers(IOBaseType)
+	// Register `closed` as a GetSetDescr so user subclasses (e.g. SocketIO)
+	// that go through instanceGetAttr → GenericGetAttr can find it.
+	//
+	// CPython: Modules/_io/iobase.c:860 iobase_getset (PyGetSetDef "closed")
+	objects.SetTypeDescr(IOBaseType, "closed", objects.NewGetSetDescr(
+		"closed",
+		func(o objects.Object) (objects.Object, error) {
+			return objects.NewBool(iobaseIsClosedAny(o)), nil
+		},
+		nil,
+	))
+	// Register all IOBase methods as MethodDescr so they are visible at
+	// the class level (e.g. RawIOBase.close(self)) and inherited by
+	// Python user subclasses via the descriptor table.
+	//
+	// CPython: Modules/_io/iobase.c:831 iobase_methods
+	installIOBaseMethods(IOBaseType)
+}
+
+// installIOBaseMethods registers IOBase methods on a type so they are
+// accessible both as instance methods and at the class level (unbound).
+func installIOBaseMethods(t *objects.Type) {
+	reg := func(name string, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+		objects.SetTypeDescr(t, name, objects.NewMethodDescr(t, name, fn))
+	}
+	reg("seek", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, iobaseUnsupported("seek")
+	})
+	reg("tell", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: tell() needs self")
+		}
+		seekFn, err := objects.GetAttr(args[0], objects.NewStr("seek"))
+		if err != nil {
+			return nil, err
+		}
+		return objects.Call(seekFn, objects.NewTuple([]objects.Object{objects.NewInt(0), objects.NewInt(1)}), nil)
+	})
+	reg("truncate", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, iobaseUnsupported("truncate")
+	})
+	reg("flush", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: flush() needs self")
+		}
+		if iobaseIsClosedAny(args[0]) {
+			return nil, fmt.Errorf("ValueError: I/O operation on closed file")
+		}
+		return objects.None(), nil
+	})
+	reg("close", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: close() needs self")
+		}
+		return iobaseCloseObj(args[0])
+	})
+	reg("seekable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.False(), nil
+	})
+	reg("readable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.False(), nil
+	})
+	reg("writable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.False(), nil
+	})
+	reg("fileno", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, iobaseUnsupported("fileno")
+	})
+	reg("isatty", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: isatty() needs self")
+		}
+		if err := iobaseCheckClosed(args[0]); err != nil {
+			return nil, err
+		}
+		return objects.False(), nil
+	})
+	reg("__enter__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __enter__() needs self")
+		}
+		if err := iobaseCheckClosed(args[0]); err != nil {
+			return nil, err
+		}
+		return args[0], nil
+	})
+	reg("__exit__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __exit__() needs self")
+		}
+		closeFn, err := objects.GetAttr(args[0], objects.NewStr("close"))
+		if err != nil {
+			return nil, err
+		}
+		return objects.Call(closeFn, objects.NewTuple(nil), nil)
+	})
+	reg("readline", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: readline() needs self")
+		}
+		return iobaseReadlineObj(args[0], args[1:])
+	})
+	reg("readlines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: readlines() needs self")
+		}
+		return iobaseReadlinesObj(args[0], args[1:])
+	})
+	reg("writelines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: writelines() needs self")
+		}
+		return iobaseWritelinesObj(args[0], args[1:])
+	})
+	reg("_checkClosed", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: _checkClosed() needs self")
+		}
+		if err := iobaseCheckClosed(args[0]); err != nil {
+			return nil, err
+		}
+		return objects.None(), nil
+	})
+	reg("_checkSeekable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: _checkSeekable() needs self")
+		}
+		return iobaseCheckCapability(args[0], "seekable", "File or stream is not seekable.")
+	})
+	reg("_checkReadable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: _checkReadable() needs self")
+		}
+		return iobaseCheckCapability(args[0], "readable", "File or stream is not readable.")
+	})
+	reg("_checkWritable", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: _checkWritable() needs self")
+		}
+		return iobaseCheckCapability(args[0], "writable", "File or stream is not writable.")
+	})
 }
 
 func setupRawIOBaseType() {
@@ -60,6 +201,31 @@ func setupRawIOBaseType() {
 	RawIOBaseType.Iter = iobaseIter
 	RawIOBaseType.IterNext = iobaseIternext
 	objects.AddIterSlotWrappers(RawIOBaseType)
+	// Register _RawIOBase methods as MethodDescr so Python user subclasses
+	// (e.g. SocketIO) inherit them via LookupDescriptor.
+	//
+	// CPython: Modules/_io/iobase.c:1035 rawiobase_methods
+	reg := func(name string, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+		objects.SetTypeDescr(RawIOBaseType, name, objects.NewMethodDescr(RawIOBaseType, name, fn))
+	}
+	reg("read", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: read() needs self")
+		}
+		return rawiobaseReadObj(args[0], args[1:])
+	})
+	reg("readall", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: readall() needs self")
+		}
+		return rawiobaseReadallObj(args[0])
+	})
+	reg("readinto", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, fmt.Errorf("NotImplementedError: readinto")
+	})
+	reg("write", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, fmt.Errorf("NotImplementedError: write")
+	})
 }
 
 // IOBase is the runtime object for _io._IOBase instances.
@@ -109,6 +275,7 @@ func iobaseUnsupported(op string) error {
 }
 
 // iobaseIsClosed checks whether the internal __IOBase_closed sentinel is set.
+// Only works for concrete IOBase/RawIOBase Go objects.
 //
 // CPython: Modules/_io/iobase.c:81 iobase_is_closed
 func iobaseIsClosed(o objects.Object) bool {
@@ -123,19 +290,24 @@ func iobaseIsClosed(o objects.Object) bool {
 	return objects.IsTrue(v)
 }
 
+// iobaseIsClosedAny checks the closed sentinel on any object type, including
+// Python user subclasses (*Instance) that store the sentinel in inst.dict.
+//
+// CPython: Modules/_io/iobase.c:81 iobase_is_closed
+func iobaseIsClosedAny(o objects.Object) bool {
+	key := objects.NewStr(closedKey)
+	if v, err := objects.GenericGetAttr(o, key); err == nil {
+		return objects.IsTrue(v)
+	}
+	// Fallback for C-level IOBase objects.
+	return iobaseIsClosed(o)
+}
+
 // iobaseCheckClosed returns an error if the stream is closed.
 //
 // CPython: Modules/_io/iobase.c:196 iobase_check_closed
 func iobaseCheckClosed(o objects.Object) error {
-	// Prefer the derived `closed` attribute, mirroring CPython which calls
-	// PyObject_GetOptionalAttr(self, "closed") rather than the internal flag.
-	if attr, err := objects.GetAttr(o, objects.NewStr("closed")); err == nil && attr != nil {
-		if objects.IsTrue(attr) {
-			return fmt.Errorf("ValueError: I/O operation on closed file")
-		}
-		return nil
-	}
-	if iobaseIsClosed(o) {
+	if iobaseIsClosedAny(o) {
 		return fmt.Errorf("ValueError: I/O operation on closed file")
 	}
 	return nil
@@ -403,15 +575,21 @@ func rawiobaseMethod(self *RawIOBase, name string) objects.Object {
 //
 // CPython: Modules/_io/iobase.c:268 _io__IOBase_close_impl
 func iobaseCloseObj(self objects.Object) (objects.Object, error) {
-	if iobaseIsClosed(self) {
+	if iobaseIsClosedAny(self) {
 		return objects.None(), nil
 	}
 	var flushErr error
 	if flushFn, err := objects.GetAttr(self, objects.NewStr("flush")); err == nil {
 		_, flushErr = objects.Call(flushFn, objects.NewTuple(nil), nil)
 	}
+	// Set the sentinel. For C-level IOBase objects use the internal dict;
+	// for Python user subclasses (*Instance) use GenericSetAttr so the
+	// sentinel lands in inst.dict.
+	key := objects.NewStr(closedKey)
 	if d := iobaseGetDict(self); d != nil {
-		_ = d.SetItem(objects.NewStr(closedKey), objects.True())
+		_ = d.SetItem(key, objects.True())
+	} else {
+		_ = objects.GenericSetAttr(self, key, objects.True())
 	}
 	if flushErr != nil {
 		return nil, flushErr
@@ -614,8 +792,7 @@ func rawiobaseReadObj(self objects.Object, args []objects.Object) (objects.Objec
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, n)
-	bobj := objects.NewByteArray(buf)
+	bobj := objects.NewByteArray(make([]byte, n))
 	res, err := objects.Call(readintoFn, objects.NewTuple([]objects.Object{bobj}), nil)
 	if err != nil || objects.IsNone(res) {
 		return res, err
@@ -628,7 +805,7 @@ func rawiobaseReadObj(self objects.Object, args []objects.Object) (objects.Objec
 	if count < 0 || int(count) > n {
 		return nil, fmt.Errorf("ValueError: readinto returned %d outside buffer size %d", count, n)
 	}
-	return objects.NewBytes(buf[:count]), nil
+	return objects.NewBytes(bobj.Bytes()[:count]), nil
 }
 
 // rawiobaseReadallObj reads until EOF using successive read() calls.

@@ -65,44 +65,73 @@ func memberDescrRepr(o Object) (string, error) {
 // like other descriptors. Reading an unset slot raises AttributeError
 // because Py_T_OBJECT_EX forbids the implicit None translation.
 //
+// For non-Instance objects that implement AttrDictHolder (C-extension
+// type subclasses), the slot value is stored by name in the attrs dict.
+//
 // CPython: Objects/descrobject.c:171 member_get
 func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	d := descr.(*MemberDescr)
 	if owner == nil {
 		return descr, nil
 	}
-	inst, ok := owner.(*Instance)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
-			d.name, "instance", typeNameOf(owner))
+	if inst, ok := owner.(*Instance); ok {
+		if d.index < 0 || d.index >= len(inst.slots) {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
+				inst.Type().Name, d.name)
+		}
+		v := inst.slots[d.index]
+		if v == nil {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
+				inst.Type().Name, d.name)
+		}
+		return v, nil
 	}
-	if d.index < 0 || d.index >= len(inst.slots) {
+	// C-extension subclass: fall back to per-instance attrs dict.
+	if h, ok := owner.(AttrDictHolder); ok {
+		ad := h.AttrDict()
+		if ad != nil {
+			key := NewStr(d.name)
+			if v, err := ad.GetItem(key); err == nil {
+				return v, nil
+			}
+		}
 		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
-			inst.Type().Name, d.name)
+			owner.Type().Name, d.name)
 	}
-	v := inst.slots[d.index]
-	if v == nil {
-		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
-			inst.Type().Name, d.name)
-	}
-	return v, nil
+	return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
+		d.name, "instance", typeNameOf(owner))
 }
 
 // memberDescrSet writes the slot. value==nil deletes (clears) it,
 // after which a subsequent read raises AttributeError again.
 //
+// For non-Instance objects that implement AttrDictHolder (C-extension
+// type subclasses), the slot value is stored by name in the attrs dict.
+//
 // CPython: Objects/descrobject.c:198 member_set
 func memberDescrSet(descr Object, owner Object, value Object) error {
 	d := descr.(*MemberDescr)
-	inst, ok := owner.(*Instance)
-	if !ok {
-		return fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
-			d.name, "instance", typeNameOf(owner))
+	if inst, ok := owner.(*Instance); ok {
+		if d.index < 0 || d.index >= len(inst.slots) {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
+				inst.Type().Name, d.name)
+		}
+		inst.slots[d.index] = value
+		return nil
 	}
-	if d.index < 0 || d.index >= len(inst.slots) {
-		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
-			inst.Type().Name, d.name)
+	// C-extension subclass: fall back to per-instance attrs dict.
+	if h, ok := owner.(AttrDictHolder); ok {
+		key := NewStr(d.name)
+		if value == nil {
+			ad := h.AttrDict()
+			if ad == nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
+					owner.Type().Name, d.name)
+			}
+			return ad.DelItem(key)
+		}
+		return h.EnsureAttrDict().SetItem(key, value)
 	}
-	inst.slots[d.index] = value
-	return nil
+	return fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
+		d.name, "instance", typeNameOf(owner))
 }

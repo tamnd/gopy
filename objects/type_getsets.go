@@ -25,6 +25,8 @@ func init() {
 	register("__parameters__", typeGetParameters, typeSetParameters)
 	// CPython: Objects/typeobject.c:5915 type___subclasses___impl
 	SetTypeDescr(typeType, "__subclasses__", NewMethodDescr(typeType, "__subclasses__", typeSubclassesMeth))
+	// CPython: Objects/typeobject.c:1254 type_mro — returns __mro__ as a list.
+	SetTypeDescr(typeType, "mro", NewMethodDescr(typeType, "mro", typeMroMeth))
 }
 
 // typeSubclassesMeth implements type.__subclasses__() -> list.
@@ -42,6 +44,25 @@ func typeSubclassesMeth(args []Object, _ map[string]Object) (Object, error) {
 	items := make([]Object, len(subs))
 	for i, s := range subs {
 		items[i] = s
+	}
+	return NewList(items), nil
+}
+
+// typeMroMeth implements type.mro() -> list. Returns the same content as
+// __mro__ but as a Python list rather than a tuple.
+//
+// CPython: Objects/typeobject.c:1254 type_mro
+func typeMroMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor 'mro' of 'type' object needs an argument")
+	}
+	t, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'mro' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	items := make([]Object, len(t.MRO))
+	for i, b := range t.MRO {
+		items[i] = b
 	}
 	return NewList(items), nil
 }

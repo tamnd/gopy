@@ -104,7 +104,14 @@ func inheritSlotsAllMRO(t *Type) {
 // CPython: Objects/typeobject.c:8227 inherit_slots (COPYNUM /
 // COPYASYNC / COPYSEQ / COPYMAP blocks)
 func inheritBundleSlotsFromAncestor(t, base *Type) {
-	if t.Number != nil && base.Number != nil {
+	// CPython: Objects/typeobject.c:8227 COPYNUM — individual slots are
+	// copied even if tp_as_number was NULL on the child; we lazily
+	// allocate the bundle so a class that inherits __int__ (etc.) from a
+	// grandparent across a mixed MRO picks up the slot.
+	if base.Number != nil {
+		if t.Number == nil {
+			t.Number = &NumberMethods{}
+		}
 		copyNumberSlots(t.Number, base.Number)
 	}
 	if t.Async != nil && base.Async != nil {
