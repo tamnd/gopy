@@ -8,7 +8,6 @@ package codecs
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -59,12 +58,50 @@ type CodecInfo struct {
 		getState func() (pending []rune, cBytes [8]byte),
 		setState func(pending []rune, cBytes [8]byte) error,
 	)
+	// IsTextEncoding reports whether this codec is a text encoding (can be
+	// used with bytes.decode() / str.encode()). Binary transform codecs
+	// (base64, zlib, hex) and text-transform codecs (rot-13) set this false.
+	// Built-in codecs (utf-8, ascii, latin-1, etc.) default to true.
+	//
+	// CPython: Lib/encodings/__init__.py CodecInfo._is_text_encoding
+	IsTextEncoding bool
 }
 
 // searchEntry pairs a search function with a unique registration handle.
 type searchEntry struct {
 	id uint64
 	fn SearchFunc
+}
+
+// nonTextEncodings holds the normalized names of codecs where
+// _is_text_encoding is False (binary/text transforms). bytes.decode()
+// and str.encode() reject these with LookupError.
+//
+// CPython: Lib/encodings/__init__.py CodecInfo._is_text_encoding
+var (
+	nonTextMu       sync.RWMutex
+	nonTextEncodings = map[string]bool{}
+)
+
+// MarkNonTextEncoding records name as a non-text encoding so that
+// bytes.decode() can reject it with an appropriate LookupError.
+func MarkNonTextEncoding(name string) {
+	n := NormalizeName(name)
+	nonTextMu.Lock()
+	nonTextEncodings[n] = true
+	nonTextMu.Unlock()
+}
+
+// IsTextEncoding returns false if the codec is a known non-text encoding
+// (binary transform or str→str transform). Returns true for all other codecs.
+//
+// CPython: Objects/bytesobject.c:1554 bytes_decode_impl (_is_text_encoding check)
+func IsTextEncoding(name string) bool {
+	n := NormalizeName(name)
+	nonTextMu.RLock()
+	v := nonTextEncodings[n]
+	nonTextMu.RUnlock()
+	return !v
 }
 
 var (
@@ -139,12 +176,31 @@ func Lookup(encoding string) (*CodecInfo, error) {
 }
 
 // NormalizeName converts an encoding name to the canonical lowercase
-// form with hyphens and spaces replaced by underscores.
+// form. Consecutive runs of non-alphanumeric characters are collapsed
+// into a single underscore; leading/trailing underscores are kept.
 //
-// CPython: Python/codecs.c:L72 normalizestring
+// CPython: Lib/encodings/__init__.py:normalize_encoding
 func NormalizeName(name string) string {
-	s := strings.ToLower(name)
-	s = strings.ReplaceAll(s, "-", "_")
-	s = strings.ReplaceAll(s, " ", "_")
-	return s
+	var buf []byte
+	punct := false
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if isAlnum(c) || c == '.' {
+			if punct && len(buf) > 0 {
+				buf = append(buf, '_')
+			}
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			buf = append(buf, c)
+			punct = false
+		} else {
+			punct = true
+		}
+	}
+	return string(buf)
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
