@@ -1697,7 +1697,10 @@ def skip_if_unlimited_stack_size(test):
     if is_emscripten or is_wasi or os.name == "nt":
         return test
 
-    import resource
+    try:
+        import resource
+    except ImportError:
+        return test
     curlim, maxlim = resource.getrlimit(resource.RLIMIT_STACK)
     unlimited_stack_size_cond = curlim == maxlim and curlim in (-1, 0xFFFF_FFFF_FFFF_FFFF)
     reason = "Not run due to unlimited stack size"
