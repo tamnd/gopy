@@ -92,18 +92,21 @@ var utf8Codec = &CodecInfo{
 	Encode:            encodeUTF8,
 	Decode:            decodeUTF8,
 	IncrementalDecode: decodeUTF8Incremental,
+	IsTextEncoding:    true,
 }
 
 var asciiCodec = &CodecInfo{
-	Name:   "ascii",
-	Encode: encodeASCII,
-	Decode: decodeASCII,
+	Name:           "ascii",
+	Encode:         encodeASCII,
+	Decode:         decodeASCII,
+	IsTextEncoding: true,
 }
 
 var latin1Codec = &CodecInfo{
-	Name:   "iso-8859-1",
-	Encode: encodeLatin1,
-	Decode: decodeLatin1,
+	Name:           "iso8859-1",
+	Encode:         encodeLatin1,
+	Decode:         decodeLatin1,
+	IsTextEncoding: true,
 }
 
 // encodeUTF8 encodes a string to UTF-8 bytes. All Go strings are
@@ -113,7 +116,7 @@ var latin1Codec = &CodecInfo{
 func encodeUTF8(input, errors string) (out []byte, n int, err error) {
 	var b strings.Builder
 	i := 0
-	runes := []rune(input)
+	runes := lenientRunes([]byte(input))
 	for i < len(runes) {
 		r := runes[i]
 		if utf8.ValidRune(r) {
@@ -125,12 +128,16 @@ func encodeUTF8(input, errors string) (out []byte, n int, err error) {
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, newpos, herr := handler("utf-8", "surrogates not allowed", []byte(string(r)), i, i+1)
+		rep, newpos, herr := handler("utf-8", "encode:surrogates not allowed", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
 		b.WriteString(rep)
-		i = newpos
+		if newpos > i {
+			i = newpos
+		} else {
+			i++
+		}
 	}
 	result := []byte(b.String())
 	return result, len(result), nil
@@ -170,6 +177,13 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 // rather than calling the error handler.
 //
 // CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
+// DecodeUTF8Incremental is the exported entry point for module/_codecs.
+//
+// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
+func DecodeUTF8Incremental(input []byte, errors string, final bool) (string, []byte, error) {
+	return decodeUTF8Incremental(input, errors, final)
+}
+
 func decodeUTF8Incremental(input []byte, errors string, final bool) (string, []byte, error) {
 	if final {
 		out, _, err := decodeUTF8(input, errors)
@@ -227,21 +241,32 @@ func utf8IncompleteTrail(b []byte) int {
 //
 // CPython: Objects/unicodeobject.c:L6420 PyUnicode_EncodeASCII
 func encodeASCII(input, errors string) (out []byte, n int, err error) {
+	runes := lenientRunes([]byte(input))
 	var result []byte
-	for i, r := range input {
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
 		if r < 0x80 {
 			result = append(result, byte(r))
+			i++
 			continue
 		}
 		handler, herr := LookupError(errors)
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("ascii", "ordinal not in range(128)", []byte(input), i, i+1)
+		// Pass UTF-8 bytes of the input string with rune positions so the
+		// error handler can resolve the original Unicode codepoint.
+		rep, newpos, herr := handler("ascii", "encode:ordinal not in range(128)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
 		result = append(result, []byte(rep)...)
+		if newpos > i {
+			i = newpos
+		} else {
+			i++
+		}
 	}
 	return result, len(result), nil
 }
@@ -280,21 +305,30 @@ func decodeASCII(input []byte, errors string) (out string, n int, err error) {
 //
 // CPython: Objects/unicodeobject.c:L6547 PyUnicode_AsLatin1String
 func encodeLatin1(input, errors string) (out []byte, n int, err error) {
+	runes := lenientRunes([]byte(input))
 	var result []byte
-	for i, r := range input {
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
 		if r <= 0xFF {
 			result = append(result, byte(r))
+			i++
 			continue
 		}
 		handler, herr := LookupError(errors)
 		if herr != nil {
 			return nil, i, herr
 		}
-		rep, _, herr := handler("iso-8859-1", "ordinal not in range(256)", []byte(input), i, i+1)
+		rep, newpos, herr := handler("iso8859-1", "encode:ordinal not in range(256)", []byte(input), i, i+1)
 		if herr != nil {
 			return nil, i, herr
 		}
 		result = append(result, []byte(rep)...)
+		if newpos > i {
+			i = newpos
+		} else {
+			i++
+		}
 	}
 	return result, len(result), nil
 }

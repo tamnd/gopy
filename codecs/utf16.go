@@ -15,9 +15,22 @@ import (
 )
 
 var (
-	utf16Codec   = &CodecInfo{Name: "utf-16", Encode: encodeUTF16BOM, Decode: decodeUTF16BOM}
-	utf16LECodec = &CodecInfo{Name: "utf-16-le", Encode: encodeUTF16LE, Decode: decodeUTF16LE}
-	utf16BECodec = &CodecInfo{Name: "utf-16-be", Encode: encodeUTF16BE, Decode: decodeUTF16BE}
+	utf16Codec = &CodecInfo{
+		Name: "utf-16", Encode: encodeUTF16BOM, Decode: decodeUTF16BOM,
+		NewIncrementalDecoder: newUTF16BOMIncrementalDecoder,
+		NewIncrementalEncoder: newUTF16BOMIncrementalEncoder,
+		IsTextEncoding:        true,
+	}
+	utf16LECodec = &CodecInfo{
+		Name: "utf-16-le", Encode: encodeUTF16LE, Decode: decodeUTF16LE,
+		IncrementalDecode: utf16LEIncrementalDecode,
+		IsTextEncoding:    true,
+	}
+	utf16BECodec = &CodecInfo{
+		Name: "utf-16-be", Encode: encodeUTF16BE, Decode: decodeUTF16BE,
+		IncrementalDecode: utf16BEIncrementalDecode,
+		IsTextEncoding:    true,
+	}
 )
 
 // encodeUTF16BOM prefixes the body with U+FEFF as a BOM. Body bytes
@@ -27,14 +40,14 @@ var (
 //
 // CPython: Modules/_codecs/utf_16.c _PyUnicode_EncodeUTF16 (byteorder == 0)
 func encodeUTF16BOM(input, errors string) ([]byte, int, error) {
-	body, _, err := encodeUTF16Body(input, errors, binary.LittleEndian)
+	body, n, err := encodeUTF16Body(input, errors, binary.LittleEndian)
 	if err != nil {
 		return nil, 0, err
 	}
 	out := make([]byte, 0, len(body)+2)
 	out = append(out, 0xFF, 0xFE)
 	out = append(out, body...)
-	return out, len(out), nil
+	return out, n, nil
 }
 
 // encodeUTF16LE / encodeUTF16BE emit raw code units without a BOM.
@@ -74,7 +87,22 @@ func encodeUTF16Body(input, errors string, bo binary.ByteOrder) ([]byte, int, er
 	for i, u := range units {
 		bo.PutUint16(buf[2*i:], u)
 	}
-	return buf, len(buf), nil
+	return buf, len(runes), nil
+}
+
+// newUTF16BOMIncrementalEncoder creates a stateful encoder that emits the
+// LE BOM on the first encode() call and switches to BOM-less LE for the rest.
+//
+// CPython: Lib/encodings/utf_16.py StreamWriter.encode (self.encode reassignment trick)
+func newUTF16BOMIncrementalEncoder() func(string, string, bool) ([]byte, int, error) {
+	first := true
+	return func(input, errors string, final bool) ([]byte, int, error) {
+		if first {
+			first = false
+			return encodeUTF16BOM(input, errors)
+		}
+		return encodeUTF16LE(input, errors)
+	}
 }
 
 // decodeUTF16BOM strips a BOM if present and dispatches to LE or BE.
@@ -99,6 +127,96 @@ func decodeUTF16LE(input []byte, errors string) (string, int, error) {
 
 func decodeUTF16BE(input []byte, errors string) (string, int, error) {
 	return decodeUTF16Body(input, errors, binary.BigEndian)
+}
+
+// utf16LEIncrementalDecode buffers incomplete 2-byte code units and
+// holds back an isolated high surrogate waiting for its low partner.
+//
+// CPython: Modules/_codecs/utf_16.c _PyUnicode_DecodeUTF16Stateful (stateful path)
+func utf16LEIncrementalDecode(data []byte, errors string, final bool) (string, []byte, error) {
+	return utf16IncrementalDecodeBody(data, errors, final, binary.LittleEndian, "utf-16-le")
+}
+
+func utf16BEIncrementalDecode(data []byte, errors string, final bool) (string, []byte, error) {
+	return utf16IncrementalDecodeBody(data, errors, final, binary.BigEndian, "utf-16-be")
+}
+
+func utf16IncrementalDecodeBody(data []byte, errors string, final bool, bo binary.ByteOrder, name string) (string, []byte, error) {
+	n := len(data)
+	consumable := (n / 2) * 2
+	if consumable == 0 {
+		if final && n > 0 {
+			_, herr := LookupError(errors)
+			if herr != nil {
+				return "", nil, herr
+			}
+			return "", nil, &UnicodeDecodeErr{Encoding: name, Object: data, Start: 0, End: n, Reason: "truncated data"}
+		}
+		return "", data, nil
+	}
+	// If last complete unit is a high surrogate and more data may follow, hold it.
+	if !final {
+		lastUnit := bo.Uint16(data[consumable-2:])
+		if lastUnit >= 0xD800 && lastUnit < 0xDC00 {
+			consumable -= 2
+			if consumable == 0 {
+				return "", data, nil
+			}
+		}
+	}
+	units := make([]uint16, consumable/2)
+	for i := range units {
+		units[i] = bo.Uint16(data[i*2:])
+	}
+	out := string(utf16.Decode(units))
+	if final && consumable < n {
+		// Trailing truncated byte(s)
+		h, herr := LookupError(errors)
+		if herr != nil {
+			return "", nil, herr
+		}
+		rep, _, herr := h(name, "truncated data", data, consumable, n)
+		if herr != nil {
+			return "", nil, &UnicodeDecodeErr{Encoding: name, Object: data, Start: consumable, End: n, Reason: "truncated data"}
+		}
+		out += rep
+		return out, nil, nil
+	}
+	return out, data[consumable:], nil
+}
+
+// newUTF16BOMIncrementalDecoder creates a stateful incremental decoder for
+// bare utf-16 that detects the BOM once and then uses the fixed-endian path.
+//
+// CPython: Lib/encodings/utf_16.py IncrementalDecoder
+func newUTF16BOMIncrementalDecoder() func([]byte, string, bool) (string, []byte, error) {
+	var bo binary.ByteOrder
+	var bomConsumed bool
+	return func(data []byte, errors string, final bool) (string, []byte, error) {
+		if !bomConsumed {
+			// Accumulate until we have at least 2 bytes to detect BOM
+			if len(data) < 2 {
+				if final {
+					if len(data) == 0 {
+						return "", nil, nil
+					}
+					return "", nil, &UnicodeDecodeErr{Encoding: "utf-16", Object: data, Start: 0, End: len(data), Reason: "truncated data"}
+				}
+				return "", data, nil
+			}
+			if data[0] == 0xFF && data[1] == 0xFE {
+				bo = binary.LittleEndian
+				data = data[2:]
+			} else if data[0] == 0xFE && data[1] == 0xFF {
+				bo = binary.BigEndian
+				data = data[2:]
+			} else {
+				bo = binary.LittleEndian
+			}
+			bomConsumed = true
+		}
+		return utf16IncrementalDecodeBody(data, errors, final, bo, "utf-16")
+	}
 }
 
 // decodeUTF16Body reads code units and decodes surrogate pairs. A

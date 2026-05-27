@@ -33,7 +33,9 @@ var rawUnicodeEscapeCodec = &CodecInfo{
 // CPython: Objects/unicodeobject.c:7188 PyUnicode_AsRawUnicodeEscapeString
 func encodeRawUnicodeEscape(input, _ string) ([]byte, int, error) {
 	var out []byte
+	nChars := 0
 	for _, r := range input {
+		nChars++
 		switch {
 		case r < 0x100:
 			out = append(out, byte(r))
@@ -43,7 +45,7 @@ func encodeRawUnicodeEscape(input, _ string) ([]byte, int, error) {
 			out = append(out, []byte(fmt.Sprintf("\\U%08x", r))...)
 		}
 	}
-	return out, len(input), nil
+	return out, nChars, nil
 }
 
 // decodeRawUnicodeEscape mirrors _PyUnicode_DecodeRawUnicodeEscapeStateful.
@@ -64,11 +66,14 @@ func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) {
 		}
 		next := input[i+1]
 		var count int
+		var truncMsg string
 		switch next {
 		case 'u':
 			count = 4
+			truncMsg = "truncated \\uXXXX escape"
 		case 'U':
 			count = 8
+			truncMsg = "truncated \\UXXXXXXXX escape"
 		default:
 			// Non-uU backslash escape: keep the backslash and the
 			// next byte verbatim (each as its raw byte codepoint).
@@ -76,18 +81,17 @@ func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) {
 			i++
 			continue
 		}
-		if i+2+count > len(input) {
-			rep, newpos, herr := handleRawUnicodeEscapeError(input, i, len(input), "truncated escape", errors)
-			if herr != nil {
-				return "", 0, herr
-			}
-			b.WriteString(rep)
-			i = newpos
-			continue
-		}
+		// Scan up to `count` hex digits, stopping early on non-hex or end of input.
+		// CPython scans character-by-character: non-hex char → "bad hex digit" error
+		// ending at that position; input too short → "truncated" ending at EOF.
 		var ch rune
-		ok := true
-		for j := 0; j < count; j++ {
+		badAt := -1
+		available := len(input) - (i + 2)
+		scan := count
+		if available < scan {
+			scan = available
+		}
+		for j := 0; j < scan; j++ {
 			hx := input[i+2+j]
 			var d rune
 			switch {
@@ -98,14 +102,34 @@ func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) {
 			case hx >= 'A' && hx <= 'F':
 				d = rune(hx-'A') + 10
 			default:
-				ok = false
+				badAt = j
 			}
-			if !ok {
+			if badAt >= 0 {
 				break
 			}
 			ch = (ch << 4) | d
 		}
-		if !ok || ch > 0x10FFFF {
+		if badAt >= 0 {
+			// Non-hex character at position i+2+badAt.
+			rep, newpos, herr := handleRawUnicodeEscapeError(input, i, i+2+badAt, truncMsg, errors)
+			if herr != nil {
+				return "", 0, herr
+			}
+			b.WriteString(rep)
+			i = newpos
+			continue
+		}
+		if available < count {
+			// Input ran out before we got `count` hex digits.
+			rep, newpos, herr := handleRawUnicodeEscapeError(input, i, len(input), truncMsg, errors)
+			if herr != nil {
+				return "", 0, herr
+			}
+			b.WriteString(rep)
+			i = newpos
+			continue
+		}
+		if ch > 0x10FFFF {
 			rep, newpos, herr := handleRawUnicodeEscapeError(input, i, i+2+count, "illegal Unicode character", errors)
 			if herr != nil {
 				return "", 0, herr
@@ -117,8 +141,7 @@ func decodeRawUnicodeEscape(input []byte, errors string) (string, int, error) {
 		b.WriteRune(ch)
 		i += 2 + count
 	}
-	s := b.String()
-	return s, len(s), nil
+	return b.String(), len(input), nil
 }
 
 // handleRawUnicodeEscapeError routes a malformed escape through the
