@@ -47,6 +47,7 @@ func TestParityDict(t *testing.T) {
 		t.Fatalf("SetItem: %v", err)
 	}
 	Track(d)
+	objects.Decref(d) // simulate del d: drop the local variable reference
 
 	if got := Collect(2); got != 1 {
 		t.Fatalf("Collect() = %d, want 1 (dict self-cycle)", got)

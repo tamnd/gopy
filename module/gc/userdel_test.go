@@ -63,6 +63,8 @@ func TestUserDelFiresDuringCycleCollect(t *testing.T) {
 	_ = b.Dict().SetItem(objects.NewStr("ref"), a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a
+	objects.Decref(b) // simulate del b
 
 	if got := Collect(2); got != 2 {
 		t.Fatalf("Collect = %d, want 2", got)
@@ -90,6 +92,7 @@ func TestUserDelResurrectionSurvivesCycleCollect(t *testing.T) {
 	a := objects.NewInstance(C)
 	_ = a.Dict().SetItem(objects.NewStr("self"), a)
 	Track(a)
+	objects.Decref(a) // simulate del a
 
 	if got := Collect(2); got != 0 {
 		t.Fatalf("Collect = %d, want 0 (resurrection)", got)
