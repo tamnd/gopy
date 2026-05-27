@@ -463,6 +463,36 @@ func lookupImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (
 	return objects.NewStr(string(code)), nil
 }
 
+// Lookup is the pure-Go entry point that the parser's \N{NAME} escape
+// decoder uses. It mirrors unicodedata.lookup(): aliases resolve to
+// their target code point, named sequences expand to a multi-rune
+// string. ok is false when the name is unknown so callers can format
+// the SyntaxError text themselves.
+//
+// CPython: Modules/unicodedata.c:1584 unicodedata_UCD_lookup_impl
+func Lookup(name string) (string, bool) {
+	if name == "" || len(name) > nameMaxLen {
+		return "", false
+	}
+	code := getCode(name)
+	if code < 0 {
+		return "", false
+	}
+	if isNamedSeq(code) {
+		idx := uint32(code) - namedSeqStart
+		seq := namedSequences[idx].Seq
+		out := make([]rune, len(seq))
+		for i, c := range seq {
+			out[i] = rune(c)
+		}
+		return string(out), true
+	}
+	if isAlias(code) {
+		code = rune(nameAliases[uint32(code)-aliasesStart])
+	}
+	return string(code), true
+}
+
 func nameBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	return nameImpl(nil, args, kwargs)
 }

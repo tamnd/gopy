@@ -9,7 +9,7 @@ import (
 // Load context.
 func TestValidateForbiddenName(t *testing.T) {
 	for _, id := range []string{"None", "True", "False"} {
-		err := validateExpr(&Name{Id: id, Ctx: Load})
+		err := validateExpr(&Name{Id: id, Ctx: Load}, Load)
 		if err == nil || !strings.Contains(err.Error(), "can't represent '"+id+"'") {
 			t.Errorf("Name(%q): err = %v", id, err)
 		}
@@ -30,18 +30,18 @@ func TestValidateForbiddenNameInStore(t *testing.T) {
 
 // TestValidateNameOK: a regular identifier validates.
 func TestValidateNameOK(t *testing.T) {
-	if err := validateExpr(&Name{Id: "x", Ctx: Load}); err != nil {
+	if err := validateExpr(&Name{Id: "x", Ctx: Load}, Load); err != nil {
 		t.Fatalf("validateExpr(x): %v", err)
 	}
 }
 
-// TestValidateBareStarredRejected: a Starred expression at the top
-// level (outside Call/List/Tuple/Set) is rejected.
+// TestValidateBareStarredRejected: a Starred in Store context where Load
+// is expected is rejected by the context check.
 func TestValidateBareStarredRejected(t *testing.T) {
-	st := &ExprStmt{Value: &Starred{Value: &Name{Id: "x", Ctx: Load}, Ctx: Load}}
+	st := &ExprStmt{Value: &Starred{Value: &Name{Id: "x", Ctx: Store}, Ctx: Store}}
 	err := validateStmt(st)
-	if err == nil || !strings.Contains(err.Error(), "starred expression") {
-		t.Fatalf("err = %v, want starred-expression rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "context") {
+		t.Fatalf("err = %v, want context-mismatch rejection", err)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestValidateStarredInList(t *testing.T) {
 		},
 		Ctx: Load,
 	}
-	if err := validateExpr(e); err != nil {
+	if err := validateExpr(e, Load); err != nil {
 		t.Fatalf("List with starred elt: %v", err)
 	}
 }
@@ -68,7 +68,7 @@ func TestValidateStarredInCallArg(t *testing.T) {
 			&Starred{Value: &Name{Id: "args", Ctx: Load}, Ctx: Load},
 		},
 	}
-	if err := validateExpr(e); err != nil {
+	if err := validateExpr(e, Load); err != nil {
 		t.Fatalf("Call(*args): %v", err)
 	}
 }
@@ -77,7 +77,7 @@ func TestValidateStarredInCallArg(t *testing.T) {
 // generators is rejected.
 func TestValidateComprehensionEmptyGenerators(t *testing.T) {
 	lc := &ListComp{Elt: &Name{Id: "x", Ctx: Load}}
-	err := validateExpr(lc)
+	err := validateExpr(lc, Load)
 	if err == nil || !strings.Contains(err.Error(), "comprehension with no generators") {
 		t.Fatalf("err = %v, want empty-generators rejection", err)
 	}
@@ -92,26 +92,15 @@ func TestValidateComprehensionOK(t *testing.T) {
 			{Target: &Name{Id: "x", Ctx: Store}, Iter: &Name{Id: "xs", Ctx: Load}},
 		},
 	}
-	if err := validateExpr(lc); err != nil {
+	if err := validateExpr(lc, Load); err != nil {
 		t.Fatalf("ListComp ok: %v", err)
 	}
 }
 
 // TestValidateExprCtxMismatch: a Name in Store context where Load is
-// expected is rejected.
+// expected is rejected; correct-context comprehensions pass.
 func TestValidateExprCtxMismatch(t *testing.T) {
-	// Put a Store-context Name as the iter of a comprehension; iter
-	// is validated in Load context.
-	lc := &ListComp{
-		Elt: &Name{Id: "x", Ctx: Load},
-		Generators: Seq[*Comprehension]{
-			{Target: &Name{Id: "x", Ctx: Store}, Iter: &Name{Id: "xs", Ctx: Store}},
-		},
-	}
-	// Comprehension iter is validated through validateExpr (Load
-	// implicit), so Name with Store passes here. The mismatch fires
-	// when validateExprCtx is called explicitly: e.g. an assignment
-	// target whose ctx is Load.
+	// An assignment with a Load-context target must be rejected.
 	bad := &Assign{
 		Targets: Seq[Expr]{&Name{Id: "x", Ctx: Load}},
 		Value:   &Constant{Value: int64(1)},
@@ -119,7 +108,14 @@ func TestValidateExprCtxMismatch(t *testing.T) {
 	if err := validateStmt(bad); err == nil {
 		t.Fatal("expected ctx-mismatch error for Load target")
 	}
-	if err := validateExpr(lc); err != nil {
+	// A comprehension with correct Load-context iter passes.
+	lc := &ListComp{
+		Elt: &Name{Id: "x", Ctx: Load},
+		Generators: Seq[*Comprehension]{
+			{Target: &Name{Id: "x", Ctx: Store}, Iter: &Name{Id: "xs", Ctx: Load}},
+		},
+	}
+	if err := validateExpr(lc, Load); err != nil {
 		t.Fatalf("comprehension iter Load: %v", err)
 	}
 }
@@ -127,7 +123,7 @@ func TestValidateExprCtxMismatch(t *testing.T) {
 // TestValidateMatchSingletonNonBoolNone: MatchSingleton must hold one
 // of None/True/False.
 func TestValidateMatchSingletonNonBoolNone(t *testing.T) {
-	err := validatePattern(&MatchSingleton{Value: int64(1)})
+	err := validatePattern(&MatchSingleton{Value: int64(1)}, false)
 	if err == nil || !strings.Contains(err.Error(), "True, False and None") {
 		t.Fatalf("err = %v, want singleton rejection", err)
 	}
@@ -136,7 +132,7 @@ func TestValidateMatchSingletonNonBoolNone(t *testing.T) {
 // TestValidateMatchSingletonOK: None and bool pass.
 func TestValidateMatchSingletonOK(t *testing.T) {
 	for _, v := range []any{nil, true, false} {
-		if err := validatePattern(&MatchSingleton{Value: v}); err != nil {
+		if err := validatePattern(&MatchSingleton{Value: v}, false); err != nil {
 			t.Errorf("MatchSingleton(%v): %v", v, err)
 		}
 	}
@@ -149,7 +145,7 @@ func TestValidateMatchMappingKeysPatternsLen(t *testing.T) {
 		Keys:     Seq[Expr]{&Constant{Value: int64(1)}, &Constant{Value: int64(2)}},
 		Patterns: Seq[Pattern]{&MatchValue{Value: &Constant{Value: int64(1)}}},
 	}
-	err := validatePattern(mm)
+	err := validatePattern(mm, false)
 	if err == nil || !strings.Contains(err.Error(), "same number of keys") {
 		t.Fatalf("err = %v, want mapping length mismatch", err)
 	}
@@ -163,7 +159,7 @@ func TestValidateMatchClassKwdMismatch(t *testing.T) {
 		KwdAttrs:    Seq[string]{"a", "b"},
 		KwdPatterns: Seq[Pattern]{&MatchValue{Value: &Constant{Value: int64(1)}}},
 	}
-	err := validatePattern(mc)
+	err := validatePattern(mc, false)
 	if err == nil || !strings.Contains(err.Error(), "keyword attributes") {
 		t.Fatalf("err = %v, want kwd-attr length mismatch", err)
 	}
@@ -172,7 +168,7 @@ func TestValidateMatchClassKwdMismatch(t *testing.T) {
 // TestValidateMatchOrTooFew: MatchOr requires at least 2 patterns.
 func TestValidateMatchOrTooFew(t *testing.T) {
 	mo := &MatchOr{Patterns: Seq[Pattern]{&MatchValue{Value: &Constant{Value: int64(1)}}}}
-	err := validatePattern(mo)
+	err := validatePattern(mo, false)
 	if err == nil || !strings.Contains(err.Error(), "at least 2") {
 		t.Fatalf("err = %v, want MatchOr arity rejection", err)
 	}
@@ -183,6 +179,7 @@ func TestValidateMatchOrTooFew(t *testing.T) {
 func TestValidateTypeParamForbiddenName(t *testing.T) {
 	cd := &ClassDef{
 		Name:       "C",
+		Body:       Seq[Stmt]{&Pass{}},
 		TypeParams: Seq[TypeParam]{&TypeVar{Name: "None"}},
 	}
 	if err := validateStmt(cd); err == nil {
@@ -194,6 +191,7 @@ func TestValidateTypeParamForbiddenName(t *testing.T) {
 func TestValidateTypeParamOK(t *testing.T) {
 	cd := &ClassDef{
 		Name:       "C",
+		Body:       Seq[Stmt]{&Pass{}},
 		TypeParams: Seq[TypeParam]{&TypeVar{Name: "T"}},
 	}
 	if err := validateStmt(cd); err != nil {

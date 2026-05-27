@@ -49,6 +49,20 @@ func init() {
 			return objects.NewTuple(items), true
 		case ast.EllipsisType:
 			return objects.Ellipsis(), true
+		case ast.FrozenSet:
+			items := make([]objects.Object, len(x))
+			for i, raw := range x {
+				item, err := wrapConst(raw)
+				if err != nil {
+					return nil, false
+				}
+				items[i] = item
+			}
+			fs, err := objects.NewFrozenset(items)
+			if err != nil {
+				return nil, false
+			}
+			return fs, true
 		}
 		return nil, false
 	}
@@ -130,6 +144,8 @@ func liftConst(v any) any {
 //
 // CPython: Python/bytecodes.c:LOAD_CONST (CPython stores PyObject*
 // directly so this conversion is a no-op there).
+//
+//nolint:gocyclo // mirrors CPython's constant-kind switch; arms added as constant types land
 func wrapConst(v any) (objects.Object, error) {
 	switch x := v.(type) {
 	case nil:
@@ -177,6 +193,16 @@ func wrapConst(v any) (objects.Object, error) {
 		return objects.NewComplex(real(x), imag(x)), nil
 	case ast.EllipsisType:
 		return objects.Ellipsis(), nil
+	case ast.FrozenSet:
+		items := make([]objects.Object, len(x))
+		for i, raw := range x {
+			item, err := wrapConst(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewFrozenset(items)
 	case objects.Object:
 		return x, nil
 	}
@@ -458,6 +484,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			if d, ok := attr.(*objects.Dict); ok {
 				fn.KwDefaults = d
 			}
+		case 0x04:
+			// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE 0x04
+			fn.Annotate = attr
+			fn.Annotations = nil
+			// gh-137814: fix the qualname of the annotation function to
+			// "enclosing_func.__qualname__ + .__annotate__" so that
+			// f.__annotate__.__qualname__ == "f.__annotate__".
+			//
+			// CPython: Python/bytecodes.c:4975
+			// SET_FUNCTION_ATTRIBUTE MAKE_FUNCTION_ANNOTATE branch
+			if af, ok := attr.(*objects.Function); ok {
+				af.Qualname = fn.Qualname + ".__annotate__"
+				af.Annotations = nil
+			}
 		case 0x08:
 			if t, ok := attr.(*objects.Tuple); ok {
 				fn.Closure = t
@@ -490,8 +530,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			return 0, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
 		}
 		if cell.Contents == nil {
-			name := derefName(e.f.Code, int(oparg))
-			return 0, true, fmt.Errorf("NameError: free variable %q referenced before assignment in %s:%s", name, e.f.Code.Filename, e.f.Code.Name)
+			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), true, nil
@@ -514,7 +553,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		ref := e.f.LocalsPlus[int(oparg)]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
 		cell.Contents = nil
 		return e.advance(), true, nil
@@ -555,27 +594,22 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.advance(), true, nil
 
 	case compile.DICT_MERGE:
-		// Pop dict-like and merge into the dict at depth oparg. Last
-		// write wins; the dictMergeEx duplicate-key check still trips a
-		// kwargs reformat path that we can't yet emit faithfully, so
-		// this stays out of dispatchGen.
+		// Pop the source mapping and merge into the kwargs dict at
+		// depth oparg. The callable sits three slots below the dict
+		// (NULL + args tuple between), and is used to dress the error
+		// with the function's qualified name. Mirrors CPython's
+		// DICT_MERGE + _PyEval_FormatKwargsError pair.
+		//
+		// CPython: Python/bytecodes.c:2122 DICT_MERGE
+		// CPython: Python/ceval.c:3410 _PyEval_FormatKwargsError
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
 			return 0, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
-		srcDict, ok := src.(*objects.Dict)
-		if !ok {
-			return 0, true, fmt.Errorf("DICT_MERGE: source not a dict")
-		}
-		for _, k := range srcDict.Keys() {
-			v, gerr := srcDict.GetItem(k)
-			if gerr != nil {
-				return 0, true, gerr
-			}
-			if serr := d.SetItem(k, v); serr != nil {
-				return 0, true, serr
-			}
+		callable := e.peek(int(oparg) + 2).AsObject()
+		if merr := dictMergeKwargs(d, src); merr != nil {
+			return 0, true, formatKwargsError(callable, merr)
 		}
 		return e.advance(), true, nil
 
@@ -684,6 +718,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		seq := e.popObject()
 		items, ierr := iterToSlice(seq)
 		if ierr != nil {
+			t := seq.Type()
+			if t.Iter == nil && (t.Sequence == nil || t.Sequence.GetItem == nil) {
+				return 0, true, fmt.Errorf("TypeError: cannot unpack non-iterable %s object", t.Name)
+			}
 			return 0, true, ierr
 		}
 		if len(items) < before+after {
@@ -872,17 +910,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.advance(), true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
-		// PEP 695 helper: look up name in the dict at TOS first; if absent,
-		// fall back to LOAD_DEREF semantics. The dict path stays a stub
-		// and we dispatch through to LOAD_DEREF. oparg is the localsplus
-		// offset of the cell, post fix_cell_offsets.
+		// Look up co_localsplusnames[oparg] in the mapping at TOS first
+		// (the class namespace at class-body load time, the type-params
+		// dict for PEP 695); if absent, fall back to the cell at the
+		// same localsplus slot. This is what makes a class-body
+		// `locals()["x"] = 43` override an enclosing closure x.
 		//
 		// CPython: Python/bytecodes.c:1887 LOAD_FROM_DICT_OR_DEREF
-		_ = e.popObject() // discard the class dict TOS
-		ref := e.f.LocalsPlus[int(oparg)]
+		classDict := e.popObject()
+		co := e.f.Code
+		idx := int(oparg)
+		if idx < 0 || idx >= len(co.LocalsplusNames) {
+			return 0, true, fmt.Errorf("SystemError: LOAD_FROM_DICT_OR_DEREF oparg %d out of range", idx)
+		}
+		name := objects.NewStr(co.LocalsplusNames[idx])
+		if v, gerr := objects.GetItem(classDict, name); gerr == nil && v != nil {
+			e.pushObject(v)
+			return e.advance(), true, nil
+		}
+		ref := e.f.LocalsPlus[idx]
 		cell, ok := ref.AsObject().(*objects.Cell)
 		if !ok || cell.Contents == nil {
-			return 0, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			return 0, true, formatExcUnbound(co, idx)
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), true, nil
@@ -1078,7 +1127,18 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		v := e.popObject()
 		dst := e.f.Locals
 		if dst == nil {
-			dst = e.f.Globals
+			if uint32(e.f.Code.Flags)&compile.CoOptimized != 0 {
+				// TypeParametersBlock and similar synthetic optimized scopes
+				// emit STORE_NAME for TypeVar names but have no Locals dict
+				// yet. Create one on demand so the name lives in the
+				// function's local scope and does not escape to globals.
+				// CPython: Python/frameobject.c:306 _PyFrameGetLocals (lazy)
+				ns := objects.NewDict()
+				e.f.Locals = ns
+				dst = ns
+			} else {
+				dst = e.f.Globals
+			}
 		}
 		return nil, storeIn(dst, keyObj, v)
 	case compile.STORE_GLOBAL:
@@ -1105,34 +1165,36 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 // CPython: Python/bytecodes.c BINARY_OP_GENERIC
 func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 	const (
-		nbAdd         = 0
-		nbAnd         = 1
-		nbFloorDivide = 2
-		nbLshift      = 3
-		nbMult        = 5
-		nbRemainder   = 6
-		nbOr          = 7
-		nbPower       = 8
-		nbRshift      = 9
-		nbSubtract    = 10
-		nbTrueDivide  = 11
-		nbXor         = 12
+		nbAdd            = 0
+		nbAnd            = 1
+		nbFloorDivide    = 2
+		nbLshift         = 3
+		nbMatrixMultiply = 4
+		nbMult           = 5
+		nbRemainder      = 6
+		nbOr             = 7
+		nbPower          = 8
+		nbRshift         = 9
+		nbSubtract       = 10
+		nbTrueDivide     = 11
+		nbXor            = 12
 		// Inplace forms (13..25) re-use the non-inplace slot for
 		// immutable types; the mapping mirrors CPython's NB_INPLACE_*
 		// alphabetical numbering.
-		nbInplaceAdd         = 13
-		nbInplaceAnd         = 14
-		nbInplaceFloorDivide = 15
-		nbInplaceLshift      = 16
-		nbInplaceMult        = 18
-		nbInplaceRemainder   = 19
-		nbInplaceOr          = 20
-		nbInplacePower       = 21
-		nbInplaceRshift      = 22
-		nbInplaceSubtract    = 23
-		nbInplaceTrueDivide  = 24
-		nbInplaceXor         = 25
-		nbSubscr             = 26
+		nbInplaceAdd            = 13
+		nbInplaceAnd            = 14
+		nbInplaceFloorDivide    = 15
+		nbInplaceLshift         = 16
+		nbInplaceMatrixMultiply = 17
+		nbInplaceMult           = 18
+		nbInplaceRemainder      = 19
+		nbInplaceOr             = 20
+		nbInplacePower          = 21
+		nbInplaceRshift         = 22
+		nbInplaceSubtract       = 23
+		nbInplaceTrueDivide     = 24
+		nbInplaceXor            = 25
+		nbSubscr                = 26
 	)
 	switch sub {
 	case nbAdd:
@@ -1147,6 +1209,10 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberMultiply(a, b)
 	case nbInplaceMult:
 		return objects.NumberInPlaceMultiply(a, b)
+	case nbMatrixMultiply:
+		return objects.NumberMatrixMultiply(a, b)
+	case nbInplaceMatrixMultiply:
+		return objects.NumberInPlaceMatrixMultiply(a, b)
 	case nbTrueDivide, nbInplaceTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide
@@ -1211,6 +1277,10 @@ func powerOp(a, b, mod objects.Object) (objects.Object, error) {
 		if !objects.IsNotImplemented(out) {
 			return out, nil
 		}
+	}
+	// CPython: Objects/typeobject.c:8195 SLOT1BIN (__pow__ / __rpow__)
+	if out, ok, err := objects.DunderBinary(a, b, "**"); ok {
+		return out, err
 	}
 	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for ** or pow(): '%s' and '%s'", a.Type().Name, b.Type().Name)
 }
@@ -1331,38 +1401,12 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 //
 // CPython: Python/bytecodes.c UNPACK_SEQUENCE
 func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
-	if t, ok := seq.(*objects.Tuple); ok {
-		if t.Len() != n {
-			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, t.Len())
-		}
-		out := make([]objects.Object, n)
-		for i := 0; i < n; i++ {
-			out[i] = t.Item(i)
-		}
-		return out, nil
-	}
-	if l, ok := seq.(*objects.List); ok {
-		if l.Len() != n {
-			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, l.Len())
-		}
-		out := make([]objects.Object, n)
-		seq := l.Type().Sequence
-		for i := 0; i < n; i++ {
-			v, gerr := seq.GetItem(l, i)
-			if gerr != nil {
-				return nil, gerr
-			}
-			out[i] = v
-		}
-		return out, nil
-	}
-	// Fall back to the iterator protocol for arbitrary iterables.
 	t := seq.Type()
-	if t.Iter == nil {
-		return nil, fmt.Errorf("TypeError: cannot unpack non-iterable '%s' object", t.Name)
-	}
-	it, ierr := t.Iter(seq)
+	it, ierr := objects.Iter(seq)
 	if ierr != nil {
+		if t.Iter == nil && (t.Sequence == nil || t.Sequence.GetItem == nil) {
+			return nil, fmt.Errorf("TypeError: cannot unpack non-iterable %s object", t.Name)
+		}
 		return nil, ierr
 	}
 	itType := it.Type()
@@ -1370,20 +1414,51 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", itType.Name)
 	}
 	out := make([]objects.Object, 0, n)
-	for {
+	for i := 0; i < n; i++ {
 		v, nerr := itType.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
-			break
+			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
 		}
 		if nerr != nil {
 			return nil, nerr
 		}
 		out = append(out, v)
 	}
-	if len(out) != n {
-		return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
+	extra, nerr := itType.IterNext(it)
+	if nerr != nil && !errors.Is(nerr, objects.ErrStopIteration) {
+		return nil, nerr
+	}
+	if nerr == nil && extra != nil {
+		if ll, ok := exactBuiltinLen(seq); ok && ll > n {
+			return nil, fmt.Errorf("ValueError: too many values to unpack (expected %d, got %d)", n, ll)
+		}
+		return nil, fmt.Errorf("ValueError: too many values to unpack (expected %d)", n)
 	}
 	return out, nil
+}
+
+// exactBuiltinLen reports the length of v when v is an exact builtin
+// list, tuple, or dict (not a subclass). Mirrors CPython's
+// PyList_CheckExact/PyTuple_CheckExact/PyDict_CheckExact branch in
+// _PyEval_UnpackIterableStackRef.
+//
+// CPython: Python/ceval.c:2443 _PyEval_UnpackIterableStackRef
+func exactBuiltinLen(v objects.Object) (int, bool) {
+	switch x := v.(type) {
+	case *objects.Tuple:
+		if v.Type() == objects.TupleType {
+			return x.Len(), true
+		}
+	case *objects.List:
+		if v.Type() == objects.ListType {
+			return x.Len(), true
+		}
+	case *objects.Dict:
+		if v.Type() == objects.DictType {
+			return x.Len(), true
+		}
+	}
+	return 0, false
 }
 
 // getItem mirrors PyObject_GetItem against the v0.6 container surface.
@@ -1668,6 +1743,22 @@ func derefName(co *objects.Code, idx int) string {
 		return co.Freevars[i]
 	}
 	return "<unknown>"
+}
+
+// formatExcUnbound mirrors CPython's _PyEval_FormatExcUnbound: an
+// empty cell at a localsplus slot below the first freevar raises
+// UnboundLocalError; at or above that boundary it raises NameError
+// with the "in enclosing scope" suffix. The boundary is
+// nlocalsplus - nfreevars (PyUnstable_Code_GetFirstFree).
+//
+// CPython: Python/ceval.c:3482 _PyEval_FormatExcUnbound
+func formatExcUnbound(co *objects.Code, idx int) error {
+	name := derefName(co, idx)
+	firstFree := frame.NLocalsPlusOf(co) - len(co.Freevars)
+	if idx < firstFree {
+		return fmt.Errorf("UnboundLocalError: cannot access local variable '%s' where it is not associated with a value", name)
+	}
+	return fmt.Errorf("NameError: cannot access free variable '%s' where it is not associated with a value in enclosing scope", name)
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error

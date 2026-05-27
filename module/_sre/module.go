@@ -108,6 +108,15 @@ func init() {
 	}
 	bindS("match", scannerMatch)
 	bindS("search", scannerSearch)
+
+	// match[key] is equivalent to match.group(key).
+	//
+	// CPython: Modules/_sre/sre.c:2433 match_getitem
+	MatchType.Mapping = &objects.MappingMethods{
+		GetItem: func(o, key objects.Object) (objects.Object, error) {
+			return matchGroup([]objects.Object{o, key}, nil)
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +140,7 @@ type matchData struct {
 	locs    []int
 	s       string
 	isBytes bool
+	runes   []rune // lazily populated rune slice for str path; locs[] hold code-point indices, so substring extraction must index by rune, not byte.
 }
 
 // ---------------------------------------------------------------------------

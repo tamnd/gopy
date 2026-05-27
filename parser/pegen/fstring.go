@@ -21,14 +21,14 @@ const (
 //
 // CPython: Parser/action_helpers.c:1860 _PyPegen_concatenate_strings
 func JoinedStrFromValues(values []ast.Expr) *ast.JoinedStr {
-	return &ast.JoinedStr{Values: foldAdjacentStrings(values)}
+	return &ast.JoinedStr{Values: foldAdjacentStrings(values), Pos: ast.NoPos}
 }
 
 // TemplateStrFromValues is the t-string counterpart.
 //
 // CPython: Parser/action_helpers.c (PEP 750)
 func TemplateStrFromValues(values []ast.Expr) *ast.TemplateStr {
-	return &ast.TemplateStr{Values: foldAdjacentStrings(values)}
+	return &ast.TemplateStr{Values: foldAdjacentStrings(values), Pos: ast.NoPos}
 }
 
 // FormattedValueFor builds a FormattedValue from the (expr,
@@ -40,6 +40,7 @@ func FormattedValueFor(expr ast.Expr, conversion int, format ast.Expr) *ast.Form
 		Value:      expr,
 		Conversion: conversion,
 		FormatSpec: format,
+		Pos:        ast.NoPos,
 	}
 }
 
@@ -53,6 +54,7 @@ func InterpolationFor(expr ast.Expr, srcText string, conversion int, format ast.
 		Str:        srcText,
 		Conversion: conversion,
 		FormatSpec: format,
+		Pos:        ast.NoPos,
 	}
 }
 

@@ -284,16 +284,16 @@ func (s *State) curMode() *tokenizerMode {
 }
 
 // InsideFString reports whether the tokenizer is currently inside an
-// f-string or t-string body. Mirrors INSIDE_FSTRING, which is the
-// guard CPython's pegen helpers use before consulting the active
-// tokenizer mode.
+// f-string or t-string body. Mirrors INSIDE_FSTRING: just check the
+// stack index, regardless of whether the current mode is scanning the
+// literal body or the inner {expr}. The kind == tokFStringMode check
+// would return false while fstringMiddle is in the middle of backing
+// up a `}` (at which point it sets kind = tokRegularMode but the
+// stack index is still > 0).
 //
-// CPython: Parser/lexer/lexer.h:14 INSIDE_FSTRING
+// CPython: Parser/lexer/state.h:10 INSIDE_FSTRING
 func (s *State) InsideFString() bool {
-	if s.tokModeStackIndex <= 0 {
-		return false
-	}
-	return s.tokModeStack[s.tokModeStackIndex].kind == tokFStringMode
+	return s.tokModeStackIndex > 0
 }
 
 // CurrentFStringRaw reports the `raw` flag of the active f-string or
@@ -303,6 +303,20 @@ func (s *State) InsideFString() bool {
 // CPython: Parser/lexer/state.h:48 tokenizer_mode.raw
 func (s *State) CurrentFStringRaw() bool {
 	return s.tokModeStack[s.tokModeStackIndex].raw
+}
+
+// CurrentFStringPrefixChar returns 'f' or 't' for the active f-string
+// or t-string mode. Mirrors TOK_GET_STRING_PREFIX, which the CPython
+// helper macros use inside the parser actions without first checking
+// INSIDE_FSTRING: the active mode entry retains its string_kind even
+// while the inner {expr} body is being scanned in regular mode.
+//
+// CPython: Parser/lexer/lexer.c:43 TOK_GET_STRING_PREFIX
+func (s *State) CurrentFStringPrefixChar() byte {
+	if s.tokModeStack[s.tokModeStackIndex].stringKind == kindTString {
+		return 't'
+	}
+	return 'f'
 }
 
 // pushMode is TOK_NEXT_MODE: enter a nested f-string or t-string
@@ -384,6 +398,12 @@ func (s *State) Filename() string { return s.filename }
 // SyntaxError text field at error time.
 func (s *State) SourceLine(n int) string { return nthLine(s.buf, n) }
 
+// Source returns the full source buffer as a string.
+// Used by the error-metadata path to populate SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:909 p->tok->str (full source string)
+func (s *State) Source() string { return string(s.buf) }
+
 // Encoding returns the source encoding detected from a BOM or
 // PEP 263 cookie, or "" when no cookie was seen.
 func (s *State) Encoding() string { return s.encoding }
@@ -394,11 +414,123 @@ func (s *State) SetFilename(name string) { s.filename = name }
 // Err returns the first SyntaxError recorded, or nil.
 func (s *State) Err() *SyntaxError { return s.err }
 
+// Level reports the nesting depth of the paren stack. Non-zero means
+// the lexer has at least one unclosed `(`, `[`, or `{`. The pegen
+// error driver consults this from outside the package when surfacing
+// unclosed-paren diagnostics.
+//
+// CPython: Parser/lexer/state.h tok_state.level
+func (s *State) Level() int { return s.level }
+
+// ParenInfo returns the recorded line, column and bracket byte of the
+// outermost unclosed paren. lvl is 1-based (1 == innermost open paren),
+// matching `parenstack[level-1]` in CPython. Returns (0, 0, 0) when lvl
+// is out of range.
+//
+// CPython: Parser/pegen_errors.c:60 raise_unclosed_parentheses_error
+func (s *State) ParenInfo(lvl int) (line, col int, ch byte) {
+	idx := lvl - 1
+	if idx < 0 || idx >= s.level {
+		return 0, 0, 0
+	}
+	return s.parenLineno[idx], s.parenCol[idx], s.parenStack[idx]
+}
+
+// EOFCharOffset returns the 1-based code-point offset of the buffer's
+// end (inp) measured from the current line_start. Mirrors CPython's
+// _PyPegen_raise_error fallback for tokens with col_offset == -1:
+// col_offset = tok->cur - tok->line_start, then converted to a
+// character count via _PyPegen_byte_offset_to_character_offset. Used to
+// place the caret at the position past the trailing backslash when the
+// parser surfaces "unexpected EOF while parsing".
+//
+// CPython: Parser/pegen_errors.c:255 col_offset = cur - line_start
+// CPython: Parser/pegen_errors.c:380 byte_offset_to_character_offset
+func (s *State) EOFCharOffset() int {
+	end := s.inp
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	return s.charColBetween(s.lineStart, end)
+}
+
+// EOFLineText returns the raw source line from the current line_start
+// up to inp, including any trailing newline. CPython's
+// _PyPegen_raise_error_known_location populates SyntaxError.text this
+// way for string-input EOF; the appended '\n' that translate_newlines
+// stamps on a non-terminated source is preserved so .text round-trips
+// the same way CPython renders it.
+//
+// CPython: Parser/pegen_errors.c:362 PyUnicode_DecodeUTF8(line_start, inp - line_start)
+func (s *State) EOFLineText() string {
+	end := s.inp
+	if end > len(s.buf) {
+		end = len(s.buf)
+	}
+	if s.lineStart < 0 || s.lineStart > end {
+		return ""
+	}
+	return string(s.buf[s.lineStart:end])
+}
+
+// Lineno returns the lexer's current line number. Exposed so the
+// parser-side error driver can stamp the right line on the
+// unexpected-EOF SyntaxError when the trailing token's lineno is
+// stale (e.g., a backslash continuation consumed the '\n' but the
+// pending lineno bump never flushed because there is no next char).
+func (s *State) Lineno() int { return s.lineno }
+
+// ForceDedentsAtEOF queues one DEDENT per open indent on the lexer's
+// pending stack so the next Get() calls drain them before returning
+// the trailing ENDMARKER. The pegen single-input driver invokes this
+// after rewriting the first ENDMARKER into a NEWLINE; the lexer's
+// indent loop only runs at beginning-of-line, so unless we prime
+// pendin here no DEDENTs ever emit and the grammar's block rule sees
+// `<stmt> NEWLINE ENDMARKER` instead of `<stmt> NEWLINE DEDENT
+// ENDMARKER`.
+//
+// CPython: Parser/pegen.c:273 _PyPegen_fill_token (single-input arm
+// sets tok->pendin = -tok->indent and clears tok->indent)
+func (s *State) ForceDedentsAtEOF() {
+	if s.indent > 0 {
+		s.pendin = -s.indent
+		s.indent = 0
+	}
+}
+
 // Warnings returns the SyntaxWarning-class diagnostics recorded
 // during tokenization. Order matches emission order.
 //
 // CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 func (s *State) Warnings() []SyntaxError { return s.warnings }
+
+// AppendWarning lets the parser stage record a SyntaxWarning that
+// the lexer itself did not catch. CPython's string decoder
+// (_PyUnicode_DecodeUnicodeEscapeInternal2) reports invalid escape
+// sequences inside literal bodies the same way the tokenizer does;
+// gopy collects them on the *string* parser and forwards them here
+// so FlushWarnings can route everything through one path.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
+func (s *State) AppendWarning(line, col int, category, message string) {
+	if !s.reportWarnings {
+		return
+	}
+	if line <= 0 {
+		line = s.lineno
+	}
+	if col < 0 {
+		col = 0
+	}
+	s.warnings = append(s.warnings, SyntaxError{
+		Pos:      Pos{Line: line, Col: col},
+		EndPos:   Pos{Line: line, Col: col},
+		Message:  message,
+		Text:     nthLine(s.buf, line),
+		Category: category,
+	})
+}
 
 // WarnHook is the package-level drain that FlushWarnings calls. It is
 // nil until a runtime package (typically module/_warnings) registers a
@@ -410,20 +542,20 @@ func (s *State) Warnings() []SyntaxError { return s.warnings }
 // CPython does the routing inline in _PyTokenizer_parser_warn
 // (helpers.c:152); gopy needs the indirection because parser/lexer
 // must not pull in the runtime's heavy dependency graph.
-var WarnHook func(filename string, warns []SyntaxError)
+var WarnHook func(filename string, warns []SyntaxError) error
 
 // FlushWarnings forwards every recorded SyntaxWarning to WarnHook so
-// the warnings filter sees them. Callers should invoke this once
-// tokenization is complete; the hook is a no-op when module/_warnings
-// is not linked into the binary.
+// the warnings filter sees them. Returns the first error returned by
+// the hook (a warning elevated to SyntaxError), which the caller must
+// propagate to abort the parse/compile pipeline.
 //
 // CPython: Parser/tokenizer/helpers.c:152 _PyTokenizer_parser_warn
 // (where the actual PyErr_WarnExplicitObject call happens).
-func (s *State) FlushWarnings() {
+func (s *State) FlushWarnings() error {
 	if WarnHook == nil || len(s.warnings) == 0 {
-		return
+		return nil
 	}
-	WarnHook(s.filename, s.warnings)
+	return WarnHook(s.filename, s.warnings)
 }
 
 // Done returns the lexer's terminal status as an exported int that
@@ -461,14 +593,50 @@ const (
 
 // recordError pins the first error we hit. CPython overwrites; we
 // preserve the first because PEG callers retry tokenization for
-// diagnostics.
+// diagnostics. The column reported here is the UTF-8 character
+// count from the line start to the cursor, matching CPython's
+// _syntaxerror_range which decodes [tok->line_start, tok->cur) and
+// uses PyUnicode_GET_LENGTH for the column.
+//
+// CPython: Parser/tokenizer/helpers.c:11 _syntaxerror_range
 func (s *State) recordError(msg string) {
 	if s.err != nil {
 		return
 	}
+	col := s.charColAt(s.cur)
+	// EndPos uses sentinel values (Line=0, Col=-1) meaning "not set".
+	// CPython's _syntaxerror_range only populates end_lineno/end_offset
+	// when the caller passes them explicitly; lexer error paths do not.
+	//
+	// CPython: Parser/tokenizer/helpers.c:11 _syntaxerror_range
 	s.err = &SyntaxError{
-		Pos:     Pos{Line: s.lineno, Col: s.col},
-		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Pos:     Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
+		Message: msg,
+	}
+}
+
+// recordStringError pins an unterminated-string error at the opening
+// quote, matching CPython which rewinds tok->cur and tok->line_start to
+// the opening-quote position before calling _PyTokenizer_syntaxerror.
+//
+// CPython's _syntaxerror_range decodes [tok->line_start, tok->cur) and
+// calls PyUnicode_GET_LENGTH, yielding a 1-indexed char count that
+// equals col_offset (= SyntaxError.offset). gopy stores the 0-indexed
+// char position (col = chars before the opening quote) so that
+// exc_from_parser.go's +1 produces the same 1-indexed value.
+//
+// CPython: Parser/lexer/lexer.c:1175 tok->cur = (char *)tok->start; tok->cur++
+// CPython: Parser/lexer/lexer.c:1177 tok->line_start = tok->multi_line_start
+// CPython: Parser/lexer/lexer.c:1179 tok->lineno = tok->first_lineno
+func (s *State) recordStringError(msg string) {
+	if s.err != nil {
+		return
+	}
+	col := s.charColBetween(s.multiLineStart, s.start)
+	s.err = &SyntaxError{
+		Pos:     Pos{Line: s.firstLine, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
 		Message: msg,
 	}
 }
@@ -485,12 +653,66 @@ func (s *State) recordErrorWithText(msg, text string) {
 	if s.err != nil {
 		return
 	}
+	col := s.charColAt(s.cur)
 	s.err = &SyntaxError{
-		Pos:     Pos{Line: s.lineno, Col: s.col},
-		EndPos:  Pos{Line: s.lineno, Col: s.col},
+		Pos:     Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
 		Message: msg,
 		Text:    text,
 	}
+}
+
+// charColAt counts how many Unicode code points sit between
+// s.lineStart and pos in the current source buffer. Used by the
+// error builders that need CPython-compatible col offsets even when
+// the offending line contains multi-byte UTF-8 sequences. Invalid
+// UTF-8 sequences are counted as one code point each, matching the
+// errors='replace' decode CPython uses in _syntaxerror_range.
+//
+// CPython: Parser/tokenizer/helpers.c:27 _syntaxerror_range
+// (PyUnicode_DecodeUTF8 with "replace" + PyUnicode_GET_LENGTH)
+func (s *State) charColAt(pos int) int {
+	return s.charColBetween(s.lineStart, pos)
+}
+
+// charColBetween is charColAt with an explicit line-start offset. The
+// unterminated-string path needs to count from multi_line_start (the
+// line containing the opening quote), which is different from
+// s.lineStart by the time the lexer reaches EOF.
+func (s *State) charColBetween(from, pos int) int {
+	if pos < from {
+		return 0
+	}
+	if pos > len(s.buf) {
+		pos = len(s.buf)
+	}
+	if from < 0 {
+		from = 0
+	}
+	bs := s.buf[from:pos]
+	chars := 0
+	for i := 0; i < len(bs); {
+		c := bs[i]
+		switch {
+		case c < 0x80:
+			i++
+		case c < 0xC0:
+			// Lone continuation byte; "replace" decode emits one
+			// U+FFFD per byte.
+			i++
+		case c < 0xE0:
+			i += 2
+		case c < 0xF0:
+			i += 3
+		default:
+			i += 4
+		}
+		if i > len(bs) {
+			i = len(bs)
+		}
+		chars++
+	}
+	return chars
 }
 
 // freeFStringExpressions clears the per-mode last_expr_buffer slots.

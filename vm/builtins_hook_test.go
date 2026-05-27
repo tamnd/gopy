@@ -30,7 +30,7 @@ func TestCurrentScopeReturnsActiveFrame(t *testing.T) {
 		instr(compile.LOAD_SMALL_INT, 1),
 		instr(compile.RETURN_VALUE, 0)...))
 	stack := frameStackFor(ts)
-	stack.Push(co, g, nil, nil, nil)
+	stack.Push(co, g, nil, nil)
 	defer stack.Pop()
 
 	gotG, gotL := currentScope()
@@ -57,7 +57,7 @@ func TestCurrentScopeReturnsExplicitLocals(t *testing.T) {
 		instr(compile.LOAD_SMALL_INT, 1),
 		instr(compile.RETURN_VALUE, 0)...))
 	stack := frameStackFor(ts)
-	f := stack.Push(co, g, nil, nil, nil)
+	f := stack.Push(co, g, nil, nil)
 	f.Locals = l
 	defer stack.Pop()
 

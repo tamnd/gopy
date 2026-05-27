@@ -8,7 +8,11 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/token"
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/token"
+)
 
 // detectStringPrefix returns the (rawFlag, kind, isFTString, ok)
 // triple for a name already scanned at start..s.cur followed by a
@@ -179,10 +183,46 @@ func (s *State) fstringMiddleKind(m *tokenizerMode) token.Type {
 // CPython: Parser/lexer/lexer.c:1446 f_string_middle label
 func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 	endQuoteSize := 0
+	unicodeEscape := false
 	for endQuoteSize != m.quoteSize {
 		c := s.nextC()
 		if c == eof || (m.quoteSize == 1 && c == '\n') {
-			return s.syntaxError("unterminated %c-string", s.fstringPrefixChar(m))
+			// CPython distinguishes three EOF/newline arms here. A
+			// newline inside a format spec of a single-quoted string is
+			// its own message; otherwise we shift the caret back to the
+			// opening quote and emit the literal-suffix variant.
+			//
+			// CPython: Parser/lexer/lexer.c:1462 f_string_middle EOF/'\n' arm
+			if m.inFormatSpec && c == '\n' && m.quoteSize == 1 {
+				prefix := s.fstringPrefixChar(m)
+				return s.syntaxError("%c-string: newlines are not allowed in format specifiers for single quoted %c-strings", prefix, prefix)
+			}
+			start := m.firstLine
+			prefix := s.fstringPrefixChar(m)
+			var msg string
+			if m.quoteSize == 3 {
+				msg = fmt.Sprintf("unterminated triple-quoted %c-string literal (detected at line %d)", prefix, start)
+			} else {
+				msg = fmt.Sprintf("unterminated %c-string literal (detected at line %d)", prefix, start)
+			}
+			// Pin the error at the opening quote line, not at the current EOF
+			// line, mirroring CPython which restores tok->lineno / tok->line_start
+			// to the values saved when the f-string mode was pushed.
+			//
+			// CPython: Parser/lexer/lexer.c:1462 EOF arm; tok_state saves
+			// first_lineno / tok->line_start at the start of the string literal
+			// and _PyTokenizer_syntaxerror reads tok->lineno (which was restored).
+			s.recordError(msg)
+			if s.err != nil {
+				s.err.Pos.Line = m.firstLine
+				s.err.EndPos.Line = m.firstLine
+				// Column at the f-string prefix (e.g. 'f' in f""").
+				col := s.charColBetween(m.multiLineStart, m.start)
+				s.err.Pos.Col = col
+				s.err.EndPos.Col = col
+			}
+			s.done = eSyntax
+			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 		}
 		if c == int(m.quote) {
 			endQuoteSize++
@@ -212,7 +252,10 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 			// CPython: Parser/lexer/lexer.c:1525
 			s.updateFtstringExpr('{')
 			peek := s.nextC()
-			if peek != '{' {
+			// CPython: Parser/lexer/lexer.c:1529
+			// In a format spec, {{ is NOT a brace escape; { always starts
+			// an expression. Outside a format spec, {{ → literal {.
+			if peek != '{' || m.inFormatSpec {
 				s.backup(peek)
 				s.backup(c)
 				m.curlyBracketExprStartDepth++
@@ -224,12 +267,37 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur)
 			}
 			// {{ literal: emit through to one open brace as middle.
-			return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+			// The token byte slice ends before the second { (cur-1),
+			// so End.Col must point at the second { not past it.
+			// Temporarily step back s.col so tokenSetup captures col-1.
+			//
+			// CPython: Parser/lexer/lexer.c:1533 p_end = tok->cur - 1
+			s.col--
+			tok := s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+			s.col++
+			return tok
 		}
 		if c == '}' {
+			if unicodeEscape {
+				// `\N{NAME}` named escape: the closing brace belongs
+				// to the escape sequence, not to an f-string expression
+				// terminator. Emit middle up through this `}`.
+				//
+				// CPython: Parser/lexer/lexer.c:1547 (unicode_escape branch)
+				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur)
+			}
 			peek := s.nextC()
-			if peek == '}' && m.curlyBracketDepth == 0 {
-				return s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+			// CPython: Parser/lexer/lexer.c:1559
+			// }} is only a brace escape outside format specs; format specs
+			// can't legally use double brackets.
+			if peek == '}' && !m.inFormatSpec && m.curlyBracketDepth == 0 {
+				// Same End.Col correction as {{ above.
+				//
+				// CPython: Parser/lexer/lexer.c:1563 p_end = tok->cur - 1
+				s.col--
+				tok := s.tokenSetup(s.fstringMiddleKind(m), s.start, s.cur-1)
+				s.col++
+				return tok
 			}
 			s.backup(peek)
 			s.backup(c)
@@ -243,6 +311,9 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				peek = s.nextC()
 			}
 			if peek == '{' || peek == '}' {
+				if !m.raw {
+					s.warnInvalidEscape(byte(peek))
+				}
 				s.backup(peek)
 				continue
 			}
@@ -257,8 +328,20 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				s.pendingLineno++
 				s.col = 0
 			}
-			// Skip the escaped character. Named escapes \N{...} fall
-			// through to the regular middle scanning.
+			// Named unicode escape `\N{NAME}`: the `{` is part of the
+			// escape sequence, not an f-string expression start.
+			// Remember the open brace so the matching `}` emits a
+			// middle instead of re-entering regular mode.
+			//
+			// CPython: Parser/lexer/lexer.c:1589 (peek == 'N' branch)
+			if !m.raw && peek == 'N' {
+				peek2 := s.nextC()
+				if peek2 == '{' {
+					unicodeEscape = true
+				} else {
+					s.backup(peek2)
+				}
+			}
 		}
 	}
 	// Hit the closing quotes during literal scan: back them up so the
@@ -307,7 +390,17 @@ func (s *State) updateFtstringExpr(cur byte) {
 		m.lastExprSize = size
 		m.lastExprEnd = -1
 	case '}', '!':
-		m.lastExprEnd = s.inp - s.start
+		// Only advance lastExprEnd on the first `}`/`!` seen. The
+		// guard is intentional: a `!` that is part of the `!=`
+		// comparison operator must not advance lastExprEnd — that is
+		// handled by NOT calling updateFtstringExpr at all for `!=`.
+		// A later `}` that closes the format spec must not overwrite
+		// the correct lastExprEnd set by `:`.
+		//
+		// CPython: Parser/lexer/lexer.c:263 (_PyLexer_update_ftstring_expr)
+		if m.lastExprEnd == -1 {
+			m.lastExprEnd = s.inp - s.start
+		}
 	case ':':
 		if m.lastExprEnd == -1 {
 			m.lastExprEnd = s.inp - s.start
@@ -328,12 +421,18 @@ func (s *State) updateFtstringExpr(cur byte) {
 // allocation cannot fail, so the gopy port is void.
 //
 // CPython: Parser/lexer/lexer.c:114 set_ftstring_expr
-func (s *State) setFtstringExpr(tok *Tok, c byte) {
+// setFtstringExpr accepts wasInDebug (the inDebug state captured before the
+// bracket switch that resets it to false) so the check matches the pre-reset
+// value, mirroring CPython's call ordering where set_ftstring_expr fires
+// before the bracket switch that clears in_debug.
+//
+// CPython: Parser/lexer/lexer.c:1268 (set_ftstring_expr call site)
+func (s *State) setFtstringExpr(tok *Tok, c byte, wasInDebug bool) {
 	if c != '}' && c != ':' && c != '!' {
 		return
 	}
 	m := s.curMode()
-	if (!m.inDebug && m.stringKind != kindTString) || tok.Metadata != nil {
+	if (!wasInDebug && m.stringKind != kindTString) || tok.Metadata != nil {
 		return
 	}
 
@@ -410,6 +509,7 @@ func (s *State) setFtstringExpr(tok *Tok, c byte) {
 			}
 			if i < len(src) {
 				out = append(out, '\n')
+				i++ // advance past \n; CPython: lexer.c:197 unconditional i++ at loop bottom
 			}
 			continue
 		}

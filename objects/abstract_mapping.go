@@ -88,9 +88,15 @@ func MappingDelItem(o, key Object) error {
 // "absent" from "broken" without burning an exception. Matches
 // PyMapping_GetOptionalItem's int return: 1, 0, -1.
 //
+// Only exact dicts take the fast path. Dict subclasses (e.g. a
+// customdict with __missing__) must go through GetItem so their
+// __getitem__ fires. CPython: Objects/abstract.c:208 checks
+// PyDict_CheckExact before the fast-path dict_getitem call.
+//
 // CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
 func MappingGetOptionalItem(o, key Object) (Object, bool, error) {
-	if d, ok := o.(*Dict); ok {
+	if IsExactDict(o) {
+		d := o.(*Dict)
 		v, err := d.GetItem(key)
 		if err != nil {
 			if errors.Is(err, errKeyNotFound) {

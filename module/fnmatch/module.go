@@ -55,6 +55,7 @@ func buildModule() (*objects.Module, error) {
 		{"filter", objects.NewBuiltinFunction("filter", filterFn)},
 		{"filterfalse", objects.NewBuiltinFunction("filterfalse", filterFalseFn)},
 		{"translate", objects.NewBuiltinFunction("translate", translateFn)},
+		{"_translate", objects.NewBuiltinFunction("_translate", translatePrivateFn)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -150,6 +151,41 @@ func filterFalseFn(args []objects.Object, _ map[string]objects.Object) (objects.
 		}
 	}
 	return objects.NewList(out), nil
+}
+
+// translatePrivateFn implements fnmatch._translate(pat, star, question_mark).
+// Returns a 2-tuple (parts, star_indices) that glob.py[342] consumes via [0].
+//
+// CPython: Lib/fnmatch.py:109 _translate
+func translatePrivateFn(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("TypeError: _translate() takes exactly 3 arguments (%d given)", len(args))
+	}
+	pat, err := strArg("_translate", args[0])
+	if err != nil {
+		return nil, err
+	}
+	star, err := strArg("_translate", args[1])
+	if err != nil {
+		return nil, err
+	}
+	qm, err := strArg("_translate", args[2])
+	if err != nil {
+		return nil, err
+	}
+	parts, starIdxs := translateParts(pat, star, qm)
+	pyParts := make([]objects.Object, len(parts))
+	for i, p := range parts {
+		pyParts[i] = objects.NewStr(p)
+	}
+	pyIdxs := make([]objects.Object, len(starIdxs))
+	for i, idx := range starIdxs {
+		pyIdxs[i] = objects.NewInt(int64(idx))
+	}
+	return objects.NewTuple([]objects.Object{
+		objects.NewList(pyParts),
+		objects.NewList(pyIdxs),
+	}), nil
 }
 
 // translateFn implements fnmatch.translate. Output is byte-identical

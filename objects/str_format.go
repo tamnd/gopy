@@ -36,6 +36,15 @@ func unicodeFormat(o Object, spec string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ValueError: %w", err)
 	}
+	switch parsed.Type {
+	case 0, 's':
+		// CPython's string formatter only accepts the empty
+		// presentation type and 's'. Anything else lands in
+		// unknown_presentation_type so the rendered ValueError
+		// names the unsupported code.
+	default:
+		return "", unknownPresentationType(parsed.Type, o.Type().Name)
+	}
 	out, err := format.FormatString(u.v, parsed)
 	if err != nil {
 		return "", fmt.Errorf("ValueError: %w", err)

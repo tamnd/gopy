@@ -255,6 +255,18 @@ type LineDispatch struct {
 	Line           int
 }
 
+// GetOriginalOpcode returns the original opcode stored at instr in
+// data.Lines, or 0 if no data is present. Used by the dispatcher when
+// it needs the opcode without firing any events (e.g. re-entrance guard).
+//
+// CPython: Python/instrumentation.c getOriginalOpcode (static inline)
+func GetOriginalOpcode(data *CoMonitoringData, instr int) compile.Opcode {
+	if data == nil || data.Lines == nil {
+		return 0
+	}
+	return compile.Opcode(getOriginalOpcode(data.Lines, instr))
+}
+
 // CallInstrumentationLine fires LINE for the (code, instr) pair when
 // the instr offset starts a new line and at least one tool subscribes,
 // then returns the original opcode the dispatcher should execute in

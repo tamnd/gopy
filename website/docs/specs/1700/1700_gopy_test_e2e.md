@@ -26,7 +26,7 @@ fixes the underlying gopy package on red):
 - [ ] v0.3.0 exceptions panel (#485)
 - [ ] v0.4.0 number / string panel (#487)
 - [ ] v0.5.0 compile panel (#475)
-- [ ] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md)
+- [x] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md) (closed by [spec 1718](1718_lexer_gate_closers.md), PR #76, `bd1e9cce`)
 - [ ] v0.7.0 lifecycle panel (#482)
 - [ ] v0.8.0 import panel (#481)
 - [ ] v0.9.0 vm tail panel (#483)
@@ -152,11 +152,11 @@ release is named.
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_tokenize | v0.9 | ready | tokenize.Iter graduated to real lexer in v0.9 |
-| test_tabnanny | v0.9 | ready | rides on tokenize.Iter |
-| test_source_encoding | v0.5.5 | ready | parser/lexer encoding detection |
-| test_utf8source | v0.5.5 | ready | parser/lexer utf-8 default |
-| test_keyword | v0.5.5 | ready | keyword module is a generated table |
+| test_tokenize | v0.9 | done | Closed by spec 1718 P29..P59 (PR #76, `bd1e9cce`) |
+| test_tabnanny | v0.9 | done | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76, `bd1e9cce`) |
+| test_source_encoding | v0.5.5 | done | Closed by spec 1718 P6..P29 cookie/BOM + P60 long-cookie line (PR #76, `bd1e9cce`) |
+| test_utf8source | v0.5.5 | done | parser/lexer utf-8 default; greens with spec 1718 (PR #76, `bd1e9cce`) |
+| test_keyword | v0.5.5 | done | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76, `bd1e9cce`) |
 
 ### Parser / grammar / AST (27 files + test_ast/, test_future_stmt/, test_peg_generator/)
 

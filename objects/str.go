@@ -209,6 +209,7 @@ func init() {
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
 	strType.Getattro = GenericGetAttr
+	strType.TpFlags |= TpFlagMatchSelf
 	SetTypeDescr(strType, "__repr__", NewMethodDescr(strType, "__repr__", unicodeReprDescr))
 	SetTypeDescr(strType, "__str__", NewMethodDescr(strType, "__str__", unicodeStrDescr))
 	SetTypeDescr(strType, "__hash__", NewMethodDescr(strType, "__hash__", unicodeHashDescr))
@@ -243,7 +244,16 @@ func init() {
 			sa, _ := a.(*Unicode)
 			sb, _ := b.(*Unicode)
 			if sa == nil || sb == nil {
-				return nil, fmt.Errorf("TypeError: can only concatenate str to str")
+				// CPython names the bad-side type in the message
+				// (typically the right operand, since ensure_unicode on
+				// `a` would have raised before we got here in real use).
+				//
+				// CPython: Objects/unicodeobject.c:11641 PyUnicode_Concat
+				other := b
+				if sa == nil {
+					other = a
+				}
+				return nil, fmt.Errorf("TypeError: can only concatenate str (not %q) to str", typeNameOf(other))
 			}
 			return NewStr(sa.v + sb.v), nil
 		},

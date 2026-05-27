@@ -399,3 +399,18 @@ func (f *Frame) FrameNumFrees() int { return NFreeOf(f.Code) }
 func (f *Frame) FrameFreeLocal(i int) objects.Object {
 	return f.LocalsPlus[FreesStart(f.Code)+i].AsObject()
 }
+
+// FrameLocalsPlusItem returns LocalsPlus[i] at the absolute slot
+// (post-fix_cell_offsets). Used by kinds-driven walks like
+// FrameFastToLocals where the slot semantics live in
+// LocalsplusKinds rather than the legacy varnames/cellvars/freevars
+// split.
+//
+// CPython: Objects/frameobject.c:2199 frame_get_var (the
+// frame->localsplus[i] read).
+func (f *Frame) FrameLocalsPlusItem(i int) objects.Object {
+	if i < 0 || i >= len(f.LocalsPlus) {
+		return nil
+	}
+	return f.LocalsPlus[i].AsObject()
+}

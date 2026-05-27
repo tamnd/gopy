@@ -97,7 +97,7 @@ func makeSuperHierarchyWithAttr(t *testing.T, baseName, subName, attrName string
 func newEvalStateForFastArm(t *testing.T, ts *state.Thread, co *objects.Code) *evalState {
 	t.Helper()
 	stack := frameStackFor(ts)
-	f := stack.Push(co, nil, nil, nil, nil)
+	f := stack.Push(co, nil, nil, nil)
 	t.Cleanup(stack.Pop)
 	v := vmFor(ts)
 	return &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil, code: f.Code.Code}

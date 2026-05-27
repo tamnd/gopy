@@ -24,6 +24,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/builtins"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -50,36 +51,40 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		return nil, fmt.Errorf("TypeError: __build_class__: name is not a string")
 	}
 	rawBases := args[2:]
-	bases := make([]*objects.Type, 0, len(rawBases))
-	for _, b := range rawBases {
-		// PEP 585 / typing: class Foo(list[int]) is legal; the
-		// runtime base is the alias' __origin__ while the alias
-		// itself becomes part of __orig_bases__. CPython's
-		// type_new_get_bases unwraps these via _Py_subclass_check_mro.
-		// CPython: Objects/typeobject.c:3568 type_new_get_bases
-		if ga, ok := b.(*objects.GenericAlias); ok {
-			if t, ok := ga.Origin().(*objects.Type); ok {
-				bases = append(bases, t)
-				continue
-			}
-		}
+	origBasesTuple := objects.NewTuple(append([]objects.Object(nil), rawBases...))
+	resolved, err := resolveBases(rawBases)
+	if err != nil {
+		return nil, err
+	}
+	// Bases that survive __mro_entries__ resolution must all be types
+	// once a real type metaclass is in play, but CPython lets non-type
+	// metaclasses run with arbitrary bases. Keep the typed slice for
+	// the metaclass-winner calculation and fall back to the resolved
+	// slice (basesTuple) for the actual call to meta(...).
+	basesTuple := objects.NewTuple(resolved)
+	bases := make([]*objects.Type, 0, len(resolved))
+	allTypes := true
+	for _, b := range resolved {
 		t, ok := b.(*objects.Type)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: __build_class__: base is not a type, got %s", b.Type().Name)
+			allTypes = false
+			continue
 		}
 		bases = append(bases, t)
 	}
 
 	// kwargs may carry metaclass. Pull it out before forwarding the
 	// rest to the metaclass call (CPython removes it from mkw before
-	// the meta(name, bases, ns, **mkw) dispatch).
-	var meta *objects.Type
+	// the meta(name, bases, ns, **mkw) dispatch). metaclass can be any
+	// callable; CPython tracks isclass to decide whether the metaclass
+	// winner calculation runs.
+	//
+	// CPython: Python/bltinmodule.c:147 PyDict_Pop(mkw, &_Py_ID(metaclass), &meta)
+	var meta objects.Object
+	isclass := false
 	if mc, ok := kwargs["metaclass"]; ok {
-		mt, ok := mc.(*objects.Type)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: metaclass must be a type, not %s", mc.Type().Name)
-		}
-		meta = mt
+		meta = mc
+		_, isclass = mc.(*objects.Type)
 		delete(kwargs, "metaclass")
 	}
 	if meta == nil {
@@ -88,35 +93,46 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		} else {
 			meta = objects.TypeType()
 		}
+		isclass = true
 	}
 	// PEP 3115 metaclass winner: walk bases and pick the most-derived
-	// metaclass. CPython: Python/bltinmodule.c:131 builtin___build_class__
-	// (_Py_CalculateMetaclass call).
-	winner, err := calculateMetaclass(meta, bases)
-	if err != nil {
-		return nil, err
+	// metaclass. Skipped when meta is not a class.
+	//
+	// CPython: Python/bltinmodule.c:172 _PyType_CalculateMetaclass
+	if isclass && allTypes {
+		winner, err := calculateMetaclass(meta.(*objects.Type), bases)
+		if err != nil {
+			return nil, err
+		}
+		meta = winner
 	}
-	meta = winner
 
 	// Call meta.__prepare__(name, bases, **kwds) to get the class
-	// namespace. If __prepare__ is not defined, fall back to a plain
-	// dict as CPython does.
+	// namespace. PyObject_GetOptionalAttr suppresses AttributeError
+	// only; other errors (e.g. a descriptor __get__ that raises) must
+	// propagate so the class statement surfaces the real cause.
 	//
-	// CPython: Python/bltinmodule.c:131 builtin___build_class__
-	// (_PyObject_CallMethodIdObjArgs(meta, &PyId___prepare__, ...))
-	basesObjs := make([]objects.Object, len(bases))
-	for i, b := range bases {
-		basesObjs[i] = b
-	}
-	basesTuple := objects.NewTuple(basesObjs)
+	// CPython: Python/bltinmodule.c:183 PyObject_GetOptionalAttr(meta, __prepare__)
 	var ns objects.Object
 	prep, prepErr := objects.GetAttr(meta, objects.NewStr("__prepare__"))
-	if prepErr == nil && prep != nil {
+	if prepErr != nil {
+		ts := currentThread()
+		if exc := pyerrors.Occurred(ts); exc != nil {
+			if !pyerrors.Match(exc, pyerrors.PyExc_AttributeError) {
+				return nil, prepErr
+			}
+			pyerrors.Clear(ts)
+		} else if !isAttributeErrorMsg(prepErr) {
+			return nil, prepErr
+		}
+		prep = nil
+	}
+	if prep != nil {
 		prepArgsTuple := objects.NewTuple([]objects.Object{nameObj, basesTuple})
 		kwargsDict := kwargsToDict(kwargs)
 		ns, err = objects.Call(prep, prepArgsTuple, kwargsDict)
 		if err != nil {
-			return nil, fmt.Errorf("__prepare__: %w", err)
+			return nil, err
 		}
 	} else {
 		ns = objects.NewDict()
@@ -133,6 +149,29 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 
 	if err := runClassBody(fn, ns); err != nil {
 		return nil, err
+	}
+
+	// When __mro_entries__ rewrote the bases, store the original bases
+	// tuple as __orig_bases__ in the class namespace so typing.get_original_bases
+	// and similar introspection tools can recover the unevaluated forms.
+	//
+	// CPython: Python/bltinmodule.c:208 builtin___build_class__
+	// (if (bases != orig_bases) PyMapping_SetItemString(ns, "__orig_bases__", orig_bases))
+	if len(rawBases) > 0 {
+		basesChanged := len(resolved) != len(rawBases)
+		if !basesChanged {
+			for i, r := range resolved {
+				if r != rawBases[i] {
+					basesChanged = true
+					break
+				}
+			}
+		}
+		if basesChanged {
+			if d, ok := ns.(*objects.Dict); ok {
+				_ = d.SetItem(objects.NewStr("__orig_bases__"), origBasesTuple)
+			}
+		}
 	}
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}
@@ -155,7 +194,7 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
-	f := stack.Push(co, fn.Globals, nil, fn, nil)
+	f := stack.Push(co, fn.Globals, nil, fn)
 	defer stack.Pop()
 	f.Locals = ns
 	f.Builtins = fn.Builtins
@@ -195,6 +234,44 @@ func calculateMetaclass(winner *objects.Type, bases []*objects.Type) (*objects.T
 		return nil, fmt.Errorf("TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")
 	}
 	return winner, nil
+}
+
+// resolveBases ports CPython's _PyObject_UpdateBases. For each base that
+// is not a type, look up __mro_entries__ and splice the returned tuple
+// into the base list in place of the original entry. The original tuple
+// (containing the unresolved bases) is passed as the argument so that
+// __mro_entries__ implementations can inspect their siblings (e.g.
+// typing._GenericAlias.__mro_entries__ returns () when Protocol is in
+// the same bases tuple).
+//
+// CPython: Objects/typeobject.c:3690 _PyObject_UpdateBases
+func resolveBases(rawBases []objects.Object) ([]objects.Object, error) {
+	origTuple := objects.NewTuple(append([]objects.Object(nil), rawBases...))
+	out := make([]objects.Object, 0, len(rawBases))
+	mroName := objects.NewStr("__mro_entries__")
+	for _, b := range rawBases {
+		if _, ok := b.(*objects.Type); ok {
+			out = append(out, b)
+			continue
+		}
+		meth, _ := objects.GetAttr(b, mroName)
+		if meth == nil {
+			out = append(out, b)
+			continue
+		}
+		res, err := objects.Call(meth, objects.NewTuple([]objects.Object{origTuple}), nil)
+		if err != nil {
+			return nil, err
+		}
+		entries, ok := res.(*objects.Tuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __mro_entries__ must return a tuple")
+		}
+		for i := 0; i < entries.Len(); i++ {
+			out = append(out, entries.Item(i))
+		}
+	}
+	return out, nil
 }
 
 func kwargsToDict(kwargs map[string]objects.Object) *objects.Dict {

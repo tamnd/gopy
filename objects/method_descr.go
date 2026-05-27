@@ -45,7 +45,12 @@ func init() {
 	// Identity hash so method descriptors are hashable.
 	MethodDescrType.Hash = identityHash
 	addDescriptorSlotWrappers(MethodDescrType)
+	AddCallSlotWrapper(MethodDescrType)
+	addDescrIntrospectionDescriptors(MethodDescrType)
 }
+
+// Owner returns the type this method descriptor is registered on.
+func (d *MethodDescr) Owner() *Type { return d.owner }
 
 // NewMethodDescr builds a method descriptor that exposes name on
 // owner. fn receives the receiver as args[0]. Conv defaults to

@@ -11,16 +11,107 @@ import (
 	"unicode/utf8"
 )
 
+// DecodeError carries the byte-position pair that
+// _PyUnicode_DecodeUnicodeEscapeInternal2 records on its
+// PyUnicodeDecodeError so _Pypegen_raise_decode_error can format the
+// codec-style prefix the parser surface needs.
+//
+// CPython: Objects/unicodeobject.c:6854 raise on "unicodeescape"
+type DecodeError struct {
+	Reason string
+	Start  int
+	End    int
+}
+
+func (e *DecodeError) Error() string {
+	return e.Reason
+}
+
+// newDecodeError constructs a DecodeError that mirrors the
+// PyUnicodeDecodeError raised inside the C decoder.
+func newDecodeError(reason string, start, end int) *DecodeError {
+	return &DecodeError{Reason: reason, Start: start, End: end}
+}
+
 // decodeUnicodeEscapes walks s and expands the standard Python
 // escape sequences. The returned string is the decoded text in
 // UTF-8 form. Unknown escape sequences are kept verbatim and
 // reported via the warnings slice so the caller can surface them
 // as SyntaxWarning text without aborting decoding.
 //
+// The body is first run through preprocessUnicodeEscapes so a
+// trailing backslash, or a backslash immediately followed by a
+// non-ASCII byte, gets rewritten into a `\` escape. CPython
+// applies the same preprocessing because its inner decoder rejects
+// trailing backslashes and treats `\<utf8>` as an invalid escape; the
+// rewrite hides both quirks from callers (and lets f-string middles
+// that legitimately end with `\` after a `\{` warning round-trip
+// cleanly).
+//
+// CPython: Parser/string_parser.c:135 decode_unicode_with_escapes
 // CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal
-func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) {
+func decodeUnicodeEscapes(s []byte) (text string, warnings []string, offsets []int, err error) {
+	s = preprocessUnicodeEscapes(s)
+	return decodeUnicodeEscapesInternal(s)
+}
+
+// preprocessUnicodeEscapes mirrors the buffer-rewrite pass in
+// decode_unicode_with_escapes. CPython has to do this because its
+// inner decoder operates on a flat byte buffer that knows nothing
+// about UTF-8 or EOF, so it pre-translates the awkward cases:
+//   - a trailing `\` becomes `\`
+//   - a `\` followed by a high byte becomes `\` + the high byte
+//
+// We keep the rewrite even though our inner decoder is happier with
+// raw UTF-8, because callers (DecodeFStringPart in particular) rely
+// on the trailing-backslash rewrite to keep f-string middles like
+// `\` decodable after a `\{` SyntaxWarning fires.
+//
+// CPython: Parser/string_parser.c:158 decode_unicode_with_escapes inner loop
+func preprocessUnicodeEscapes(s []byte) []byte {
+	hasTrigger := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			if i+1 >= len(s) || s[i+1] >= 0x80 {
+				hasTrigger = true
+				break
+			}
+			i++
+		}
+	}
+	if !hasTrigger {
+		return s
+	}
+	out := make([]byte, 0, len(s)+5)
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' {
+			out = append(out, '\\')
+			i++
+			if i >= len(s) || s[i] >= 0x80 {
+				out = append(out, 'u', '0', '0', '5', 'c')
+				if i >= len(s) {
+					break
+				}
+			}
+		}
+		if i < len(s) {
+			out = append(out, s[i])
+			i++
+		}
+	}
+	return out
+}
+
+// decodeUnicodeEscapesInternal is the inner escape-decoder loop. It
+// matches _PyUnicode_DecodeUnicodeEscapeInternal2's behavior and is
+// only entered from decodeUnicodeEscapes after the buffer rewrite.
+//
+// CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal2
+func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, offsets []int, err error) {
 	var out []byte
 	var warns []string
+	var warnOffsets []int
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -29,9 +120,10 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			i++
 			continue
 		}
+		escStart := i
 		i++
 		if i >= len(s) {
-			return "", nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
+			return "", nil, nil, newDecodeError("\\ at end of string", escStart, i)
 		}
 		c = s[i]
 		i++
@@ -63,88 +155,119 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			// Octal value is a Unicode ordinal: emit as a codepoint,
 			// not as a raw byte (raw bytes >=0x80 corrupt UTF-8).
 			// Values > 0o377 are reported as invalid escapes, but
-			// the codepoint is still emitted.
+			// the codepoint is still emitted. The warning text mirrors
+			// Parser/string_parser.c:32 warn_invalid_escape_sequence
+			// octal branch: it quotes the original digit triple, not the
+			// numeric value, so `\477` shows `"\477"` in the message.
+			digitsStart := escStart + 1
 			val := int(c - '0')
 			for k := 0; k < 2 && i < len(s) && s[i] >= '0' && s[i] <= '7'; k++ {
 				val = val*8 + int(s[i]-'0')
 				i++
 			}
 			if val > 0o377 {
-				warns = append(warns, fmt.Sprintf("invalid octal escape sequence '\\%o'", val))
+				digits := string(s[digitsStart:i])
+				warns = append(warns, fmt.Sprintf(
+					"\"\\%s\" is an invalid octal escape sequence. "+
+						"Such sequences will not work in the future. "+
+						"Did you mean \"\\\\%s\"? A raw string is also an option.",
+					digits, digits))
+				warnOffsets = append(warnOffsets, escStart)
 			}
 			out = utf8.AppendRune(out, rune(val))
 		case 'x':
 			if i+2 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\xXX escape")
+				return "", nil, nil, newDecodeError("truncated \\xXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+2])
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, newDecodeError("truncated \\xXX escape", escStart, i+2)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 2
 		case 'u':
 			if i+4 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\uXXXX escape")
+				return "", nil, nil, newDecodeError("truncated \\uXXXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+4])
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, newDecodeError("truncated \\uXXXX escape", escStart, i+4)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 4
 		case 'U':
 			if i+8 > len(s) {
-				return "", nil, fmt.Errorf("truncated \\UXXXXXXXX escape")
+				return "", nil, nil, newDecodeError("truncated \\UXXXXXXXX escape", escStart, len(s))
 			}
 			v, err := parseHex(s[i : i+8])
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, newDecodeError("truncated \\UXXXXXXXX escape", escStart, i+8)
 			}
 			if v > 0x10FFFF {
-				return "", nil, fmt.Errorf("illegal Unicode character in \\U escape")
+				return "", nil, nil, newDecodeError("illegal Unicode character", escStart, i+8)
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 8
 		case 'N':
-			// CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscape
-			// \N{NAME} expands via the unicodedata name table.
+			// CPython: Objects/unicodeobject.c:6791 \N{name} expansion.
+			// The matching errors live at unicodeobject.c:6801 ("malformed
+			// \N character escape") and :6826 ("unknown Unicode character
+			// name"); both are surfaced through PyUnicodeDecodeError so
+			// _Pypegen_raise_decode_error can format the codec prefix.
 			if i >= len(s) || s[i] != '{' {
-				return "", nil, fmt.Errorf("malformed \\N character escape")
+				return "", nil, nil, newDecodeError("malformed \\N character escape", escStart, i)
 			}
 			j := i + 1
 			for j < len(s) && s[j] != '}' {
 				j++
 			}
 			if j >= len(s) {
-				return "", nil, fmt.Errorf("malformed \\N character escape")
+				return "", nil, nil, newDecodeError("malformed \\N character escape", escStart, j)
 			}
-			r, nerr := CharByName(string(s[i+1 : j]))
-			if nerr != nil {
-				return "", nil, fmt.Errorf("unknown Unicode character name")
+			name := string(s[i+1 : j])
+			if name == "" {
+				return "", nil, nil, newDecodeError("malformed \\N character escape", escStart, j+1)
 			}
-			out = utf8.AppendRune(out, r)
+			expanded, ok := NameLookup(name)
+			if !ok {
+				return "", nil, nil, newDecodeError("unknown Unicode character name", escStart, j+1)
+			}
+			out = append(out, expanded...)
 			i = j + 1
 		default:
 			// PEP 414 keeps the backslash in the output for
 			// unrecognized escapes; CPython 3.14 also emits a
-			// SyntaxWarning so the user can spot a typo.
+			// SyntaxWarning so the user can spot a typo. The text
+			// mirrors Parser/string_parser.c:38 warn_invalid_escape_sequence
+			// non-octal branch so the runtime warnings filter sees the
+			// same key the tokenizer surface uses.
 			out = append(out, '\\', c)
-			warns = append(warns, fmt.Sprintf("invalid escape sequence '\\%c'", c))
+			warns = append(warns, fmt.Sprintf(
+				"\"\\%c\" is an invalid escape sequence. "+
+					"Such sequences will not work in the future. "+
+					"Did you mean \"\\\\%c\"? A raw string is also an option.",
+				c, c))
+			warnOffsets = append(warnOffsets, escStart)
 		}
 	}
 	if !utf8.Valid(out) {
-		return "", nil, fmt.Errorf("invalid utf-8 in string literal")
+		return "", nil, nil, fmt.Errorf("invalid utf-8 in string literal")
 	}
-	return string(out), warns, nil
+	return string(out), warns, warnOffsets, nil
 }
 
 // decodeBytesEscapes is the bytes form. The unicode escapes are
 // rejected here because they have no meaning in a byte literal.
 //
 // CPython: Objects/bytesobject.c _PyBytes_DecodeEscape
-func decodeBytesEscapes(s []byte) (out []byte, warnings []string, err error) {
+// decodeBytesEscapes is the bytes form. The unicode escapes are
+// rejected here because they have no meaning in a byte literal.
+//
+// CPython: Objects/bytesobject.c _PyBytes_DecodeEscape
+// CPython: Parser/tokenizer/helpers.c _PyTokenizer_warn_invalid_escape_sequence (message format)
+func decodeBytesEscapes(s []byte) (out []byte, warnings []string, offsets []int, err error) {
 	var warns []string
+	var warnOffsets []int
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -153,9 +276,10 @@ func decodeBytesEscapes(s []byte) (out []byte, warnings []string, err error) {
 			i++
 			continue
 		}
+		escStart := i
 		i++
 		if i >= len(s) {
-			return nil, nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
+			return nil, nil, nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
 		}
 		c = s[i]
 		i++
@@ -182,28 +306,47 @@ func decodeBytesEscapes(s []byte) (out []byte, warnings []string, err error) {
 		case 'v':
 			out = append(out, 0x0b)
 		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// CPython: Objects/bytesobject.c:_PyBytes_DecodeEscape octal branch.
+			// Values > 0o377 are truncated to a byte but also emit SyntaxWarning
+			// via _PyTokenizer_warn_invalid_escape_sequence in the tokenizer path.
+			digitsStart := escStart + 1
 			val := int(c - '0')
 			for k := 0; k < 2 && i < len(s) && s[i] >= '0' && s[i] <= '7'; k++ {
 				val = val*8 + int(s[i]-'0')
 				i++
 			}
+			if val > 0o377 {
+				digits := string(s[digitsStart:i])
+				warns = append(warns, fmt.Sprintf(
+					"\"\\%s\" is an invalid octal escape sequence. "+
+						"Such sequences will not work in the future. "+
+						"Did you mean \"\\\\%s\"? A raw string is also an option.",
+					digits, digits))
+				warnOffsets = append(warnOffsets, escStart)
+			}
 			out = append(out, byte(val&0xff))
 		case 'x':
 			if i+2 > len(s) {
-				return nil, nil, fmt.Errorf("truncated \\xXX escape")
+				return nil, nil, nil, fmt.Errorf("truncated \\xXX escape")
 			}
 			v, err := parseHex(s[i : i+2])
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			out = append(out, byte(v))
 			i += 2
 		default:
+			// CPython: Parser/tokenizer/helpers.c:_PyTokenizer_warn_invalid_escape_sequence
 			out = append(out, '\\', c)
-			warns = append(warns, fmt.Sprintf("invalid escape sequence '\\%c'", c))
+			warns = append(warns, fmt.Sprintf(
+				"\"\\%c\" is an invalid escape sequence. "+
+					"Such sequences will not work in the future. "+
+					"Did you mean \"\\\\%c\"? A raw string is also an option.",
+				c, c))
+			warnOffsets = append(warnOffsets, escStart)
 		}
 	}
-	return out, warns, nil
+	return out, warns, warnOffsets, nil
 }
 
 func parseHex(s []byte) (int, error) {

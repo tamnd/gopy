@@ -151,11 +151,12 @@ func TestFormattedValueWithConversionEmitsConvertValue(t *testing.T) {
 	js := &ast.JoinedStr{Values: []ast.Expr{fv}}
 	u := compileMod(t, exprMod(js))
 	got := opNames(u)
+	// Single FormattedValue: CPython omits BUILD_STRING (value_count==1 branch).
+	// CPython: Python/codegen.c:4104 codegen_joined_str
 	want := []string{
 		"LOAD_NAME",
 		"CONVERT_VALUE",
 		"FORMAT_SIMPLE",
-		"BUILD_STRING",
 		"POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
 	}

@@ -19,7 +19,7 @@ import (
 //
 // CPython: Objects/typeobject.c:7970 PyBaseObject_Type
 var objectType = func() *Type {
-	t := &Type{Name: "object"}
+	t := &Type{Name: "object", TpFlags: TpFlagImmutable | TpFlagBasetype}
 	t.init(typeType)
 	t.Bases = []*Type{}
 	t.MRO = []*Type{t}
@@ -545,15 +545,26 @@ func objectGetClass(o Object) (Object, error) {
 	return o.Type(), nil
 }
 
-// objectSetClass implements object.__class__ set. CPython performs
-// elaborate compatibility checks (object_set_class_world_stopped)
-// before swapping the type pointer; gopy raises TypeError for now
-// so user code does not silently corrupt the type graph. A real
-// port is tracked under the pickle / object-protocol follow-up.
+// objectSetClass implements object.__class__ set. CPython checks that
+// old and new types have compatible C-level memory layouts; gopy only
+// supports this for *Instance objects (which share a uniform layout)
+// and rejects built-in types.
 //
 // CPython: Objects/typeobject.c:7208 object_set_class
 func objectSetClass(o Object, value Object) error {
-	return fmt.Errorf("TypeError: __class__ assignment not supported")
+	newType, ok := value.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)
+	}
+	if newType.TpFlags&TpFlagImmutable != 0 {
+		return fmt.Errorf("TypeError: can't set __class__: new type '%s' is not mutable", newType.Name)
+	}
+	inst, ok := o.(*Instance)
+	if !ok {
+		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
+	}
+	inst.Header.typ = newType //nolint:staticcheck // QF1008: explicit Header field access mirrors CPython's ob_type layout
+	return nil
 }
 
 // objectGetDict implements object.__dict__ get for HasDict-bearing
@@ -562,11 +573,22 @@ func objectSetClass(o Object, value Object) error {
 //
 // CPython: Objects/typeobject.c subtype_dict
 func objectGetDict(o Object) (Object, error) {
-	if inst, ok := o.(*Instance); ok {
-		if inst.dict == nil {
+	switch v := o.(type) {
+	case *Instance:
+		if v.dict == nil {
 			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 		}
-		return inst.dict, nil
+		return v.dict, nil
+	case *Int:
+		if v.attrs == nil {
+			v.attrs = NewDict()
+		}
+		return v.attrs, nil
+	case *Unicode:
+		if v.attrs == nil {
+			v.attrs = NewDict()
+		}
+		return v.attrs, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 }

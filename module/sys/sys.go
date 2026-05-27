@@ -80,6 +80,9 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "hash_info", hashInfo()); err != nil {
 		return nil, err
 	}
+	if err := setItem(d, "float_info", floatInfo()); err != nil {
+		return nil, err
+	}
 	if err := setItem(d, "_jit", jitInfo()); err != nil {
 		return nil, err
 	}
@@ -260,6 +263,30 @@ func hashInfo() *objects.Namespace {
 	_ = d.SetItem(objects.NewStr("hash_bits"), objects.NewInt(64))
 	_ = d.SetItem(objects.NewStr("seed_bits"), objects.NewInt(128))
 	_ = d.SetItem(objects.NewStr("cutoff"), objects.NewInt(0))
+	return n
+}
+
+// floatInfo returns sys.float_info as a SimpleNamespace with the
+// standard IEEE 754 double-precision constants. Field order matches
+// CPython's Float_InfoType (max, max_exp, max_10_exp, min, min_exp,
+// min_10_exp, dig, mant_dig, epsilon, radix, rounds).
+//
+// CPython: Objects/floatobject.c:82 PyFloat_GetInfo
+// CPython: Python/sysmodule.c:3849 _PySys_InitCore
+func floatInfo() *objects.Namespace {
+	n := objects.NewNamespace()
+	d := n.Dict()
+	_ = d.SetItem(objects.NewStr("max"), objects.NewFloat(1.7976931348623157e+308))
+	_ = d.SetItem(objects.NewStr("max_exp"), objects.NewInt(1024))
+	_ = d.SetItem(objects.NewStr("max_10_exp"), objects.NewInt(308))
+	_ = d.SetItem(objects.NewStr("min"), objects.NewFloat(2.2250738585072014e-308))
+	_ = d.SetItem(objects.NewStr("min_exp"), objects.NewInt(-1021))
+	_ = d.SetItem(objects.NewStr("min_10_exp"), objects.NewInt(-307))
+	_ = d.SetItem(objects.NewStr("dig"), objects.NewInt(15))
+	_ = d.SetItem(objects.NewStr("mant_dig"), objects.NewInt(53))
+	_ = d.SetItem(objects.NewStr("epsilon"), objects.NewFloat(2.220446049250313e-16))
+	_ = d.SetItem(objects.NewStr("radix"), objects.NewInt(2))
+	_ = d.SetItem(objects.NewStr("rounds"), objects.NewInt(1))
 	return n
 }
 

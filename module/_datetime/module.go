@@ -20,6 +20,7 @@ package _datetime
 import (
 	"fmt"
 	"math"
+	"strings"
 	gotime "time"
 
 	"github.com/tamnd/gopy/imp"
@@ -83,11 +84,17 @@ const (
 // ---------------------------------------------------------------------------
 
 // pythonToGoFmt converts a CPython strftime format string to the
-// equivalent Go time.Format layout string.
+// equivalent Go time.Format layout string. Returns ("", false) when the
+// input contains no % directives at all; callers should return the
+// original format string directly in that case because Go's time.Format
+// would interpret bare digits (1, 2, 3…) as date/time components.
 //
 // CPython: Modules/_datetimemodule.c:720 format_utcoffset (and surrounding
 // strftime code)
-func pythonToGoFmt(pyFmt string) string {
+func pythonToGoFmt(pyFmt string) (string, bool) {
+	if !strings.ContainsRune(pyFmt, '%') {
+		return pyFmt, false
+	}
 	out := make([]byte, 0, len(pyFmt))
 	i := 0
 	for i < len(pyFmt) {
@@ -146,7 +153,7 @@ func pythonToGoFmt(pyFmt string) string {
 		}
 		i++
 	}
-	return string(out)
+	return string(out), true
 }
 
 // ---------------------------------------------------------------------------
@@ -720,11 +727,11 @@ func init() {
 	objects.SetTypeDescr(DateType, "__reduce__",
 		objects.NewMethodDescr(DateType, "__reduce__", dateReduce))
 	objects.SetTypeDescr(DateType, "today",
-		objects.NewMethodDescr(DateType, "today", dateTodayMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("today", dateTodayMethod)))
 	objects.SetTypeDescr(DateType, "fromtimestamp",
-		objects.NewMethodDescr(DateType, "fromtimestamp", dateFromtimestampMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("fromtimestamp", dateFromtimestampMethod)))
 	objects.SetTypeDescr(DateType, "fromisoformat",
-		objects.NewMethodDescr(DateType, "fromisoformat", dateFromisoformatMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("fromisoformat", dateFromisoformatMethod)))
 	objects.SetTypeDescr(DateType, "timetuple",
 		objects.NewMethodDescr(DateType, "timetuple", dateTimetuple))
 	objects.SetTypeDescr(DateType, "toordinal",
@@ -739,6 +746,8 @@ func init() {
 		objects.NewMethodDescr(DateType, "isoformat", dateIsoformat))
 	objects.SetTypeDescr(DateType, "strftime",
 		objects.NewMethodDescr(DateType, "strftime", dateStrftime))
+	objects.SetTypeDescr(DateType, "__format__",
+		objects.NewMethodDescr(DateType, "__format__", dateFormatMethod))
 	objects.SetTypeDescr(DateType, "replace",
 		objects.NewMethodDescr(DateType, "replace", dateReplace))
 	objects.SetTypeDescr(DateType, "min", mustDate(minyear, 1, 1))
@@ -1173,8 +1182,33 @@ func dateStrftime(args []objects.Object, kwargs map[string]objects.Object) (obje
 		return nil, err
 	}
 	gt := dateToGoTime(d)
-	goFmt := pythonToGoFmt(fmtStr)
+	goFmt, hasDirectives := pythonToGoFmt(fmtStr)
+	if !hasDirectives {
+		return objects.NewStr(fmtStr), nil
+	}
 	return objects.NewStr(gt.Format(goFmt)), nil
+}
+
+// dateFormatMethod is date.__format__(format_spec).
+// Empty spec returns str(self); non-empty delegates to strftime.
+//
+// CPython: Modules/_datetimemodule.c:3598 date_format
+func dateFormatMethod(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __format__() takes exactly one argument")
+	}
+	spec, ok := args[1].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __format__() argument 1 must be str")
+	}
+	if spec.Value() == "" {
+		s, err := objects.Str(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}
+	return dateStrftime(args, kwargs)
 }
 
 // dateReplace is date.replace(**kw).
@@ -1545,7 +1579,7 @@ func init() {
 	TimeType.Getattro = timeGetattr
 
 	objects.SetTypeDescr(TimeType, "fromisoformat",
-		objects.NewMethodDescr(TimeType, "fromisoformat", timeFromisoformatMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("fromisoformat", timeFromisoformatMethod)))
 	objects.SetTypeDescr(TimeType, "isoformat",
 		objects.NewMethodDescr(TimeType, "isoformat", timeIsoformat))
 	objects.SetTypeDescr(TimeType, "strftime",
@@ -2029,7 +2063,10 @@ func timeStrftime(args []objects.Object, kwargs map[string]objects.Object) (obje
 	}
 	gt := gotime.Date(1900, 1, 1, int(t.Hour), int(t.Minute), int(t.Second),
 		int(t.Microsecond)*1000, gotime.UTC)
-	goFmt := pythonToGoFmt(fmtStr)
+	goFmt, hasDirectives := pythonToGoFmt(fmtStr)
+	if !hasDirectives {
+		return objects.NewStr(fmtStr), nil
+	}
 	return objects.NewStr(gt.Format(goFmt)), nil
 }
 
@@ -2154,17 +2191,17 @@ func init() {
 	DatetimeType.Getattro = datetimeGetattr
 
 	objects.SetTypeDescr(DatetimeType, "now",
-		objects.NewMethodDescr(DatetimeType, "now", datetimeNowMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("now", datetimeNowMethod)))
 	objects.SetTypeDescr(DatetimeType, "utcnow",
-		objects.NewMethodDescr(DatetimeType, "utcnow", datetimeUtcnowMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("utcnow", datetimeUtcnowMethod)))
 	objects.SetTypeDescr(DatetimeType, "fromtimestamp",
-		objects.NewMethodDescr(DatetimeType, "fromtimestamp", datetimeFromtimestampMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("fromtimestamp", datetimeFromtimestampMethod)))
 	objects.SetTypeDescr(DatetimeType, "utcfromtimestamp",
-		objects.NewMethodDescr(DatetimeType, "utcfromtimestamp", datetimeUtcfromtimestampMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("utcfromtimestamp", datetimeUtcfromtimestampMethod)))
 	objects.SetTypeDescr(DatetimeType, "combine",
-		objects.NewMethodDescr(DatetimeType, "combine", datetimeCombine))
+		objects.NewClassMethod(objects.NewBuiltinFunction("combine", datetimeCombine)))
 	objects.SetTypeDescr(DatetimeType, "fromisoformat",
-		objects.NewMethodDescr(DatetimeType, "fromisoformat", datetimeFromisoformatMethod))
+		objects.NewClassMethod(objects.NewBuiltinFunction("fromisoformat", datetimeFromisoformatMethod)))
 	objects.SetTypeDescr(DatetimeType, "timetuple",
 		objects.NewMethodDescr(DatetimeType, "timetuple", datetimeTimetuple))
 	objects.SetTypeDescr(DatetimeType, "utctimetuple",
@@ -2197,6 +2234,8 @@ func init() {
 		objects.NewMethodDescr(DatetimeType, "isoformat", datetimeIsoformat))
 	objects.SetTypeDescr(DatetimeType, "strftime",
 		objects.NewMethodDescr(DatetimeType, "strftime", datetimeStrftime))
+	objects.SetTypeDescr(DatetimeType, "__format__",
+		objects.NewMethodDescr(DatetimeType, "__format__", datetimeFormatMethod))
 	objects.SetTypeDescr(DatetimeType, "min",
 		mustDatetime(minyear, 1, 1, 0, 0, 0, 0, nil))
 	objects.SetTypeDescr(DatetimeType, "max",
@@ -3063,6 +3102,34 @@ func datetimeStrftime(args []objects.Object, kwargs map[string]objects.Object) (
 		return nil, err
 	}
 	gt := datetimeToGoTime(dt)
-	goFmt := pythonToGoFmt(fmtStr)
+	goFmt, hasDirectives := pythonToGoFmt(fmtStr)
+	if !hasDirectives {
+		return objects.NewStr(fmtStr), nil
+	}
 	return objects.NewStr(gt.Format(goFmt)), nil
+}
+
+// datetimeFormatMethod is datetime.__format__(format_spec).
+// Empty spec returns str(self); non-empty delegates to strftime.
+// Strings with no % directives are returned unchanged (Python strftime
+// passes non-%-chars through literally).
+//
+// CPython: Modules/_datetimemodule.c:3598 date_format (shared by datetime)
+func datetimeFormatMethod(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __format__() takes exactly one argument")
+	}
+	spec, ok := args[1].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __format__() argument 1 must be str")
+	}
+	v := spec.Value()
+	if v == "" {
+		s, err := objects.Str(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}
+	return datetimeStrftime(args, kwargs)
 }

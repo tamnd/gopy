@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -38,7 +39,7 @@ func buildModule() (*objects.Module, error) {
 		{"iter_unpack", objects.NewBuiltinFunction("iter_unpack", moduleIterUnpack)},
 		{"_clearcache", objects.NewBuiltinFunction("_clearcache", moduleClearcache)},
 		{"Struct", StructType},
-		{"error", objects.NewType("struct.error", []*objects.Type{objects.ObjectType()})},
+		{"error", pyerrors.NewExcType("struct.error", []*objects.Type{pyerrors.PyExc_Exception})},
 		{"__doc__", objects.NewStr(structDoc)},
 	}
 	for _, e := range entries {

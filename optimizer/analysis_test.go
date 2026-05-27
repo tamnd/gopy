@@ -81,19 +81,20 @@ type stubFrame struct {
 	fn       objects.Object
 }
 
-func (s *stubFrame) FrameCode() *objects.Code            { return nil }
-func (s *stubFrame) FrameGlobals() objects.Object        { return s.globals }
-func (s *stubFrame) FrameBuiltins() objects.Object       { return s.builtins }
-func (s *stubFrame) FrameLocals() objects.Object         { return nil }
-func (s *stubFrame) FrameBack() objects.InterpreterFrame { return nil }
-func (s *stubFrame) FrameLasti() int                     { return 0 }
-func (s *stubFrame) FrameNumLocals() int                 { return 0 }
-func (s *stubFrame) FrameFastLocal(int) objects.Object   { return nil }
-func (s *stubFrame) FrameNumCells() int                  { return 0 }
-func (s *stubFrame) FrameCellLocal(int) objects.Object   { return nil }
-func (s *stubFrame) FrameNumFrees() int                  { return 0 }
-func (s *stubFrame) FrameFreeLocal(int) objects.Object   { return nil }
-func (s *stubFrame) FrameFunc() objects.Object           { return s.fn }
+func (s *stubFrame) FrameCode() *objects.Code               { return nil }
+func (s *stubFrame) FrameGlobals() objects.Object           { return s.globals }
+func (s *stubFrame) FrameBuiltins() objects.Object          { return s.builtins }
+func (s *stubFrame) FrameLocals() objects.Object            { return nil }
+func (s *stubFrame) FrameBack() objects.InterpreterFrame    { return nil }
+func (s *stubFrame) FrameLasti() int                        { return 0 }
+func (s *stubFrame) FrameNumLocals() int                    { return 0 }
+func (s *stubFrame) FrameFastLocal(int) objects.Object      { return nil }
+func (s *stubFrame) FrameNumCells() int                     { return 0 }
+func (s *stubFrame) FrameCellLocal(int) objects.Object      { return nil }
+func (s *stubFrame) FrameNumFrees() int                     { return 0 }
+func (s *stubFrame) FrameFreeLocal(int) objects.Object      { return nil }
+func (s *stubFrame) FrameLocalsPlusItem(int) objects.Object { return nil }
+func (s *stubFrame) FrameFunc() objects.Object              { return s.fn }
 
 // TestRemoveGlobals_RewritesGuardToCheckFunction confirms that the
 // first _GUARD_GLOBALS_VERSION on a fresh trace becomes _CHECK_FUNCTION

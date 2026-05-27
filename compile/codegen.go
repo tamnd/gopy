@@ -15,17 +15,26 @@ import (
 )
 
 // Intrinsic ids for CALL_INTRINSIC_1. CPython:
-// Include/internal/pycore_intrinsics.h INTRINSIC_*. Add more as the
-// visitors that emit them land.
+// Include/internal/pycore_intrinsics.h INTRINSIC_*. Numbering matches
+// CPython byte-for-byte so the VM dispatch table indexes line up with
+// the eval loop's CALL_INTRINSIC_1 reader.
 const (
 	intrinsicPrint              int32 = 1
 	intrinsicStopIterationError int32 = 3
+	intrinsicTypeVar            int32 = 7
+	intrinsicParamSpec          int32 = 8
+	intrinsicTypeVarTuple       int32 = 9
+	intrinsicSubscriptGeneric   int32 = 10
 )
 
 // Intrinsic ids for CALL_INTRINSIC_2. CPython:
 // Include/internal/pycore_intrinsics.h INTRINSIC_2_*.
 const (
-	intrinsicPrepReraiseStar int32 = 1
+	intrinsicPrepReraiseStar        int32 = 1
+	intrinsicTypeVarWithBound       int32 = 2
+	intrinsicTypeVarWithConstraints int32 = 3
+	intrinsicSetFunctionTypeParams  int32 = 4
+	intrinsicSetTypeParamDefault    int32 = 5
 )
 
 // Operands for LOAD_SPECIAL. CPython:
@@ -84,6 +93,15 @@ type Unit struct {
 	CellVars            []string
 	FastHidden          map[string]bool
 	DeferredAnnotations []deferredAnnotation
+	// NextConditionalAnnotationIndex is the counter for conditional annotation
+	// indices, incremented each time a new conditional annotation is recorded.
+	// Mirrors CPython's Python/compile.c:670 u_next_conditional_annotation_index.
+	NextConditionalAnnotationIndex int
+	// InConditionalBlock is the nesting depth of conditional control-flow blocks
+	// (if/for/while/match/try/with). Annotations inside conditional blocks get
+	// a non-(-1) CondIdx so the __annotate__ function can guard their inclusion.
+	// Mirrors CPython's Python/compile.c:64 u_in_conditional_block.
+	InConditionalBlock int
 	// Private is the enclosing class name used for PEP 8 private name
 	// mangling. Set when entering a class scope and inherited by nested
 	// function / comprehension scopes so `self.__x` inside a method
@@ -108,17 +126,32 @@ type deferredAnnotation struct {
 	Name  string
 	Value ast.Expr
 	Loc   ast.Pos
+	// CondIdx is the conditional annotation index (-1 = unconditional).
+	// At the annotation site the compiler emits SET_ADD to track which
+	// indices were actually reached; emitAnnotateBody uses it to guard
+	// each annotation with CONTAINS_OP.
+	//
+	// CPython: Python/compile.c:63 u_conditional_annotation_indices
+	CondIdx int
 }
 
 // Compiler is the long-lived driver state shared by every Codegen
 // call within one Compile invocation.
 //
 // CPython: Python/compile.c compiler
+// compilerRecursionLimit mirrors CPython Python/symtable.c C_RECURSION_LIMIT
+// used via ENTER_RECURSIVE / Py_EnterRecursiveCall during compilation.
+const compilerRecursionLimit = 500
+
 type Compiler struct {
 	Filename string
 	Optimize int
 	Future   *future.Features
 	Symtable *symtable.Table
+
+	// recursionRemaining guards visitExpr / visitStmt against circular ASTs.
+	// CPython: Python/compile.c (via Py_EnterRecursiveCall in codegen.c)
+	recursionRemaining int
 
 	// units stacks active scopes during the recursive descent. The
 	// top-of-stack is the scope currently being codegen'd; nested
@@ -152,10 +185,11 @@ type Compiler struct {
 // CPython: Python/compile.c new_compiler
 func NewCompiler(filename string, optimize int, ff *future.Features, st *symtable.Table) *Compiler {
 	return &Compiler{
-		Filename: filename,
-		Optimize: optimize,
-		Future:   ff,
-		Symtable: st,
+		Filename:           filename,
+		Optimize:           optimize,
+		Future:             ff,
+		Symtable:           st,
+		recursionRemaining: compilerRecursionLimit,
 	}
 }
 
@@ -234,7 +268,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	}
 	u := &Unit{
 		Name:        name,
-		Qualname:    buildQualname(c.units, name),
+		Qualname:    buildQualname(c.units, name, sc.Type),
 		ScopeType:   sc.Type,
 		FirstLineno: firstLine,
 		Seq:         &Sequence{},
@@ -282,6 +316,19 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		// CPython: Python/codegen.c codegen_setup_annotations_scope
 		// (the SCOPE_TYPE_FUNCTION flags it asks for)
 		u.Flags = CoOptimized | CoNewLocals
+	case symtable.TypeParametersBlock,
+		symtable.TypeVariableBlock,
+		symtable.TypeAliasBlock:
+		// PEP 695 synthetic function scopes: the outer "<generic
+		// parameters of X>" wrapper, per-TypeVar bound / default
+		// thunks, and the body of `type X = ...`. CPython enters all
+		// three through codegen_enter_scope with
+		// COMPILE_SCOPE_ANNOTATIONS, which sets CO_OPTIMIZED |
+		// CO_NEWLOCALS (and the nested flag below).
+		//
+		// CPython: Python/codegen.c:648 codegen_enter_scope
+		// (COMPILE_SCOPE_ANNOTATIONS branch)
+		u.Flags = CoOptimized | CoNewLocals
 	}
 	// CoNested: any scope nested inside a non-module scope. Mirrors
 	// CPython's compute_code_flags COMPILER_FLAGS_NESTED check.
@@ -312,6 +359,22 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 			cellNames = append(cellNames, name)
 		case symtable.Free:
 			freeNames = append(freeNames, name)
+		default:
+			// DEF_FREE_CLASS: a class scope can have a name that is
+			// LOCAL to the class yet also referenced as Free by a
+			// nested method. The class itself doesn't make a cell
+			// (the local binding wins inside the class body), but
+			// the nested method's closure tuple still needs to
+			// pull the value from the enclosing function. CPython
+			// handles this by listing the name in u_freevars even
+			// when its scope is LOCAL, so dict_lookup_arg finds
+			// the cell index.
+			//
+			// CPython: Python/compile.c:641 compiler_enter_scope
+			// (dictbytype(symbols, FREE, DEF_FREE_CLASS, ...))
+			if flags&symtable.DefFreeClass != 0 {
+				freeNames = append(freeNames, name)
+			}
 		}
 	}
 	sortStrings(cellNames)
@@ -332,19 +395,56 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 // function get "Outer.<locals>.Name". Mirrors CPython's
 // compiler_set_qualname.
 //
+// Annotation, type-params, type-alias, and type-variable scopes are
+// transparent: they do not appear in the qualname chain. CPython
+// treats them all as COMPILE_SCOPE_ANNOTATIONS (which is skipped) in
+// codegen_enter_scope, so a class Foo[T] has qualname "Foo", not
+// "<generic parameters of Foo>.<locals>.Foo".
+//
 // CPython: Python/compile.c:L644 compiler_set_qualname
-func buildQualname(stack []*Unit, name string) string {
+func buildQualname(stack []*Unit, name string, scopeType symtable.Block) string {
 	if len(stack) == 0 {
 		return name
 	}
+	// Walk backwards past transparent scopes to find the real parent.
 	parent := stack[len(stack)-1]
+	for isTransparentScope(parent.ScopeType) {
+		stack = stack[:len(stack)-1]
+		if len(stack) == 0 {
+			return name
+		}
+		parent = stack[len(stack)-1]
+	}
 	if parent.ScopeType == symtable.ModuleBlock {
 		return name
 	}
 	if parent.ScopeType == symtable.ClassBlock {
 		return parent.Qualname + "." + name
 	}
+	// Annotation scopes use "." not ".<locals>." even when the parent
+	// is a function scope. CPython: Python/compile.c:644
+	// compiler_set_qualname (COMPILE_SCOPE_ANNOTATIONS branch).
+	if scopeType == symtable.AnnotationBlock {
+		return parent.Qualname + "." + name
+	}
 	return parent.Qualname + ".<locals>." + name
+}
+
+// isTransparentScope reports whether a scope type is invisible in
+// qualname computation. These scopes (PEP 695 generics, PEP 649
+// annotations) are entered as COMPILE_SCOPE_ANNOTATIONS in CPython,
+// which compiler_set_qualname skips when building co_qualname.
+//
+// CPython: Python/compile.c:244 (COMPILE_SCOPE_ANNOTATIONS check)
+func isTransparentScope(t symtable.Block) bool {
+	switch t {
+	case symtable.AnnotationBlock,
+		symtable.TypeParametersBlock,
+		symtable.TypeVariableBlock,
+		symtable.TypeAliasBlock:
+		return true
+	}
+	return false
 }
 
 // leaveScope pops the top unit. The unit is still reachable through

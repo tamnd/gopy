@@ -85,6 +85,85 @@ func SeqLastItem[T any](seq []T) T {
 	return seq[len(seq)-1]
 }
 
+// seqFirstAny returns the first element of a sequence-shaped action
+// result. A non-slice value is treated as a length-1 sequence.
+//
+// CPython: Parser/pegen.h:267 PyPegen_first_item macro
+func seqFirstAny(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		if len(x) == 0 {
+			return nil
+		}
+		return x[0]
+	default:
+		return v
+	}
+}
+
+// seqLastAny returns the last element of a sequence-shaped action
+// result. Rule-result sequences arrive as `[]any` from the generator;
+// individual AST nodes are passed through untouched so the caller can
+// chain extractPos on either form.
+//
+// CPython: Parser/pegen.h:265 PyPegen_last_item macro
+func seqLastAny(v any) any {
+	for {
+		switch x := v.(type) {
+		case nil:
+			return nil
+		case []any:
+			if len(x) == 0 {
+				return nil
+			}
+			v = x[len(x)-1]
+		default:
+			return v
+		}
+	}
+}
+
+// seqLenAny reports the length of a gather-rule result. The result is
+// always a flat slice; a non-slice value is treated as a single item
+// so callers do not need to special-case the collapsed shape.
+//
+// CPython: Include/internal/pycore_asdl.h:18 asdl_seq_LEN
+func seqLenAny(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case []any:
+		return len(x)
+	default:
+		return 1
+	}
+}
+
+// seqGetAny indexes a gather-rule result. A non-slice value behaves as
+// a length-1 sequence so the canonical
+// `asdl_seq_LEN(x) == 1 ? asdl_seq_GET(x, 0) : ...` collapse pattern
+// from the grammar still works after the collapsed shape arrives.
+//
+// CPython: Include/internal/pycore_asdl.h:19 asdl_seq_GET
+func seqGetAny(v any, i int) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		if i < 0 || i >= len(x) {
+			return nil
+		}
+		return x[i]
+	default:
+		if i == 0 {
+			return v
+		}
+		return nil
+	}
+}
+
 // SeqCountDots counts the leading DOT/ELLIPSIS tokens that the
 // `from ... import` rule accepts. ELLIPSIS counts as three dots.
 //
@@ -207,12 +286,165 @@ func setStarredContext(p *Parser, e *ast.Starred, ctx ast.ExprContext) ast.Expr 
 	return &ast.Starred{Value: SetExprContext(p, e.Value, ctx), Ctx: ctx, Pos: e.Pos}
 }
 
-// GetExprName returns the human-readable phrase used in
-// "cannot assign to %s" diagnostics for an expression.
+// GetInvalidDelTarget walks an expression tree and returns the first
+// sub-expression that is not a valid `del` target. Valid targets are
+// Name, Subscript, and Attribute; Tuple and List are container nodes
+// that are walked recursively. A Starred expression is itself invalid
+// for del (you cannot `del *x`). Everything else is returned as-is.
+// Returns nil when the entire expression is a valid del target.
 //
-// CPython: Parser/action_helpers.c:1259 _PyPegen_get_expr_name
+// CPython: Parser/action_helpers.c:1168 _PyPegen_get_invalid_target (DEL_TARGETS branch)
+func GetInvalidDelTarget(e ast.Expr) ast.Expr {
+	if e == nil {
+		return nil
+	}
+	switch t := e.(type) {
+	case *ast.List:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidDelTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Tuple:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidDelTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Starred:
+		return e
+	case *ast.Name, *ast.Subscript, *ast.Attribute:
+		return nil
+	default:
+		return e
+	}
+}
+
+// GetInvalidStarTarget walks an expression tree and returns the first
+// sub-expression that is not a valid assignment (STAR_TARGETS) target.
+// Valid targets are Name, Subscript, and Attribute. Tuple and List are
+// walked recursively. Starred recurses into its value (a, *b = x is
+// valid). Everything else is returned as the invalid node.
+// Returns nil when the entire expression is a valid assignment target.
+//
+// CPython: Parser/action_helpers.c:1168 _PyPegen_get_invalid_target (STAR_TARGETS branch)
+func GetInvalidStarTarget(e ast.Expr) ast.Expr {
+	if e == nil {
+		return nil
+	}
+	switch t := e.(type) {
+	case *ast.List:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidStarTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Tuple:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidStarTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Starred:
+		return GetInvalidStarTarget(t.Value)
+	case *ast.Name, *ast.Subscript, *ast.Attribute:
+		return nil
+	default:
+		return e
+	}
+}
+
+// GetInvalidForTarget walks an expression tree and returns the first
+// sub-expression that is not a valid for-loop target (FOR_TARGETS).
+// This differs from STAR_TARGETS in one place: a Compare with a leading
+// `in` operator is how the grammar represents `for a() in b` when the
+// target failed to parse normally; in that case we recurse into the
+// left-hand side of the comparison to find the real bad node.
+//
+// CPython: Parser/action_helpers.c:1168 _PyPegen_get_invalid_target (FOR_TARGETS branch)
+func GetInvalidForTarget(e ast.Expr) ast.Expr {
+	if e == nil {
+		return nil
+	}
+	switch t := e.(type) {
+	case *ast.List:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidForTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Tuple:
+		for _, elt := range t.Elts {
+			if bad := GetInvalidForTarget(elt); bad != nil {
+				return bad
+			}
+		}
+		return nil
+	case *ast.Starred:
+		return GetInvalidForTarget(t.Value)
+	case *ast.Compare:
+		if len(t.Ops) > 0 && t.Ops[0] == ast.In {
+			return GetInvalidForTarget(t.Left)
+		}
+		return nil
+	case *ast.Name, *ast.Subscript, *ast.Attribute:
+		return nil
+	default:
+		return e
+	}
+}
+
+// GetExprName returns the human-readable phrase used in
+// "cannot assign to %s" diagnostics for an expression. The set of
+// returned strings matches CPython's `_PyPegen_get_expr_name` switch
+// arm-for-arm so messages from `invalid_*` rules read identically.
+//
+// CPython: Parser/action_helpers.c:1043 _PyPegen_get_expr_name
 func GetExprName(e ast.Expr) string {
 	switch v := e.(type) {
+	case *ast.Attribute:
+		return "attribute"
+	case *ast.Subscript:
+		return "subscript"
+	case *ast.Starred:
+		return "starred"
+	case *ast.Name:
+		return "name"
+	case *ast.List:
+		return "list"
+	case *ast.Tuple:
+		return "tuple"
+	case *ast.Lambda:
+		return "lambda"
+	case *ast.Call:
+		return "function call"
+	case *ast.BoolOp, *ast.BinOp, *ast.UnaryOp:
+		return "expression"
+	case *ast.GeneratorExp:
+		return "generator expression"
+	case *ast.Yield, *ast.YieldFrom:
+		return "yield expression"
+	case *ast.Await:
+		return "await expression"
+	case *ast.ListComp:
+		return "list comprehension"
+	case *ast.SetComp:
+		return "set comprehension"
+	case *ast.DictComp:
+		return "dict comprehension"
+	case *ast.Dict:
+		return "dict literal"
+	case *ast.Set:
+		return "set display"
+	case *ast.JoinedStr, *ast.FormattedValue:
+		return "f-string expression"
+	case *ast.TemplateStr, *ast.Interpolation:
+		return "t-string expression"
 	case *ast.Constant:
 		switch x := v.Value.(type) {
 		case nil:
@@ -222,27 +454,18 @@ func GetExprName(e ast.Expr) string {
 				return "True"
 			}
 			return "False"
+		case ast.EllipsisType:
+			_ = x
+			return "ellipsis"
 		default:
 			return "literal"
 		}
-	case *ast.Name:
-		return "Name"
-	case *ast.Attribute:
-		return "attribute"
-	case *ast.Subscript:
-		return "subscript"
-	case *ast.Starred:
-		return "starred"
-	case *ast.List:
-		return "list"
-	case *ast.Tuple:
-		return "tuple"
-	case *ast.Call:
-		return "function call"
-	case *ast.JoinedStr, *ast.FormattedValue:
-		return "f-string expression"
-	case *ast.TemplateStr, *ast.Interpolation:
-		return "t-string expression"
+	case *ast.Compare:
+		return "comparison"
+	case *ast.IfExp:
+		return "conditional expression"
+	case *ast.NamedExpr:
+		return "named expression"
 	}
 	return "expression"
 }

@@ -16,6 +16,8 @@ import (
 //
 // CPython: Python/codegen.c:L5161 codegen_with
 func (c *Compiler) visitWith(s *ast.With) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	return c.visitWithInner(s, 0)
 }
 
@@ -91,6 +93,8 @@ func (c *Compiler) visitWithInner(s *ast.With, pos int) error {
 //
 // CPython: Python/codegen.c:L5064 codegen_async_with
 func (c *Compiler) visitAsyncWith(s *ast.AsyncWith) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	return c.visitAsyncWithInner(s, 0)
 }
 

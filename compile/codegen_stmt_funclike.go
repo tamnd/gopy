@@ -20,7 +20,7 @@ import (
 // CPython: Python/codegen.c:L1390 codegen_function
 func (c *Compiler) visitFunctionDef(s *ast.FunctionDef) error {
 	return c.compileFunctionLike(s.Name, s.Args, s.Body, s.Returns,
-		s.DecoratorList, false, s)
+		s.DecoratorList, s.TypeParams, false, s)
 }
 
 // visitAsyncFunctionDef compiles `async def`. Same shape as
@@ -30,7 +30,7 @@ func (c *Compiler) visitFunctionDef(s *ast.FunctionDef) error {
 // CPython: Python/codegen.c:L1390 codegen_function with is_async=1
 func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 	return c.compileFunctionLike(s.Name, s.Args, s.Body, s.Returns,
-		s.DecoratorList, false, s)
+		s.DecoratorList, s.TypeParams, false, s)
 }
 
 // visitLambda compiles a Lambda expression. Same shape as a function
@@ -40,7 +40,7 @@ func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 // CPython: Python/codegen.c:L1999 codegen_lambda
 func (c *Compiler) visitLambda(e *ast.Lambda) error {
 	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: e.Pos}}
-	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, true, e)
+	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, nil, true, e)
 }
 
 // compileFunctionLike is the shared emit driver. It evaluates
@@ -50,10 +50,8 @@ func (c *Compiler) visitLambda(e *ast.Lambda) error {
 // CPython: Python/codegen.c:L1311 codegen_function_body driver
 func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	body ast.Seq[ast.Stmt], returns ast.Expr, decorators ast.Seq[ast.Expr],
-	isLambda bool, scopeKey any,
+	typeParams ast.Seq[ast.TypeParam], isLambda bool, scopeKey any,
 ) error {
-	_ = returns
-
 	// Evaluate decorator expressions (in source order, top-to-bottom)
 	// before the function is created. They wrap the result of
 	// MAKE_FUNCTION in reverse order via CALL.
@@ -66,6 +64,95 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	flags, err := c.emitDefaults(args, loc(scopeKey))
 	if err != nil {
 		return err
+	}
+
+	isGeneric := len(typeParams) > 0
+
+	var (
+		outerScope    *symtable.Entry
+		outerFblocks  []fblock
+		outerCaches   savedCaches
+		wrapperScope  *symtable.Entry
+		wrapperUnit   *Unit
+		numTPArgs     int32
+		hasDefaults   = flags&0x01 != 0
+		hasKwDefaults = flags&0x02 != 0
+	)
+
+	if isGeneric {
+		wrapperScope = c.Symtable.LookupTypeParams(scopeKey)
+		if wrapperScope == nil {
+			return fmt.Errorf("compile: no TypeParametersBlock for %s %q", funcLikeKind(scopeKey), name)
+		}
+		if hasDefaults {
+			numTPArgs++
+		}
+		if hasKwDefaults {
+			numTPArgs++
+		}
+		// Both defaults and kwdefaults present: outer stack is
+		// [defaults_tuple, kwdefaults_dict] with kwdefaults on TOS.
+		// Swap so the wrapper's first positional arg (`.defaults`)
+		// receives defaults_tuple and the second (`.kwdefaults`)
+		// receives kwdefaults_dict after the eventual outer CALL.
+		//
+		// CPython: Python/codegen.c:1441 (num_typeparam_args==2 SWAP)
+		if numTPArgs == 2 {
+			c.addOpI(SWAP, 2, loc(scopeKey))
+		}
+
+		outerScope = c.scope
+		outerFblocks = c.fblocks
+		outerCaches = c.savedCaches()
+
+		c.enterScope(wrapperScope)
+		first := c.unit().FirstLineno
+		c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
+
+		// Declare the wrapper's positional parameters so the var pool
+		// allocates slot 0 (and slot 1 if both flavors are present)
+		// in the order CPython expects from
+		// codegen_function: .defaults first, .kwdefaults second.
+		//
+		// CPython: Python/codegen.c:1448 _PyCompile_CodeUnitMetadata u_argcount
+		if hasDefaults {
+			c.declareArg(".defaults")
+		}
+		if hasKwDefaults {
+			c.declareArg(".kwdefaults")
+		}
+		c.unit().Argcount = int(numTPArgs)
+
+		if err := c.emitTypeParams(typeParams); err != nil {
+			return err
+		}
+		// Load the wrapper's positional args back so codegen_function_body's
+		// MAKE_FUNCTION sees [type_params, defaults?, kwdefaults?, ...].
+		//
+		// CPython: Python/codegen.c:1456 LOAD_FAST loop
+		for i := int32(0); i < numTPArgs; i++ {
+			c.addOpI(LOAD_FAST, i, loc(scopeKey))
+		}
+	}
+
+	// Compile the __annotate__ callable for PEP 649 lazy annotations.
+	// For generic functions this runs inside the TypeParams scope (c.scope
+	// is already wrapperScope after the isGeneric block above), matching
+	// CPython where codegen_function_annotations is called after
+	// codegen_enter_scope for type params.
+	//
+	// The callable must be pushed before emitClosure and
+	// emitInnerFunctionCode because emitMakeFunction emits
+	// SET_FUNCTION_ATTRIBUTE 0x04 after 0x08 (closure), expecting the
+	// annotate callable to be one deeper than the closure tuple.
+	//
+	// CPython: Python/codegen.c:1113 codegen_function_annotations
+	if !isLambda {
+		annotFlag, err := c.emitFunctionAnnotations(args, returns, loc(scopeKey))
+		if err != nil {
+			return err
+		}
+		flags |= annotFlag
 	}
 
 	// Look up the inner scope from the symtable.
@@ -88,6 +175,45 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	}
 
 	c.emitMakeFunction(flags, loc(scopeKey))
+
+	if isGeneric {
+		// Wrapper stack: [type_params_tuple, func]. Attach the
+		// type-params tuple to the new function object.
+		//
+		// CPython: Python/codegen.c:1479 SWAP 2 + CALL_INTRINSIC_2 SET_FUNCTION_TYPE_PARAMS
+		c.addOpI(SWAP, 2, loc(scopeKey))
+		c.addOpI(CALL_INTRINSIC_2, intrinsicSetFunctionTypeParams, loc(scopeKey))
+		c.addOp(RETURN_VALUE, loc(scopeKey))
+
+		wrapperUnit = c.unit()
+		wrapperUnit.Name = "<generic parameters of " + name + ">"
+
+		c.leaveScope()
+		c.scope = outerScope
+		c.fblocks = outerFblocks
+		c.restoreCaches(outerCaches)
+
+		// Outer scope: push closure + wrapper code + MAKE_FUNCTION.
+		wrapperClosureFlag, err := c.emitClosure(wrapperScope, loc(scopeKey))
+		if err != nil {
+			return err
+		}
+		c.addLoadConst(wrapperUnit, loc(scopeKey))
+		c.emitMakeFunction(wrapperClosureFlag, loc(scopeKey))
+
+		// Outer stack: [defaults?, kwdefaults?, wrapper_func].
+		// Move the wrapper to the bottom so CALL's func/self_or_null
+		// slots resolve to wrapper(d, k).
+		//
+		// CPython: Python/codegen.c:1490 SWAP num+1 + CALL num-1
+		if numTPArgs > 0 {
+			c.addOpI(SWAP, numTPArgs+1, loc(scopeKey))
+			c.addOpI(CALL, numTPArgs-1, loc(scopeKey))
+		} else {
+			c.addOp(PUSH_NULL, loc(scopeKey))
+			c.addOpI(CALL, 0, loc(scopeKey))
+		}
+	}
 
 	// Apply decorators. Each emits CALL 0: 3.14 lays out the stack as
 	// [..., decorator, wrapped] and CALL's MAYBE_EXPAND_METHOD path
@@ -219,12 +345,18 @@ func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	return nil
 }
 
-// declareArg adds name to the per-unit varnames pool.
+// declareArg adds name to the per-unit varnames pool. Names that look
+// private (`__foo`, not dunders) are mangled against the enclosing
+// class so the slot matches the LOAD_FAST / kwdefaults lookups, which
+// also mangle via codegen_nameop. Without this the class-scope kwarg
+// `__a` would pool both `__a` and `_X__a`, doubling the slot count.
 //
-// CPython: Python/compile.c compiler_arguments per-arg slot
+// CPython: Python/compile.c compiler_arguments per-arg slot (the
+// arg name is mangled before being added to u_varnames).
 func (c *Compiler) declareArg(name string) {
 	pool := poolVarNames
-	c.poolIndex(&pool, name)
+	mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
+	c.poolIndex(&pool, mangled)
 }
 
 // emitDefaults evaluates positional default expressions and the
@@ -261,7 +393,16 @@ func (c *Compiler) emitDefaults(args *ast.Arguments, l ast.Pos) (int32, error) {
 			if d == nil {
 				continue
 			}
-			c.addLoadConst(args.Kwonlyargs[i].Arg, l)
+			// CPython mangles each kwarg name against the enclosing
+			// class so the kwdefaults dict key matches the
+			// function's mangled fast-local slot. Without this the
+			// `def f(self, *, __a=42)` inside `class X` builds the
+			// dict with key '__a' while f's slot is named '_X__a',
+			// so initialize_locals' default fill misses.
+			//
+			// CPython: Python/codegen.c codegen_function_body kwdefaults loop
+			mangled := symtable.MaybeMangle(c.unit().Private, c.scope, args.Kwonlyargs[i].Arg)
+			c.addLoadConst(mangled, l)
 			if err := c.visitExpr(d); err != nil {
 				return 0, err
 			}
@@ -329,6 +470,20 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 			idx := c.poolIndex(&pool, name)
 			c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
 		default:
+			// DEF_FREE_CLASS: the outer is a class scope where this
+			// name is bound locally (the class-body def/assign) but
+			// the inner method still wants the enclosing function's
+			// cell. enterScope put the name in u.FreeVars; load it
+			// from there.
+			//
+			// CPython: Python/compile.c:641 compiler_enter_scope
+			// (dictbytype FREE | DEF_FREE_CLASS)
+			if c.scope.Symbols[name]&symtable.DefFreeClass != 0 {
+				pool := poolFreeVars
+				idx := c.poolIndex(&pool, name)
+				c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
+				continue
+			}
 			return 0, fmt.Errorf("compile: free var %q in nested scope %q has scope %v in outer %q",
 				name, inner.Name, scope, c.scope.Name)
 		}
@@ -338,14 +493,17 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 }
 
 // freeVarsOf returns the free-variable names of the inner scope in
-// stable order. CPython uses dictbytype on ste->ste_symbols filtered
-// by FREE; we mirror that by iterating the explicit Symbols map.
+// stable order. CPython uses dictbytype(symbols, FREE, DEF_FREE_CLASS,
+// ...): names scoped FREE plus class-locals flagged DEF_FREE_CLASS
+// (the latter happens when a class body binds a name AND a nested
+// method references it; the cell still has to flow through).
 //
-// CPython: Python/compile.c dictbytype(symbols, FREE, ...)
+// CPython: Python/compile.c:641 compiler_enter_scope
+// (dictbytype(symbols, FREE, DEF_FREE_CLASS, ...))
 func freeVarsOf(sc *symtable.Entry) []string {
 	var out []string
 	for name, flags := range sc.Symbols {
-		if flags.Scope() == symtable.Free {
+		if flags.Scope() == symtable.Free || flags&symtable.DefFreeClass != 0 {
 			out = append(out, name)
 		}
 	}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/initconfig"
+	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -190,6 +191,30 @@ func makeStderrFile() *objects.File {
 
 func init() {
 	_ = imp.AppendInittab("sys", buildModule)
+	// CALL_INTRINSIC_1 PRINT (PRINT_EXPR pre-3.12) must reach the live
+	// sys.displayhook so user code (and doctest's runner) can intercept
+	// it; intrinsics is a lower layer and cannot import module/sys
+	// directly without a cycle, so the link is via a function variable.
+	//
+	// CPython: Python/intrinsics.c:28 print_expr (sys_displayhook lookup)
+	intrinsics.PrintExprHook = printExprViaSysDisplayhook
+}
+
+// printExprViaSysDisplayhook resolves sys.displayhook fresh on every
+// call so a user-installed hook (sys.displayhook = ...) takes effect.
+// CPython does the same with _PySys_GetRequiredAttr.
+//
+// CPython: Python/intrinsics.c:30 _PySys_GetRequiredAttr(displayhook)
+func printExprViaSysDisplayhook(v objects.Object) (objects.Object, error) {
+	d := liveSysDict()
+	if d == nil {
+		return nil, fmt.Errorf("RuntimeError: lost sys.displayhook")
+	}
+	hook, _ := d.GetItem(objects.NewStr("displayhook"))
+	if hook == nil || hook == objects.None() {
+		return nil, fmt.Errorf("RuntimeError: lost sys.displayhook")
+	}
+	return objects.Call(hook, objects.NewTuple([]objects.Object{v}), nil)
 }
 
 // buildModule wraps the static-attribute slice produced by Init in a
@@ -303,6 +328,16 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "exception", objects.NewBuiltinFunction("exception", sysException)); err != nil {
 		return nil, err
 	}
+	// sys.monitoring is the PEP 669 instrumentation namespace. gopy
+	// hasn't wired the bytecode interpreter to actually fire events
+	// yet, so the public surface is a stub: the constants are
+	// byte-identical to CPython (bdb does `E.PY_START | E.LINE`
+	// arithmetic at import time), and every callable returns None.
+	//
+	// CPython: Python/instrumentation.c:3001 _PyMonitoring_PrintEvents
+	if err := setItem(md, "monitoring", makeMonitoring()); err != nil {
+		return nil, err
+	}
 	// sys.intern interns a str object. The dedicated unicodeobject port
 	// will route through the global interned table; for now the helper
 	// returns the input unchanged so collections.namedtuple's typename /
@@ -349,11 +384,68 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
 		return nil, err
 	}
+	// sys.get_int_max_str_digits / sys.set_int_max_str_digits guard
+	// integer-to-string conversion length. Added in CPython 3.11 to
+	// mitigate quadratic-time attacks via enormous int repr.
+	//
+	// CPython: Python/sysmodule.c:2001 sys_get_int_max_str_digits_impl,
+	// Python/sysmodule.c:2026 sys_set_int_max_str_digits_impl
+	if err := setItem(md, "get_int_max_str_digits", objects.NewBuiltinFunction("get_int_max_str_digits", getIntMaxStrDigits)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_int_max_str_digits", objects.NewBuiltinFunction("set_int_max_str_digits", setIntMaxStrDigits)); err != nil {
+		return nil, err
+	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
 	// stack. depth=0 is the immediate caller's frame.
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
 	if err := setItem(md, "_getframe", objects.NewBuiltinFunction("_getframe", getFrame)); err != nil {
+		return nil, err
+	}
+	// sys._getframemodulename(depth) returns func.__module__ for the
+	// function whose frame is depth levels above. doctest's
+	// _normalize_module prefers this over _getframe + f_globals so it
+	// can route through sys.modules even when the live module was
+	// imported under a different key (e.g. __main__).
+	//
+	// CPython: Python/sysmodule.c:2595 sys__getframemodulename_impl
+	if err := setItem(md, "_getframemodulename", objects.NewBuiltinFunction("_getframemodulename", getFrameModuleName)); err != nil {
+		return nil, err
+	}
+	// sys.gettrace / settrace stubs. The vm package overwrites these with the
+	// real monitoring-aware implementations via SysTraceBuiltinsHook (set in
+	// vm's init). The stubs exist so the attributes are present before vm
+	// wires in; callers that run without vm (e.g. pure-parse paths) get the
+	// no-op fallback.
+	//
+	// CPython: Python/sysmodule.c:1145 sys_settrace, 1202 sys_gettrace_impl
+	if err := setItem(md, "gettrace", objects.NewBuiltinFunction("gettrace", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.None(), nil
+	})); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "settrace", objects.NewBuiltinFunction("settrace", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.None(), nil
+	})); err != nil {
+		return nil, err
+	}
+	// Overwrite stubs with real implementations when the vm hook is wired.
+	if SysTraceBuiltinsHook != nil {
+		if err := SysTraceBuiltinsHook(md); err != nil {
+			return nil, err
+		}
+	}
+	// sys.displayhook prints the value to sys.stdout and stores it in
+	// builtins._, skipping None. doctest's runner installs its own
+	// displayhook during test execution, but the bare module attribute
+	// must exist before that swap.
+	//
+	// CPython: Python/sysmodule.c:742 sys_displayhook
+	if err := setItem(md, "displayhook", objects.NewBuiltinFunction("displayhook", displayHook)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__displayhook__", objects.NewBuiltinFunction("__displayhook__", displayHook)); err != nil {
 		return nil, err
 	}
 	// sys.audit dispatches an audit event to any registered hooks.
@@ -393,6 +485,41 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// displayHook implements sys.displayhook: skip None, then print repr(o)
+// to sys.stdout and store o in builtins._. Used by the REPL and by
+// doctest's runner to capture the value of a top-level expression.
+//
+// CPython: Python/sysmodule.c:742 sys_displayhook
+func displayHook(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: displayhook() takes exactly one argument (%d given)", len(args))
+	}
+	o := args[0]
+	if o == objects.None() {
+		return objects.None(), nil
+	}
+	d := liveSysDict()
+	var out objects.Object
+	if d != nil {
+		out, _ = d.GetItem(objects.NewStr("stdout"))
+	}
+	if out == nil || out == objects.None() {
+		return nil, fmt.Errorf("RuntimeError: lost sys.stdout")
+	}
+	r, err := objects.Repr(o)
+	if err != nil {
+		return nil, err
+	}
+	write, err := objects.GetAttr(out, objects.NewStr("write"))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := objects.Call(write, objects.NewTuple([]objects.Object{objects.NewStr(r + "\n")}), nil); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // internShim is the inittab-time form of sys.intern. The thread-aware

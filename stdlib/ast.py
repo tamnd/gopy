@@ -43,8 +43,63 @@ def parse(source, filename='<unknown>', mode='exec', *,
             raise ValueError(f"Unsupported major version: {major}")
         feature_version = minor
     # Else it should be an int giving the minor version for 3.x.
-    return compile(source, filename, mode, flags,
+    tree = compile(source, filename, mode, flags,
                    _feature_version=feature_version, optimize=optimize)
+    if optimize >= 1 and isinstance(tree, AST):
+        tree = _optimize_ast(tree, optimize)
+    return tree
+
+
+def _optimize_ast(tree, optimize):
+    # CPython: Python/ast_opt.c _PyAST_Optimize
+    # Apply compile-time constant folding: fold __debug__ and strip docstrings.
+
+    class _Optimizer(NodeTransformer):
+        def visit_Name(self, node):
+            # CPython: Python/ast_opt.c fold_constants __debug__ -> bool
+            if node.id == '__debug__':
+                val = (optimize == 0)
+                c = Constant(value=val)
+                copy_location(c, node)
+                return c
+            return node
+
+        def _optimize_body(self, body):
+            if optimize < 2 or not body:
+                return body
+            first = body[0]
+            if (isinstance(first, Expr) and
+                    isinstance(first.value, Constant) and
+                    isinstance(first.value.value, str)):
+                # CPython: Python/ast_opt.c optimize_body docstring removal.
+                # Pass position: same start as docstring Expr, end_lineno =
+                # lineno, end_col_offset = col_offset + len("pass") = + 4.
+                if len(body) == 1:
+                    p = Pass()
+                    p.lineno = first.lineno
+                    p.col_offset = first.col_offset
+                    p.end_lineno = first.lineno
+                    p.end_col_offset = first.col_offset + 4
+                    return [p]
+                return body[1:]
+            return body
+
+        def visit_FunctionDef(self, node):
+            self.generic_visit(node)
+            node.body = self._optimize_body(node.body)
+            return node
+
+        def visit_AsyncFunctionDef(self, node):
+            self.generic_visit(node)
+            node.body = self._optimize_body(node.body)
+            return node
+
+        def visit_ClassDef(self, node):
+            self.generic_visit(node)
+            node.body = self._optimize_body(node.body)
+            return node
+
+    return _Optimizer().visit(tree)
 
 
 def literal_eval(node_or_string):

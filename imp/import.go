@@ -106,7 +106,8 @@ func resolveAbsName(name, pkgname string, level int) (string, error) {
 		return name, nil
 	}
 	if pkgname == "" {
-		return "", fmt.Errorf("imp: attempted relative import with no known parent package")
+		// CPython: Python/import.c:3708 ImportError raised by resolve_name
+		return "", fmt.Errorf("ImportError: attempted relative import with no known parent package")
 	}
 	// Walk up level-1 dots from pkgname.
 	// CPython: Python/import.c:L1597 strip up to `level` components
@@ -114,7 +115,8 @@ func resolveAbsName(name, pkgname string, level int) (string, error) {
 	for i := 1; i < level; i++ {
 		dot := strings.LastIndex(pkg, ".")
 		if dot < 0 {
-			return "", fmt.Errorf("imp: attempted relative import beyond top-level package")
+			// CPython: Python/import.c:3689 ImportError raised by resolve_name
+			return "", fmt.Errorf("ImportError: attempted relative import beyond top-level package")
 		}
 		pkg = pkg[:dot]
 	}

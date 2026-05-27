@@ -219,7 +219,12 @@ func analyzeName(t *Table, ste *Entry, scopes map[string]Scope, name string, fla
 	}
 	if flags&DefNonlocal != 0 {
 		if bound == nil {
-			return errorAtDirective(t, ste, name, msgNonlocalAtModule)
+			for _, d := range ste.Directives {
+				if d.Name == name {
+					return errorf(t.Filename, d.Loc, msgNonlocalAtModule)
+				}
+			}
+			return errorf(t.Filename, ste.Loc, msgNonlocalAtModule)
 		}
 		if !bound.contains(name) {
 			return errorAtDirective(t, ste, name, msgNoBindingNonlocal)
@@ -315,6 +320,7 @@ func dropClassFree(ste *Entry, scopes map[string]Scope, free nameSet) {
 	}
 	if free.discard("__conditional_annotations__") {
 		ste.HasConditionalAnnotations = true
+		stampImplicitCell(ste, scopes, "__conditional_annotations__")
 	}
 }
 

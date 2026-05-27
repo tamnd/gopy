@@ -71,6 +71,9 @@ func callProfileFunc(event int, arg objects.Object) (objects.Object, error) {
 	if ts == nil {
 		return objects.None(), nil
 	}
+	if ts.Tracing > 0 {
+		return objects.None(), nil
+	}
 	fn, obj := CProfileFunc(ts)
 	if fn == nil {
 		return objects.None(), nil
@@ -79,7 +82,10 @@ func callProfileFunc(event int, arg objects.Object) (objects.Object, error) {
 	if f == nil {
 		return nil, fmt.Errorf("SystemError: missing frame when calling profile function")
 	}
-	if err := fn(obj, f, event, arg); err != nil {
+	ts.EnterTracing()
+	err := fn(obj, f, event, arg)
+	ts.LeaveTracing()
+	if err != nil {
 		return nil, err
 	}
 	return objects.None(), nil
@@ -91,6 +97,14 @@ func callProfileFunc(event int, arg objects.Object) (objects.Object, error) {
 func callTraceFunc(event int, arg objects.Object) (objects.Object, error) {
 	ts := currentThread()
 	if ts == nil {
+		return objects.None(), nil
+	}
+	// Re-entrance guard: skip if a trace callback is already running on
+	// this thread, matching CPython's tstate->tracing check in
+	// call_instrumentation_vector (Python/instrumentation.c:1146).
+	//
+	// CPython: Python/ceval.c:2607 PyThreadState_EnterTracing
+	if ts.Tracing > 0 {
 		return objects.None(), nil
 	}
 	fn, obj := CTraceFunc(ts)
@@ -106,7 +120,10 @@ func callTraceFunc(event int, arg objects.Object) (objects.Object, error) {
 			return nil, err
 		}
 	}
-	if err := fn(obj, f, event, arg); err != nil {
+	ts.EnterTracing()
+	err := fn(obj, f, event, arg)
+	ts.LeaveTracing()
+	if err != nil {
 		return nil, err
 	}
 	f.Lineno = 0
@@ -267,6 +284,9 @@ func sysTraceInstructionFunc(args []objects.Object, _ map[string]objects.Object)
 	if ts == nil {
 		return objects.None(), nil
 	}
+	if ts.Tracing > 0 {
+		return objects.None(), nil
+	}
 	f := frameStackFor(ts).Top()
 	if f == nil {
 		return nil, fmt.Errorf("SystemError: missing frame when calling trace function")
@@ -278,7 +298,10 @@ func sysTraceInstructionFunc(args []objects.Object, _ map[string]objects.Object)
 		}
 		return objects.None(), nil
 	}
-	if err := fn(obj, f, PyTraceOpcode, objects.None()); err != nil {
+	ts.EnterTracing()
+	err := fn(obj, f, PyTraceOpcode, objects.None())
+	ts.LeaveTracing()
+	if err != nil {
 		return nil, err
 	}
 	f.Lineno = 0
@@ -296,12 +319,18 @@ func traceLine(ts *state.Thread, f *frame.Frame, line int) (objects.Object, erro
 	if line < 0 {
 		return objects.None(), nil
 	}
+	if ts.Tracing > 0 {
+		return objects.None(), nil
+	}
 	fn, obj := CTraceFunc(ts)
 	if fn == nil {
 		return objects.None(), nil
 	}
 	f.Lineno = line
-	if err := fn(obj, f, PyTraceLine, objects.None()); err != nil {
+	ts.EnterTracing()
+	err := fn(obj, f, PyTraceLine, objects.None())
+	ts.LeaveTracing()
+	if err != nil {
 		return nil, err
 	}
 	f.Lineno = 0
@@ -612,6 +641,18 @@ func SetTrace(ts *state.Thread, fn LegacyTraceFunc, arg objects.Object) (objects
 	old := swapTraceFuncArg(ts, fn, arg)
 	if err := setMonitoringTraceEvents(interp); err != nil {
 		return old, err
+	}
+	// Instrument the currently-executing frame's code so line events fire
+	// immediately, without waiting for the next RESUME. CPython does this
+	// after set_monitoring_trace_events when func != NULL.
+	//
+	// CPython: Python/legacy_tracing.c:725 _Py_Instrument(current_frame code)
+	if fn != nil {
+		if f := frameStackFor(ts).Top(); f != nil {
+			if merr := monitor.Instrument(f.Code, interp); merr != nil {
+				return old, merr
+			}
+		}
 	}
 	if interp.SysTracingThreads > 0 {
 		if err := maybeSetOpcodeTrace(ts); err != nil {

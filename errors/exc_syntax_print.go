@@ -106,15 +106,18 @@ func clampSyntaxOffsets(offset int, text, rtext string, state *SyntaxErrorState)
 // caretIndent builds the leading whitespace for the caret line.
 // CPython preserves non-space whitespace (tabs) so the caret aligns
 // with the source line under proportional / tab-stop rendering.
+// colno counts Unicode code points (SyntaxError.offset is 1-indexed
+// codepoint offset), so slicing must walk runes, not bytes.
 //
 // CPython: Lib/traceback.py:1437 caretspace generator
 func caretIndent(ltext string, colno int) string {
-	if colno > len(ltext) {
-		colno = len(ltext)
-	}
-	prefix := ltext[:colno]
 	var b strings.Builder
-	for _, r := range prefix {
+	count := 0
+	for _, r := range ltext {
+		if count >= colno {
+			break
+		}
+		count++
 		if unicode.IsSpace(r) {
 			b.WriteRune(r)
 		} else {

@@ -247,38 +247,76 @@ func kwargsToDict(kwargs map[string]Object) *Dict {
 }
 
 // gaRichCompare implements __eq__ / __ne__ for generic aliases: two
-// aliases are equal when their starred flag, origin, and args tuple
-// match. Other comparison operators return NotImplemented.
+// aliases are equal when their origin and args match. Handles both
+// Go *GenericAlias (types.GenericAlias) and Python _GenericAlias
+// objects (from typing.py) by reading __origin__ and __args__ via
+// GetAttr when the other side is not a Go GenericAlias.
 //
 // CPython: Objects/genericaliasobject.c:705 ga_richcompare
 func gaRichCompare(a, b Object, op CompareOp) (Object, error) {
-	bb, ok := b.(*GenericAlias)
-	if !ok || (op != CompareEQ && op != CompareNE) {
+	if op != CompareEQ && op != CompareNE {
 		return NotImplemented(), nil
 	}
 	aa := a.(*GenericAlias)
-	if op == CompareNE {
-		eq, err := gaRichCompare(a, b, CompareEQ)
-		if err != nil {
-			return nil, err
+
+	var bOrigin, bArgs Object
+	if bb, ok := b.(*GenericAlias); ok {
+		// Fast path: both are Go GenericAlias.
+		if op == CompareNE {
+			eq, err := gaRichCompare(a, b, CompareEQ)
+			if err != nil {
+				return nil, err
+			}
+			t, err := IsTruthy(eq)
+			if err != nil {
+				return nil, err
+			}
+			return NewBool(!t), nil
 		}
+		if aa.starred != bb.starred {
+			return False(), nil
+		}
+		bOrigin = bb.origin
+		bArgs = bb.args
+	} else {
+		// Slow path: b might be a Python-level _GenericAlias from typing.py.
+		// Read __origin__ and __args__ via attribute lookup.
+		//
+		// CPython: Objects/genericaliasobject.c:706 ga_richcompare (handles
+		// both ga_type and _GenericAlias via __origin__/__args__ duck-typing)
+		var err error
+		bOrigin, err = GetAttr(b, NewStr("__origin__"))
+		if err != nil {
+			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+		}
+		bArgs, err = GetAttr(b, NewStr("__args__"))
+		if err != nil {
+			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+		}
+	}
+
+	eqOrigin, err := RichCmpBool(aa.origin, bOrigin, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if !eqOrigin {
+		if op == CompareNE {
+			return True(), nil
+		}
+		return False(), nil
+	}
+	eq, err := RichCmp(aa.args, bArgs, CompareEQ)
+	if err != nil {
+		return nil, err
+	}
+	if op == CompareNE {
 		t, err := IsTruthy(eq)
 		if err != nil {
 			return nil, err
 		}
 		return NewBool(!t), nil
 	}
-	if aa.starred != bb.starred {
-		return False(), nil
-	}
-	eqOrigin, err := RichCmpBool(aa.origin, bb.origin, CompareEQ)
-	if err != nil {
-		return nil, err
-	}
-	if !eqOrigin {
-		return False(), nil
-	}
-	return RichCmp(aa.args, bb.args, CompareEQ)
+	return eq, nil
 }
 
 // gaAttrBlocked is the set of names that must never proxy to origin.
@@ -379,15 +417,72 @@ func gaIter(o Object) (Object, error) {
 	return NewList([]Object{starred}).Type().Iter(NewList([]Object{starred}))
 }
 
-// makeParameters walks args looking for typevar-like entries. Since
-// gopy has no TypeVar / ParamSpec / TypeVarTuple types yet, the result
-// is always an empty tuple; the helper still exists so the
-// __parameters__ getset returns the right shape and so the gate code
-// in subsParameters can detect "no parameters".
+// makeParameters walks args collecting type-parameter-like entries.
+// An entry qualifies if it has a __typing_subst__ attribute (TypeVar,
+// ParamSpec, TypeVarTuple) or itself carries a non-empty __parameters__
+// tuple (a nested generic alias). Deduplication preserves first-appearance
+// order, matching CPython's _Py_make_parameters.
 //
 // CPython: Objects/genericaliasobject.c:186 _Py_make_parameters
-func makeParameters(_ *Tuple) *Tuple {
-	return NewTuple(nil)
+func makeParameters(args *Tuple) *Tuple {
+	seen := map[Object]bool{}
+	var params []Object
+	for i := 0; i < args.Len(); i++ {
+		arg := args.Item(i)
+		collectTypeParams(arg, seen, &params)
+	}
+	return NewTuple(params)
+}
+
+// collectTypeParams adds type-parameter-like objects from arg into params,
+// deduplicating by pointer identity.
+//
+// CPython: Objects/genericaliasobject.c:147 collect_parameters
+func collectTypeParams(arg Object, seen map[Object]bool, params *[]Object) {
+	// TypeVar / ParamSpec / TypeVarTuple: has __typing_subst__
+	if _, ok := arg.(*TypeVar); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	if _, ok := arg.(*ParamSpec); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	if _, ok := arg.(*TypeVarTuple); ok {
+		if !seen[arg] {
+			seen[arg] = true
+			*params = append(*params, arg)
+		}
+		return
+	}
+	// Nested generic alias: recurse into its __parameters__.
+	if ga, ok := arg.(*GenericAlias); ok {
+		if ga.parameters == nil {
+			ga.parameters = makeParameters(ga.args)
+		}
+		for i := 0; i < ga.parameters.Len(); i++ {
+			collectTypeParams(ga.parameters.Item(i), seen, params)
+		}
+		return
+	}
+	// Python-level generic aliases (_GenericAlias, _UnionGenericAlias, etc.)
+	// expose __parameters__ as a tuple; collect its elements.
+	//
+	// CPython: Objects/genericaliasobject.c:147 collect_parameters
+	// (the Py_GenericAlias branch then the __parameters__ fallback)
+	if p, err := GetAttr(arg, NewStr("__parameters__")); err == nil && p != nil {
+		if tup, ok := p.(*Tuple); ok {
+			for i := 0; i < tup.Len(); i++ {
+				collectTypeParams(tup.Item(i), seen, params)
+			}
+		}
+	}
 }
 
 // subsParameters substitutes typevars in args with the values in item.
@@ -415,8 +510,34 @@ func subsParameters(self Object, parameters *Tuple) error {
 // list[int] picks up `list` as its real base class. PEP 560 calls this
 // during type construction.
 //
+// When origin is Generic, mirror typing._GenericAlias.__mro_entries__'s
+// dedup: return () if any other base in the sibling tuple is a Protocol
+// or another GenericAlias. Without this, classes like
+// `class Foo[T](Protocol)` end up with both Generic and Protocol in
+// their bases, producing an inconsistent C3 linearization.
+//
 // CPython: Objects/genericaliasobject.c:742 ga_mro_entries
-func gaMroEntries(ga *GenericAlias) *Tuple {
+// CPython: Lib/typing.py _GenericAlias.__mro_entries__
+func gaMroEntries(ga *GenericAlias, bases *Tuple) *Tuple {
+	if ga.origin == Object(GenericType) && bases != nil {
+		selfIdx := -1
+		for i := 0; i < bases.Len(); i++ {
+			b := bases.Item(i)
+			if b == Object(ga) {
+				selfIdx = i
+			}
+			if t, ok := b.(*Type); ok && t.Name == "Protocol" {
+				return NewTuple(nil)
+			}
+		}
+		if selfIdx >= 0 {
+			for i := selfIdx + 1; i < bases.Len(); i++ {
+				if other, ok := bases.Item(i).(*GenericAlias); ok && other != ga {
+					return NewTuple(nil)
+				}
+			}
+		}
+	}
 	return NewTuple([]Object{ga.origin})
 }
 
@@ -461,7 +582,11 @@ func init() {
 		if !ok {
 			return nil, fmt.Errorf("TypeError: __mro_entries__ requires a GenericAlias, not %s", typeNameOf(args[0]))
 		}
-		return gaMroEntries(ga), nil
+		var bases *Tuple
+		if len(args) >= 2 {
+			bases, _ = args[1].(*Tuple)
+		}
+		return gaMroEntries(ga, bases), nil
 	}))
 	SetTypeDescr(GenericAliasType, "__instancecheck__", NewMethodDescr(GenericAliasType, "__instancecheck__", func(_ []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: isinstance() argument 2 cannot be a parameterized generic")

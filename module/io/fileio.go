@@ -71,6 +71,7 @@ func init() {
 	FileIOType.Repr = fileIORepr
 	FileIOType.Str = fileIORepr
 	FileIOType.Getattro = fileIOGetattr
+	FileIOType.Setattro = fileIOSetattr
 	// FileIO inherits object's identity-based __hash__ so it can be
 	// used as a dict key (selectors and subprocess store fileobjs that way).
 	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type tp_hash
@@ -253,9 +254,36 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 	if !closefd {
 		return nil, fmt.Errorf("ValueError: Cannot use closefd=False with file name")
 	}
-	f, err := stdos.OpenFile(name, flag, 0o666)
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %s", err.Error())
+
+	opener := bound[3]
+	var f *stdos.File
+	if opener != nil && !objects.IsNone(opener) && objects.Callable(opener) {
+		// Call opener(name, flags) to get the file descriptor.
+		//
+		// CPython: Modules/_io/fileio.c:399 _PyObject_CallMethodIdObjArgs opener
+		nameObj := objects.NewStr(name)
+		flagObj := objects.NewInt(int64(flag))
+		fdObj, callErr := objects.Call(opener, objects.NewTuple([]objects.Object{nameObj, flagObj}), nil)
+		if callErr != nil {
+			return nil, callErr
+		}
+		fd, ok := fdObj.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: expected integer from opener, got %s", fdObj.Type().Name)
+		}
+		fdVal, fits := fd.Int64()
+		if !fits || fdVal < 0 {
+			return nil, fmt.Errorf("ValueError: opener returned invalid file descriptor")
+		}
+		f = stdos.NewFile(uintptr(fdVal), name)
+		if f == nil {
+			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
+		}
+	} else {
+		f, err = stdos.OpenFile(name, flag, 0o666)
+		if err != nil {
+			return nil, fmt.Errorf("OSError: %s", err.Error())
+		}
 	}
 	fi := &FileIO{
 		f:         f,
@@ -694,6 +722,42 @@ func fileIOGetattr(o objects.Object, name objects.Object) (objects.Object, error
 		return fn, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '_io.FileIO' object has no attribute '%s'", n.Value())
+}
+
+// fileIOSetattr handles attribute assignment on FileIO. Only .name is
+// writable; tempfile.py assigns raw.name after the opener returns.
+//
+// CPython: Modules/_io/fileio.c:1195 fileio_name (member T_OBJECT, writable)
+func fileIOSetattr(o, name, value objects.Object) error {
+	fi, ok := o.(*FileIO)
+	if !ok {
+		return fmt.Errorf("TypeError: expected _io.FileIO self")
+	}
+	n, ok := name.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: attribute name must be string")
+	}
+	switch n.Value() {
+	case "name":
+		if value == nil || objects.IsNone(value) {
+			fi.name = ""
+			fi.nameIsInt = false
+			return nil
+		}
+		if s, ok := value.(*objects.Unicode); ok {
+			fi.name = s.Value()
+			fi.nameIsInt = false
+			return nil
+		}
+		if i, ok := value.(*objects.Int); ok {
+			v, _ := i.Int64()
+			fi.nameFd = v
+			fi.nameIsInt = true
+			return nil
+		}
+		return fmt.Errorf("TypeError: name must be a str or int")
+	}
+	return fmt.Errorf("AttributeError: '_io.FileIO' object attribute '%s' is read-only", n.Value())
 }
 
 // fileIOMethod maps method names to BuiltinFunctions.

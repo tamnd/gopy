@@ -729,37 +729,101 @@ func strFormatField(field string, args []Object, kwargs map[string]Object, auto 
 	return Format(v, spec)
 }
 
+// strFormatLookup resolves a field name against args/kwargs and applies any
+// trailing attribute ("." access) and subscript ("[key]") components to the
+// base object. Mirrors the FieldNameIterator loop from CPython.
+//
+// CPython: Objects/stringlib/unicode_format.h:392 get_field_object
 func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto *int) (Object, error) {
-	if name == "" {
+	// Split into base and remaining components ("d[a].b" → base="d", rest="[a].b").
+	base, rest := strFormatBaseName(name)
+	var obj Object
+	if base == "" {
 		if *auto >= len(args) {
 			return nil, fmt.Errorf("IndexError: tuple index out of range")
 		}
-		v := args[*auto]
+		obj = args[*auto]
 		*auto++
-		return v, nil
-	}
-	if name[0] >= '0' && name[0] <= '9' {
+	} else if base[0] >= '0' && base[0] <= '9' {
 		idx := 0
-		for _, r := range name {
+		for _, r := range base {
 			if r < '0' || r > '9' {
-				return nil, fmt.Errorf("ValueError: invalid field index %q", name)
+				return nil, fmt.Errorf("ValueError: invalid field index %q", base)
 			}
 			idx = idx*10 + int(r-'0')
 		}
 		if idx >= len(args) {
 			return nil, fmt.Errorf("IndexError: tuple index out of range")
 		}
-		return args[idx], nil
+		obj = args[idx]
+	} else {
+		v, ok := kwargs[base]
+		if !ok {
+			return nil, fmt.Errorf("KeyError: '%s'", base)
+		}
+		obj = v
 	}
-	key := name
-	if attrIdx := strings.IndexAny(name, ".["); attrIdx >= 0 {
-		key = name[:attrIdx]
+	// Apply remaining components: ".attr" or "[key]".
+	//
+	// CPython: Objects/stringlib/unicode_format.h:454 FieldNameIterator_next loop
+	for len(rest) > 0 {
+		if rest[0] == '.' {
+			rest = rest[1:]
+			end := strings.IndexAny(rest, ".[")
+			var attr string
+			if end < 0 {
+				attr, rest = rest, ""
+			} else {
+				attr, rest = rest[:end], rest[end:]
+			}
+			var err error
+			obj, err = GetAttr(obj, NewStr(attr))
+			if err != nil {
+				return nil, err
+			}
+		} else if rest[0] == '[' {
+			close := strings.IndexByte(rest, ']')
+			if close < 0 {
+				return nil, fmt.Errorf("ValueError: missing ']' in format string")
+			}
+			key := rest[1:close]
+			rest = rest[close+1:]
+			// All-digit key → integer index; otherwise string key.
+			isInt := len(key) > 0
+			for _, r := range key {
+				if r < '0' || r > '9' {
+					isInt = false
+					break
+				}
+			}
+			var err error
+			if isInt {
+				idx := 0
+				for _, r := range key {
+					idx = idx*10 + int(r-'0')
+				}
+				obj, err = GetItem(obj, NewInt(int64(idx)))
+			} else {
+				obj, err = GetItem(obj, NewStr(key))
+			}
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			break
+		}
 	}
-	v, ok := kwargs[key]
-	if !ok {
-		return nil, fmt.Errorf("KeyError: '%s'", key)
+	return obj, nil
+}
+
+// strFormatBaseName splits a field name into the leading identifier and the
+// remaining component string. E.g. "d[a].b" → ("d", "[a].b").
+func strFormatBaseName(name string) (base, rest string) {
+	i := strings.IndexAny(name, ".[")
+	if i < 0 {
+		return name, ""
 	}
-	return v, nil
+	return name[:i], name[i:]
 }
 
 func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {

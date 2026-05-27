@@ -1146,6 +1146,13 @@ type DefaultDictObject struct {
 // CPython: Modules/_collectionsmodule.c:2514 defdict_spec
 var DefaultDictType = newDefaultDictType()
 
+// AsDictBacking exposes the inner *Dict storage so dict's tp_richcompare
+// (and any other slot that introspects subclass instances) operates on
+// the dict_data the subclass inherits from PyDict_Type.
+//
+// CPython: Modules/_collectionsmodule.c:2213 defdictobject (PyDictObject substructure)
+func (dd *DefaultDictObject) AsDictBacking() *objects.Dict { return dd.Dict }
+
 func newDefaultDictType() *objects.Type {
 	t := objects.NewType("defaultdict", []*objects.Type{objects.DictType})
 	t.HasDict = false
@@ -1163,6 +1170,15 @@ func newDefaultDictType() *objects.Type {
 		return objects.Iter(o.(*DefaultDictObject).Dict)
 	}
 	objects.SetTypeDescr(t, "default_factory", &defaultFactoryDescr{})
+	// __repr__ slot wrapper. Binding a distinct method descriptor on
+	// defaultdict keeps it from inheriting dict.__repr__ — pprint's
+	// _dispatch table is keyed on `type.__repr__`, so without a
+	// per-type entry `defaultdict.__repr__` collapses onto
+	// `dict.__repr__` and the dispatcher routes plain dicts through
+	// _pprint_default_dict.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
+	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", defaultDictReprMethod))
 	objects.SetTypeDescr(t, "__missing__", objects.NewMethodDescr(t, "__missing__", defaultDictMissing))
 	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", defaultDictCopy))
 	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", defaultDictCopy))
@@ -1307,7 +1323,7 @@ func defaultDictSetup(dd *DefaultDictObject, args []objects.Object, kwargs map[s
 }
 
 // defaultDictGetItem dispatches through __missing__ on key absence.
-// Mirrors defdict's mp_subscript behaviour.
+// Mirrors defdict's mp_subscript behavior.
 //
 // CPython: Modules/_collectionsmodule.c:2229 defdict_missing (called from getitem)
 func defaultDictGetItem(o, key objects.Object) (objects.Object, error) {
@@ -1564,6 +1580,26 @@ func mergeIntoDict(dst *objects.Dict, src objects.Object) error {
 // defaultDictRepr renders defaultdict(factory, {...}).
 //
 // CPython: Modules/_collectionsmodule.c:2363 defdict_repr
+// defaultDictReprMethod is the method-descriptor wrapper for tp_repr.
+// Distinct from defaultDictRepr so pprint's dispatch table keys the
+// defaultdict entry separately from dict.__repr__.
+//
+// CPython: Modules/_collectionsmodule.c:2364 defdict_repr
+func defaultDictReprMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	dd, ok := args[0].(*DefaultDictObject)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'defaultdict' object")
+	}
+	s, err := defaultDictRepr(dd)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewStr(s), nil
+}
+
 func defaultDictRepr(o objects.Object) (string, error) {
 	dd := o.(*DefaultDictObject)
 	var factoryRepr string

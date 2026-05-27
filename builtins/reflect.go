@@ -24,44 +24,26 @@ func TypeOf(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	return args[0].Type(), nil
 }
 
-// IsInstance ports builtin_isinstance. Tuple second argument runs the
-// recursive check; otherwise the test is sub.MRO contains super.
-// __instancecheck__ landings come with the descriptor port.
+// IsInstance ports builtin_isinstance. The fast path handles the
+// type-exact case; otherwise the call falls through to the metaclass's
+// __instancecheck__ (so abc.ABCMeta's virtual-subclass registry takes
+// effect for collections.abc and the like).
 //
 // CPython: Objects/abstract.c:2632 object_recursive_isinstance
 func IsInstance(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: isinstance expected 2 arguments, got %d", len(args))
 	}
-	ok, err := isInstanceCheck(args[0], args[1])
+	ok, err := objects.ObjectIsInstance(args[0], args[1])
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewBool(ok), nil
 }
 
-func isInstanceCheck(inst, cls objects.Object) (bool, error) {
-	if tup, ok := cls.(*objects.Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := isInstanceCheck(inst, tup.Item(i))
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	t, ok := cls.(*objects.Type)
-	if !ok {
-		return false, fmt.Errorf("TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union")
-	}
-	return objects.IsSubtype(inst.Type(), t), nil
-}
-
-// IsSubclass ports builtin_issubclass. Both arguments must be types
-// (or the second a tuple of types); the test runs IsSubtype.
+// IsSubclass ports builtin_issubclass. As with IsInstance, the call
+// routes through __subclasscheck__ when the class's metaclass overrides
+// it; otherwise it falls back to the MRO subtype test.
 //
 // CPython: Objects/abstract.c:2742 object_issubclass
 func IsSubclass(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -72,31 +54,11 @@ func IsSubclass(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if !ok {
 		return nil, fmt.Errorf("TypeError: issubclass() arg 1 must be a class")
 	}
-	ok2, err := isSubclassCheck(sub, args[1])
+	ok2, err := objects.ObjectIsSubclass(sub, args[1])
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewBool(ok2), nil
-}
-
-func isSubclassCheck(sub *objects.Type, cls objects.Object) (bool, error) {
-	if tup, ok := cls.(*objects.Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := isSubclassCheck(sub, tup.Item(i))
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	t, ok := cls.(*objects.Type)
-	if !ok {
-		return false, fmt.Errorf("TypeError: issubclass() arg 2 must be a class, a tuple of classes, or a union")
-	}
-	return objects.IsSubtype(sub, t), nil
 }
 
 // Callable ports builtin_callable. Returns True iff the type has a

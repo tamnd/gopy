@@ -160,3 +160,48 @@ func makeWrapIterNext(t *Type) func(args []Object, kwargs map[string]Object) (Ob
 		return t.IterNext(args[0])
 	}
 }
+
+// AddCallSlotWrapper exposes __call__ on t when t advertises either
+// tp_call (Call) or PEP 590 vectorcall (Vectorcall). Mirrors CPython's
+// slotdefs entry for tp_call which add_operators resolves to wrap_call.
+// Without this, `fn.__call__`, `bound_method.__call__`,
+// `Type.__call__(instance, *args)` shapes raise AttributeError on types
+// whose only callable hook is one of the slot fields.
+//
+// CPython: Objects/typeobject.c wrap_call (slotdefs row for tp_call)
+func AddCallSlotWrapper(t *Type) {
+	if t == nil || (t.Call == nil && t.Vectorcall == nil) {
+		return
+	}
+	if _, exists := typeDescrTable[t]["__call__"]; exists {
+		return
+	}
+	SetTypeDescr(t, "__call__", NewMethodDescr(t, "__call__", makeWrapCall()))
+}
+
+// makeWrapCall returns the (self, *args, **kwargs) wrapper for the
+// callable slot. The receiver is the first positional argument
+// (CPython's wrap_call receives self via the descriptor binding); the
+// remaining positionals and the kwargs dict feed through the standard
+// Call helper so vectorcall-only types route the same as tp_call types.
+//
+// CPython: Objects/typeobject.c wrap_call
+func makeWrapCall() func(args []Object, kwargs map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __call__() missing self argument")
+		}
+		self := args[0]
+		rest := NewTuple(args[1:])
+		var kw *Dict
+		if len(kwargs) > 0 {
+			kw = NewDict()
+			for k, v := range kwargs {
+				if err := kw.SetItem(NewStr(k), v); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return Call(self, rest, kw)
+	}
+}

@@ -41,6 +41,14 @@ type InterpreterFrame interface {
 	FrameCellLocal(i int) Object
 	FrameNumFrees() int
 	FrameFreeLocal(i int) Object
+	// FrameLocalsPlusItem returns LocalsPlus[i] for the absolute
+	// localsplus index i. Callers walking LocalsplusKinds need this
+	// to fetch the post-fix_cell_offsets value at a kind-tagged slot
+	// regardless of whether the slot is fast/cell/free.
+	//
+	// CPython: Objects/frameobject.c:2199 frame_get_var (the
+	// frame->localsplus[i] read).
+	FrameLocalsPlusItem(i int) Object
 	// FrameFunc returns the Function that produced the call, or nil
 	// when the frame was not created from a function (e.g. module
 	// init, exec). The Tier-2 globals folder needs the function for

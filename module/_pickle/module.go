@@ -17,6 +17,7 @@
 package _pickle
 
 import (
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -176,9 +177,11 @@ var (
 )
 
 func init() {
-	pickleErrorType = objects.NewType("PickleError", []*objects.Type{objects.ObjectType()})
-	picklingErrorType = objects.NewType("PicklingError", []*objects.Type{pickleErrorType})
-	unpicklingErrorType = objects.NewType("UnpicklingError", []*objects.Type{pickleErrorType})
+	// CPython: Modules/_pickle.c:7720 PyModule_AddType (PickleError / PicklingError / UnpicklingError)
+	// CPython: Objects/exceptions.c PyExc_Exception hierarchy
+	pickleErrorType = pyerrors.NewExcType("PickleError", []*objects.Type{pyerrors.PyExc_Exception})
+	picklingErrorType = pyerrors.NewExcType("PicklingError", []*objects.Type{pickleErrorType})
+	unpicklingErrorType = pyerrors.NewExcType("UnpicklingError", []*objects.Type{pickleErrorType})
 }
 
 // buildModule constructs the _pickle module dict.

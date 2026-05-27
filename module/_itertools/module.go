@@ -1528,17 +1528,34 @@ func init() {
 //
 // CPython: Modules/itertoolsmodule.c:2254 itertools_combinations_impl
 func combinationsNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if err := noKwargs("combinations", kwargs); err != nil {
-		return nil, err
-	}
-	if len(args) != 2 {
+	// CPython: Modules/itertoolsmodule.c:2254 itertools_combinations_impl
+	// accepts r as positional or keyword argument.
+	var rObj objects.Object
+	switch len(args) {
+	case 2:
+		if len(kwargs) > 0 {
+			return nil, fmt.Errorf("TypeError: combinations() takes no keyword arguments")
+		}
+		rObj = args[1]
+	case 1:
+		if rv, ok := kwargs["r"]; ok {
+			if len(kwargs) > 1 {
+				return nil, fmt.Errorf("TypeError: combinations() got unexpected keyword arguments")
+			}
+			rObj = rv
+		} else if len(kwargs) > 0 {
+			return nil, fmt.Errorf("TypeError: combinations() got unexpected keyword arguments")
+		} else {
+			return nil, fmt.Errorf("TypeError: combinations expected 2 arguments, got 1")
+		}
+	default:
 		return nil, fmt.Errorf("TypeError: combinations expected 2 arguments, got %d", len(args))
 	}
 	pool, err := objects.SequenceTuple(args[0])
 	if err != nil {
 		return nil, err
 	}
-	r, err := asSsizeT(args[1])
+	r, err := asSsizeT(rObj)
 	if err != nil {
 		return nil, err
 	}

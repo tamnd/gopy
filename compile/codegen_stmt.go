@@ -34,32 +34,21 @@ func (c *Compiler) visitModule(m *ast.Module) error {
 		c.addLoadConst(docstring, docLoc)
 		c.addOpName(STORE_NAME, &pool, "__doc__", ast.Pos{Lineno: -1})
 	}
-	// PEP 649 conditional-annotations prologue. Same shape as the
-	// class body emitter: when a top-level annotation hides behind a
-	// conditional, the analyzer flips HasConditionalAnnotations and
-	// we open a tracking set so __annotate__ knows which names made
-	// it through the body.
-	//
-	// CPython: Python/codegen.c:860 codegen_body (BUILD_SET 0 +
-	// STORE_NAME __conditional_annotations__)
-	if c.scope != nil && c.scope.HasConditionalAnnotations {
-		pool := poolNames
-		c.addOpI(BUILD_SET, 0, ast.Pos{Lineno: 1})
-		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", ast.Pos{Lineno: 1})
-	}
 	// PEP 649: module annotations are deferred. visitAnnAssign records
-	// each annotation into the unit's DeferredAnnotations slice, and
-	// emitDeferredAnnotations after the body emits a synthetic
-	// `__annotate__` function. moduleGetAnnotations
-	// (objects/module_annotations.go) invokes that function the first
-	// time `__annotations__` is read off the module.
+	// each annotation into the unit's DeferredAnnotations slice.
+	// After the body, annotation setup code (__conditional_annotations__
+	// + __annotate__) is emitted into a separate stash sequence that
+	// cfgFromSequence prepends at the start of the body, so __annotate__
+	// is available before any body statement executes. This matches
+	// CPython's _PyCompile_StartAnnotationSetup /
+	// _PyCompile_EndAnnotationSetup stash.
 	//
-	// CPython: Python/codegen.c codegen_body (the
-	// codegen_process_deferred_annotations call after the body loop)
+	// CPython: Python/compile.c _PyCompile_StartAnnotationSetup (L739)
+	// CPython: Python/flowgraph.c:3946 _PyCfg_FromInstructionSequence
 	if err := c.visitStmts(body); err != nil {
 		return err
 	}
-	if err := c.emitDeferredAnnotations(ast.Pos{Lineno: 1}); err != nil {
+	if err := c.stashAnnotationCode(ast.Pos{Lineno: 1}); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
@@ -244,6 +233,8 @@ func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
 		return true, c.visitWhile(n)
 	case *ast.For:
 		return true, c.visitFor(n)
+	case *ast.AsyncFor:
+		return true, c.visitAsyncFor(n)
 	case *ast.Break:
 		return true, c.visitBreak(n)
 	case *ast.Continue:
@@ -301,6 +292,9 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 // CPython: Python/codegen.c:2191 codegen_return
 func (c *Compiler) visitReturn(s *ast.Return) error {
 	l := loc(s)
+	if c.scope == nil || !c.scope.IsFunctionLike() {
+		return c.errorAt(l, "'return' outside function")
+	}
 	_, valueIsConst := s.Value.(*ast.Constant)
 	preserveTOS := s.Value != nil && !valueIsConst
 
@@ -316,6 +310,7 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 		l = loc(s)
 		c.addOp(NOP, l)
 	}
+	c.unwindForReturn(preserveTOS, l)
 	if s.Value == nil {
 		c.addLoadConst(nil, l)
 	} else if !preserveTOS {
@@ -373,10 +368,12 @@ func (c *Compiler) assignTo(target ast.Expr, l ast.Pos) error {
 	case *ast.List:
 		return c.assignToSequence(t.Elts, l)
 	case *ast.Starred:
-		// A bare Starred outside a Tuple/List target is a syntax
-		// error caught earlier; if we get here we just store into the
-		// inner target.
-		return c.assignTo(t.Value, l)
+		// A bare Starred outside a Tuple/List target is invalid: only
+		// `a, *b = x` or `[*b] = x` shapes are legal. CPython's
+		// codegen_visit_expr Starred(Store) branch raises here too.
+		//
+		// CPython: Python/codegen.c:5301 codegen_visit_expr (Starred_kind)
+		return c.errorAt(l, "starred assignment target must be in a list or tuple")
 	}
 	return fmt.Errorf("compile: assign target %T not supported", target)
 }
@@ -393,7 +390,7 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 	for i, e := range elts {
 		if _, ok := e.(*ast.Starred); ok {
 			if starIdx >= 0 {
-				return fmt.Errorf("compile: multiple starred expressions in assignment")
+				return c.errorAt(l, "multiple starred expressions in assignment")
 			}
 			starIdx = i
 		}
@@ -403,7 +400,14 @@ func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
 	} else {
 		countBefore := starIdx
 		countAfter := n - starIdx - 1
-		// CPython packs (after << 8) | before into the oparg.
+		// The oparg packs (countAfter << 8) | countBefore, so each half
+		// must fit in 8 / 24 bits. CPython raises before emitting the
+		// instruction; otherwise the runtime hits an invalid CFG.
+		//
+		// CPython: Python/codegen.c:3398 unpack_helper
+		if countBefore >= (1<<8) || countAfter >= (1<<24) {
+			return c.errorAt(l, "too many expressions in star-unpacking assignment")
+		}
 		c.addOpI(UNPACK_EX, int32((countAfter<<8)|countBefore), l)
 	}
 	for _, e := range elts {

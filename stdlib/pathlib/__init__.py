@@ -768,7 +768,7 @@ class Path(PurePath):
         """
         if "b" not in mode:
             encoding = io.text_encoding(encoding)
-        return io.open(self, mode, buffering, encoding, errors, newline)
+        return io.open(str(self), mode, buffering, encoding, errors, newline)
 
     def read_bytes(self):
         """

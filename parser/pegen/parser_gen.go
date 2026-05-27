@@ -17,6 +17,15 @@ import (
 // The real AST surface lands with the action translator (M6).
 var ErrParserNotImplemented = errors.New("pegen: generated rule bodies not yet emitted")
 
+// ErrIncompleteInput is returned by Dispatch when
+// PyCF_ALLOW_INCOMPLETE_INPUT is set and the first-pass failure
+// occurred at end-of-source (tokenizer done = E_EOF/E_EOFS/E_EOLS).
+// The caller promotes this to _IncompleteInputError without running
+// the invalid_* second pass.
+//
+// CPython: Parser/pegen.c:952 _PyPegen_run_parser _is_end_of_source
+var ErrIncompleteInput = errors.New("pegen: incomplete input")
+
 var _ = token.NAME // keep import alive when no rule uses it.
 var _ = ast.Add       // keep import alive when no rule uses it.
 
@@ -1581,7 +1590,7 @@ func parseRule_assignment(p *Parser) any {
 			_ = b
 			c := parseRule__rhs_9(p)
 			_ = c
-			return withSpan(p, mark, actionAstAnnAssign(p, actionPgenSetExprContext(p, p, a, ast.Store), b, c, 1))
+			return withSpan(p, mark, checkVersion(p, 6, "Variable annotation syntax is", actionAstAnnAssign(p, actionPgenSetExprContext(p, p, a, ast.Store), b, c, 1)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment, v)
 			return v
@@ -1602,7 +1611,7 @@ func parseRule_assignment(p *Parser) any {
 			_ = b
 			c := parseRule__rhs_9(p)
 			_ = c
-			return withSpan(p, mark, actionAstAnnAssign(p, a, b, c, 0))
+			return withSpan(p, mark, checkVersion(p, 6, "Variable annotations syntax is", actionAstAnnAssign(p, a, b, c, 0)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment, v)
 			return v
@@ -1757,7 +1766,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(token.ATEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return withSpan(p, mark, actionPgenAugoperator(p, p, ast.MatMult))
+			return withSpan(p, mark, checkVersion(p, 5, "The '@' operator is", actionPgenAugoperator(p, p, ast.MatMult)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -2841,7 +2850,7 @@ func parseRule_function_def_raw(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncFunctionDef(p, nameIDOf(n), func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }(), b, nil, a, tc, t))
+			return withSpan(p, mark, checkVersion(p, 5, "Async functions are", actionAstAsyncFunctionDef(p, nameIDOf(n), func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }(), b, nil, a, tc, t)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_function_def_raw, v)
 			return v
@@ -2906,7 +2915,7 @@ func parseRule_parameters(p *Parser) any {
 			_ = c
 			d := parseRule_star_etc(p)
 			_ = d
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, a, nil, b, c, d))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, a, nil, b, c, d)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_parameters, v)
 			return v
@@ -2923,7 +2932,7 @@ func parseRule_parameters(p *Parser) any {
 			_ = b
 			c := parseRule_star_etc(p)
 			_ = c
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, nil, a, nil, b, c))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, nil, a, nil, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_parameters, v)
 			return v
@@ -3857,7 +3866,7 @@ func parseRule_for_stmt(p *Parser) any {
 			_ = b
 			el := parseRule_else_block(p)
 			_ = el
-			return withSpan(p, mark, actionAstAsyncFor(p, t, ex, b, el, tc))
+			return withSpan(p, mark, checkVersion(p, 5, "Async for loops are", actionAstAsyncFor(p, t, ex, b, el, tc)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_for_stmt, v)
 			return v
@@ -3986,7 +3995,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncWith(p, a, b, nil))
+			return withSpan(p, mark, checkVersion(p, 5, "Async with statements are", actionAstAsyncWith(p, a, b, nil)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -4013,7 +4022,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstAsyncWith(p, a, b, tc))
+			return withSpan(p, mark, checkVersion(p, 5, "Async with statements are", actionAstAsyncWith(p, a, b, tc)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -4173,7 +4182,7 @@ func parseRule_try_stmt(p *Parser) any {
 			_ = el
 			f := parseRule_finally_block(p)
 			_ = f
-			return withSpan(p, mark, actionAstTryStar(p, b, ex, el, f))
+			return withSpan(p, mark, checkVersion(p, 11, "Exception groups are", actionAstTryStar(p, b, ex, el, f)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_try_stmt, v)
 			return v
@@ -4268,7 +4277,7 @@ func parseRule_except_block(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstExceptHandler(p, e, nil, b))
+			return withSpan(p, mark, checkVersion(p, 14, "except expressions without parentheses are", actionAstExceptHandler(p, e, nil, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_except_block, v)
 			return v
@@ -4404,7 +4413,7 @@ func parseRule_except_star_block(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstExceptHandler(p, e, nil, b))
+			return withSpan(p, mark, checkVersion(p, 14, "except expressions without parentheses are", actionAstExceptHandler(p, e, nil, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_except_star_block, v)
 			return v
@@ -4498,7 +4507,7 @@ func parseRule_match_stmt(p *Parser) any {
 			dedent := p.ExpectToken(token.DEDENT)
 			if dedent == nil { return nil }
 			_ = dedent
-			return withSpan(p, mark, actionAstMatch(p, subject, cases))
+			return withSpan(p, mark, checkVersion(p, 10, "Pattern matching is", actionAstMatch(p, subject, cases)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_match_stmt, v)
 			return v
@@ -4762,7 +4771,7 @@ func parseRule_or_pattern(p *Parser) any {
 			patterns := parseRule__gather_35(p)
 			if patterns == nil { return nil }
 			_ = patterns
-			return withSpan(p, mark, matchedOr(patterns))
+			return withSpan(p, mark, func() any { if truthy(seqLenAny(patterns) == 1) { return seqGetAny(patterns, 0) }; return actionAstMatchOr(p, patterns) }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_or_pattern, v)
 			return v
@@ -6009,7 +6018,7 @@ func parseRule_type_alias(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstTypeAlias(p, actionPgenSetExprContext(p, p, n, ast.Store), t, b))
+			return withSpan(p, mark, checkVersion(p, 12, "Type statement is", actionAstTypeAlias(p, actionPgenSetExprContext(p, p, n, ast.Store), t, b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_alias, v)
 			return v
@@ -6051,7 +6060,7 @@ func parseRule_type_params(p *Parser) any {
 			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return withSpan(p, mark, matchedOr(t))
+			return withSpan(p, mark, checkVersion(p, 12, "Type parameter lists are", t))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_params, v)
 			return v
@@ -6204,7 +6213,7 @@ func parseRule_type_param_default(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return withSpan(p, mark, matchedOr(e))
+			return withSpan(p, mark, checkVersion(p, 13, "Type parameter defaults are", e))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_param_default, v)
 			return v
@@ -6230,7 +6239,7 @@ func parseRule_type_param_starred_default(p *Parser) any {
 			e := parseRule_star_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return withSpan(p, mark, matchedOr(e))
+			return withSpan(p, mark, checkVersion(p, 13, "Type parameter defaults are", e))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_param_starred_default, v)
 			return v
@@ -6609,7 +6618,7 @@ func parseRule_assignment_expression(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstNamedExpr(p, actionPgenSetExprContext(p, p, a, ast.Store), b))
+			return withSpan(p, mark, checkVersion(p, 8, "Assignment expressions are", actionAstNamedExpr(p, actionPgenSetExprContext(p, p, a, ast.Store), b)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment_expression, v)
 			return v
@@ -7689,7 +7698,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return withSpan(p, mark, actionAstBinOp(p, a, ast.MatMult, b))
+			return withSpan(p, mark, checkVersion(p, 5, "The '@' operator is", actionAstBinOp(p, a, ast.MatMult, b)))
 		}(); v != nil {
 			return v
 		}
@@ -7850,7 +7859,7 @@ func parseRule_await_primary(p *Parser) any {
 			a := parseRule_primary(p)
 			if a == nil { return nil }
 			_ = a
-			return withSpan(p, mark, actionAstAwait(p, a))
+			return withSpan(p, mark, checkVersion(p, 5, "Await expressions are", actionAstAwait(p, a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_await_primary, v)
 			return v
@@ -8341,7 +8350,7 @@ func parseRule_lambda_parameters(p *Parser) any {
 			_ = c
 			d := parseRule_lambda_star_etc(p)
 			_ = d
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, a, nil, b, c, d))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, a, nil, b, c, d)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_parameters, v)
 			return v
@@ -8358,7 +8367,7 @@ func parseRule_lambda_parameters(p *Parser) any {
 			_ = b
 			c := parseRule_lambda_star_etc(p)
 			_ = c
-			return withSpan(p, mark, actionPgenMakeArguments(p, p, nil, a, nil, b, c))
+			return withSpan(p, mark, checkVersion(p, 8, "Positional-only parameters are", actionPgenMakeArguments(p, p, nil, a, nil, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_parameters, v)
 			return v
@@ -9188,7 +9197,7 @@ func parseRule_tstring(p *Parser) any {
 			c := p.ExpectToken(token.TSTRING_END)
 			if c == nil { return nil }
 			_ = c
-			return withSpan(p, mark, actionPgenTemplateStr(p, p, a, b, c))
+			return withSpan(p, mark, checkVersion(p, 14, "t-strings are", actionPgenTemplateStr(p, p, a, b, c)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_tstring, v)
 			return v
@@ -9547,7 +9556,7 @@ func parseRule_for_if_clause(p *Parser) any {
 			_ = b
 			c := parseRule__loop0_72(p)
 			_ = c
-			return withSpan(p, mark, actionAstComprehension(p, a, b, c, 1))
+			return withSpan(p, mark, checkVersion(p, 6, "Async comprehensions are", actionAstComprehension(p, a, b, c, 1)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_for_if_clause, v)
 			return v
@@ -11082,7 +11091,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			_ = op
 			opt := parseRule__rhs_87(p)
 			_ = opt
-			return []any{a, b, op, opt}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, actionPgenGetLastComprehensionItem(p, seqLastAny(b)), "Generator expression must be parenthesized"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_arguments, v)
 			return v
@@ -11161,7 +11170,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{args, op, a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, actionPgenGetLastComprehensionItem(p, seqLastAny(b)), "Generator expression must be parenthesized"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_arguments, v)
 			return v
@@ -11207,7 +11216,7 @@ func parseRule_invalid_kwarg(p *Parser) any {
 			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "cannot assign to %s", nameIDOf(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_kwarg, v)
 			return v
@@ -11282,6 +11291,9 @@ func parseRule_invalid_kwarg(p *Parser) any {
 // parseRule_expression_without_invalid parses expression_without_invalid.
 func parseRule_expression_without_invalid(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	prevCallInvalid := p.CallInvalid()
+	p.SetCallInvalid(false)
+	defer func() { p.SetCallInvalid(prevCallInvalid) }()
 	if v, ok := p.IsMemoized(Rule_expression_without_invalid); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11390,7 +11402,7 @@ func parseRule_invalid_type_param(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return []any{op, a, colon, e}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, func() any { if truthy(isTupleKind(e)) { return "cannot use constraints with TypeVarTuple" }; return "cannot use bound with TypeVarTuple" }()))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v
@@ -11412,7 +11424,7 @@ func parseRule_invalid_type_param(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			return []any{op, a, colon, e}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", colon, func() any { if truthy(isTupleKind(e)) { return "cannot use constraints with ParamSpec" }; return "cannot use bound with ParamSpec" }()))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_type_param, v)
 			return v
@@ -11442,7 +11454,7 @@ func parseRule_invalid_expression(p *Parser) any {
 			string_var_1 := stringToken(p)
 			if string_var_1 == nil { return nil }
 			_ = string_var_1
-			return []any{string_var, a, string_var_1}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqFirstAny(a), seqLastAny(a), "invalid syntax. Is this intended to be part of the string?"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -11459,7 +11471,7 @@ func parseRule_invalid_expression(p *Parser) any {
 			b := parseRule_expression_without_invalid(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, func() any { if truthy(actionPgenCheckLegacyStmt(p, p, a)) { return nil }; return func() any { if truthy(p.PrevTokenLevel() == 0) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "invalid syntax. Perhaps you forgot a comma?") }() }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
 			return v
@@ -11727,7 +11739,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{rep, a, op}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "STAR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_assignment, v)
 			return v
@@ -11847,7 +11859,7 @@ func parseRule_invalid_del_stmt(p *Parser) any {
 			a := parseRule_star_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "DEL_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_del_stmt, v)
 			return v
@@ -11927,7 +11939,7 @@ func parseRule_invalid_comprehension(p *Parser) any {
 			for_if_clauses := parseRule_for_if_clauses(p)
 			if for_if_clauses == nil { return nil }
 			_ = for_if_clauses
-			return []any{g, a, op, b, for_if_clauses}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, seqLastAny(b), "did you forget parentheses around the comprehension target?"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_comprehension, v)
 			return v
@@ -12722,7 +12734,7 @@ func parseRule_invalid_with_item(p *Parser) any {
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
-			return []any{expression, kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "STAR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_item, v)
 			return v
@@ -12781,7 +12793,7 @@ func parseRule_invalid_for_target(p *Parser) any {
 			a := parseRule_star_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{opt, kw, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_INVALID_TARGET", "FOR_TARGETS", a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_for_target, v)
 			return v
@@ -13084,7 +13096,7 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, gat, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'with' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
 			return v
@@ -13117,7 +13129,7 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, op, gat, opt_1, op_1, op_2, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'with' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
 			return v
@@ -13148,7 +13160,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'try' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
 			return v
@@ -13489,7 +13501,7 @@ func parseRule_invalid_finally_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'finally' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_finally_stmt, v)
 			return v
@@ -13525,7 +13537,7 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, expression, opt, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
 			return v
@@ -13545,7 +13557,7 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
 			return v
@@ -13584,7 +13596,7 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, expression, opt, op_1, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'except*' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, v)
 			return v
@@ -13614,7 +13626,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'"))
+			return withSpan(p, mark, checkVersion(p, 10, "Pattern matching is", raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
 			return v
@@ -13637,7 +13649,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, subject, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'match' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
 			return v
@@ -13694,7 +13706,7 @@ func parseRule_invalid_case_block(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, patterns, opt, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'case' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_case_block, v)
 			return v
@@ -13773,7 +13785,7 @@ func parseRule_invalid_class_pattern(p *Parser) any {
 			a := parseRule_invalid_class_argument_pattern(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{name_or_attr, op, a}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqFirstAny(a), seqLastAny(a), "positional patterns follow keyword patterns"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_class_pattern, v)
 			return v
@@ -13858,7 +13870,7 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, a_1, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'if' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_if_stmt, v)
 			return v
@@ -13911,7 +13923,7 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, named_expression, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'elif' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
 			return v
@@ -13942,7 +13954,7 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'else' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_else_stmt, v)
 			return v
@@ -14017,7 +14029,7 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, named_expression, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'while' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_while_stmt, v)
 			return v
@@ -14086,7 +14098,7 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, star_targets, kw, star_expressions, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after 'for' statement on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_for_stmt, v)
 			return v
@@ -14134,7 +14146,7 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{opt, a, name_var, opt_1, op, opt_2, op_1, opt_3, op_2, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after function definition on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_def_raw, v)
 			return v
@@ -14229,7 +14241,7 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 			if newline == nil { return nil }
 			_ = newline
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
-			return []any{a, name_var, opt, opt_1, op, newline}
+			return withSpan(p, mark, raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block after class definition on line %d", extractLineno(a)))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
 			return v
@@ -14323,7 +14335,7 @@ func parseRule_invalid_kvpair(p *Parser) any {
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
-			return withSpan(p, mark, matchedOr(a))
+			return withSpan(p, mark, raiseAction(p, "RAISE_ERROR_KNOWN_LOCATION", p, "SyntaxError", extractLineno(a), extractEndColOffset(a) - 1, extractEndLineno(a), -1, "':' expected after dictionary key"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_kvpair, v)
 			return v
@@ -14525,7 +14537,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-			return []any{op, annotated_rhs}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '=', or '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14545,7 +14557,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-			return []any{op, annotated_rhs, op_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14587,7 +14599,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting ':' or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14613,7 +14625,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			rep := parseRule__loop0_63(p)
 			_ = rep
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '}', or format specs") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14634,7 +14646,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "f-string: expecting '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
 			return v
@@ -14779,7 +14791,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-			return []any{op, annotated_rhs}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '=', or '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14799,7 +14811,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-			return []any{op, annotated_rhs, op_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '!', or ':', or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14841,7 +14853,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting ':' or '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14867,7 +14879,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			rep := parseRule__loop0_63(p)
 			_ = rep
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '}', or format specs") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14888,7 +14900,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
-			return []any{op, annotated_rhs, opt, opt_1}
+			return withSpan(p, mark, func() any { if truthy((p.PinnedError() != nil)) { return nil }; return raiseAction(p, "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN", "t-string: expecting '}'") }())
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
 			return v
@@ -14954,7 +14966,7 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 			b := parseRule_tstring(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqLastAny(a), b, "cannot mix t-string literals with string or bytes literals"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
 			return v
@@ -14970,7 +14982,7 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 			b := parseRule__group_131(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return withSpan(p, mark, raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", seqLastAny(a), b, "cannot mix t-string literals with string or bytes literals"))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
 			return v
@@ -19367,15 +19379,7 @@ func parseRule__rhs_156(p *Parser) any {
 
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
-func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func raiseAction(p *Parser, kind string, args ...any) any {
-	_ = p
-	_ = kind
-	_ = args
-	p.SetErrorIndicator(true)
-	return nil
-}
-
+func actionPgenGetLastComprehensionItem(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 
 // placeholderMatched is a non-nil sentinel returned by alts
 // whose items all bind to skip-vars. M6 replaces it with
@@ -19407,8 +19411,14 @@ func Dispatch(p *Parser, m StartRule) (any, error) {
 		return nil, ErrParserNotImplemented
 	}
 	if result == nil {
-		p.SetCallInvalid(true)
-		p.Reset(0)
+		// CPython: Parser/pegen.c:952 _PyPegen_run_parser
+		// When PyCF_ALLOW_INCOMPLETE_INPUT is set and the source ends at
+		// EOF (no unclosed brackets), promote the first-pass failure to
+		// _IncompleteInputError immediately, skipping the second (invalid_*) pass.
+		if p.AllowIncompleteInput() && p.IsEndOfSource() {
+			return nil, ErrIncompleteInput
+		}
+		p.ResetForErrorPass()
 		switch m {
 		case StartFile:
 			result = parseRule_file(p)

@@ -1,6 +1,10 @@
 package errors
 
-import "github.com/tamnd/gopy/objects"
+import (
+	stderrors "errors"
+
+	"github.com/tamnd/gopy/objects"
+)
 
 // The exception class hierarchy ported in v0.3. Each Type entry has
 // the same MRO shape as CPython. The class objects are created lazily
@@ -47,6 +51,91 @@ var (
 	PyExc_GeneratorExit     = newExcType("GeneratorExit", []*objects.Type{PyExc_BaseException})
 )
 
+func init() {
+	// Wire AttributeErrorFactory so GenericGetAttr produces rich
+	// AttributeError exceptions with .name and .obj populated.
+	//
+	// CPython: Objects/object.c:843 _PyObject_SetAttributeError
+	objects.AttributeErrorFactory = func(obj objects.Object, attrName string) error {
+		msg := "'" + obj.Type().Name + "' object has no attribute '" + attrName + "'"
+		exc := New(PyExc_AttributeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		d := exc.EnsureAttrDict()
+		_ = d.SetItem(objects.NewStr("name"), objects.NewStr(attrName))
+		_ = d.SetItem(objects.NewStr("obj"), obj)
+		return &objects.RaisedError{Exc: exc, Msg: "AttributeError: " + msg}
+	}
+	objects.IsIndexErrorHook = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		msg := err.Error()
+		if msg == "IndexError" {
+			return true
+		}
+		const p = "IndexError:"
+		return len(msg) >= len(p) && msg[:len(p)] == p
+	}
+	// StopIteration.value exposes args[0] (or None) as a member, so
+	// callers can read the generator/coroutine return value from
+	// `except StopIteration as e: e.value`. CPython stores it in a
+	// dedicated field stamped by StopIteration_init; gopy reads it back
+	// off args so the same value flows through whether the exception
+	// was constructed via StopIteration(retval) or args was rewritten.
+	//
+	// CPython: Objects/exceptions.c:711 StopIteration_members
+	// CPython: Objects/exceptions.c:684 StopIteration_init
+	objects.SetTypeDescr(PyExc_StopIteration, "value",
+		objects.NewGetSetDescr("value", stopIterValueGet, stopIterValueSet))
+}
+
+// stopIterValueGet returns args[0] when StopIteration was constructed
+// with a value, else None.
+//
+// CPython: Objects/exceptions.c:684 StopIteration_init (value field)
+func stopIterValueGet(owner objects.Object) (objects.Object, error) {
+	e, ok := owner.(*Exception)
+	if !ok || e.Args == nil || e.Args.Len() == 0 {
+		return objects.None(), nil
+	}
+	return e.Args.Item(0), nil
+}
+
+// stopIterValueSet rewrites args[0] so reassigning .value also surfaces
+// through args. CPython has a dedicated field for value; gopy keeps
+// args and value in lock-step.
+//
+// CPython: Objects/exceptions.c:711 StopIteration_members
+func stopIterValueSet(owner objects.Object, value objects.Object) error {
+	e, ok := owner.(*Exception)
+	if !ok {
+		return stderrors.New("TypeError: descriptor 'value' requires StopIteration")
+	}
+	if value == nil {
+		value = objects.None()
+	}
+	if e.Args == nil || e.Args.Len() == 0 {
+		e.Args = objects.NewTuple([]objects.Object{value})
+		return nil
+	}
+	items := make([]objects.Object, e.Args.Len())
+	items[0] = value
+	for i := 1; i < e.Args.Len(); i++ {
+		items[i] = e.Args.Item(i)
+	}
+	e.Args = objects.NewTuple(items)
+	return nil
+}
+
+// NewExcType creates a named exception type that inherits from the
+// given bases. It wires the same Call/TpNew/Str/Repr/HasDict slots
+// that all CPython exception types carry. Exported for use by C-extension
+// ports (e.g. _pickle, _struct) that need proper exception classes.
+//
+// CPython: Objects/exceptions.c BaseException_Type setup
+func NewExcType(name string, bases []*objects.Type) *objects.Type {
+	return newExcType(name, bases)
+}
+
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
 	t.Call = excCall
@@ -75,21 +164,58 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	// = PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
 	t.Getattro = objects.GenericGetAttr
 	t.Setattro = objects.GenericSetAttr
+	// BaseException carries __repr__ / __str__ method descriptors that
+	// wrap BaseException_repr / BaseException_str. Without these, a
+	// user subclass like `class BozoError(Exception): pass` runs through
+	// fixupCallReprStr which finds object.__repr__ via MRO and installs
+	// slot_tp_repr, so repr(BozoError()) returns the generic
+	// "<__main__.BozoError object at 0x...>" instead of "BozoError()".
+	//
+	// CPython: Objects/typeobject.c add_operators (slot wrapper for
+	// each non-NULL slot in slotdefs). The repr/str rows install
+	// __repr__ / __str__ descriptors that wrap tp_repr / tp_str.
+	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, stderrors.New("TypeError: __repr__ expected 1 argument")
+		}
+		s, err := excRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}))
+	objects.SetTypeDescr(t, "__str__", objects.NewMethodDescr(t, "__str__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, stderrors.New("TypeError: __str__ expected 1 argument")
+		}
+		s, err := excStr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}))
 	return t
 }
 
 // excTpNew is the tp_new slot for every built-in exception type. It
 // mirrors BaseException_new: allocate a fresh PyBaseExceptionObject,
-// store positional args on .args, and return. tp_init is a no-op on
-// BaseException itself; user subclasses that override __init__ run
-// after this via typeCallViaTpNew. Kwargs are tolerated for the same
-// reason excCall tolerates them: stdlib call sites that pass
-// `name=` / `path=` to ImportError use the keyword form before the
-// proper ImportError init lands.
+// store positional args on .args, and return. Keyword arguments that
+// correspond to exception-specific attributes (name, obj, path) are
+// stored in the exception's attr dict so code like
+// `raise NameError("msg", name="x")` works correctly.
 //
 // CPython: Objects/exceptions.c:L42 BaseException_new
-func excTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return New(cls, objects.NewTuple(args)), nil
+// CPython: Objects/exceptions.c:2503 NameError_init
+// CPython: Objects/exceptions.c:2586 AttributeError_init
+func excTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	exc := New(cls, objects.NewTuple(args))
+	if len(kwargs) > 0 {
+		d := exc.EnsureAttrDict()
+		for k, v := range kwargs {
+			_ = d.SetItem(objects.NewStr(k), v)
+		}
+	}
+	return exc, nil
 }
 
 // excStr ports BaseException_str: empty for no args, str(args[0]) for

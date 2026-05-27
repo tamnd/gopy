@@ -35,6 +35,40 @@ func init() {
 	SliceType.Repr = sliceRepr
 	SliceType.Str = sliceRepr
 	SliceType.Dealloc = sliceDealloc
+	SliceType.Getattro = GenericGetAttr
+	// slice(stop) / slice(start, stop) / slice(start, stop, step).
+	// CPython: Objects/sliceobject.c:319 slice_new
+	SliceType.TpNew = sliceTpNew
+	// CPython: Objects/sliceobject.c:576 slice_richcompare
+	SliceType.RichCmp = sliceRichCmp
+	SetTypeDescr(SliceType, "start", NewGetSetDescr("start",
+		func(o Object) (Object, error) { return o.(*Slice).Start, nil }, nil))
+	SetTypeDescr(SliceType, "stop", NewGetSetDescr("stop",
+		func(o Object) (Object, error) { return o.(*Slice).Stop, nil }, nil))
+	SetTypeDescr(SliceType, "step", NewGetSetDescr("step",
+		func(o Object) (Object, error) { return o.(*Slice).Step, nil }, nil))
+}
+
+// sliceTpNew implements the slice constructor: slice(stop),
+// slice(start, stop), or slice(start, stop, step).
+//
+// CPython: Objects/sliceobject.c:319 slice_new
+func sliceTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: slice() takes no keyword arguments")
+	}
+	var start, stop, step Object
+	switch len(args) {
+	case 1:
+		stop = args[0]
+	case 2:
+		start, stop = args[0], args[1]
+	case 3:
+		start, stop, step = args[0], args[1], args[2]
+	default:
+		return nil, fmt.Errorf("TypeError: slice expected at most 3 arguments, got %d", len(args))
+	}
+	return NewSlice(start, stop, step), nil
 }
 
 // NewSlice builds a slice. Any of start/stop/step may be None. The
@@ -79,6 +113,21 @@ func sliceDealloc(o Object) {
 	s.Stop = nil
 	s.Step = nil
 	sliceFreeList.Put(s)
+}
+
+// sliceRichCmp compares two slice objects by comparing their (start, stop, step)
+// tuples, mirroring slice_richcompare.
+//
+// CPython: Objects/sliceobject.c:576 slice_richcompare
+func sliceRichCmp(a, b Object, op CompareOp) (Object, error) {
+	sa, ok1 := a.(*Slice)
+	sb, ok2 := b.(*Slice)
+	if !ok1 || !ok2 {
+		return NotImplemented(), nil
+	}
+	t1 := NewTuple([]Object{sa.Start, sa.Stop, sa.Step})
+	t2 := NewTuple([]Object{sb.Start, sb.Stop, sb.Step})
+	return RichCmp(t1, t2, op)
 }
 
 func sliceRepr(o Object) (string, error) {

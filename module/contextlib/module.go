@@ -192,11 +192,18 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		_ = gen.Close()
 		return nil, fmt.Errorf("RuntimeError: generator didn't stop")
 	}
-	// Exception path: throw it back into the generator. The error we
-	// hand to gen.Throw carries the exception text; if the generator
-	// re-raises the same error, gen.Throw returns it back to us and we
-	// propagate to the caller (return False).
-	throwErr := errorFromException(valArg, typArg)
+	// Exception path: throw the original Python exception back into the
+	// generator as a *RaisedError so execYieldValue can install it on
+	// thread state via pyerrors.Raise. Using errorFromException (plain
+	// fmt.Errorf) bypasses that path and causes synthesizeException to
+	// create a generic Exception instead of preserving the original type.
+	if objects.GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: generator.throw not available")
+	}
+	throwErr, hookErr := objects.GenThrowHook(valArg)
+	if hookErr != nil {
+		return nil, hookErr
+	}
 	val, thrErr := gen.Throw(throwErr)
 	if thrErr == nil {
 		// Generator caught the exception and yielded. Close it and
@@ -219,28 +226,6 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		return objects.NewBool(false), nil
 	}
 	return nil, thrErr
-}
-
-// errorFromException turns a Python-level exception value into a Go
-// error suitable for Generator.Throw. The generator side has no shared
-// exception object yet; we encode type + str(value) into the error.
-func errorFromException(val, typ objects.Object) error {
-	name := "Exception"
-	if t, ok := typ.(*objects.Type); ok {
-		name = t.Name
-	} else if typ != nil && !objects.IsNone(typ) {
-		name = typ.Type().Name
-	}
-	msg := ""
-	if val != nil && !objects.IsNone(val) {
-		if s, sErr := objects.Str(val); sErr == nil {
-			msg = s
-		}
-	}
-	if msg == "" {
-		return fmt.Errorf("%s", name)
-	}
-	return fmt.Errorf("%s: %s", name, msg)
 }
 
 // kwargsToDict converts a Go kwargs map into a Python *Dict for Call.
@@ -342,7 +327,7 @@ func newNullcontextType() *objects.Type {
 		if len(args) >= 1 {
 			enterResult = args[0]
 		}
-		if err := inst.Dict().SetItem(objects.NewStr("enter_result"), enterResult); err != nil {
+		if err := inst.EnsureDict().SetItem(objects.NewStr("enter_result"), enterResult); err != nil {
 			return nil, err
 		}
 		return inst, nil

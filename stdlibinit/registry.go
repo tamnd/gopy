@@ -193,6 +193,13 @@ import (
 	// CPython: Modules/_sre/sre.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_sre"
 
+	// Built-in module: _suggestions. Registers itself via
+	// module/_suggestions/module.go init(). Exposes _generate_suggestions
+	// used by traceback._find_keyword_typos to rank keyword typos via
+	// CPython-faithful Levenshtein distance (MOVE_COST=2, CASE_COST=1).
+	// CPython: Modules/_suggestions.c:67 PyInit__suggestions
+	_ "github.com/tamnd/gopy/module/_suggestions"
+
 	// Built-in module: _heapq. Registers itself via
 	// module/_heapq/module.go init(). Ports Modules/_heapqmodule.c:
 	// heappush, heappop, heappushpop, heapreplace, heapify, nlargest, nsmallest.
@@ -218,6 +225,15 @@ import (
 	// list consumed by Lib/opcode.py + Lib/dis.py.
 	// CPython: Modules/_opcode.c:422 _opcode_exec
 	_ "github.com/tamnd/gopy/module/_opcode"
+
+	// Built-in module: _typing. Registers itself via
+	// module/_typing/module.go init(). 1:1 port of
+	// Modules/_typingmodule.c: re-exports TypeVar / ParamSpec /
+	// TypeVarTuple / ParamSpecArgs / ParamSpecKwargs / Generic /
+	// TypeAliasType / Union / NoDefault plus the _idfunc identity
+	// accelerator so Lib/typing.py imports cleanly.
+	// CPython: Modules/config.c.in {"_typing", PyInit__typing}
+	_ "github.com/tamnd/gopy/module/_typing"
 
 	// Pure-Python shim modules backed by stdlib vendored .py files.
 	// Each registers itself via an init() that calls imp.AppendInittab.
@@ -302,8 +318,14 @@ import (
 	// CPython: Python/marshal.c:1949 marshal_methods
 	_ "github.com/tamnd/gopy/module/marshal"
 
-	// Built-in module: unicodedata. Registers itself via
-	// module/unicodedata/module.go init(). Ports
+	// Built-in module: unicodedata. Registration happens in the
+	// init() block below instead of inside module/unicodedata
+	// itself because parser/pegen needs to import unicodedata for
+	// PEP 3131 NFKC identifier normalisation; pulling imp +
+	// marshal + specialize + compile in transitively would create
+	// a test-time import cycle through compile <- parser <-
+	// parser/pegen <- unicodedata. Keeping unicodedata as a leaf
+	// (objects-only) package breaks that cycle. Ports
 	// Modules/unicodedata.c: normalize / is_normalized / category /
 	// bidirectional / combining / mirrored / east_asian_width /
 	// decomposition plus the unidata_version constant. Unblocks
@@ -311,7 +333,15 @@ import (
 	// `unicodedata.normalize('NFD', ...)` along the test_tokenize.py
 	// panel import chain.
 	// CPython: Modules/unicodedata.c:1733 PyInit_unicodedata
-	_ "github.com/tamnd/gopy/module/unicodedata"
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/unicodedata"
+
+	// Built-in module: array. Registers itself via module/array/array.go
+	// init(). Ports Modules/arraymodule.c: the array.array type backing
+	// numeric typed buffers (typecodes b/B/u/w/h/H/i/I/l/L/q/Q/f/d) plus
+	// the module-level typecodes constant.
+	// CPython: Modules/arraymodule.c:3225 array_modexec
+	_ "github.com/tamnd/gopy/module/array"
 
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface
@@ -327,3 +357,11 @@ import (
 	// CPython: Modules/_pickle.c:7700 _pickle_exec
 	_ "github.com/tamnd/gopy/module/_pickle"
 )
+
+// init registers the handful of built-in modules whose own packages
+// deliberately stay clear of the imp -> marshal -> specialize ->
+// compile chain (so they can be imported from packages the compile
+// tests reach into without creating an import cycle).
+func init() {
+	_ = imp.AppendInittab("unicodedata", unicodedata.BuildModule)
+}

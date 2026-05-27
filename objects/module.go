@@ -15,6 +15,14 @@ type Module struct {
 	Header
 	dict  *Dict
 	state any // per-module state for Go-implemented modules
+	// Initializing is true while the module body is executing. When set,
+	// moduleGetAnnotations does not cache its result so that circular
+	// imports see the annotations that existed at the point of access
+	// rather than a stale cached snapshot.
+	//
+	// CPython: Objects/moduleobject.c:1307 is_initializing check via
+	// __spec__._initializing; gopy uses an explicit flag instead.
+	Initializing bool
 }
 
 // ModuleType is the type singleton for module objects.
@@ -27,6 +35,41 @@ func init() {
 	ModuleType.Setattro = moduleSetattr
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
+
+	// tp_new: allocate an empty module with an empty __dict__. The name
+	// and optional doc are populated by __init__ below, matching CPython's
+	// two-step new_module + module___init___impl.
+	//
+	// CPython: Objects/moduleobject.c:91 new_module_notrack
+	ModuleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		m := &Module{dict: NewDict()}
+		m.init(cls)
+		return m, nil
+	}
+
+	// module.__init__(name, doc=None): set __name__ and optionally __doc__
+	// in the module's __dict__. Called by typeCallViaTpNew with self as
+	// args[0], matching the MethodDescr calling convention.
+	//
+	// CPython: Objects/moduleobject.c:804 module___init___impl
+	SetTypeDescr(ModuleType, "__init__", NewMethodDescr(ModuleType, "__init__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: module.__init__() requires at least a name argument")
+		}
+		m, ok := args[0].(*Module)
+		if !ok {
+			return None(), nil
+		}
+		nameObj, ok := args[1].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: module.__init__() argument 'name' must be str, not '%s'", typeNameOf(args[1]))
+		}
+		_ = m.dict.SetItem(NewStr("__name__"), nameObj)
+		if len(args) >= 3 && args[2] != None() {
+			_ = m.dict.SetItem(NewStr("__doc__"), args[2])
+		}
+		return None(), nil
+	}))
 }
 
 // NewModule creates an empty module with the given name in its __dict__.
@@ -185,20 +228,20 @@ func moduleRepr(o Object) (string, error) {
 	m := o.(*Module)
 	name := moduleStrAttr(m, "__name__")
 	if file := moduleStrAttr(m, "__file__"); file != "" {
-		return fmt.Sprintf("<module %q from %q>", name, file), nil
+		return fmt.Sprintf("<module '%s' from '%s'>", name, file), nil
 	}
 	if spec, err := m.dict.GetItem(NewStr("__spec__")); err == nil && spec != nil {
 		if sm, ok := spec.(*Module); ok {
 			origin := moduleStrAttr(sm, "origin")
 			if origin == "built-in" {
-				return fmt.Sprintf("<module %q (built-in)>", name), nil
+				return fmt.Sprintf("<module '%s' (built-in)>", name), nil
 			}
 			if origin == "frozen" {
-				return fmt.Sprintf("<module %q (frozen)>", name), nil
+				return fmt.Sprintf("<module '%s' (frozen)>", name), nil
 			}
 		}
 	}
-	return fmt.Sprintf("<module %q>", name), nil
+	return fmt.Sprintf("<module '%s'>", name), nil
 }
 
 func moduleStrAttr(m *Module, attr string) string {

@@ -65,6 +65,7 @@ var dispatchGenSupportedList = []compile.Opcode{
 	compile.BUILD_SLICE,
 	compile.BUILD_MAP,
 	compile.BUILD_TEMPLATE,
+	compile.BUILD_INTERPOLATION,
 	compile.GET_AWAITABLE,
 	compile.GET_ANEXT,
 	compile.MAKE_CELL,

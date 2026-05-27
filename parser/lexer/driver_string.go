@@ -80,7 +80,13 @@ func FromString(src string, mode Mode) *State {
 		)
 		s.done = eEncoding
 	}
-	buf = TranslateNewlines(buf, mode == ModeFile)
+	// exec-input and single-input both need a trailing newline so the
+	// lexer can close the indent stack before EOF. Only eval-input
+	// skips injection since it parses a single expression with no suite.
+	//
+	// CPython: Parser/lexer/state.c readl_stdin (single mode always has
+	// the final \n from the interactive prompt or injected here).
+	buf = TranslateNewlines(buf, mode == ModeFile || mode == ModeSingle)
 	s.encoding = "utf-8"
 	s.buf = buf
 	s.cur = 0
@@ -174,7 +180,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		}
 	}
 	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
-	src = TranslateNewlines(src, mode == ModeFile)
+	src = TranslateNewlines(src, mode == ModeFile || mode == ModeSingle)
 	s.buf = src
 	s.cur = 0
 	s.inp = len(src)

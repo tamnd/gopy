@@ -1,11 +1,13 @@
-// Port of builtin_globals_impl and builtin_locals_impl. Both rely on
-// the eval loop publishing the running frame so the builtin can read
-// f_globals / f_locals out of it. gopy stores the active frame on a
-// per-goroutine map inside vm; the dependency edge from builtins to
-// vm is closed with a hook the vm package installs in its init().
+// Port of builtin_globals_impl, builtin_locals_impl, and
+// builtin_vars_impl. Both rely on the eval loop publishing the running
+// frame so the builtin can read f_globals / f_locals out of it. gopy
+// stores the active frame on a per-goroutine map inside vm; the
+// dependency edge from builtins to vm is closed with a hook the vm
+// package installs in its init().
 //
 // CPython: Python/bltinmodule.c:1267 builtin_globals_impl
 // CPython: Python/bltinmodule.c:1933 builtin_locals_impl
+// CPython: Python/bltinmodule.c:2375 builtin_vars_impl
 
 package builtins
 
@@ -65,4 +67,22 @@ func Locals(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 		return objects.None(), nil
 	}
 	return l, nil
+}
+
+// Vars implements builtins.vars(). With no argument returns locals();
+// with one argument returns obj.__dict__.
+//
+// CPython: Python/bltinmodule.c:2375 builtin_vars_impl
+func Vars(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return Locals(nil, nil)
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: vars() takes at most 1 argument (%d given)", len(args))
+	}
+	d, err := objects.GetAttr(args[0], objects.NewStr("__dict__"))
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: vars() argument must have __dict__ attribute")
+	}
+	return d, nil
 }

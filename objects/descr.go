@@ -17,9 +17,10 @@ import "errors"
 // CPython: Objects/descrobject.c:1620 PyGetSetDescr_Type
 type GetSetDescr struct {
 	Header
-	name string
-	fget func(owner Object) (Object, error)
-	fset func(owner Object, value Object) error
+	name  string
+	owner *Type
+	fget  func(owner Object) (Object, error)
+	fset  func(owner Object, value Object) error
 }
 
 // GetSetDescrType is the type singleton for getset descriptors.
@@ -33,6 +34,65 @@ func init() {
 	GetSetDescrType.DescrGet = getsetDescrGet
 	GetSetDescrType.DescrSet = getsetDescrSet
 	addDescriptorSlotWrappers(GetSetDescrType)
+	addDescrIntrospectionDescriptors(GetSetDescrType)
+}
+
+// addDescrIntrospectionDescriptors exposes __name__ and __objclass__
+// on a descriptor type. CPython stuffs these on every PyDescrObject
+// subclass through PyMemberDef descr_members and reads them from
+// inspect.getattr_static / typing._ProtocolMeta when inferring whether
+// an instance satisfies a protocol's attribute set.
+//
+// CPython: Objects/descrobject.c:642 descr_members
+func addDescrIntrospectionDescriptors(t *Type) {
+	SetTypeDescr(t, "__name__", NewGetSetDescr("__name__", descrNameGetter, nil))
+	SetTypeDescr(t, "__objclass__", NewGetSetDescr("__objclass__", descrObjclassGetter, nil))
+	SetTypeDescr(t, "__qualname__", NewGetSetDescr("__qualname__", descrQualnameGetter, nil))
+}
+
+// descrName reads the bound name from any descriptor type the port
+// installs through SetTypeDescr.
+type descrNamer interface {
+	Name() string
+}
+
+// descrOwner reads the owning type. MethodDescr exposes Owner();
+// GetSetDescr exposes its owner via the field accessor here.
+type descrOwner interface {
+	Owner() *Type
+}
+
+// Owner returns the type this getset descriptor is registered on.
+func (d *GetSetDescr) Owner() *Type { return d.owner }
+
+func descrNameGetter(owner Object) (Object, error) {
+	if n, ok := owner.(descrNamer); ok {
+		return NewStr(n.Name()), nil
+	}
+	return nil, errors.New("AttributeError: __name__")
+}
+
+func descrObjclassGetter(owner Object) (Object, error) {
+	if o, ok := owner.(descrOwner); ok {
+		if t := o.Owner(); t != nil {
+			return t, nil
+		}
+	}
+	return nil, errors.New("AttributeError: __objclass__")
+}
+
+// descrQualnameGetter returns Owner.__qualname__.Name, matching
+// descr_get_qualname (Objects/descrobject.c:144).
+func descrQualnameGetter(owner Object) (Object, error) {
+	n, hasName := owner.(descrNamer)
+	if !hasName {
+		return nil, errors.New("AttributeError: __qualname__")
+	}
+	o, hasOwner := owner.(descrOwner)
+	if !hasOwner || o.Owner() == nil {
+		return NewStr(n.Name()), nil
+	}
+	return NewStr(o.Owner().Name + "." + n.Name()), nil
 }
 
 // NewGetSetDescr builds a getset descriptor that exposes name on the
@@ -135,6 +195,12 @@ func lookupTypeMember(t *Type, name string) Object {
 // CPython: Objects/typeobject.c:1057 type_dict (analog)
 var typeDescrTable = map[*Type]map[string]Object{}
 
+// typeDescrOrder records the insertion order of keys in typeDescrTable[t].
+// This mirrors the tp_dict insertion order that CPython's dict preserves,
+// and is required so that type.__dict__ iterates attributes in definition
+// order (e.g. enum members, dataclass fields).
+var typeDescrOrder = map[*Type][]string{}
+
 // TypeDescrNames returns the names registered on t through
 // SetTypeDescr, walking the MRO and de-duplicating. Used by builtins
 // dir() to introspect a class.
@@ -160,16 +226,38 @@ func TypeDescrNames(t *Type) []string {
 
 // SetTypeDescr installs d as the attribute name on t. Used by built-in
 // type initialisers to expose properties before the typeobject port
-// gives every type a real __dict__.
+// gives every type a real __dict__. When d is a GetSetDescr without an
+// owner, we record t there so that descr.__objclass__ resolves the way
+// CPython exposes it via PyMemberDef.
+//
+// For user types that carry a ClassAttrDict (the live tp_dict mirror),
+// the entry is also written there so PEP 695 type alias thunks that
+// hold a __classdict__ closure cell always read the current value.
 //
 // CPython: Objects/typeobject.c:6012 type_add_method
 func SetTypeDescr(t *Type, name string, d Object) {
+	switch x := d.(type) {
+	case *GetSetDescr:
+		if x.owner == nil {
+			x.owner = t
+		}
+	case *MemberDescr:
+		if x.owner == nil {
+			x.owner = t
+		}
+	}
 	m, ok := typeDescrTable[t]
 	if !ok {
 		m = map[string]Object{}
 		typeDescrTable[t] = m
 	}
+	if _, exists := m[name]; !exists {
+		typeDescrOrder[t] = append(typeDescrOrder[t], name)
+	}
 	m[name] = d
+	if t.ClassAttrDict != nil {
+		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
+	}
 }
 
 // TypeOwnDescrs returns the names and values registered directly on
@@ -185,6 +273,26 @@ func TypeOwnDescrs(t *Type) map[string]Object {
 	return typeDescrTable[t]
 }
 
+// TypeOwnDescrItems iterates the descriptors registered on t in insertion
+// order, calling f(name, value) for each. Used by type.__dict__ to expose
+// attributes in definition order, matching CPython's tp_dict behavior.
+//
+// CPython: Objects/typeobject.c:1057 type_dict
+func TypeOwnDescrItems(t *Type, f func(name string, value Object)) {
+	if t == nil {
+		return
+	}
+	m := typeDescrTable[t]
+	if m == nil {
+		return
+	}
+	for _, name := range typeDescrOrder[t] {
+		if v, ok := m[name]; ok {
+			f(name, v)
+		}
+	}
+}
+
 // DelTypeDescr removes name from t's own descriptor table. Returns
 // true when the entry existed. Mirrors a PyDict_DelItem on tp_dict.
 //
@@ -198,5 +306,12 @@ func DelTypeDescr(t *Type, name string) bool {
 		return false
 	}
 	delete(m, name)
+	order := typeDescrOrder[t]
+	for i, n := range order {
+		if n == name {
+			typeDescrOrder[t] = append(order[:i], order[i+1:]...)
+			break
+		}
+	}
 	return true
 }

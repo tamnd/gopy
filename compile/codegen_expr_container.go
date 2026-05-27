@@ -264,8 +264,16 @@ func (c *Compiler) maybeAddStaticAttribute(e *ast.Attribute) {
 // Slice expressions go through visitSlice and still leave a Slice
 // object on the stack.
 //
-// CPython: Python/codegen.c:L5548 codegen_subscript
+// CPython: Python/codegen.c:5548 codegen_subscript
 func (c *Compiler) visitSubscript(e *ast.Subscript) error {
+	if e.Ctx == ast.Load {
+		if err := c.checkSubscripter(e.Value); err != nil {
+			return err
+		}
+		if err := c.checkIndex(e.Value, e.Slice); err != nil {
+			return err
+		}
+	}
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}

@@ -111,12 +111,12 @@ func TestFrameStackLocalsPlusRecycled(t *testing.T) {
 	s := New()
 	co := mkCode(4, 0, 0, 6)
 
-	f := s.Push(co, nil, nil, nil, nil)
+	f := s.Push(co, nil, nil, nil)
 	origPtr := &f.LocalsPlus[0]
 	origCap := cap(f.LocalsPlus)
 	s.Pop()
 
-	f2 := s.Push(co, nil, nil, nil, nil)
+	f2 := s.Push(co, nil, nil, nil)
 	if cap(f2.LocalsPlus) != origCap {
 		t.Errorf("cap(LocalsPlus) = %d after recycle, want %d",
 			cap(f2.LocalsPlus), origCap)
@@ -141,12 +141,12 @@ func TestFrameStackLocalsPlusRecycled(t *testing.T) {
 func TestFrameStackGeneratorOwnedDropsLocalsPlus(t *testing.T) {
 	s := New()
 	co := mkCode(2, 0, 0, 2)
-	f := s.Push(co, nil, nil, nil, nil)
+	f := s.Push(co, nil, nil, nil)
 	f.Owner = OwnedByGenerator
 	origPtr := &f.LocalsPlus[0]
 	s.Pop()
 
-	f2 := s.Push(co, nil, nil, nil, nil)
+	f2 := s.Push(co, nil, nil, nil)
 	if len(f2.LocalsPlus) > 0 && &f2.LocalsPlus[0] == origPtr {
 		t.Errorf("generator-owned LocalsPlus was recycled, would alias generator storage")
 	}
@@ -156,11 +156,11 @@ func TestFrameStackPushPop(t *testing.T) {
 	s := New()
 	co := mkCode(1, 0, 0, 2)
 
-	f1 := s.Push(co, nil, nil, nil, nil)
+	f1 := s.Push(co, nil, nil, nil)
 	if s.Depth() != 1 {
 		t.Errorf("Depth after 1 push = %d", s.Depth())
 	}
-	f2 := s.Push(co, nil, nil, nil, f1)
+	f2 := s.Push(co, nil, nil, nil)
 	if f2.Previous != f1 {
 		t.Error("frame chain broken")
 	}
@@ -180,7 +180,7 @@ func TestFrameStackChunkGrowth(t *testing.T) {
 	co := mkCode(0, 0, 0, 0)
 	var prev *Frame
 	for range ChunkSize + 5 {
-		prev = s.Push(co, nil, nil, nil, prev)
+		prev = s.Push(co, nil, nil, nil)
 	}
 	if s.Depth() != ChunkSize+5 {
 		t.Errorf("Depth = %d", s.Depth())
@@ -248,7 +248,7 @@ func TestFrameSuspendResume(t *testing.T) {
 func TestFrameStackDetach(t *testing.T) {
 	s := New()
 	co := mkCode(1, 0, 0, 1)
-	f := s.Push(co, nil, nil, nil, nil)
+	f := s.Push(co, nil, nil, nil)
 	f.SetLocal(0, stackref.FromObject(objects.NewInt(99)))
 	det := s.Detach()
 	if det == nil {
@@ -268,7 +268,7 @@ func TestFrameStackDetach(t *testing.T) {
 func TestFrameStackPopGeneratorOwnedSkipsClear(t *testing.T) {
 	s := New()
 	co := mkCode(1, 0, 0, 1)
-	f := s.Push(co, nil, nil, nil, nil)
+	f := s.Push(co, nil, nil, nil)
 	f.SetLocal(0, stackref.FromObject(objects.NewInt(5)))
 	// Mark as generator-owned and copy the Frame state out before Pop
 	// nukes the slot. This mirrors what Detach + Pop would do, just

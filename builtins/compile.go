@@ -31,10 +31,15 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		return nil, err
 	}
 	var mod ast.Mod
-	if parsed.sourceBytes != nil {
-		mod, err = parser.ParseBytes(parsed.sourceBytes, parsed.filename, parsed.mode)
-	} else {
-		mod, err = parser.ParseString(parsed.source, parsed.filename, parsed.mode)
+	switch {
+	case parsed.astMod != nil:
+		// Source was a Python _ast object; use the reverse-bridged Go AST directly.
+		// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod path
+		mod = parsed.astMod
+	case parsed.sourceBytes != nil:
+		mod, err = parser.ParseBytesFlagsVersion(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
+	default:
+		mod, err = parser.ParseStringFlagsVersion(parsed.source, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
 	}
 	if err != nil {
 		// Parser-incomplete sentinel surfaces as SyntaxError to Python
@@ -48,6 +53,15 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		}
 		return nil, err
 	}
+	// PyCF_ONLY_AST: parse-only mode. Return a sentinel Module object
+	// so callers like codeop.compile_command and _find_keyword_typos can
+	// check for SyntaxError without needing full codegen. A proper
+	// Python-side AST object tree lands with the _ast_unparse spec.
+	//
+	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
+	if parsed.flags&(cfOnlyAST|cfOptimizedAST) != 0 {
+		return parseOnlyResult(mod, &parsed)
+	}
 	cco, err := compile.Compile(mod, parsed.filename, parsed.optimize)
 	if err != nil {
 		return nil, err
@@ -56,12 +70,14 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 }
 
 type compileArgs struct {
-	source      string
-	sourceBytes []byte
-	filename    string
-	mode        parser.Mode
-	flags       int
-	optimize    int
+	source         string
+	sourceBytes    []byte
+	astMod         ast.Mod // non-nil when source is a Python _ast object
+	filename       string
+	mode           parser.Mode
+	flags          int
+	optimize       int
+	featureVersion int // minor-only, e.g. 4 for (3, 4)
 }
 
 // parseCompileArgs binds the positional and keyword arguments to the
@@ -77,9 +93,21 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
-	source, sourceBytes, err := compileSourceArg(bound[0])
-	if err != nil {
-		return compileArgs{}, err
+	// Check for Python _ast object before falling through to text source.
+	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_Check
+	var astMod ast.Mod
+	if mod, ok, convErr := PyASTObjectToMod(bound[0]); convErr != nil {
+		return compileArgs{}, convErr
+	} else if ok {
+		astMod = mod
+	}
+	var source string
+	var sourceBytes []byte
+	if astMod == nil {
+		source, sourceBytes, err = compileSourceArg(bound[0])
+		if err != nil {
+			return compileArgs{}, err
+		}
 	}
 	filename, err := stringArg(bound[1], "filename")
 	if err != nil {
@@ -97,6 +125,11 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
+	// func_type requires PyCF_ONLY_AST; validate now that flags are known.
+	// CPython: Python/bltinmodule.c:771 builtin_compile_impl (mode == func_type check)
+	if mode == parser.ModeFunc && flags&(cfOnlyAST|cfOptimizedAST) == 0 {
+		return compileArgs{}, fmt.Errorf("ValueError: compile() mode 'func_type' requires flag PyCF_ONLY_AST")
+	}
 	if err := checkDontInherit(bound[4]); err != nil {
 		return compileArgs{}, err
 	}
@@ -104,13 +137,16 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
+	featureVersion := parseFeatureVersion(bound[6])
 	return compileArgs{
-		source:      source,
-		sourceBytes: sourceBytes,
-		filename:    filename,
-		mode:        mode,
-		flags:       flags,
-		optimize:    optimize,
+		source:         source,
+		sourceBytes:    sourceBytes,
+		astMod:         astMod,
+		filename:       filename,
+		mode:           mode,
+		flags:          flags,
+		optimize:       optimize,
+		featureVersion: featureVersion,
 	}, nil
 }
 
@@ -141,12 +177,20 @@ func compileSourceArg(o objects.Object) (string, []byte, error) {
 // bindCompileArgs maps the positional + keyword args onto the
 // fixed-position bound slice, enforcing the required-arg trio and
 // rejecting dupes / unknown kwargs.
+//
+// _feature_version is the keyword-only private knob ast.parse uses to
+// pin a Python feature level when compiling. CPython accepts it as a
+// kwarg in Python/clinic/bltinmodule.c.h:289; gopy accepts it but
+// ignores the value (we always parse against the bundled grammar).
+//
+// CPython: Python/clinic/bltinmodule.c.h:241 builtin_compile signature
 func bindCompileArgs(args []objects.Object, kwargs map[string]objects.Object) ([]objects.Object, error) {
-	const maxArgs = 6
-	if len(args) > maxArgs {
-		return nil, fmt.Errorf("TypeError: compile() takes at most 6 arguments (%d given)", len(args))
+	const maxPositional = 6
+	const maxArgs = 7
+	if len(args) > maxPositional {
+		return nil, fmt.Errorf("TypeError: compile() takes at most 6 positional arguments (%d given)", len(args))
 	}
-	names := []string{"source", "filename", "mode", "flags", "dont_inherit", "optimize"}
+	names := []string{"source", "filename", "mode", "flags", "dont_inherit", "optimize", "_feature_version"}
 	bound := make([]objects.Object, maxArgs)
 	copy(bound, args)
 	for k, v := range kwargs {
@@ -173,9 +217,32 @@ func bindCompileArgs(args []objects.Object, kwargs map[string]objects.Object) ([
 	return bound, nil
 }
 
+// parseFeatureVersion extracts the minor version from the _feature_version
+// kwarg. ast.parse already strips the major and passes only the minor as
+// an integer (e.g. 4 for Python 3.4). We also accept -1 (unset sentinel
+// used by ast.parse when feature_version=None) as "unset".
+//
+// CPython: Python/clinic/bltinmodule.c.h:289 builtin_compile (feature_version param)
+// CPython: Lib/ast.py:38-44 (feature_version normalization: tuple→minor int)
+func parseFeatureVersion(obj objects.Object) int {
+	if obj == nil {
+		return 0
+	}
+	if n, ok := obj.(*objects.Int); ok {
+		v, exact := n.Int64()
+		if !exact || v <= 0 {
+			return 0
+		}
+		return int(v)
+	}
+	return 0
+}
+
 // parseCompileMode maps the mode string to the parser mode constant.
-// func_type is recognized but rejected because gopy has no
-// PyCF_ONLY_AST path yet.
+// "func_type" is valid only when PyCF_ONLY_AST is set; that validation
+// happens in parseCompileArgs after flags are parsed.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl (mode check)
 func parseCompileMode(modeStr string) (parser.Mode, error) {
 	switch modeStr {
 	case "exec":
@@ -185,17 +252,24 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 	case "single":
 		return parser.ModeSingle, nil
 	case "func_type":
-		return 0, fmt.Errorf("ValueError: compile() mode 'func_type' requires flag PyCF_ONLY_AST")
+		return parser.ModeFunc, nil
 	}
-	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval' or 'single'")
+	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval', 'single' or 'func_type'")
 }
 
-// parseCompileFlags reads the optional flags arg. Only the flag bits
-// CPython actually carries today are PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
-// / PyCF_DONT_IMPLY_DEDENT / PyCF_ALLOW_TOP_LEVEL_AWAIT plus the
-// future-statement bits; none alter codegen in gopy yet, so non-zero
-// values are silently accepted except for the AST bits which need
-// AST-as-Python support.
+// PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.
+//
+// CPython: Include/cpython/code.h PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
+const (
+	cfOnlyAST      = 0x0400
+	cfOptimizedAST = 0x8400
+)
+
+// parseCompileFlags reads the optional flags arg. PyCF_ONLY_AST is now
+// accepted and triggers parse-only mode (no codegen). Other flag bits are
+// silently accepted for signature parity.
+//
+// CPython: Python/bltinmodule.c:771 builtin_compile_impl flags check
 func parseCompileFlags(o objects.Object) (int, error) {
 	if o == nil {
 		return 0, nil
@@ -203,11 +277,6 @@ func parseCompileFlags(o objects.Object) (int, error) {
 	flags, err := intArg(o, "flags")
 	if err != nil {
 		return 0, err
-	}
-	const cfOnlyAST = 0x0400
-	const cfOptimizedAST = 0x2400
-	if flags&(cfOnlyAST|cfOptimizedAST) != 0 {
-		return 0, fmt.Errorf("ValueError: compile() PyCF_ONLY_AST / PyCF_OPTIMIZED_AST not supported yet")
 	}
 	return flags, nil
 }
@@ -258,6 +327,34 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 		return 0, fmt.Errorf("OverflowError: %s does not fit in a Go int", label)
 	}
 	return int(v), nil
+}
+
+// parseOnlyResult converts a Go ast.Mod into a Python _ast object tree
+// for PyCF_ONLY_AST parse-only mode. The _ast module must already be
+// loaded in sys.modules (ast.parse() imports it before calling compile()).
+// Falls back to a sentinel int(0) if the bridge cannot find _ast, so
+// callers that only check for SyntaxError still see a successful parse.
+//
+// When PyCF_OPTIMIZED_AST is set (i.e. both 0x8000 and 0x0400 bits),
+// the Preprocess pass runs constant-folding and other optimizations before
+// converting to Python objects. When only PyCF_ONLY_AST (0x0400) is set,
+// only syntax-check mode is used (no mutations).
+//
+// CPython: Python/bltinmodule.c:840 builtin_compile_impl (PyCF_ONLY_AST branch)
+func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
+	// CPython: Python/bltinmodule.c:843 _PyAST_Validate
+	if err := ast.Validate(mod); err != nil {
+		return nil, fmt.Errorf("ValueError: %w", err)
+	}
+	// CPython: Python/bltinmodule.c:846
+	// syntax_check_only = ((flags & PyCF_OPTIMIZED_AST) == PyCF_ONLY_AST)
+	syntaxCheckOnly := (parsed.flags & cfOptimizedAST) == cfOnlyAST
+	ast.Preprocess(mod, ast.PreprocessOptions{
+		Filename:        parsed.filename,
+		OptimizeLevel:   parsed.optimize,
+		SyntaxCheckOnly: syntaxCheckOnly,
+	})
+	return astModToObject(mod), nil
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the

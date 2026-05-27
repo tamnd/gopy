@@ -9,6 +9,34 @@
 
 package objects
 
+// inheritPatmaFlagsAllMRO walks t's MRO and propagates the first
+// COLLECTION_FLAGS bit it finds. Matches CPython's inherit_patma_flags
+// guard ("if no flags set yet") so the FIRST base in MRO order with a
+// SEQUENCE / MAPPING bit wins. Without this, `class M(UserDict,
+// Sequence)` would OR both bits and turn match-class arms ambiguous.
+//
+// CPython: Objects/typeobject.c:8705 inherit_patma_flags /
+// Objects/typeobject.c:8712 type_ready_inherit (per-MRO call)
+func inheritPatmaFlagsAllMRO(t *Type) {
+	const collFlags = TpFlagSequence | TpFlagMapping
+	if t.TpFlags&collFlags != 0 {
+		return
+	}
+	if len(t.MRO) < 2 {
+		return
+	}
+	for _, anc := range t.MRO[1:] {
+		if anc == nil {
+			continue
+		}
+		bits := anc.TpFlags & collFlags
+		if bits != 0 {
+			t.TpFlags |= bits
+			return
+		}
+	}
+}
+
 // inheritSlotsAllMRO is the gopy port of CPython's type_ready_inherit
 // minus the parts that have no analog (tp_flags inheritance, GC
 // flag handling, vectorcall flag).
@@ -46,6 +74,23 @@ func inheritSlotsAllMRO(t *Type) {
 	}
 	if len(t.Bases) > 0 && t.Bases[0] != nil {
 		inheritProtocolPointers(t, t.Bases[0])
+	}
+	// Scalar slots like RichCmp are only copied from Bases[0] in
+	// inheritProtocolPointers. When Bases[0] has nil RichCmp but a later MRO
+	// entry (e.g. a mixin that defines __eq__) has it set, scan the full MRO.
+	//
+	// CPython: Objects/typeobject.c:8227 inherit_slots SLOTDEFINED check
+	// walks all ancestors for each slot.
+	if t.RichCmp == nil && !typeOverridesHash(t) {
+		for _, anc := range t.MRO[1:] {
+			if anc != nil && anc.RichCmp != nil {
+				t.RichCmp = anc.RichCmp
+				if t.Hash == nil {
+					t.Hash = anc.Hash
+				}
+				break
+			}
+		}
 	}
 }
 

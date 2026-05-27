@@ -372,7 +372,7 @@ func (e *evalState) objectDelAttr(o, name objects.Object) int32 {
 // matchKeys wraps _PyEval_MatchKeys: returns a tuple of values, or
 // None on partial match, or nil on a real error.
 //
-// CPython: Python/ceval.c:5052 _PyEval_MatchKeys
+// CPython: Python/ceval.c:728 _PyEval_MatchKeys
 func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 	keysTup, ok := keys.(*objects.Tuple)
 	if !ok {
@@ -383,15 +383,41 @@ func (e *evalState) matchKeys(subject, keys objects.Object) objects.Object {
 	if n == 0 {
 		return objects.NewTuple(nil)
 	}
+	get, gerr := objects.LookupAttrString(subject, "get")
+	if gerr != nil {
+		e.pendingErr = gerr
+		return nil
+	}
+	if get == nil {
+		e.pendingErr = fmt.Errorf("TypeError: %s object has no attribute 'get'", subject.Type().Name)
+		return nil
+	}
+	dummy := objects.NewInstance(objects.ObjectType())
+	seen := objects.NewSet()
 	values := make([]objects.Object, n)
 	for i := 0; i < n; i++ {
-		v, gerr := matchKeysGet(subject, keysTup.Item(i))
-		if errors.Is(gerr, errKeyMissing) {
-			return objects.None()
-		}
-		if gerr != nil {
-			e.pendingErr = gerr
+		k := keysTup.Item(i)
+		contains, cerr := seen.Contains(k)
+		if cerr != nil {
+			e.pendingErr = cerr
 			return nil
+		}
+		if contains {
+			rep, _ := objects.Repr(k)
+			e.pendingErr = fmt.Errorf("ValueError: mapping pattern checks duplicate key (%s)", rep)
+			return nil
+		}
+		if aerr := seen.Add(k); aerr != nil {
+			e.pendingErr = aerr
+			return nil
+		}
+		v, cerr := objects.Call(get, objects.NewTuple([]objects.Object{k, dummy}), nil)
+		if cerr != nil {
+			e.pendingErr = cerr
+			return nil
+		}
+		if v == dummy {
+			return objects.None()
 		}
 		values[i] = v
 	}
@@ -410,7 +436,7 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 	}
 	tp, ok := typeObj.(*objects.Type)
 	if !ok {
-		e.pendingErr = fmt.Errorf("MATCH_CLASS: type operand not a type, got %T", typeObj)
+		e.pendingErr = errors.New("TypeError: called match pattern must be a class")
 		return nil
 	}
 	if !isInstance(subject, tp) {
@@ -418,38 +444,34 @@ func (e *evalState) matchClass(subject, typeObj objects.Object, oparg uint32, na
 	}
 	npos := int(oparg)
 	nkw := namesTup.Len()
-	attrs := make([]objects.Object, npos+nkw)
+	attrs := make([]objects.Object, 0, npos+nkw)
+	seen := make(map[string]struct{}, npos+nkw)
 	if npos > 0 {
-		matchArgs, agerr := objects.GetAttr(typeObj, objects.NewStr("__match_args__"))
-		if agerr != nil {
+		posAttrs, noMatch, mcErr := resolvePositionalAttrs(subject, typeObj, tp, npos, seen)
+		if mcErr != nil {
+			e.pendingErr = mcErr
+			return nil
+		}
+		if noMatch {
 			return objects.None()
 		}
-		maTup, isTup := matchArgs.(*objects.Tuple)
-		if !isTup || maTup.Len() < npos {
-			return objects.None()
-		}
-		for i := 0; i < npos; i++ {
-			s, serr := objects.Str(maTup.Item(i))
-			if serr != nil {
-				return objects.None()
-			}
-			val, verr := objects.GetAttr(subject, objects.NewStr(s))
-			if verr != nil {
-				return objects.None()
-			}
-			attrs[i] = val
-		}
+		attrs = append(attrs, posAttrs...)
 	}
 	for i := 0; i < nkw; i++ {
-		s, serr := objects.Str(namesTup.Item(i))
-		if serr != nil {
+		name, isStr := namesTup.Item(i).(*objects.Unicode)
+		if !isStr {
+			e.pendingErr = fmt.Errorf("TypeError: keyword sub-pattern names must be strings (got %s)", namesTup.Item(i).Type().Name)
+			return nil
+		}
+		val, mcErr := matchClassAttr(subject, tp, name.Value(), seen)
+		if mcErr != nil {
+			e.pendingErr = mcErr
+			return nil
+		}
+		if val == nil {
 			return objects.None()
 		}
-		val, verr := objects.GetAttr(subject, objects.NewStr(s))
-		if verr != nil {
-			return objects.None()
-		}
-		attrs[npos+i] = val
+		attrs = append(attrs, val)
 	}
 	return objects.NewTuple(attrs)
 }
@@ -526,26 +548,22 @@ func iterToSlice(o objects.Object) ([]objects.Object, error) {
 	if o == nil {
 		return nil, errors.New("TypeError: cannot iterate nil")
 	}
-	t := o.Type()
-	if t.Iter == nil {
-		// Tuple/List shortcut: avoid iterator allocation for the common case.
-		switch v := o.(type) {
-		case *objects.Tuple:
-			out := make([]objects.Object, v.Len())
-			for i := range out {
-				out[i] = v.Item(i)
-			}
-			return out, nil
-		case *objects.List:
-			out := make([]objects.Object, v.Len())
-			for i := range out {
-				out[i] = v.Item(i)
-			}
-			return out, nil
+	// Tuple/List shortcut: avoid iterator allocation for the common case.
+	switch v := o.(type) {
+	case *objects.Tuple:
+		out := make([]objects.Object, v.Len())
+		for i := range out {
+			out[i] = v.Item(i)
 		}
-		return nil, errors.New("TypeError: '" + t.Name + "' object is not iterable")
+		return out, nil
+	case *objects.List:
+		out := make([]objects.Object, v.Len())
+		for i := range out {
+			out[i] = v.Item(i)
+		}
+		return out, nil
 	}
-	it, ierr := t.Iter(o)
+	it, ierr := objects.Iter(o)
 	if ierr != nil {
 		return nil, ierr
 	}
@@ -677,21 +695,17 @@ func storeSlice(container, start, stop, value objects.Object) error {
 //
 // CPython: Objects/dictobject.c _PyDict_LoadGlobal
 func (e *evalState) dictLoadGlobal(globals, builtins, name objects.Object) objects.Object {
-	if d, ok := globals.(*objects.Dict); ok {
-		if v, gerr := d.GetItem(name); gerr != nil {
-			e.pendingErr = gerr
-			return nil
-		} else if v != nil {
-			return v
-		}
+	if v, found, err := objects.MappingGetOptionalItem(globals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
+		return v
 	}
-	if d, ok := builtins.(*objects.Dict); ok {
-		if v, gerr := d.GetItem(name); gerr != nil {
-			e.pendingErr = gerr
-			return nil
-		} else if v != nil {
-			return v
-		}
+	if v, found, err := objects.MappingGetOptionalItem(builtins, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
+		return v
 	}
 	return nil
 }
@@ -846,7 +860,10 @@ func (e *evalState) dictPop(dict, key, _ objects.Object) int32 {
 }
 
 // dictMergeEx wraps _PyDict_MergeEx: merges b into a. override==2 means
-// "raise on duplicate key" (DICT_MERGE semantics).
+// "raise on duplicate key" (DICT_MERGE semantics). The dispatchGen path
+// calls this for kwargs unpacking; trySimple's DICT_MERGE arm bypasses
+// it and goes through dictMergeKwargs + formatKwargsError so the error
+// message picks up the function's qualname.
 //
 // CPython: Objects/dictobject.c:3232 _PyDict_MergeEx
 func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
@@ -855,34 +872,152 @@ func (e *evalState) dictMergeEx(a, b objects.Object, override int32) int32 {
 		e.pendingErr = errors.New("TypeError: _PyDict_MergeEx expected dict")
 		return -1
 	}
-	items, err := iterToSlice(b)
-	if err != nil {
-		// Fallback: maybe b is a mapping. Walk its items() via keys().
-		if bd, isd := b.(*objects.Dict); isd {
-			for _, k := range bd.Keys() {
-				v, _ := bd.GetItem(k)
-				if override == 2 {
-					if existing, _ := d.GetItem(k); existing != nil {
-						if s, sok := k.(*objects.Unicode); sok {
-							e.pendingErr = fmt.Errorf("TypeError: got multiple values for keyword argument '%s'", s.Value())
-						} else {
-							e.pendingErr = errors.New("TypeError: duplicate keyword argument")
-						}
-						return -1
-					}
-				}
-				if serr := d.SetItem(k, v); serr != nil {
-					e.pendingErr = serr
-					return -1
-				}
-			}
-			return 0
+	if merr := dictMergeKwargs(d, b); merr != nil {
+		var dup *kwargsDuplicateErr
+		if errors.As(merr, &dup) && override == 2 {
+			e.pendingErr = fmt.Errorf("%s", dup.Error())
+			return -1
 		}
-		e.pendingErr = err
+		e.pendingErr = merr
 		return -1
 	}
-	_ = items
 	return 0
+}
+
+// kwargsDuplicateErr is the sentinel dictMergeKwargs returns when the
+// override-on-duplicate path trips. The DICT_MERGE arm catches this
+// and reformats it with the function name through formatKwargsError,
+// mirroring CPython's KeyError-percolation in _PyEval_FormatKwargsError.
+type kwargsDuplicateErr struct {
+	key objects.Object
+}
+
+func (e *kwargsDuplicateErr) Error() string {
+	if s, ok := e.key.(*objects.Unicode); ok {
+		return "TypeError: got multiple values for keyword argument '" + s.Value() + "'"
+	}
+	r, _ := objects.Repr(e.key)
+	if r != "" {
+		return "TypeError: got multiple values for keyword argument '" + r + "'"
+	}
+	return "TypeError: got multiple values for keyword argument"
+}
+
+// kwargsNotMappingErr is returned when the source has no keys() method.
+// The DICT_MERGE arm rewrites it to "X argument after ** must be a
+// mapping, not Y" so the function name is part of the message.
+type kwargsNotMappingErr struct {
+	src objects.Object
+}
+
+func (e *kwargsNotMappingErr) Error() string {
+	return "TypeError: argument after ** must be a mapping, not " + e.src.Type().Name
+}
+
+// dictMergeKwargs is the DICT_MERGE / _PyDict_MergeEx slow path with
+// override-on-duplicate semantics. Tries the dict fast path first,
+// then falls back to b.keys() + b[key] iteration so mapping subclasses
+// (and the CrazyDict-style mid-iteration mutation guard) work.
+//
+// CPython: Objects/dictobject.c:3247 dict_merge (override == 2)
+func dictMergeKwargs(d *objects.Dict, b objects.Object) error {
+	if bd, ok := b.(*objects.Dict); ok {
+		for _, k := range bd.Keys() {
+			if existing, _ := d.GetItem(k); existing != nil {
+				return &kwargsDuplicateErr{key: k}
+			}
+			v, _ := bd.GetItem(k)
+			if serr := d.SetItem(k, v); serr != nil {
+				return serr
+			}
+		}
+		return nil
+	}
+	keysFn, gerr := objects.GetAttr(b, objects.NewStr("keys"))
+	if gerr != nil {
+		return &kwargsNotMappingErr{src: b}
+	}
+	keysObj, cerr := objects.CallNoArgs(keysFn)
+	if cerr != nil {
+		return cerr
+	}
+	it, ierr := objects.Iter(keysObj)
+	if ierr != nil {
+		return ierr
+	}
+	for {
+		k, nerr := objects.IterNext(it)
+		if errors.Is(nerr, objects.ErrStopIteration) {
+			return nil
+		}
+		if nerr != nil {
+			return nerr
+		}
+		if existing, _ := d.GetItem(k); existing != nil {
+			return &kwargsDuplicateErr{key: k}
+		}
+		v, ierr := objects.GetItem(b, k)
+		if ierr != nil {
+			return ierr
+		}
+		if serr := d.SetItem(k, v); serr != nil {
+			return serr
+		}
+	}
+}
+
+// formatKwargsError wraps a dictMergeKwargs error in the same shape
+// CPython's _PyEval_FormatKwargsError produces. Duplicate-key and
+// not-a-mapping errors pick up the function's qualname prefix; any
+// other error percolates unchanged.
+//
+// CPython: Python/ceval.c:3410 _PyEval_FormatKwargsError
+func formatKwargsError(callable objects.Object, err error) error {
+	funcstr := objectFunctionStr(callable)
+	var dup *kwargsDuplicateErr
+	if errors.As(err, &dup) {
+		var keystr string
+		if s, ok := dup.key.(*objects.Unicode); ok {
+			keystr = s.Value()
+		} else {
+			keystr, _ = objects.Repr(dup.key)
+		}
+		if keystr != "" {
+			return fmt.Errorf("TypeError: %s got multiple values for keyword argument '%s'", funcstr, keystr)
+		}
+		return fmt.Errorf("TypeError: %s got multiple values for keyword argument", funcstr)
+	}
+	var notMap *kwargsNotMappingErr
+	if errors.As(err, &notMap) {
+		return fmt.Errorf("TypeError: %s argument after ** must be a mapping, not %s", funcstr, notMap.src.Type().Name)
+	}
+	return err
+}
+
+// objectFunctionStr mirrors _PyObject_FunctionStr: returns
+// "<module>.<qualname>()" when both are set and module != 'builtins',
+// "<qualname>()" otherwise, falling back to str(x) when __qualname__
+// is unset.
+//
+// CPython: Objects/object.c:973 _PyObject_FunctionStr
+func objectFunctionStr(x objects.Object) string {
+	if x == nil {
+		return ""
+	}
+	qn, _ := objects.GetAttr(x, objects.NewStr("__qualname__"))
+	if qn == nil {
+		s, _ := objects.Str(x)
+		return s
+	}
+	qstr, _ := objects.Str(qn)
+	mod, _ := objects.GetAttr(x, objects.NewStr("__module__"))
+	if mod != nil && mod != objects.None() {
+		mstr, _ := objects.Str(mod)
+		if mstr != "" && mstr != "builtins" {
+			return mstr + "." + qstr + "()"
+		}
+	}
+	return qstr + "()"
 }
 
 // listExtend wraps _PyList_Extend: appends every item from iter to list.
@@ -905,7 +1040,9 @@ func (e *evalState) listExtend(list, iter objects.Object) int32 {
 	return 0
 }
 
-// listAppendTakeRef wraps _PyList_AppendTakeRef.
+// listAppendTakeRef wraps _PyList_AppendTakeRef. CPython steals the
+// item ref. gopy's dispatch arm drop(1) after the call will Decref the
+// item slot, so we Incref here to keep the list's owned reference alive.
 //
 // CPython: Objects/listobject.c:362 _PyList_AppendTakeRef
 func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
@@ -914,11 +1051,14 @@ func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
 		e.pendingErr = errors.New("TypeError: _PyList_AppendTakeRef expected list")
 		return -1
 	}
+	objects.Incref(item)
 	l.Append(item)
 	return 0
 }
 
-// setAddTakeRef wraps _PySet_AddTakeRef.
+// setAddTakeRef wraps _PySet_AddTakeRef. Steal semantics; balance the
+// dispatch arm's drop(1) by Incref'ing the stored element so the set's
+// reference outlives the popped stack slot.
 //
 // CPython: Objects/setobject.c:2433 _PySet_AddTakeRef
 func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
@@ -927,6 +1067,7 @@ func (e *evalState) setAddTakeRef(set, elem objects.Object) int32 {
 		e.pendingErr = errors.New("TypeError: _PySet_AddTakeRef expected set")
 		return -1
 	}
+	objects.Incref(elem)
 	if err := s.Add(elem); err != nil {
 		e.pendingErr = err
 		return -1
@@ -1172,6 +1313,14 @@ func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object,
 // since the action body's `values[oparg]` sized input is rendered as a
 // peek loop above) and the count.
 //
+// CPython steals refs from the stack array (no per-item Py_INCREF, and
+// the surrounding STACK_SHRINK does not Py_DECREF). gopy's translator
+// emits an unconditional e.drop(oparg) after this call which Closes
+// each stack slot and Decref's its object, so the items must be Incref'd
+// here to balance the impending decref. Without this, items with a
+// non-trivial Dealloc (e.g. slice via sliceFreeList) get torn down
+// while the new tuple still references them.
+//
 // CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
 func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.Object {
 	if int(n) > len(values) {
@@ -1181,11 +1330,14 @@ func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.O
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
+		objects.Incref(items[i])
 	}
 	return objects.NewTuple(items)
 }
 
-// listFromStackRef wraps _PyList_FromStackRefStealOnSuccess.
+// listFromStackRef wraps _PyList_FromStackRefStealOnSuccess. Same
+// rationale as tupleFromStackRef: balance the unconditional drop()
+// that follows in the dispatch arm.
 //
 // CPython: Objects/listobject.c:3146 _PyList_FromStackRefStealOnSuccess
 func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Object {
@@ -1196,6 +1348,7 @@ func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Ob
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
+		objects.Incref(items[i])
 	}
 	return objects.NewList(items)
 }
@@ -1251,9 +1404,14 @@ func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Obj
 }
 
 // dictUpdate wraps PyDict_Update: merges b into a without duplicate-key
-// checking.
+// checking. The slow path mirrors dict_merge: pull b.keys(), iterate,
+// and copy each key+value via b[key]. Non-mapping sources surface as
+// "'X' object is not a mapping" so `{**1}` / `{**[]}` match CPython.
+// Iteration-time RuntimeErrors (a CrazyDict-style "dictionary changed
+// size during iteration") percolate up unchanged.
 //
 // CPython: Objects/dictobject.c:3354 PyDict_Update
+// CPython: Objects/dictobject.c:3247 dict_merge (slow path via keys())
 func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 	d, ok := a.(*objects.Dict)
 	if !ok {
@@ -1270,8 +1428,40 @@ func (e *evalState) dictUpdate(a, b objects.Object) int32 {
 		}
 		return 0
 	}
-	e.pendingErr = errors.New("TypeError: PyDict_Update expected dict source")
-	return -1
+	keysFn, gerr := objects.GetAttr(b, objects.NewStr("keys"))
+	if gerr != nil {
+		e.pendingErr = fmt.Errorf("TypeError: '%s' object is not a mapping", b.Type().Name)
+		return -1
+	}
+	keysObj, cerr := objects.CallNoArgs(keysFn)
+	if cerr != nil {
+		e.pendingErr = cerr
+		return -1
+	}
+	it, ierr := objects.Iter(keysObj)
+	if ierr != nil {
+		e.pendingErr = ierr
+		return -1
+	}
+	for {
+		k, nerr := objects.IterNext(it)
+		if errors.Is(nerr, objects.ErrStopIteration) {
+			return 0
+		}
+		if nerr != nil {
+			e.pendingErr = nerr
+			return -1
+		}
+		v, gerr := objects.GetItem(b, k)
+		if gerr != nil {
+			e.pendingErr = gerr
+			return -1
+		}
+		if serr := d.SetItem(k, v); serr != nil {
+			e.pendingErr = serr
+			return -1
+		}
+	}
 }
 
 // templateBuild wraps _PyTemplate_Build: builds a PEP 750 t-string from

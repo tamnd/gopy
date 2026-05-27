@@ -224,6 +224,14 @@ func (e *emitter) writePreamble() {
 	e.buf.WriteString("// per-rule emitter still produces placeholder action results.\n")
 	e.buf.WriteString("// The real AST surface lands with the action translator (M6).\n")
 	e.buf.WriteString("var ErrParserNotImplemented = errors.New(\"pegen: generated rule bodies not yet emitted\")\n\n")
+	e.buf.WriteString("// ErrIncompleteInput is returned by Dispatch when\n")
+	e.buf.WriteString("// PyCF_ALLOW_INCOMPLETE_INPUT is set and the first-pass failure\n")
+	e.buf.WriteString("// occurred at end-of-source (tokenizer done = E_EOF/E_EOFS/E_EOLS).\n")
+	e.buf.WriteString("// The caller promotes this to _IncompleteInputError without running\n")
+	e.buf.WriteString("// the invalid_* second pass.\n")
+	e.buf.WriteString("//\n")
+	e.buf.WriteString("// CPython: Parser/pegen.c:952 _PyPegen_run_parser _is_end_of_source\n")
+	e.buf.WriteString("var ErrIncompleteInput = errors.New(\"pegen: incomplete input\")\n\n")
 	e.buf.WriteString("var _ = token.NAME // keep import alive when no rule uses it.\n")
 	e.buf.WriteString("var _ = ast.Add       // keep import alive when no rule uses it.\n\n")
 }
@@ -337,16 +345,53 @@ func (e *emitter) writeRuleBody(r *Rule, suffix string, memoize bool) {
 	if isInvalidRule(r.Name) {
 		out.WriteString("\tif !p.CallInvalid() { return nil }\n")
 	}
+	// Rules ending in "without_invalid" temporarily disable call_invalid_rules
+	// so that invalid_* sub-rules do not fire inside them. CPython does this in
+	// the generated C via _prev_call_invalid / p->call_invalid_rules = 0 / cleanup.
+	//
+	// CPython: Tools/peg_generator/pegen/c_generator.py:696 without_invalid
+	if strings.HasSuffix(r.Name, "without_invalid") {
+		out.WriteString("\tprevCallInvalid := p.CallInvalid()\n")
+		out.WriteString("\tp.SetCallInvalid(false)\n")
+		out.WriteString("\tdefer func() { p.SetCallInvalid(prevCallInvalid) }()\n")
+	}
 	if memoize {
 		e.printf("\tif v, ok := p.IsMemoized(Rule_%s); ok { return v }\n", r.Name)
 	}
 	out.WriteString("\tmark := p.Mark()\n")
 	out.WriteString("\t_ = mark\n")
-	for ai, alt := range r.RHS.Alts {
-		out.WriteString("\t// alt ")
-		out.WriteString(strconv.Itoa(ai))
-		out.WriteString("\n")
-		e.writeAltBlock(r, alt)
+	if needsInvalidAltDefer(r.Name) {
+		// For expression, CPython's grammar places invalid_expression first
+		// but gopy's memoization requires valid alts to run before the
+		// error-recovery pass descends through expression_without_invalid.
+		ai := 0
+		for _, alt := range r.RHS.Alts {
+			if isInvalidOnlyAlt(alt) {
+				continue
+			}
+			out.WriteString("\t// alt ")
+			out.WriteString(strconv.Itoa(ai))
+			out.WriteString("\n")
+			e.writeAltBlock(r, alt)
+			ai++
+		}
+		for _, alt := range r.RHS.Alts {
+			if !isInvalidOnlyAlt(alt) {
+				continue
+			}
+			out.WriteString("\t// alt ")
+			out.WriteString(strconv.Itoa(ai))
+			out.WriteString("\n")
+			e.writeAltBlock(r, alt)
+			ai++
+		}
+	} else {
+		for ai, alt := range r.RHS.Alts {
+			out.WriteString("\t// alt ")
+			out.WriteString(strconv.Itoa(ai))
+			out.WriteString("\n")
+			e.writeAltBlock(r, alt)
+		}
 	}
 	if memoize {
 		e.printf("\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
@@ -873,6 +918,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstMatchAs":                   true,
 		"actionAstMatchClass":                true,
 		"actionAstMatchMapping":              true,
+		"actionAstMatchOr":                   true,
 		"actionAstMatchSequence":             true,
 		"actionAstMatchStar":                 true,
 		"actionAstMatchValue":                true,
@@ -901,6 +947,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenCheckFstringConversion":   true,
 		"actionPgenAddTypeCommentToArg":      true,
 		"actionPgenArgumentsParsingError":    true,
+		"raiseAction":                        true,
 		"actionPgenClassDefDecorators":       true,
 		"actionPgenFunctionDefDecorators":    true,
 		"actionPgenCollectCallSeqs":          true,
@@ -972,6 +1019,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenGetValues":                true,
 		"actionPgenGetPatternKeys":           true,
 		"actionPgenGetPatterns":              true,
+		"actionPgenCheckLegacyStmt":          true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {
@@ -991,13 +1039,6 @@ func (e *emitter) writeActionHelperStubs() {
 	e.buf.WriteString("// Action helper stubs. The action translator emits calls into\n")
 	e.buf.WriteString("// these names; real implementations land with the AST surface.\n")
 	for _, n := range names {
-		if n == "raiseAction" {
-			e.buf.WriteString("func raiseAction(p *Parser, kind string, args ...any) any {\n")
-			e.buf.WriteString("\t_ = p\n\t_ = kind\n\t_ = args\n")
-			e.buf.WriteString("\tp.SetErrorIndicator(true)\n")
-			e.buf.WriteString("\treturn nil\n}\n\n")
-			continue
-		}
 		e.printf("func %s(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }\n", n)
 	}
 	e.buf.WriteString("\n")
@@ -1031,8 +1072,14 @@ func (e *emitter) writeDispatch() {
 	e.buf.WriteString("\tdefault:\n\t\treturn nil, ErrParserNotImplemented\n")
 	e.buf.WriteString("\t}\n")
 	e.buf.WriteString("\tif result == nil {\n")
-	e.buf.WriteString("\t\tp.SetCallInvalid(true)\n")
-	e.buf.WriteString("\t\tp.Reset(0)\n")
+	e.buf.WriteString("\t\t// CPython: Parser/pegen.c:952 _PyPegen_run_parser\n")
+	e.buf.WriteString("\t\t// When PyCF_ALLOW_INCOMPLETE_INPUT is set and the source ends at\n")
+	e.buf.WriteString("\t\t// EOF (no unclosed brackets), promote the first-pass failure to\n")
+	e.buf.WriteString("\t\t// _IncompleteInputError immediately, skipping the second (invalid_*) pass.\n")
+	e.buf.WriteString("\t\tif p.AllowIncompleteInput() && p.IsEndOfSource() {\n")
+	e.buf.WriteString("\t\t\treturn nil, ErrIncompleteInput\n")
+	e.buf.WriteString("\t\t}\n")
+	e.buf.WriteString("\t\tp.ResetForErrorPass()\n")
 	e.buf.WriteString("\t\tswitch m {\n")
 	e.buf.WriteString("\t\tcase StartFile:\n\t\t\tresult = parseRule_file(p)\n")
 	e.buf.WriteString("\t\tcase StartSingle:\n\t\t\tresult = parseRule_interactive(p)\n")
@@ -1048,3 +1095,20 @@ func (e *emitter) writeDispatch() {
 func lower(s string) string { return strings.ToLower(s) }
 
 func isInvalidRule(name string) bool { return strings.HasPrefix(name, "invalid_") }
+
+// isInvalidOnlyAlt reports whether an alt consists of a single call to
+// an invalid_* rule with no lookaheads or other items.
+func isInvalidOnlyAlt(a *Alt) bool {
+	if len(a.Items) != 1 {
+		return false
+	}
+	nl, ok := a.Items[0].Item.(*NameLeaf)
+	return ok && isInvalidRule(nl.Value)
+}
+
+// needsInvalidAltDefer reports whether rule r requires invalid-only alts
+// to be emitted AFTER all valid alts. Currently no rules require this;
+// the function is kept as an extension point.
+func needsInvalidAltDefer(_ string) bool {
+	return false
+}

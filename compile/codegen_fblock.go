@@ -73,19 +73,19 @@ func (c *Compiler) popFblock(kind fblockKind) error {
 	return nil
 }
 
-// topFblock returns the innermost frame block of the requested kinds,
-// or nil if none. break / continue search up the stack until they
-// find a loop frame.
+// topFblockIdx returns the stack index of the innermost fblock with
+// one of the requested kinds, or -1 if none. break / continue use
+// this to locate the enclosing loop.
 //
 // CPython: Python/codegen.c walk fblock_stack from top in
 // codegen_break and codegen_continue.
-func (c *Compiler) topFblock(kinds ...fblockKind) *fblock {
+func (c *Compiler) topFblockIdx(kinds ...fblockKind) int {
 	for i := len(c.fblocks) - 1; i >= 0; i-- {
 		if slices.Contains(kinds, c.fblocks[i].Kind) {
-			return &c.fblocks[i]
+			return i
 		}
 	}
-	return nil
+	return -1
 }
 
 // useLabel binds the next-emitted instruction to lbl in the active

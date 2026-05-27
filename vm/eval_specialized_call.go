@@ -105,7 +105,7 @@ func (e *evalState) callPyExactArgsCommon(fn *objects.Function, selfOrNull objec
 		return 0, false, nil
 	}
 	stack := frameStackFor(e.ts)
-	f2 := stack.Push(co, fn.Globals, fn.Builtins, fn, nil)
+	f2 := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	if hasSelf == 1 {
 		f2.SetLocal(0, stackref.FromObject(selfOrNull))
 	}

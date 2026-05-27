@@ -78,14 +78,45 @@ func installSubclassAttrSlots(t *Type) {
 // 487 hooks that call cls.<metaclass_method>(...) resolve through the
 // real metatype, not the placeholder.
 //
+// Panics if typeSetNames or typeInitSubclass returns an error. Callers
+// that need to surface those failures as Python exceptions should use
+// NewUserTypeMetaE instead.
+//
 // CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
 func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) *Type {
+	t, err := NewUserTypeMetaE(name, bases, ns, kwargs, meta)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+// NewUserTypeMetaE is the error-returning sibling of NewUserTypeMeta.
+// typeNewBuiltin uses this variant so a __init_subclass__ hook that
+// raises TypeError surfaces through the normal exception path instead
+// of crashing the interpreter.
+//
+// CPython: Objects/typeobject.c:4153 type_new
+func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) (*Type, error) {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
-	t := NewType(name, bases)
+	t, err := newTypeE(name, bases)
+	if err != nil {
+		return nil, err
+	}
 	t.IsUser = true
+	// Heap (user) types are mutable: drop the IMMUTABLETYPE flag that
+	// NewType stamps on by default so collections.abc registrations
+	// can still paint sequence/mapping bits onto user subclasses.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (heap types lack
+	// Py_TPFLAGS_IMMUTABLETYPE)
+	t.TpFlags &^= TpFlagImmutable
 	stampMetaclass(t, meta)
+	if err := applyMetaclassMRO(t, meta); err != nil {
+		return nil, err
+	}
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
 	configureManagedDict(t, bases, noSlotsDeclared)
@@ -122,12 +153,12 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 	//
 	// CPython: Objects/typeobject.c:4549 type_new_set_names
 	if err := typeSetNames(t, ns); err != nil {
-		panic(err)
+		return nil, err
 	}
 	if err := typeInitSubclass(t, kwargs); err != nil {
-		panic(err)
+		return nil, err
 	}
-	return t
+	return t, nil
 }
 
 // stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
@@ -139,6 +170,63 @@ func stampMetaclass(t *Type, meta *Type) {
 	if meta != nil && meta != typeType {
 		t.Init(meta)
 	}
+}
+
+// applyMetaclassMRO replaces t.MRO with the tuple returned by the
+// metaclass's mro() method when the metaclass overrides it. NewType
+// already filled t.MRO via c3Linearize, which matches type.mro(); only
+// a user override changes the result. Ports mro_invoke's custom branch.
+//
+// CPython: Objects/typeobject.c:2228 mro_invoke
+func applyMetaclassMRO(t *Type, meta *Type) error {
+	if meta == nil || meta == typeType {
+		return nil
+	}
+	descr, _ := LookupDescriptor(meta, "mro")
+	if descr == nil {
+		return nil
+	}
+	if owner, ok := mroDescrOwner(descr); ok && owner == typeType {
+		return nil
+	}
+	bound := bindDescr(descr, t, meta)
+	res, err := callBound(bound, nil, nil)
+	if err != nil {
+		return err
+	}
+	tup, ok := res.(*Tuple)
+	if !ok {
+		lst, ok := res.(*List)
+		if !ok {
+			return fmt.Errorf("TypeError: mro() returned a non-tuple: %s", typeNameOf(res))
+		}
+		items := make([]Object, lst.Len())
+		for i := 0; i < lst.Len(); i++ {
+			items[i] = lst.Item(i)
+		}
+		tup = NewTuple(items)
+	}
+	newMRO := make([]*Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		entry, ok := tup.Item(i).(*Type)
+		if !ok {
+			return fmt.Errorf("TypeError: mro() returned a non-type at index %d: %s", i, typeNameOf(tup.Item(i)))
+		}
+		newMRO = append(newMRO, entry)
+	}
+	t.MRO = newMRO
+	return nil
+}
+
+// mroDescrOwner returns the type that owns a descriptor lookup result,
+// when the descriptor records its owning class (MethodDescr does). This
+// lets applyMetaclassMRO short-circuit when the lookup returned the
+// built-in type.mro descriptor unchanged from typeType.
+func mroDescrOwner(o Object) (*Type, bool) {
+	if md, ok := o.(*MethodDescr); ok {
+		return md.owner, true
+	}
+	return nil, false
 }
 
 // hasNoSlotsDeclared reports whether ns lacks a __slots__ entry. object
@@ -217,6 +305,23 @@ func processClassNamespace(t *Type, ns *Dict) {
 		}
 		_ = ns.DelItem(classCellKey)
 	}
+	// __classdictcell__ is the closure cell that PEP 695 type-alias
+	// thunks hold as their __classdict__ free variable. CPython sets the
+	// cell to tp_dict (the live attribute dict), not to ns. gopy mirrors
+	// this by keeping t.ClassAttrDict as the authoritative store and
+	// making SetTypeDescr write through to it. The cell is pointed at
+	// ClassAttrDict so subsequent typeSetAttr calls (X.T = float) are
+	// visible when the thunk later reads X.Alias.__value__.
+	//
+	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
+	classDictCellKey := NewStr("__classdictcell__")
+	if cellObj, err := ns.GetItem(classDictCellKey); err == nil {
+		if cell, ok := cellObj.(*Cell); ok {
+			t.ClassAttrDict = NewDict()
+			cell.Contents = t.ClassAttrDict
+		}
+		_ = ns.DelItem(classDictCellKey)
+	}
 	// __slots__ processing runs before the descriptor copy so the
 	// MemberDescr entries land in typeDescrTable before any class body
 	// assignments could overwrite them. Errors here are programming
@@ -232,11 +337,14 @@ func processClassNamespace(t *Type, ns *Dict) {
 
 // copyNamespaceToType walks ns and installs each entry as a type
 // descriptor on t, with the same special-casing CPython performs in
-// type_new_set_attrs: __init_subclass__, __class_getitem__, and
-// __prepare__ become classmethods, and __module__ propagates onto
-// t.Module so type_repr can render qualified names.
+// type_new_set_attrs: __init_subclass__ and __class_getitem__ become
+// classmethods when they are plain functions, and __module__ propagates
+// onto t.Module so type_repr can render qualified names. __prepare__
+// is NOT auto-wrapped; CPython leaves it alone so the user controls
+// the binding via @classmethod / @staticmethod / plain function.
 //
-// CPython: Objects/typeobject.c:4419 type_new_set_attrs
+// CPython: Objects/typeobject.c:4526 type_new_set_attrs
+// CPython: Objects/typeobject.c:4372 type_new_classmethod
 func copyNamespaceToType(t *Type, ns *Dict) {
 	for _, k := range ns.Keys() {
 		s, ok := k.(*Unicode)
@@ -248,8 +356,8 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			continue
 		}
 		switch s.v {
-		case "__init_subclass__", "__class_getitem__", "__prepare__":
-			if _, isCM := v.(*ClassMethod); !isCM {
+		case "__init_subclass__", "__class_getitem__":
+			if _, isFn := v.(*Function); isFn {
 				v = NewClassMethod(v)
 			}
 		case "__module__":
@@ -264,17 +372,63 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 			// path (typeSetQualname), so do not also stash a raw descr
 			// for it: the descr table would shadow the getset.
 			continue
+		case "__type_params__":
+			// CPython: Objects/typeobject.c type_new_impl extracts
+			// __type_params__ from the namespace into tp_typeparams.
+			if tp, ok := v.(*Tuple); ok {
+				t.TypeParams = tp
+			}
+			// Do not install __type_params__ as a regular descr: the
+			// getset on typeType serves all lookups via the MRO.
+			continue
+		case "__annotations__":
+			// If the value is a descriptor (e.g. a property), install it
+			// directly under "__annotations__" so GenericGetAttr can find
+			// and invoke it for instance-level access. A plain dict/mapping
+			// goes through typeSetAnnotations so it lands under
+			// "__annotations_cache__" as the lazy-evaluation cache.
+			//
+			// CPython: Objects/typeobject.c:4526 type_new_set_attrs calls
+			// PyObject_SetAttr -> type_setattro -> type_set_annotations, which
+			// stores the value in tp_dict["__annotations__"] unchanged.
+			if v.Type().DescrGet != nil {
+				SetTypeDescr(t, "__annotations__", v)
+			} else {
+				_ = typeSetAnnotations(t, v)
+			}
+			continue
+		case "__annotate__":
+			// User-defined __annotate__ from the class body: store directly
+			// under __annotate__ so typeGetAnnotate's priority check
+			// (user-defined __annotate__ beats compiler-generated
+			// __annotate_func__) works correctly. CPython type_new_impl copies
+			// the class namespace directly into tp_dict without special-casing
+			// __annotate__, so the user's function survives alongside the
+			// synthetic __annotate_func__ the compiler emits at end-of-body.
+			//
+			// CPython: Objects/typeobject.c:4618 type_new_init (PyDict_Copy)
+			SetTypeDescr(t, "__annotate__", v)
+			continue
 		}
 		SetTypeDescr(t, s.v, v)
 	}
 }
 
+// FormatNoteHook lets the errors package attach a __notes__ string to
+// the live exception on the thread state. Installed from vm/eval_call
+// so objects does not depend on errors or state.
+//
+// CPython: Python/errors.c:1567 _PyErr_FormatNote
+var FormatNoteHook func(string)
+
 // typeSetNames invokes __set_name__(cls, name) on every namespace
 // value that defines it. Mirrors CPython's __set_name__ pass; this
 // is what gives PEP 487 descriptors (and enum's _proto_member) a
-// chance to rewrite themselves once the owning class is known.
+// chance to rewrite themselves once the owning class is known. On
+// failure CPython attaches a note that names the offending instance,
+// key, and owner type.
 //
-// CPython: Objects/typeobject.c:4549 type_new_set_names
+// CPython: Objects/typeobject.c:11514 type_new_set_names
 func typeSetNames(t *Type, ns *Dict) error {
 	if ns == nil {
 		return nil
@@ -306,6 +460,15 @@ func typeSetNames(t *Type, ns *Dict) error {
 			callable = setName
 		}
 		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+			if FormatNoteHook != nil {
+				keyRepr, rerr := Repr(s)
+				keyText := s.Value()
+				if rerr == nil {
+					keyText = keyRepr
+				}
+				FormatNoteHook(fmt.Sprintf("Error calling __set_name__ on '%s' instance %s in '%s'",
+					typeNameOf(v), keyText, t.Name))
+			}
 			return err
 		}
 	}
@@ -396,8 +559,72 @@ func fixupSlotDispatchers(t *Type) {
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
+	fixupAsyncSlots(t)
 	fixupTpNew(t)
 	fixupFinalize(t)
+}
+
+// fixupAsyncSlots wires tp_as_async (am_aiter / am_anext / am_await)
+// when the class body (or any user-defined base on the MRO) provides
+// __aiter__ / __anext__ / __await__. Without this, async for / async
+// with / await on a user class can find the Python-level methods via
+// LookupDescriptor but the C-level Async slot stays nil, so the
+// dispatcher panel rejects the call as "no __aiter__ method".
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot (am_aiter /
+// am_anext / am_await entries), Objects/typeobject.c slot_am_aiter etc.
+func fixupAsyncSlots(t *Type) {
+	hasAiter := lookupDunderCallable(t, "__aiter__")
+	hasAnext := lookupDunderCallable(t, "__anext__")
+	hasAwait := lookupDunderCallable(t, "__await__")
+	if !hasAiter && !hasAnext && !hasAwait {
+		return
+	}
+	if t.Async == nil {
+		t.Async = &AsyncMethods{}
+	}
+	if hasAiter {
+		t.Async.Aiter = slotAmAiter
+	}
+	if hasAnext {
+		t.Async.Anext = slotAmAnext
+	}
+	if hasAwait {
+		t.Async.Await = slotAmAwait
+	}
+}
+
+// slotAmAiter dispatches to __aiter__.
+//
+// CPython: Objects/typeobject.c slot_am_aiter
+func slotAmAiter(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__aiter__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotAmAnext dispatches to __anext__.
+//
+// CPython: Objects/typeobject.c slot_am_anext
+func slotAmAnext(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__anext__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
+}
+
+// slotAmAwait dispatches to __await__.
+//
+// CPython: Objects/typeobject.c slot_am_await
+func slotAmAwait(o Object) (Object, error) {
+	fn, err := lookupMethodOnSelf(o, "__await__")
+	if err != nil {
+		return nil, err
+	}
+	return Call(fn, NewTuple(nil), nil)
 }
 
 // fixupFinalize wires tp_finalize when the class body (or any base on
@@ -1145,8 +1372,20 @@ func installSlots(t *Type, ns *Dict) error {
 		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
-	// Strip __slots__ from ns so it does not also become a stored
-	// attribute on the type.
+	// Keep __slots__ accessible as a class attribute (cls.__slots__ returns
+	// the tuple of slot names). CPython stores a plain tuple in tp_dict so
+	// `type.__dict__['__slots__']` works, and copyreg._reduce_ex inspects
+	// getattr(inst, '__slots__') to decide whether to raise TypeError for
+	// classes without __getstate__. Storing the tuple directly (not wrapped
+	// in a GetSetDescr) makes it a non-data descriptor so instance-level
+	// assignments like `self.__slots__ = None` still land in __dict__.
+	//
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors
+	items := make([]Object, len(resolved))
+	for i, n := range resolved {
+		items[i] = NewStr(n)
+	}
+	SetTypeDescr(t, "__slots__", NewTuple(items))
 	_ = ns.DelItem(slotsKey)
 	return nil
 }

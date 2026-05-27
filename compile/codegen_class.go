@@ -16,21 +16,15 @@ import (
 	"github.com/tamnd/gopy/symtable"
 )
 
-// visitClassDef compiles `class C(...): ...`. The full type-param /
-// __classdict__ / __classcell__ machinery lands alongside PEP 695 and
-// super() support; this step covers the basic shape: decorators,
-// LOAD_BUILD_CLASS + PUSH_NULL, inner class body via MAKE_FUNCTION,
-// the class name as a constant, the bases as positional args, and any
-// keyword arguments (e.g. metaclass=...) folded through CALL_KW.
+// visitClassDef compiles `class C(...): ...`. The basic shape:
+// decorators, LOAD_BUILD_CLASS + PUSH_NULL, inner class body via
+// MAKE_FUNCTION, the class name as a constant, the bases as positional
+// args, and any keyword arguments (e.g. metaclass=...) folded through
+// CALL_KW. When TypeParams is non-empty the whole emission lives
+// inside a synthetic `<generic parameters of C>` wrapper scope.
 //
-// CPython: Python/codegen.c:L1623 codegen_class
+// CPython: Python/codegen.c:1623 codegen_class
 func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
-	if hasStarArg(s.Bases) || hasStarStar(s.Keywords) {
-		return fmt.Errorf("compile: ClassDef with *args/**kwargs in bases not yet supported")
-	}
-	if len(s.TypeParams) > 0 {
-		return fmt.Errorf("compile: ClassDef with PEP 695 type params not yet supported")
-	}
 	// 1. Decorators are evaluated outer-first; each wraps the produced
 	// class object via a CALL 0 after the build-class call (the class
 	// sits in the self_or_null slot which CALL promotes to the first
@@ -39,6 +33,38 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 		return err
 	}
 
+	if len(s.TypeParams) > 0 {
+		if err := c.emitGenericClass(s); err != nil {
+			return err
+		}
+	} else {
+		if err := c.emitClassBuildCall(s); err != nil {
+			return err
+		}
+	}
+
+	// 6. Decorator chain. CALL 0 per layer: the class sits in the
+	// self_or_null slot, which the CALL macro path promotes to a
+	// first positional arg.
+	//
+	// CPython: Python/codegen.c:976 codegen_apply_decorators
+	for range s.DecoratorList {
+		c.addOpI(CALL, 0, loc(s))
+	}
+
+	// 7. Bind the produced class object to the class name in the
+	// outer scope.
+	return c.nameOpStore(s.Name, loc(s))
+}
+
+// emitClassBuildCall lays out the LOAD_BUILD_CLASS + body fn + name +
+// bases + keywords call. Shared between the non-generic path (called
+// directly from visitClassDef) and the generic path (called inside the
+// "<generic parameters of C>" wrapper scope, with .generic_base spliced
+// in as the first base).
+//
+// CPython: Python/codegen.c:1623 codegen_class (non-generic arm)
+func (c *Compiler) emitClassBuildCall(s *ast.ClassDef) error {
 	// 2. LOAD_BUILD_CLASS pushes the __build_class__ builtin; PUSH_NULL
 	// is the self/NULL slot the 3.14 CALL convention requires.
 	c.addOp(LOAD_BUILD_CLASS, loc(s))
@@ -67,14 +93,56 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 	// positional arg of __build_class__.
 	c.addLoadConst(s.Name, loc(s))
 
-	// 5. Bases (positional) and keywords. The leading 2 args (function
-	// + name) are already on the stack so the CALL count starts at 2.
+	// 5. Bases (positional) and keywords.
+	return c.emitClassCallArgs(s, false)
+}
+
+// emitClassCallArgs pushes positional bases (optionally prefixed with
+// .generic_base from the wrapper scope) and the keyword arguments,
+// then emits CALL / CALL_KW with the right arg count. The function
+// and name are already on the stack from emitClassBuildCall.
+//
+// When any base is *expr or any keyword is **expr the helper routes
+// through the CALL_FUNCTION_EX path (mirrors codegen_call_helper_impl's
+// ex_call branch): start with BUILD_LIST 0, walk the bases interleaving
+// LIST_EXTEND for starred entries with pending plain-positional values
+// flushed via BUILD_LIST + LIST_EXTEND, INTRINSIC_LIST_TO_TUPLE, then
+// the matching BUILD_MAP / DICT_MERGE dance for kwargs.
+//
+// CPython: Python/codegen.c:4246 codegen_call_helper_impl
+// (the splice-extra-positional branch is what the generic class uses
+// to land .generic_base ahead of the user bases)
+func (c *Compiler) emitClassCallArgs(s *ast.ClassDef, withGenericBase bool) error {
+	// codegen_call_helper_impl runs codegen_validate_keywords first so
+	// `class C(metaclass=type, metaclass=type)` raises SyntaxError at
+	// compile time rather than tumbling through to __build_class__.
+	//
+	// CPython: Python/codegen.c:4254 codegen_call_helper_impl
+	if err := c.validateKeywords(s.Keywords); err != nil {
+		return err
+	}
+	if hasStarArg(s.Bases) || hasStarStar(s.Keywords) {
+		return c.emitClassCallArgsEx(s, withGenericBase)
+	}
+
+	npos := len(s.Bases)
 	for _, b := range s.Bases {
 		if err := c.visitExpr(b); err != nil {
 			return err
 		}
 	}
-	nargs := int32(2 + len(s.Bases))
+	// .generic_base (Generic[T,...]) is appended after the explicit bases,
+	// matching CPython's codegen_class ordering: SUBSCRIPT_GENERIC result
+	// lands last so orig_bases = (explicit..., Generic[T,...]).
+	//
+	// CPython: Python/codegen.c:1657-1672 codegen_class (generic bases)
+	if withGenericBase {
+		if err := c.nameOpLoad(".generic_base", loc(s)); err != nil {
+			return err
+		}
+		npos++
+	}
+	nargs := int32(2 + npos)
 	if len(s.Keywords) > 0 {
 		names := make([]any, 0, len(s.Keywords))
 		for _, kw := range s.Keywords {
@@ -90,19 +158,242 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 	} else {
 		c.addOpI(CALL, nargs, loc(s))
 	}
+	return nil
+}
 
-	// 6. Decorator chain. CALL 0 per layer: the class sits in the
-	// self_or_null slot, which the CALL macro path promotes to a
-	// first positional arg.
+// emitClassCallArgsEx is the ex_call path for ClassDef. The stack at
+// entry already carries [__build_class__, NULL, body_fn, name]; with
+// withGenericBase we append .generic_base after the user bases so
+// orig_bases = (user_base1, ..., Generic[T,...]).
+// The walk mirrors starunpack_helper_impl: plain bases push and either
+// stay loose (no star seen yet) or LIST_APPEND into the in-progress
+// list, while a *base triggers BUILD_LIST pushed-so-far to wrap the
+// pre-star prefix, then LIST_EXTEND. Trailing **kwargs go through
+// BUILD_MAP / DICT_MERGE before CALL_FUNCTION_EX.
+//
+// CPython: Python/codegen.c:4296 codegen_call_helper_impl (ex_call arm)
+// CPython: Python/codegen.c:3318 starunpack_helper_impl
+func (c *Compiler) emitClassCallArgsEx(s *ast.ClassDef, withGenericBase bool) error {
+	l := loc(s)
+	// pushed counts the values already on the stack that should end up
+	// at the head of the args tuple: body_fn, name. Plain bases get
+	// pushed inline and are wrapped via BUILD_LIST on the first star
+	// (or via BUILD_TUPLE pushed when no star is present).
+	pushed := 2
+
+	sequenceBuilt := false
+	for i, b := range s.Bases {
+		star, isStar := b.(*ast.Starred)
+		if isStar {
+			if !sequenceBuilt {
+				c.addOpI(BUILD_LIST, int32(i+pushed), l)
+				sequenceBuilt = true
+			}
+			if err := c.visitExpr(star.Value); err != nil {
+				return err
+			}
+			c.addOpI(LIST_EXTEND, 1, l)
+			continue
+		}
+		if err := c.visitExpr(b); err != nil {
+			return err
+		}
+		if sequenceBuilt {
+			c.addOpI(LIST_APPEND, 1, l)
+		}
+	}
+	// .generic_base goes after all explicit bases, matching CPython's
+	// codegen_class ordering where Generic[T,...] is the last positional.
 	//
-	// CPython: Python/codegen.c:976 codegen_apply_decorators
-	for range s.DecoratorList {
-		c.addOpI(CALL, 0, loc(s))
+	// CPython: Python/codegen.c:1657-1672 codegen_class (generic bases)
+	if withGenericBase {
+		if err := c.nameOpLoad(".generic_base", l); err != nil {
+			return err
+		}
+		if sequenceBuilt {
+			c.addOpI(LIST_APPEND, 1, l)
+		}
+		pushed++
+	}
+	if sequenceBuilt {
+		c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, l)
+	} else {
+		// Only **kwargs triggered the ex_call dispatch; fold all
+		// pushed values into a tuple directly.
+		c.addOpI(BUILD_TUPLE, int32(len(s.Bases)+pushed), l)
 	}
 
-	// 7. Bind the produced class object to the class name in the
-	// outer scope.
-	return c.nameOpStore(s.Name, loc(s))
+	flag := int32(0)
+	if len(s.Keywords) > 0 {
+		flag = 1
+		if err := c.emitKwargsForEx(s.Keywords, l); err != nil {
+			return err
+		}
+	}
+	c.addOpI(CALL_FUNCTION_EX, flag, l)
+	return nil
+}
+
+// emitKwargsForEx builds the kwargs dict that CALL_FUNCTION_EX expects.
+// Plain `name=value` chunks are packed via codegen_subkwargs (visit
+// pairs, BUILD_MAP n) and DICT_MERGE'd into the running dict; each
+// `**expr` does its own DICT_MERGE 1 against the same dict. When the
+// first chunk is a plain run the BUILD_MAP itself seeds the dict, so
+// the leading empty-map is skipped.
+//
+// CPython: Python/codegen.c:4306 codegen_call_helper_impl (kwargs)
+// CPython: Python/codegen.c:3565 codegen_subkwargs
+func (c *Compiler) emitKwargsForEx(kws ast.Seq[*ast.Keyword], l ast.Pos) error {
+	haveDict := false
+	nseen := 0
+	flushPlain := func(end int) error {
+		if nseen == 0 {
+			return nil
+		}
+		start := end - nseen
+		for j := start; j < end; j++ {
+			kw := kws[j]
+			c.addLoadConst(*kw.Arg, l)
+			if err := c.visitExpr(kw.Value); err != nil {
+				return err
+			}
+		}
+		c.addOpI(BUILD_MAP, int32(nseen), l)
+		if haveDict {
+			c.addOpI(DICT_MERGE, 1, l)
+		}
+		haveDict = true
+		nseen = 0
+		return nil
+	}
+	for i, kw := range kws {
+		if kw.Arg == nil {
+			if err := flushPlain(i); err != nil {
+				return err
+			}
+			if !haveDict {
+				c.addOpI(BUILD_MAP, 0, l)
+				haveDict = true
+			}
+			if err := c.visitExpr(kw.Value); err != nil {
+				return err
+			}
+			c.addOpI(DICT_MERGE, 1, l)
+			continue
+		}
+		nseen++
+	}
+	if err := flushPlain(len(kws)); err != nil {
+		return err
+	}
+	if !haveDict {
+		c.addOpI(BUILD_MAP, 0, l)
+	}
+	return nil
+}
+
+// emitGenericClass wraps the class build call in a synthetic
+// "<generic parameters of C>" function scope. Inside the scope:
+// emit the TypeParams, store them as .type_params, run the normal
+// class-build sequence (with .generic_base spliced into the bases),
+// then RETURN_VALUE. In the outer scope, wrap the produced code into
+// a function via MAKE_FUNCTION and CALL 0.
+//
+// CPython: Python/codegen.c:1623 codegen_class (is_generic arm)
+func (c *Compiler) emitGenericClass(s *ast.ClassDef) error {
+	wrapperScope := c.Symtable.LookupTypeParams(s)
+	if wrapperScope == nil {
+		return fmt.Errorf("compile: no TypeParametersBlock for class %q", s.Name)
+	}
+
+	outerScope := c.scope
+	outerFblocks := c.fblocks
+	outerCaches := c.savedCaches()
+
+	c.enterScope(wrapperScope)
+	// The symtable sets b.private = class_name before visiting type params
+	// for a class so that dunder names like __T are mangled to _ClassName__T.
+	// Mirror that here: codegen_nameop must use the same private so the
+	// store opcode resolves to the same mangled slot.
+	//
+	// CPython: Python/compile.c compiler_enter_scope (private param = class_name
+	// for TypeParams, Python/codegen.c:1623 codegen_class)
+	c.unit().Private = s.Name
+	first := c.unit().FirstLineno
+	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
+
+	if err := c.emitTypeParams(s.TypeParams); err != nil {
+		return err
+	}
+	if err := c.nameOpStore(".type_params", loc(s)); err != nil {
+		return err
+	}
+
+	if err := c.emitClassBuildCallGeneric(s); err != nil {
+		return err
+	}
+
+	// Return the produced class object. The wrapper is invoked with
+	// CALL 0 in the outer scope so this return value becomes the bound
+	// class.
+	c.addOp(RETURN_VALUE, loc(s))
+
+	wrapperUnit := c.unit()
+	wrapperUnit.Name = "<generic parameters of " + s.Name + ">"
+
+	c.leaveScope()
+	c.scope = outerScope
+	c.fblocks = outerFblocks
+	c.restoreCaches(outerCaches)
+
+	// Outer scope: load the wrapper code, wrap into a function, CALL 0.
+	closureFlag, err := c.emitClosure(wrapperScope, loc(s))
+	if err != nil {
+		return err
+	}
+	c.addLoadConst(wrapperUnit, loc(s))
+	c.emitMakeFunction(closureFlag, loc(s))
+	c.addOp(PUSH_NULL, loc(s))
+	c.addOpI(CALL, 0, loc(s))
+	return nil
+}
+
+// emitClassBuildCallGeneric is the inside-the-wrapper variant of
+// emitClassBuildCall. After the class body is on the stack (as a
+// MAKE_FUNCTION result) and the name is loaded, the wrapper loads
+// .type_params, calls INTRINSIC_SUBSCRIPT_GENERIC to build the
+// Generic[T,...] base, stores it under .generic_base, and emits the
+// build-class call with that base spliced ahead of the user bases.
+//
+// CPython: Python/codegen.c:1657-1672 codegen_class (is_generic body)
+func (c *Compiler) emitClassBuildCallGeneric(s *ast.ClassDef) error {
+	c.addOp(LOAD_BUILD_CLASS, loc(s))
+	c.addOp(PUSH_NULL, loc(s))
+
+	innerScope := c.Symtable.Lookup(s)
+	if innerScope == nil {
+		return fmt.Errorf("compile: no symtable entry for class %q", s.Name)
+	}
+	closureFlag, err := c.emitClosure(innerScope, loc(s))
+	if err != nil {
+		return err
+	}
+	if err := c.emitInnerClassCode(innerScope, s); err != nil {
+		return err
+	}
+	c.emitMakeFunction(closureFlag, loc(s))
+	c.addLoadConst(s.Name, loc(s))
+
+	// .type_params -> INTRINSIC_SUBSCRIPT_GENERIC -> .generic_base
+	if err := c.nameOpLoad(".type_params", loc(s)); err != nil {
+		return err
+	}
+	c.addOpI(CALL_INTRINSIC_1, intrinsicSubscriptGeneric, loc(s))
+	if err := c.nameOpStore(".generic_base", loc(s)); err != nil {
+		return err
+	}
+
+	return c.emitClassCallArgs(s, true)
 }
 
 // extractDocstring returns the bare string literal that opens a body,
@@ -202,6 +493,20 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	// CPython: Python/codegen.c:1540
 	c.addLoadConst(int64(c.unit().FirstLineno), loc(s))
 	c.addOpName(STORE_NAME, &pool, "__firstlineno__", loc(s))
+
+	// Generic classes: load .type_params from the enclosing wrapper
+	// scope's cell and store it as __type_params__ in the class namespace.
+	// The .type_params symbol is registered as a Use in the class body
+	// by the symtable visitor, so nameOpLoad resolves it as a Free var
+	// and emits LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF.
+	//
+	// CPython: Python/codegen.c:1540 codegen_class_body (type_params arm)
+	if len(s.TypeParams) > 0 {
+		if err := c.nameOpLoad(".type_params", loc(s)); err != nil {
+			return err
+		}
+		c.addOpName(STORE_NAME, &pool, "__type_params__", loc(s))
+	}
 
 	if innerScope.NeedsClassDict {
 		// MAKE_CELL is inserted by prepare_localsplus; only register

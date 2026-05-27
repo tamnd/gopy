@@ -39,6 +39,20 @@ func (f *fakeInterpFrame) FrameNumFrees() int { return len(f.frees) }
 func (f *fakeInterpFrame) FrameFreeLocal(i int) Object {
 	return f.frees[i]
 }
+
+func (f *fakeInterpFrame) FrameLocalsPlusItem(i int) Object {
+	n := len(f.fast)
+	if i < n {
+		return f.fast[i]
+	}
+	if i < n+len(f.cells) {
+		return f.cells[i-n]
+	}
+	if i < n+len(f.cells)+len(f.frees) {
+		return f.frees[i-n-len(f.cells)]
+	}
+	return nil
+}
 func (f *fakeInterpFrame) FrameFunc() Object { return nil }
 
 func TestFrameAccessors(t *testing.T) {

@@ -63,6 +63,9 @@ func (s *State) syntaxErrorKnownRange(startCol, endCol int, format string, args 
 func (s *State) indentError() Tok {
 	s.done = eTabSpace
 	s.cur = s.inp
+	// Record position so tokenizerError can populate lineno/text.
+	// CPython uses tok->lineno and tok->buf at the point of error.
+	s.recordError("inconsistent use of tabs and spaces in indentation")
 	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 }
 

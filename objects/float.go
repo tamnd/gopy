@@ -29,6 +29,7 @@ func init() {
 	FloatType.Str = floatRepr
 	FloatType.Hash = floatHash
 	FloatType.RichCmp = floatRichCmp
+	FloatType.TpFlags |= TpFlagMatchSelf
 	FloatType.Number = &NumberMethods{
 		Add:         floatAdd,
 		Subtract:    floatSub,
@@ -64,6 +65,44 @@ func init() {
 	// CPython: Objects/floatobject.c:357 float_repr
 	SetTypeDescr(FloatType, "__repr__", NewMethodDescr(FloatType, "__repr__", floatReprDescr))
 	SetTypeDescr(FloatType, "__str__", NewMethodDescr(FloatType, "__str__", floatReprDescr))
+
+	// float_getset (Objects/floatobject.c:1797): real returns self,
+	// imag returns 0.0. CPython exposes both as get-only descriptors.
+	SetTypeDescr(FloatType, "real", NewGetSetDescr("real", floatRealGetter, nil))
+	SetTypeDescr(FloatType, "imag", NewGetSetDescr("imag", floatImagGetter, nil))
+	SetTypeDescr(FloatType, "conjugate", NewMethodDescr(FloatType, "conjugate", floatConjugateMethod))
+}
+
+// floatRealGetter backs float.real: returns self.
+//
+// CPython: Objects/floatobject.c:1741 float_getreal
+func floatRealGetter(owner Object) (Object, error) {
+	f, ok := owner.(*Float)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'real' for 'float' objects doesn't apply to a '%s' object", typeNameOf(owner))
+	}
+	return f, nil
+}
+
+// floatImagGetter backs float.imag: always 0.0.
+//
+// CPython: Objects/floatobject.c:1747 float_getimag
+func floatImagGetter(_ Object) (Object, error) {
+	return NewFloat(0.0), nil
+}
+
+// floatConjugateMethod backs float.conjugate(): returns self.
+//
+// CPython: Objects/floatobject.c:1096 float_conjugate_impl
+func floatConjugateMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: conjugate() takes no arguments (%d given)", len(args)-1)
+	}
+	f, ok := args[0].(*Float)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'conjugate' for 'float' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return f, nil
 }
 
 // floatReprDescr is the slot wrapper for float.__repr__ / float.__str__.

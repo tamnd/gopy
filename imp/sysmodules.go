@@ -19,6 +19,10 @@ var (
 	sysModules   = objects.NewDict()
 )
 
+func init() {
+	objects.SysModulesGetter = func() *objects.Dict { return sysModules }
+}
+
 // SysModules returns the dict backing sys.modules. The same pointer is
 // stamped onto the sys module as `sys.modules` so Python and Go share
 // one view of the cache.

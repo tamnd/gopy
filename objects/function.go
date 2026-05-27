@@ -28,8 +28,19 @@ const CoHasDocstring = 0x4000000
 // CPython: Include/cpython/funcobject.h:36 PyFunctionObject
 type Function struct {
 	Header
-	Name        string
-	Qualname    string
+	Name     string
+	Qualname string
+	// nameObj / qualnameObj cache the *Unicode wrappers for Name and
+	// Qualname so two consecutive reads of __name__ or __qualname__
+	// return the same Python object. CPython stores func_name and
+	// func_qualname as PyObject* directly, so identity is preserved
+	// for free; gopy keeps the Go string for fast field access and
+	// memoizes the Unicode wrapper here. Invalidated when the
+	// underlying string changes.
+	//
+	// CPython: Include/cpython/funcobject.h:36 PyFunctionObject
+	nameObj     *Unicode
+	qualnameObj *Unicode
 	Code        *Code
 	Globals     Object // __globals__, typically *Dict
 	Builtins    Object // __builtins__, loaded from globals['__builtins__']
@@ -183,23 +194,27 @@ func registerFunctionIdentityGetSets() {
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Doc), nil },
 		func(o Object, v Object) error { o.(*Function).Doc = v; return nil }))
 	SetTypeDescr(FunctionType, "__name__", NewGetSetDescr("__name__",
-		func(o Object) (Object, error) { return NewStr(o.(*Function).Name), nil },
+		func(o Object) (Object, error) { return o.(*Function).nameUnicode(), nil },
 		func(o Object, v Object) error {
 			s, ok := v.(*Unicode)
 			if !ok {
 				return fmt.Errorf("TypeError: __name__ must be set to a string object")
 			}
-			o.(*Function).Name = s.Value()
+			f := o.(*Function)
+			f.Name = s.Value()
+			f.nameObj = s
 			return nil
 		}))
 	SetTypeDescr(FunctionType, "__qualname__", NewGetSetDescr("__qualname__",
-		func(o Object) (Object, error) { return NewStr(o.(*Function).Qualname), nil },
+		func(o Object) (Object, error) { return o.(*Function).qualnameUnicode(), nil },
 		func(o Object, v Object) error {
 			s, ok := v.(*Unicode)
 			if !ok {
 				return fmt.Errorf("TypeError: __qualname__ must be set to a string object")
 			}
-			o.(*Function).Qualname = s.Value()
+			f := o.(*Function)
+			f.Qualname = s.Value()
+			f.qualnameObj = s
 			return nil
 		}))
 	SetTypeDescr(FunctionType, "__module__", NewGetSetDescr("__module__",
@@ -412,23 +427,31 @@ func funcSetAnnotateAttr(o Object, v Object) error {
 //
 // CPython: Objects/funcobject.c:1030 func_new_impl
 func funcTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	pos := append([]Object(nil), args...)
-	if v, ok := kwargs["code"]; ok && len(pos) < 1 {
-		pos = append(pos, v)
+	// Build a 6-slot positional array. Positional args fill from the
+	// front; keyword args fill their named slot regardless of whether
+	// earlier optional args were given.
+	//
+	// CPython: Objects/funcobject.c:1030 func_new_impl
+	// Signature: function(code, globals[, name[, argdefs[, closure[, kwdefaults]]]])
+	slotNames := []string{"code", "globals", "name", "argdefs", "closure", "kwdefaults"}
+	pos := make([]Object, 6)
+	for i := range pos {
+		pos[i] = None()
 	}
-	if v, ok := kwargs["globals"]; ok && len(pos) < 2 {
-		pos = append(pos, v)
+	for i, v := range args {
+		if i >= 6 {
+			break
+		}
+		pos[i] = v
 	}
-	for _, name := range []string{"name", "argdefs", "closure", "kwdefaults"} {
-		if v, ok := kwargs[name]; ok {
-			pos = append(pos, v)
+	for i, sn := range slotNames {
+		if v, ok := kwargs[sn]; ok {
+			pos[i] = v
 		}
 	}
-	for len(pos) < 6 {
-		pos = append(pos, None())
-	}
-	if len(pos) < 2 || len(pos) > 6 {
-		return nil, fmt.Errorf("TypeError: function expected 2 to 6 arguments, got %d", len(args))
+	totalArgs := len(args) + len(kwargs)
+	if totalArgs < 2 || totalArgs > 6 {
+		return nil, fmt.Errorf("TypeError: function expected 2 to 6 arguments, got %d", totalArgs)
 	}
 	code, ok := pos[0].(*Code)
 	if !ok {
@@ -677,6 +700,30 @@ func functionRepr(o Object) (string, error) {
 		name = f.Name
 	}
 	return fmt.Sprintf("<function %s at %p>", name, f), nil
+}
+
+// nameUnicode returns the *Unicode wrapper for f.Name, allocating it
+// once and reusing the same pointer across reads so id(f.__name__) is
+// stable. CPython gets this for free because func_name is a
+// PyObject*; gopy keeps the Go string for hot-path use and lazily
+// memoizes the wrapper.
+//
+// CPython: Include/cpython/funcobject.h:39 func_name
+func (f *Function) nameUnicode() *Unicode {
+	if f.nameObj == nil || f.nameObj.Value() != f.Name {
+		f.nameObj = NewStr(f.Name).(*Unicode)
+	}
+	return f.nameObj
+}
+
+// qualnameUnicode is the qualname counterpart to nameUnicode.
+//
+// CPython: Include/cpython/funcobject.h:50 func_qualname
+func (f *Function) qualnameUnicode() *Unicode {
+	if f.qualnameObj == nil || f.qualnameObj.Value() != f.Qualname {
+		f.qualnameObj = NewStr(f.Qualname).(*Unicode)
+	}
+	return f.qualnameObj
 }
 
 // NewFunction is the no-qualname form of NewFunctionWithQualName.

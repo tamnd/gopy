@@ -67,7 +67,7 @@ func newMTSource() *mtSource {
 	return s
 }
 
-// initGenrand initialises the MT state from a single 32-bit seed.
+// initGenrand initializes the MT state from a single 32-bit seed.
 //
 // CPython: Modules/_randommodule.c:196 init_genrand
 func (s *mtSource) initGenrand(seed uint32) {
@@ -79,7 +79,7 @@ func (s *mtSource) initGenrand(seed uint32) {
 	s.index = mtN
 }
 
-// initByArray initialises the MT state from a key array.
+// initByArray initializes the MT state from a key array.
 //
 // CPython: Modules/_randommodule.c:219 init_by_array
 func (s *mtSource) initByArray(key []uint32) {

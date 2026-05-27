@@ -17,10 +17,13 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/future"
 	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
+	"github.com/tamnd/gopy/symtable"
 	"github.com/tamnd/gopy/traceback"
 )
 
@@ -37,6 +40,7 @@ var errorPrefixToType = map[string]*objects.Type{
 	"TypeError:":               pyerrors.PyExc_TypeError,
 	"ValueError:":              pyerrors.PyExc_ValueError,
 	"NameError:":               pyerrors.PyExc_NameError,
+	"UnboundLocalError:":       pyerrors.PyExc_UnboundLocalError,
 	"AttributeError:":          pyerrors.PyExc_AttributeError,
 	"KeyError:":                pyerrors.PyExc_KeyError,
 	"IndexError:":              pyerrors.PyExc_IndexError,
@@ -73,6 +77,19 @@ var errorPrefixToType = map[string]*objects.Type{
 // the result falls back to a plain Exception, matching the previous
 // behavior.
 func synthesizeException(err error) *pyerrors.Exception {
+	// RaisedError carries an already-typed Python exception across the
+	// generator/coroutine channel boundary (or any other Go error
+	// surface). Unwrap so the original instance lands on the thread
+	// state with its args (and therefore StopIteration.value) intact.
+	//
+	// CPython: Objects/genobject.c:225 gen_send_ex2 (StopIteration
+	// carries the body's return value through args[0]).
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		if exc, ok := re.Exc.(*pyerrors.Exception); ok {
+			return exc
+		}
+	}
 	// Iterator-protocol sentinels: the Go side carries them as bare
 	// errors.New("StopIteration") / "StopAsyncIteration", which the
 	// prefix table below misses (no trailing colon). Recognize them
@@ -91,6 +108,28 @@ func synthesizeException(err error) *pyerrors.Exception {
 	var se *parsererrors.SyntaxError
 	if errors.As(err, &se) {
 		return pyerrors.SyntaxFromParser(se)
+	}
+	// Structured symtable SyntaxError: same idea as the parser branch,
+	// but the location data lives in symtable.SyntaxError.Pos rather
+	// than the parser record.
+	var stse *symtable.SyntaxError
+	if errors.As(err, &stse) {
+		return pyerrors.SyntaxFromSymtable(stse)
+	}
+	// Structured compile-time SyntaxError: codegen visitor passes
+	// surface _PyCompile_Error through compile.SyntaxError with
+	// filename / ast.Pos already pinned to the offending node.
+	// CPython: Python/compile.c:1191 _PyCompile_Error
+	var cse *compile.SyntaxError
+	if errors.As(err, &cse) {
+		return pyerrors.SyntaxFromCompile(cse)
+	}
+	// Structured future-scanner SyntaxError: future_check_features raises
+	// for "braces" (easter egg) and unknown feature names.
+	// CPython: Python/future.c:L8 future_check_features
+	var fse *future.SyntaxError
+	if errors.As(err, &fse) {
+		return pyerrors.SyntaxFromFuture(fse)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
@@ -112,6 +151,20 @@ func synthesizeException(err error) *pyerrors.Exception {
 		if i := strings.Index(msg, prefix); i >= 0 {
 			typ = promoteOSErrorByErrno(typ, err)
 			return buildExceptionForType(typ, strings.TrimSpace(msg[i+len(prefix):]))
+		}
+	}
+	// Third pass: bare-name match. setPendingErr("NameError") produces
+	// "NameError" with no colon, so neither HasPrefix nor Index finds
+	// "NameError:" in it. Check for an exact match against the name
+	// portion (prefix without the trailing colon).
+	//
+	// CPython: Python/errors.c PyErr_SetNone / _PyErr_SetString — callers
+	// always pass a typed exception; this compensates for generator code
+	// that can only emit the bare type name.
+	for prefix, typ := range errorPrefixToType {
+		bare := strings.TrimSuffix(prefix, ":")
+		if msg == bare {
+			return buildExceptionForType(typ, "")
 		}
 	}
 	return pyerrors.New(pyerrors.PyExc_Exception, objects.NewTuple([]objects.Object{
@@ -140,7 +193,41 @@ func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
 			}
 		}
 	}
-	return pyerrors.New(typ, objects.NewTuple(args))
+	exc := pyerrors.New(typ, objects.NewTuple(args))
+	attachExcNameAttr(exc, typ, msg)
+	return exc
+}
+
+// attachExcNameAttr populates the `.name` (and optionally `.obj`) field on
+// AttributeError and NameError exceptions synthesized from Go error strings.
+// CPython populates these fields in PyErr_SetObject when raising via C; gopy
+// mirrors the behavior by parsing the message string.
+//
+// CPython: Objects/exceptions.c:NameError_init, AttributeError_init
+func attachExcNameAttr(exc *pyerrors.Exception, typ *objects.Type, msg string) {
+	switch typ {
+	case pyerrors.PyExc_AttributeError:
+		// Pattern: "'TYPE' object has no attribute 'NAME'"
+		if i := strings.LastIndex(msg, "no attribute '"); i >= 0 {
+			rest := msg[i+len("no attribute '"):]
+			if j := strings.IndexByte(rest, '\''); j >= 0 {
+				name := rest[:j]
+				d := exc.EnsureAttrDict()
+				_ = d.SetItem(objects.NewStr("name"), objects.NewStr(name))
+				_ = d.SetItem(objects.NewStr("obj"), objects.None())
+			}
+		}
+	case pyerrors.PyExc_NameError, pyerrors.PyExc_UnboundLocalError:
+		// Pattern: "name 'NAME' is not defined" or "free variable 'NAME' referenced..."
+		if i := strings.Index(msg, "name '"); i >= 0 {
+			rest := msg[i+len("name '"):]
+			if j := strings.IndexByte(rest, '\''); j >= 0 {
+				name := rest[:j]
+				d := exc.EnsureAttrDict()
+				_ = d.SetItem(objects.NewStr("name"), objects.NewStr(name))
+			}
+		}
+	}
 }
 
 // promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename
@@ -220,11 +307,27 @@ func (e *evalState) handleException(err error) bool {
 	// hang the frame entry off of. Synthesize once at the bottom frame
 	// and let it propagate up, picking up one TB entry per frame.
 	if pyerrors.Occurred(e.ts) == nil {
-		// Restore (not Raise) so we skip __context__ chaining: this
-		// exception is being born here, it has no causal predecessor
-		// in the currently-handled chain.
 		exc := synthesizeException(err)
-		pyerrors.Restore(e.ts, exc.ExcType, exc, nil)
+		// Attach any __notes__ queued by FormatNoteHook before this
+		// Go error became a typed Exception (e.g. arg-binding
+		// TypeError raised inside type_new_set_names).
+		//
+		// CPython: Python/errors.c:1567 _PyErr_FormatNote
+		if notes := drainPendingNotes(); len(notes) > 0 {
+			if exc.Notes == nil {
+				exc.Notes = objects.NewList(nil)
+			}
+			for _, n := range notes {
+				exc.Notes.Append(objects.NewStr(n))
+			}
+		}
+		// Use Raise (not Restore) so that __context__ is chained when this
+		// exception is born inside an active except-block, matching CPython's
+		// _PyErr_SetObject which always chains. This makes
+		// `except E: <Go-raised SyntaxError>` set SyntaxError.__context__=E.
+		//
+		// CPython: Python/errors.c:83 _PyErr_SetObject (chaining branch)
+		pyerrors.Raise(e.ts, exc)
 	}
 	// Prepend a traceback entry for this frame before considering
 	// handlers. CPython does the same in exception_unwind so an

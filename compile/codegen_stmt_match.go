@@ -10,6 +10,7 @@ package compile
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/tamnd/gopy/ast"
 )
@@ -48,6 +49,8 @@ type patternContext struct {
 //
 // CPython: Python/codegen.c:L6453 codegen_match
 func (c *Compiler) visitMatch(s *ast.Match) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	pc := &patternContext{}
 	return c.matchInner(s, pc)
 }
@@ -66,7 +69,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 	end := c.newLabel()
 	cases := len(s.Cases)
 	if cases == 0 {
-		return fmt.Errorf("compile: match has zero cases")
+		return c.errorAt(loc(s), "match has zero cases")
 	}
 	last := s.Cases[cases-1]
 	hasDefault := isWildcardPattern(last.Pattern) && cases > 1
@@ -77,7 +80,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 	}
 	for i := 0; i < limit; i++ {
 		m := s.Cases[i]
-		if err := c.matchOneCase(m, i, limit, pc, end); err != nil {
+		if err := c.matchOneCase(m, i, limit, cases, pc, end); err != nil {
 			return err
 		}
 	}
@@ -94,7 +97,7 @@ func (c *Compiler) matchInner(s *ast.Match, pc *patternContext) error {
 // captures, body, JUMP to end, then the per-arm fail-pop tail.
 //
 // CPython: Python/codegen.c:L6384 codegen_match_inner case loop
-func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit int,
+func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit, cases int,
 	pc *patternContext, end JumpTargetLabel,
 ) error {
 	notLast := i != limit-1
@@ -102,7 +105,15 @@ func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit int,
 		c.addOpI(COPY, 1, loc(m.Pattern))
 	}
 	pc.stores = pc.stores[:0]
-	pc.allowIrrefutable = m.Guard != nil || i == limit-1
+	// allow_irrefutable lifts the "name capture / wildcard makes
+	// remaining patterns unreachable" guard. CPython gates it on
+	// i == cases - 1 (the absolute last case, not the last refutable
+	// one): when there's a trailing wildcard arm, the non-wildcard
+	// case ahead of it still has to be refutable so the wildcard can
+	// actually catch something.
+	//
+	// CPython: Python/codegen.c:6384 codegen_match_inner
+	pc.allowIrrefutable = m.Guard != nil || i == cases-1
 	pc.failPop = nil
 	pc.onTop = 0
 
@@ -129,7 +140,14 @@ func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit int,
 	if err := c.visitStmts(m.Body); err != nil {
 		return err
 	}
-	c.addOpJump(JUMP, end, ast.Pos{})
+	// Use NO_LOCATION so the JUMP does not override the line number
+	// propagated from the last statement in the case body. Jump-threading
+	// inlines the end-label content in place of this JUMP; with a real
+	// source location stamped here, the inlined return would inherit the
+	// pattern line instead of the body's last line.
+	//
+	// CPython: Python/codegen.c:6433 ADDOP_JUMP(c, NO_LOCATION, JUMP, end)
+	c.addOpJump(JUMP, end, ast.NoPos)
 	return c.emitAndResetFailPop(pc, loc(m.Pattern))
 }
 
@@ -237,7 +255,7 @@ func (c *Compiler) visitPattern(p ast.Pattern, pc *patternContext) error {
 	case *ast.MatchOr:
 		return c.patternOr(n, pc)
 	}
-	return fmt.Errorf("compile: unknown pattern kind %T", p)
+	return c.errorAt(loc(p), "unknown pattern kind %T", p)
 }
 
 // patternSubpattern is visitPattern with allowIrrefutable forced on.
@@ -262,7 +280,7 @@ func (c *Compiler) patternValue(p *ast.MatchValue, pc *patternContext) error {
 	switch p.Value.(type) {
 	case *ast.Constant, *ast.Attribute:
 	default:
-		return fmt.Errorf("compile: patterns may only match literals and attribute lookups")
+		return c.errorAt(loc(p), "patterns may only match literals and attribute lookups")
 	}
 	if err := c.visitExpr(p.Value); err != nil {
 		return err
@@ -300,9 +318,9 @@ func (c *Compiler) patternAs(p *ast.MatchAs, pc *patternContext) error {
 	if p.Pattern == nil {
 		if !pc.allowIrrefutable {
 			if p.Name != nil {
-				return fmt.Errorf("compile: name capture %q makes remaining patterns unreachable", *p.Name)
+				return c.errorAt(loc(p), "name capture %q makes remaining patterns unreachable", *p.Name)
 			}
-			return fmt.Errorf("compile: wildcard makes remaining patterns unreachable")
+			return c.errorAt(loc(p), "wildcard makes remaining patterns unreachable")
 		}
 		return c.patternStoreName(p.Name, pc, loc(p))
 	}
@@ -328,7 +346,7 @@ func (c *Compiler) patternStoreName(name *string, pc *patternContext, l ast.Pos)
 	}
 	for _, n := range pc.stores {
 		if n == *name {
-			return fmt.Errorf("compile: multiple assignments to name %q in pattern", *name)
+			return c.errorAt(l, "multiple assignments to name %q in pattern", *name)
 		}
 	}
 	rotations := pc.onTop + len(pc.stores) + 1
@@ -359,7 +377,7 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 	for i, sub := range p.Patterns {
 		if _, ok := sub.(*ast.MatchStar); ok {
 			if star >= 0 {
-				return fmt.Errorf("compile: multiple starred names in sequence pattern")
+				return c.errorAt(loc(p), "multiple starred names in sequence pattern")
 			}
 			star = i
 			starWild = isWildcardStarPattern(sub)
@@ -368,6 +386,12 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 			allWild = false
 		}
 	}
+	// Keep the subject on top across MATCH_SEQUENCE and the length
+	// checks so jumpToFailPop knows the gate must pop the subject when
+	// the match fails.
+	//
+	// CPython: Python/codegen.c:6280 codegen_pattern_sequence
+	pc.onTop++
 	c.addOp(MATCH_SEQUENCE, loc(p))
 	if err := c.jumpToFailPop(pc, POP_JUMP_IF_FALSE, loc(p)); err != nil {
 		return err
@@ -390,6 +414,8 @@ func (c *Compiler) patternSequence(p *ast.MatchSequence, pc *patternContext) err
 			return err
 		}
 	}
+	// Past the gates the subject is consumed by the unpack / POP_TOP.
+	pc.onTop--
 	if allWild {
 		c.addOp(POP_TOP, loc(p))
 		return nil
@@ -455,6 +481,51 @@ func (c *Compiler) patternSequenceSubscr(p *ast.MatchSequence, star int, pc *pat
 	return nil
 }
 
+// isValidMappingPatternKey accepts the set of expressions the PEG
+// grammar's literal_expr / complex_number alternatives can build into
+// a mapping pattern key: bare Constants, Attribute lookups, and the
+// signed_number / complex_number shapes the optimizer would later fold
+// to a single Constant. CPython gets to skip this because its compiler
+// runs _PyAST_Optimize before codegen, folding `-0-0j` to a single
+// Constant; gopy has no AST optimizer pass yet, so the codegen needs
+// to recognize the parser's literal-expression spelling directly.
+//
+// CPython: Python/ast_opt.c:457 fold_unaryop / fold_binop, called via
+// Python/compile.c:1733 _PyCompile_AstOptimize
+func isValidMappingPatternKey(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.Constant, *ast.Attribute:
+		return true
+	case *ast.UnaryOp:
+		// signed_number / signed_real_number: USub Constant
+		if v.Op != ast.USub {
+			return false
+		}
+		_, ok := v.Operand.(*ast.Constant)
+		return ok
+	case *ast.BinOp:
+		// complex_number: signed_real_number (+|-) imaginary_number
+		if v.Op != ast.Add && v.Op != ast.Sub {
+			return false
+		}
+		switch lhs := v.Left.(type) {
+		case *ast.Constant:
+		case *ast.UnaryOp:
+			if lhs.Op != ast.USub {
+				return false
+			}
+			if _, ok := lhs.Operand.(*ast.Constant); !ok {
+				return false
+			}
+		default:
+			return false
+		}
+		_, ok := v.Right.(*ast.Constant)
+		return ok
+	}
+	return false
+}
+
 // patternMapping handles `{key: value, ...}` patterns. MATCH_MAPPING
 // gates the type, MATCH_KEYS extracts the values for the listed
 // keys, then each value pattern matches against the corresponding
@@ -465,7 +536,7 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 	keys := p.Keys
 	patterns := p.Patterns
 	if len(keys) != len(patterns) {
-		return fmt.Errorf("compile: mapping pattern keys/patterns length mismatch")
+		return c.errorAt(loc(p), "mapping pattern keys/patterns length mismatch")
 	}
 	pc.onTop++
 	c.addOp(MATCH_MAPPING, loc(p))
@@ -486,11 +557,22 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 			return err
 		}
 	}
+	// CPython: Python/codegen.c:6060 mirror the seen-set duplicate check.
+	// Detect duplicates by Python equality: 0 == False == 0.0 == 0j == -0
+	// all share a bucket and must collide here so the SyntaxError fires
+	// before the bytecode reaches MATCH_KEYS.
+	seen := map[mappingDedupKey]struct{}{}
 	for _, k := range keys {
-		switch k.(type) {
-		case *ast.Constant, *ast.Attribute:
-		default:
-			return fmt.Errorf("compile: mapping pattern keys may only be literals and attribute lookups")
+		if !isValidMappingPatternKey(k) {
+			return c.errorAt(loc(k), "mapping pattern keys may only match literals and attribute lookups")
+		}
+		if v, ok := foldedMappingKey(k); ok {
+			if dk, ok := normalizeMappingKey(v); ok {
+				if _, dup := seen[dk]; dup {
+					return c.errorAt(loc(k), "mapping pattern checks duplicate key (%s)", literalRepr(v))
+				}
+				seen[dk] = struct{}{}
+			}
 		}
 		if err := c.visitExpr(k); err != nil {
 			return err
@@ -515,6 +597,22 @@ func (c *Compiler) patternMapping(p *ast.MatchMapping, pc *patternContext) error
 	}
 	pc.onTop -= 2
 	if p.Rest != nil {
+		// Build `rest = dict(subject)` minus the matched keys. The
+		// stack on entry is [subject, keys]; we lower it to a single
+		// dict copy that patternStoreName then captures.
+		//
+		// CPython: Python/codegen.c:6094 codegen_pattern_mapping star_target
+		c.addOpI(BUILD_MAP, 0, loc(p))
+		c.addOpI(SWAP, 3, loc(p))
+		c.addOpI(DICT_UPDATE, 2, loc(p))
+		c.addOpI(UNPACK_SEQUENCE, int32(len(keys)), loc(p))
+		remaining := len(keys)
+		for remaining > 0 {
+			c.addOpI(COPY, int32(1+remaining), loc(p))
+			c.addOpI(SWAP, 2, loc(p))
+			c.addOp(DELETE_SUBSCR, loc(p))
+			remaining--
+		}
 		return c.patternStoreName(p.Rest, pc, loc(p))
 	}
 	c.addOp(POP_TOP, loc(p))
@@ -532,10 +630,10 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	nargs := len(p.Patterns)
 	nattrs := len(p.KwdAttrs)
 	if nargs+nattrs > 1<<31-1 {
-		return fmt.Errorf("compile: too many sub-patterns in class pattern")
+		return c.errorAt(loc(p), "too many sub-patterns in class pattern")
 	}
 	if nattrs != len(p.KwdPatterns) {
-		return fmt.Errorf("compile: kwd attrs/patterns length mismatch")
+		return c.errorAt(loc(p), "kwd_attrs (%d) / kwd_patterns (%d) length mismatch in class pattern", nattrs, len(p.KwdPatterns))
 	}
 	if err := c.visitExpr(p.Cls); err != nil {
 		return err
@@ -543,7 +641,7 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	for i, a := range p.KwdAttrs {
 		for j := i + 1; j < nattrs; j++ {
 			if a == p.KwdAttrs[j] {
-				return fmt.Errorf("compile: attribute name %q repeated in class pattern", a)
+				return c.errorAt(loc(p.KwdPatterns[j]), "attribute name repeated in class pattern: %s", a)
 			}
 		}
 	}
@@ -580,66 +678,268 @@ func (c *Compiler) patternClass(p *ast.MatchClass, pc *patternContext) error {
 	return nil
 }
 
-// patternOr handles `case A | B | C`. Each alternative builds its
-// own fail-pop ladder; on a match we jump out, on total failure we
-// fall through to the surrounding fail-pop.
+// patternOr handles `case A | B | C`. Each alternative shares the
+// captured-store layout of the first; alternatives that bind names in
+// a different order get their stack slots rotated to match. The whole
+// OR keeps a COPY of the subject on top of stack across alternatives
+// so each alt can match against it without consuming.
 //
-// CPython: Python/codegen.c:L6113 codegen_pattern_or. The CPython
-// version also reconciles divergent capture sets across
-// alternatives. We surface a clear error if alternatives bind
-// different name sets and otherwise emit the basic chain.
+// CPython: Python/codegen.c:6120 codegen_pattern_or.
 func (c *Compiler) patternOr(p *ast.MatchOr, pc *patternContext) error {
 	end := c.newLabel()
 	size := len(p.Patterns)
-	if size == 0 {
-		return fmt.Errorf("compile: empty or-pattern")
+	if size < 2 {
+		return c.errorAt(loc(p), "or-pattern requires at least two alternatives")
 	}
-	var firstStores []string
+	oldStores := pc.stores
+	oldFailPop := pc.failPop
+	oldOnTop := pc.onTop
+	oldAllowIrrefutable := pc.allowIrrefutable
+	var control []string
 	for i, alt := range p.Patterns {
-		altStores := pc.stores
-		altFailPop := pc.failPop
-		altOnTop := pc.onTop
 		pc.stores = nil
 		pc.failPop = nil
+		pc.onTop = 0
+		pc.allowIrrefutable = (i == size-1) && oldAllowIrrefutable
+		c.addOpI(COPY, 1, loc(alt))
 		if err := c.visitPattern(alt, pc); err != nil {
 			return err
 		}
+		nstores := len(pc.stores)
 		if i == 0 {
-			firstStores = append([]string(nil), pc.stores...)
-		} else if !sameStores(firstStores, pc.stores) {
-			return fmt.Errorf("compile: alternative patterns bind different names")
+			control = append([]string(nil), pc.stores...)
+		} else {
+			if nstores != len(control) {
+				return c.errorAt(loc(alt), "alternative patterns bind different names")
+			}
+			if nstores > 0 {
+				for icontrol := nstores - 1; icontrol >= 0; icontrol-- {
+					name := control[icontrol]
+					istores := indexOf(pc.stores, name)
+					if istores < 0 {
+						return c.errorAt(loc(alt), "alternative patterns bind different names")
+					}
+					if icontrol != istores {
+						rotations := istores + 1
+						rotated := append([]string(nil), pc.stores[:rotations]...)
+						pc.stores = append(pc.stores[:0], pc.stores[rotations:]...)
+						insertAt := icontrol - istores
+						tail := append([]string(nil), pc.stores[insertAt:]...)
+						pc.stores = append(pc.stores[:insertAt], rotated...)
+						pc.stores = append(pc.stores, tail...)
+						for r := rotations; r > 0; r-- {
+							c.patternRotate(icontrol+1, loc(alt))
+						}
+					}
+				}
+			}
 		}
 		c.addOpJump(JUMP, end, loc(alt))
 		if err := c.emitAndResetFailPop(pc, loc(alt)); err != nil {
 			return err
 		}
-		pc.stores = altStores
-		pc.failPop = altFailPop
-		pc.onTop = altOnTop
 	}
+	pc.stores = oldStores
+	pc.failPop = oldFailPop
+	pc.onTop = oldOnTop
+	pc.allowIrrefutable = oldAllowIrrefutable
+	c.addOp(POP_TOP, loc(p))
 	if err := c.jumpToFailPop(pc, JUMP, loc(p)); err != nil {
 		return err
 	}
 	c.useLabel(end)
-	pc.stores = append(pc.stores, firstStores...)
+	nrots := len(control) + 1 + pc.onTop + len(pc.stores)
+	for _, name := range control {
+		c.patternRotate(nrots, loc(p))
+		for _, n := range pc.stores {
+			if n == name {
+				return c.errorAt(loc(p), "multiple assignments to name %q in pattern", name)
+			}
+		}
+		pc.stores = append(pc.stores, name)
+	}
+	c.addOp(POP_TOP, loc(p))
 	return nil
 }
 
-// sameStores returns true if two capture-name lists hold the same
-// names, in any order.
-func sameStores(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	count := make(map[string]int, len(a))
-	for _, n := range a {
-		count[n]++
-	}
-	for _, n := range b {
-		if count[n] == 0 {
-			return false
+func indexOf(s []string, v string) int {
+	for i, n := range s {
+		if n == v {
+			return i
 		}
-		count[n]--
 	}
-	return true
+	return -1
+}
+
+// mappingDedupKey is the canonical bucket every numeric value sharing
+// Python equality collapses into. Strings, bytes, and singletons take
+// their own kind so they cannot collide with a number.
+type mappingDedupKey struct {
+	kind byte
+	s    string
+	c    complex128
+}
+
+// foldedMappingKey returns the Python-value a mapping-pattern key
+// resolves to. CPython gets here from AST optimizer constant folding;
+// gopy folds the same three shapes (Constant, UnaryOp USub Constant,
+// BinOp real ± imaginary) inline.
+//
+// CPython: Python/ast_opt.c:457 fold_unaryop / fold_binop (folded prior
+// to codegen.c:5989 codegen_pattern_mapping_key)
+func foldedMappingKey(e ast.Expr) (any, bool) {
+	switch v := e.(type) {
+	case *ast.Constant:
+		return v.Value, true
+	case *ast.UnaryOp:
+		if v.Op != ast.USub {
+			return nil, false
+		}
+		c, ok := v.Operand.(*ast.Constant)
+		if !ok {
+			return nil, false
+		}
+		return negateConstValue(c.Value), true
+	case *ast.BinOp:
+		if v.Op != ast.Add && v.Op != ast.Sub {
+			return nil, false
+		}
+		left, lok := signedConstValue(v.Left)
+		if !lok {
+			return nil, false
+		}
+		rc, rok := v.Right.(*ast.Constant)
+		if !rok {
+			return nil, false
+		}
+		right := rc.Value
+		if v.Op == ast.Sub {
+			right = negateConstValue(right)
+		}
+		return addConstValues(left, right), true
+	}
+	return nil, false
+}
+
+// signedConstValue accepts a bare Constant or UnaryOp(USub, Constant)
+// and returns the folded numeric value. Used as the left-operand
+// helper for foldedMappingKey's BinOp arm.
+func signedConstValue(e ast.Expr) (any, bool) {
+	switch v := e.(type) {
+	case *ast.Constant:
+		return v.Value, true
+	case *ast.UnaryOp:
+		if v.Op != ast.USub {
+			return nil, false
+		}
+		c, ok := v.Operand.(*ast.Constant)
+		if !ok {
+			return nil, false
+		}
+		return negateConstValue(c.Value), true
+	}
+	return nil, false
+}
+
+func negateConstValue(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return -x
+	case float64:
+		return -x
+	case complex128:
+		return -x
+	case *big.Int:
+		return new(big.Int).Neg(x)
+	case bool:
+		if x {
+			return int64(-1)
+		}
+		return int64(0)
+	}
+	return v
+}
+
+func addConstValues(a, b any) any {
+	af, aok := toComplexValue(a)
+	bf, bok := toComplexValue(b)
+	if !aok || !bok {
+		return a
+	}
+	return af + bf
+}
+
+func toComplexValue(v any) (complex128, bool) {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return 1, true
+		}
+		return 0, true
+	case int64:
+		return complex(float64(x), 0), true
+	case float64:
+		return complex(x, 0), true
+	case complex128:
+		return x, true
+	case *big.Int:
+		f, _ := new(big.Float).SetInt(x).Float64()
+		return complex(f, 0), true
+	}
+	return 0, false
+}
+
+// normalizeMappingKey returns the dedup bucket for v. Numeric values
+// (bool, int, float, complex) collapse to the same kind so that
+// `{0: _, False: _}`, `{0: _, 0.0: _}`, `{0: _, 0j: _}`, and
+// `{0: _, -0: _}` all flag as duplicates the way CPython's PySet would.
+func normalizeMappingKey(v any) (mappingDedupKey, bool) {
+	switch x := v.(type) {
+	case nil:
+		return mappingDedupKey{kind: 'N'}, true
+	case bool, int64, float64, complex128:
+		c, _ := toComplexValue(x)
+		return mappingDedupKey{kind: 'n', c: c}, true
+	case *big.Int:
+		if x.IsInt64() {
+			f := float64(x.Int64())
+			return mappingDedupKey{kind: 'n', c: complex(f, 0)}, true
+		}
+		return mappingDedupKey{kind: 'I', s: x.String()}, true
+	case string:
+		return mappingDedupKey{kind: 's', s: x}, true
+	case []byte:
+		return mappingDedupKey{kind: 'b', s: string(x)}, true
+	}
+	return mappingDedupKey{}, false
+}
+
+// literalRepr returns a CPython-faithful repr() for the values that
+// reach mapping-pattern keys. Only the literal kinds get a custom
+// spelling; anything else falls back to %v which is good enough for
+// SyntaxError diagnostics.
+func literalRepr(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "None"
+	case bool:
+		if x {
+			return "True"
+		}
+		return "False"
+	case int64:
+		return fmt.Sprintf("%d", x)
+	case *big.Int:
+		return x.String()
+	case float64:
+		return fmt.Sprintf("%g", x)
+	case complex128:
+		if real(x) == 0 {
+			return fmt.Sprintf("%gj", imag(x))
+		}
+		return fmt.Sprintf("(%g+%gj)", real(x), imag(x))
+	case string:
+		return fmt.Sprintf("%q", x)
+	}
+	return fmt.Sprintf("%v", v)
 }

@@ -19,9 +19,31 @@ func init() {
 	register("__name__", typeGetName, typeSetName)
 	register("__qualname__", typeGetQualname, typeSetQualname)
 	register("__module__", typeGetModule, typeSetModule)
-	register("__bases__", typeGetBases, nil)
+	register("__bases__", typeGetBases, typeSetBases)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
+	register("__parameters__", typeGetParameters, typeSetParameters)
+	// CPython: Objects/typeobject.c:5915 type___subclasses___impl
+	SetTypeDescr(typeType, "__subclasses__", NewMethodDescr(typeType, "__subclasses__", typeSubclassesMeth))
+}
+
+// typeSubclassesMeth implements type.__subclasses__() -> list.
+//
+// CPython: Objects/typeobject.c:5915 type___subclasses___impl
+func typeSubclassesMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasses__' of 'type' object needs an argument")
+	}
+	t, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasses__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	subs := t.Subclasses()
+	items := make([]Object, len(subs))
+	for i, s := range subs {
+		items[i] = s
+	}
+	return NewList(items), nil
 }
 
 // typeGetName mirrors type_name. Heap types return ht_name verbatim;
@@ -169,6 +191,52 @@ func typeGetBases(o Object) (Object, error) {
 	return NewTuple(items), nil
 }
 
+// typeSetBases reassigns t.Bases and recomputes the MRO. Only allowed
+// on heap (user) types. typing.NamedTuple does this so the resulting
+// class can claim the user-supplied bases tuple (which may include
+// Generic) after _make_nmtuple has already produced a plain tuple
+// subclass.
+//
+// CPython: Objects/typeobject.c:1109 type_set_bases
+func typeSetBases(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__bases__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if !t.IsUser {
+		return fmt.Errorf("TypeError: can't set %s.__bases__", t.Name)
+	}
+	if v == nil {
+		return fmt.Errorf("TypeError: can't delete %s.__bases__", t.Name)
+	}
+	tup, ok := v.(*Tuple)
+	if !ok {
+		return fmt.Errorf("TypeError: can only assign tuple to %s.__bases__, not '%s'", t.Name, typeNameOf(v))
+	}
+	if tup.Len() == 0 {
+		return fmt.Errorf("TypeError: can only assign non-empty tuple to %s.__bases__", t.Name)
+	}
+	newBases := make([]*Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		b, ok := tup.Item(i).(*Type)
+		if !ok {
+			return fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
+		}
+		if b == t {
+			return fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
+		}
+		newBases = append(newBases, b)
+	}
+	t.Bases = newBases
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return err
+	}
+	t.MRO = mro
+	t.InvalidateVersionTag()
+	return nil
+}
+
 // typeGetMRO returns a tuple of t.MRO. Mirrors type_mro.
 //
 // CPython: Objects/typeobject.c:1183 type_get_mro
@@ -182,6 +250,46 @@ func typeGetMRO(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeGetParameters returns the class's __parameters__ tuple. Priority:
+// 1. TypingParameters set by typing.Generic.__init_subclass__ (traditional generics)
+// 2. TypeParams set from the PEP 695 class body (__type_params__)
+// 3. Empty tuple fallback
+//
+// CPython: Lib/typing.py:1209 Generic.__init_subclass__ sets cls.__parameters__
+// CPython: Include/cpython/typeobject.h tp_typeparams (PEP 695 source)
+func typeGetParameters(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if t.TypingParameters != nil {
+		return t.TypingParameters, nil
+	}
+	if t.TypeParams != nil {
+		return t.TypeParams, nil
+	}
+	return NewTuple(nil), nil
+}
+
+// typeSetParameters stores a __parameters__ tuple assigned by user code
+// (typically typing.Generic.__init_subclass__).
+//
+// CPython: Lib/typing.py:1209 cls.__parameters__ = tuple(tvars)
+func typeSetParameters(o Object, v Object) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if tup, ok2 := v.(*Tuple); ok2 {
+		t.TypingParameters = tup
+	} else if v == None() {
+		t.TypingParameters = nil
+	} else {
+		return fmt.Errorf("TypeError: __parameters__ must be a tuple")
+	}
+	return nil
 }
 
 // typeGetDoc returns the type's __doc__. Looks in the type's own

@@ -13,6 +13,8 @@
 package pegen
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/build"
 	perrors "github.com/tamnd/gopy/parser/errors"
@@ -31,6 +33,13 @@ const (
 	FlagTypeComments         = 0x0040
 	FlagAllowIncompleteInput = 0x0100
 )
+
+// IntMaxStrDigitsHook returns the current sys.int_max_str_digits limit.
+// Zero means unlimited. module/sys sets this during its init so the
+// parser can enforce the limit while building integer Constant nodes.
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+var IntMaxStrDigitsHook func() int32
 
 // StartRule selects the entry point of the generated parser table.
 // Mirrors the Py_*_input constants.
@@ -109,6 +118,37 @@ type Parser struct {
 	lastStmt       Location
 	farthestPos    int
 	pinnedErr      *perrors.SyntaxError
+	// pinnedFromTokenizer is set when pinnedErr came from an
+	// ERRORTOKEN dispatch (the lexer raised a structured error).
+	// Parser-side recordError must not overwrite it, mirroring
+	// CPython's _Pypegen_set_syntax_error which checks PyErr_Occurred
+	// before refining the message in the second pass.
+	//
+	// CPython: Parser/pegen_errors.c:416 _Pypegen_set_syntax_error
+	pinnedFromTokenizer bool
+	// unclosedBracketAtFill is set when the tokenizer reported
+	// E_EOF+level during fillToken (the source truncated cleanly
+	// inside an unclosed bracket with no prior hard syntax error).
+	// Used to distinguish "incomplete input" from "syntax error
+	// inside a bracket" when PyCF_ALLOW_INCOMPLETE_INPUT is set.
+	//
+	// CPython: Parser/pegen.c:218 fill_token E_EOF+level check
+	unclosedBracketAtFill bool
+	// typeIgnoreComments collects "# type: ignore" comments skipped
+	// during token advance. CPython records these in
+	// p->type_ignore_comments and folds them into Module.type_ignores.
+	//
+	// CPython: Parser/pegen.c:251 _PyPegen_fill_token TYPE_IGNORE loop
+	typeIgnoreComments []TypeIgnoreComment
+}
+
+// TypeIgnoreComment holds a single "# type: ignore" entry collected
+// while advancing tokens.
+//
+// CPython: Parser/pegen.c:256 growable_comment_array_add
+type TypeIgnoreComment struct {
+	Lineno int
+	Tag    string
 }
 
 // Location pins a (start, end) source span. The generated parser uses
@@ -127,6 +167,10 @@ type Location struct {
 //
 // CPython: Parser/pegen.c:1024 _PyPegen_Parser_New
 func New(tok *lexer.State, start StartRule, flags int) *Parser {
+	if tok != nil && flags&FlagTypeComments != 0 {
+		// CPython: Parser/pegen.c:815 tok->type_comments = (flags & PyPARSE_TYPE_COMMENTS) > 0
+		tok.SetTypeComments(true)
+	}
 	return &Parser{
 		tok:            tok,
 		startRule:      start,
@@ -145,16 +189,57 @@ func New(tok *lexer.State, start StartRule, flags int) *Parser {
 //
 // CPython: Parser/pegen.c:62 _PyPegen_fill_token
 // CPython: Parser/lexer/lexer.c PyToken_OneChar / TwoChars / ThreeChars
+// TypeIgnoreComments returns the "# type: ignore" entries collected
+// during parsing. Called by the Module-building action to populate
+// Module.type_ignores.
+//
+// CPython: Parser/pegen.c:831 Parser_new p->type_ignore_comments
+func (p *Parser) TypeIgnoreComments() []TypeIgnoreComment {
+	return p.typeIgnoreComments
+}
+
 func (p *Parser) fillToken() int {
 	if p.errorIndicator {
 		return -1
 	}
+	if p.tok == nil {
+		return -1
+	}
+restart:
 	tk := p.tok.Get()
 	kind := tk.Kind
+	// Record and skip "# type: ignore" comments just as CPython does in
+	// _PyPegen_fill_token. The tag is the bytes after "ignore".
+	//
+	// CPython: Parser/pegen.c:251 _PyPegen_fill_token TYPE_IGNORE loop
+	if kind == token.TYPE_IGNORE {
+		tag := string(tk.Bytes)
+		p.typeIgnoreComments = append(p.typeIgnoreComments, TypeIgnoreComment{
+			Lineno: tk.Start.Line,
+			Tag:    tag,
+		})
+		goto restart
+	}
 	if kind == token.OP {
 		if exact, ok := opTokenType[string(tk.Bytes)]; ok {
 			kind = exact
 		}
+	}
+	// Single-input mode: when the lexer hands us the first ENDMARKER
+	// and the parser has already consumed at least one real token,
+	// rewrite it to NEWLINE so `statement_newline: compound_stmt
+	// NEWLINE` matches even though the source ended on a DEDENT (or
+	// on a non-newline char like "x"). Mirrors the C fill_token arm
+	// that also primes the lexer with a -indent pendin so the
+	// follow-up calls flush DEDENTs before the real ENDMARKER.
+	//
+	// CPython: Parser/pegen.c:268 _PyPegen_fill_token single-input
+	if p.startRule == StartSingle && kind == token.ENDMARKER && p.parsingStarted {
+		kind = token.NEWLINE
+		p.parsingStarted = false
+		p.tok.ForceDedentsAtEOF()
+	} else if kind != token.ENDMARKER {
+		p.parsingStarted = true
 	}
 	t := &Token{
 		Type:     kind,
@@ -178,8 +263,38 @@ func (p *Parser) fillToken() int {
 	// SyntaxError.
 	if kind == token.ERRORTOKEN {
 		p.errorIndicator = true
-		if p.pinnedErr == nil {
+		// Only pin when the lexer stored a specific error. A bare
+		// ERRORTOKEN with no stored message (e.g. an unrecognized
+		// character like `$` inside an f-string expression) must leave
+		// pinnedErr nil so the grammar's error-recovery rules can fire
+		// and produce the context-appropriate message ("f-string:
+		// expecting '=', or '!', or ':', or '}'"). Callers that reach
+		// the top of the grammar without a pinned error fall through to
+		// SetSyntaxError which emits "invalid syntax".
+		//
+		// CPython: Parser/pegen.c:218 _PyPegen_fill_token
+		if p.pinnedErr == nil && p.tok.Err() != nil {
 			p.pinnedErr = tokenizerSyntaxError(p.tok, t)
+			p.pinnedFromTokenizer = true
+		} else if p.pinnedErr == nil && p.tok.Done() == lexer.DoneEOF && p.tok.Level() > 0 {
+			// EOF with an unclosed paren: pin "'{' was never closed" at
+			// fill time. CPython's _Pypegen_tokenizer_error handles the
+			// E_EOF+level case by calling raise_unclosed_parentheses_error
+			// immediately, before any grammar rule fires. This blocks the
+			// second pass from overriding the message with a generic
+			// "f-string: expecting ..." from invalid_* rules.
+			//
+			// CPython: Parser/pegen_errors.c:81 case E_EOF: tok->level → raise_unclosed_parentheses_error
+			p.raiseUnclosedParenthesesError()
+			// Record that the unclosed bracket was the PRIMARY failure
+			// (not a secondary cleanup after a grammar error). This lets
+			// runParse promote to _IncompleteInputError when
+			// PyCF_ALLOW_INCOMPLETE_INPUT is set. If errorIndicator was
+			// already true (grammar error came first), this path is
+			// guarded by `p.pinnedErr == nil` so it won't be reached.
+			//
+			// CPython: Parser/peg_api.c compute_parser_flags / E_EOF+level
+			p.unclosedBracketAtFill = true
 		}
 		return -1
 	}
@@ -199,16 +314,29 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 		storedMsg = stored.Message
 		if stored.Pos.Line > 0 {
 			pos.Lineno = stored.Pos.Line
-		}
-		if stored.Pos.Col > 0 {
 			pos.ColOff = stored.Pos.Col
+			// CPython's recordStringError pins both start and end at
+			// the opening quote (Parser/lexer/lexer.c:1175); take the
+			// stored EndPos when set, otherwise drop end_col to -1 so
+			// the traceback renders a single caret instead of striping
+			// a range across the rest of the source line.
+			//
+			// CPython: Parser/pegen_errors.c:123 RAISE_ERROR_KNOWN_LOCATION
+			pos.EndLine = stored.EndPos.Line
+			if stored.EndPos.Line == 0 {
+				pos.EndLine = stored.Pos.Line
+			}
+			pos.EndCol = -1
 		}
 	}
 	kind := perrors.KindSyntax
 	msg := ""
 	switch st.Done() {
 	case lexer.DoneToken:
-		msg = "invalid token"
+		// CPython maps E_TOKEN to "invalid syntax", not "invalid token".
+		//
+		// CPython: Parser/pegen_errors.c:79 E_TOKEN → "invalid syntax"
+		msg = "invalid syntax"
 	case lexer.DoneDedent:
 		kind = perrors.KindIndentation
 		msg = "unindent does not match any outer indentation level"
@@ -223,6 +351,36 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 	case lexer.DoneColumnOverflow:
 		kind = perrors.KindOverflow
 		msg = "Parser column offset overflow - source line is too big"
+	case lexer.DoneEOF:
+		// Unterminated input: backslash-continuation at EOF, or
+		// unclosed paren level. CPython's _Pypegen_tokenizer_error
+		// raises "unexpected EOF while parsing" for the no-level case
+		// and "'%c' was never closed" when a paren is still open.
+		//
+		// CPython: Parser/pegen_errors.c:84 E_EOF branch
+		if st.Level() > 0 {
+			line, col, ch := st.ParenInfo(st.Level())
+			pos.Lineno = line
+			pos.ColOff = col
+			pos.EndLine = line
+			pos.EndCol = -1
+			msg = fmt.Sprintf("'%c' was never closed", ch)
+		} else {
+			// CPython's _PyPegen_raise_error sees the ERRORTOKEN's
+			// col_offset == -1, recomputes it as (tok->cur -
+			// tok->line_start), then runs the byte-to-character
+			// conversion in raise_error_known_location so the caret
+			// lands one column past the trailing backslash. text
+			// comes from line_start..inp WITH the trailing '\n' the
+			// translate_newlines pass appended.
+			//
+			// CPython: Parser/pegen_errors.c:248 col_offset == -1 branch
+			// CPython: Parser/pegen_errors.c:362 error_line from line_start..inp
+			pos.ColOff = st.EOFCharOffset()
+			pos.EndLine = pos.Lineno
+			pos.EndCol = -1
+			msg = "unexpected EOF while parsing"
+		}
 	default:
 		if storedMsg != "" {
 			msg = storedMsg
@@ -236,6 +394,18 @@ func tokenizerSyntaxError(st *lexer.State, tk *Token) *perrors.SyntaxError {
 	text := ""
 	if stored != nil {
 		text = stored.Text
+	}
+	if text == "" && st.Done() == lexer.DoneEOF && st.Level() == 0 {
+		// CPython routes string-input EOF through the fallback in
+		// _PyPegen_raise_error_known_location that decodes from
+		// tok->line_start to tok->inp, so the trailing '\n' that
+		// translate_newlines appended is preserved on SyntaxError.text.
+		// The file-input path (ProgramDecodedTextObject) strips it; we
+		// land on the string-input shape because gopy serves source from
+		// the lexer buffer, not from a re-opened file.
+		//
+		// CPython: Parser/pegen_errors.c:362 PyUnicode_DecodeUTF8(line_start, inp - line_start, "replace")
+		text = st.EOFLineText()
 	}
 	return &perrors.SyntaxError{
 		Kind:     kind,
@@ -353,6 +523,35 @@ func (p *Parser) Span(startMark int) ast.Pos {
 // Reset rewinds the parse to a previously-taken Mark.
 func (p *Parser) Reset(m int) { p.mark = m }
 
+// ResetForErrorPass clears the memo cache on every cached token and
+// rewinds the mark so the second parse pass starts from scratch with
+// invalid-rule diagnostics active. CPython does the same between its
+// two passes; without it the first pass's nil-memo entries are reused
+// and the second pass returns immediately without running the deeper
+// invalid_* rules.
+//
+// CPython: Parser/pegen.c:879 reset_parser_state_for_error_pass
+func (p *Parser) ResetForErrorPass() {
+	for i := 0; i < p.fill; i++ {
+		p.tokens[i].memo = nil
+	}
+	p.mark = 0
+	p.callInvalid = true
+	p.lastStmt = Location{}
+	// Clear errorIndicator when no specific error is pinned so the
+	// second pass can run invalid_* rules and produce context-aware
+	// messages. This mirrors CPython's reset_parser_state_for_error_pass
+	// which clears p->error_indicator when no Python exception is set.
+	// If pinnedErr is already set (e.g. tokenizer-raised TabError), keep
+	// errorIndicator true so the second pass short-circuits and the
+	// original structured error is preserved.
+	//
+	// CPython: Parser/pegen.c:879 reset_parser_state_for_error_pass
+	if p.pinnedErr == nil {
+		p.errorIndicator = false
+	}
+}
+
 // Peek returns the token at the current mark, filling the buffer if
 // needed. Returns nil at EOF.
 //
@@ -432,6 +631,64 @@ func (p *Parser) FarthestToken() *Token {
 	return p.tokens[idx]
 }
 
+// PrevTokenLevel returns the paren-nesting Level of the most-recently
+// consumed token (p.tokens[p.mark-1].Level). The invalid_expression
+// rule uses this to restrict the "perhaps you forgot a comma?" error
+// to positions inside parentheses only.
+//
+// CPython: Grammar/python.gram invalid_expression alt
+// p->tokens[p->mark-1]->level == 0 guard
+func (p *Parser) PrevTokenLevel() int {
+	if p.mark <= 0 || p.mark > len(p.tokens) {
+		return 0
+	}
+	return p.tokens[p.mark-1].Level
+}
+
 // Tokenizer returns the lexer state driving this parser. The driver
 // reads the source buffer through it to populate SyntaxError.text.
 func (p *Parser) Tokenizer() *lexer.State { return p.tok }
+
+// LastStmtLineno returns the line number of the last successfully
+// parsed statement, used for SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:928 p->last_stmt_location.lineno
+func (p *Parser) LastStmtLineno() int { return p.lastStmt.Lineno }
+
+// LastStmtColOff returns the column offset of the last successfully
+// parsed statement, used for SyntaxError._metadata.
+//
+// CPython: Parser/pegen.c:929 p->last_stmt_location.col_offset
+func (p *Parser) LastStmtColOff() int { return p.lastStmt.ColOff }
+
+// IsUnclosedBracketError reports whether e is a "'x' was never closed"
+// error that originated from a clean truncation (no prior grammar
+// error). When PyCF_ALLOW_INCOMPLETE_INPUT is set, only this kind of
+// error should be promoted to _IncompleteInputError.
+//
+// CPython: Parser/peg_api.c compute_parser_flags / _Pypegen_check_tokenizer
+// CPython: Parser/pegen.c:218 fill_token E_EOF+level → raise_unclosed_parentheses_error
+func (p *Parser) IsUnclosedBracketError(e *perrors.SyntaxError) bool {
+	return p.unclosedBracketAtFill
+}
+
+// IsEndOfSource reports whether the tokenizer is at end-of-source
+// (no incomplete brackets). Used by Dispatch to decide whether to
+// promote a first-pass failure to _IncompleteInputError when
+// PyCF_ALLOW_INCOMPLETE_INPUT is set, matching CPython's behavior of
+// bypassing the second (invalid_*) pass for clean truncations.
+//
+// CPython: Parser/pegen.c:896 _is_end_of_source
+func (p *Parser) IsEndOfSource() bool {
+	if p.tok == nil {
+		return false
+	}
+	done := p.tok.Done()
+	return done == lexer.DoneEOF || done == lexer.DoneEOFS || done == lexer.DoneEOLS
+}
+
+// AllowIncompleteInput reports whether the FlagAllowIncompleteInput
+// parser flag is set.
+func (p *Parser) AllowIncompleteInput() bool {
+	return p.flags&FlagAllowIncompleteInput != 0
+}

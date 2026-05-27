@@ -12,12 +12,16 @@ import (
 )
 
 // setEntry is one slot in the set's open-addressed table.
+// dummy marks a slot that was deleted: the probe chain must
+// continue past it (tombstone) so that previously inserted entries
+// further in the chain are still reachable.
 //
-// CPython: Objects/setobject.c:L78 setentry
+// CPython: Objects/setobject.c:L78 setentry (DUMMY sentinel)
 type setEntry struct {
-	hash int64
-	key  Object
-	used bool
+	hash  int64
+	key   Object
+	used  bool
+	dummy bool // tombstone: deleted but probe chain continues
 }
 
 // Set is the mutable Python set type.
@@ -26,7 +30,8 @@ type setEntry struct {
 type Set struct {
 	Header
 	entries    []setEntry
-	used       int
+	used       int // live entries only
+	fill       int // live + tombstone entries (CPython: so->fill)
 	frozen     bool
 	cachedHash int64 // only valid for frozenset when hashValid is true
 	hashValid  bool
@@ -49,6 +54,8 @@ func init() {
 	SetType.Str = setRepr
 	SetType.Hash = nil // sets are not hashable
 	SetType.RichCmp = setRichCmp
+	SetType.TpFlags |= TpFlagMatchSelf
+	FrozensetType.TpFlags |= TpFlagMatchSelf
 	SetType.Iter = setIter
 	SetType.Sequence = &SequenceMethods{
 		Length:   setLen,
@@ -108,6 +115,10 @@ func init() {
 	SetTypeDescr(FrozensetType, "union", NewMethodDescr(FrozensetType, "union", setUnionMethod))
 	SetTypeDescr(FrozensetType, "issubset", NewMethodDescr(FrozensetType, "issubset", setIsSubsetMethod))
 	SetTypeDescr(FrozensetType, "issuperset", NewMethodDescr(FrozensetType, "issuperset", setIsSupersetMethod))
+	SetTypeDescr(FrozensetType, "difference", NewMethodDescr(FrozensetType, "difference", setDifferenceMethod))
+	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
+	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
+	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
 }
 
 // setTraverse visits each element of a set or frozenset.
@@ -190,7 +201,10 @@ func (s *Set) Discard(key Object) error {
 	if err != nil || !ok {
 		return err
 	}
-	s.entries[idx] = setEntry{}
+	// Mark as tombstone so probe chains threading through this slot
+	// remain intact. grow() rebuilds the table without tombstones.
+	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	return nil
 }
@@ -224,12 +238,25 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 	mask := uint64(len(s.entries) - 1)
 	i := uint64(h) & mask
 	perturb := uint64(h)
+	firstDummy := -1 // index of first tombstone slot in probe chain
 	for {
 		e := &s.entries[i]
 		if !e.used {
-			return int(i), false, nil
-		}
-		if e.hash == h {
+			if e.dummy {
+				// Tombstone: probe chain continues, but remember this
+				// slot as a candidate for insertion.
+				// CPython: Objects/setobject.c:L140 DUMMY sentinel
+				if firstDummy < 0 {
+					firstDummy = int(i)
+				}
+			} else {
+				// Genuinely empty: chain ends here.
+				if firstDummy >= 0 {
+					return firstDummy, false, nil
+				}
+				return int(i), false, nil
+			}
+		} else if e.hash == h {
 			eq, err := RichCmpBool(e.key, key, CompareEQ)
 			if err != nil {
 				return 0, false, err
@@ -245,18 +272,26 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 }
 
 // insert places (h, key) into the table, growing first if the
-// fill ratio crosses 2/3. Mirrors CPython's set_add_entry which
-// resizes before placing the new element.
+// fill ratio crosses 3/5. fill = used + tombstones; mirrors CPython's
+// set_add_entry which resizes on fill*5 > (mask+1)*3.
 //
 // CPython: Objects/setobject.c:220 set_add_entry
 func (s *Set) insert(h int64, key Object) {
-	if (s.used+1)*3 >= len(s.entries)*2 {
+	// Resize when fill (used+tombstones) exceeds 60% of capacity.
+	// CPython: Objects/setobject.c:391 (so->fill+1)*5 > (so->mask+1)*3
+	if (s.fill+1)*5 >= len(s.entries)*3 {
 		s.grow()
 	}
 	idx, ok, _ := s.lookup(h, key)
+	wasTombstone := !s.entries[idx].used && s.entries[idx].dummy
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	if !ok {
 		s.used++
+		// Only increment fill when replacing a genuinely empty slot.
+		// Tombstone → live does not change fill (tombstone was already counted).
+		if !wasTombstone {
+			s.fill++
+		}
 	}
 }
 
@@ -269,12 +304,20 @@ func (s *Set) insertClean(h int64, key Object) {
 	idx, _, _ := s.lookup(h, key)
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	s.used++
+	s.fill++
 }
 
 func (s *Set) grow() {
 	old := s.entries
-	s.entries = make([]setEntry, len(old)*2)
+	// CPython: Objects/setobject.c:266 set_table_resize
+	// New table is 4x used (so post-rehash fill == used, no tombstones).
+	newSize := setMinSize
+	for newSize < s.used*4 {
+		newSize <<= 1
+	}
+	s.entries = make([]setEntry, newSize)
 	s.used = 0
+	s.fill = 0
 	for _, e := range old {
 		if e.used {
 			s.insertClean(e.hash, e.key)
@@ -378,8 +421,9 @@ func shuffleBits(h uint64) uint64 {
 	return ((h ^ 89869747) ^ (h << 16)) * 3644798167
 }
 
-// setRichCmp implements == and != for both set and frozenset by
-// checking equal cardinality and mutual containment.
+// setRichCmp implements all comparison ops for both set and frozenset.
+// EQ/NE use mutual containment. Ordering ops are subset/superset checks:
+// a <= b means a is a subset of b; a < b is a proper subset.
 //
 // CPython: Objects/setobject.c:L1683 set_richcompare
 func setRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -404,8 +448,57 @@ func setRichCmp(a, b Object, op CompareOp) (Object, error) {
 			return nil, err
 		}
 		return NewBool(!eq), nil
+	case CompareLE:
+		sub, err := setIsSubset(as, bs)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareGE:
+		sub, err := setIsSubset(bs, as)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareLT:
+		if as.used >= bs.used {
+			return False(), nil
+		}
+		sub, err := setIsSubset(as, bs)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
+	case CompareGT:
+		if as.used <= bs.used {
+			return False(), nil
+		}
+		sub, err := setIsSubset(bs, as)
+		if err != nil {
+			return nil, err
+		}
+		return NewBool(sub), nil
 	}
 	return NotImplemented(), nil
+}
+
+// setIsSubset reports whether every element of a is contained in b.
+//
+// CPython: Objects/setobject.c:L1641 set_issubset_impl
+func setIsSubset(a, b *Set) (bool, error) {
+	if a.used > b.used {
+		return false, nil
+	}
+	for _, e := range a.entries {
+		if !e.used {
+			continue
+		}
+		ok, err := b.Contains(e.key)
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func setsEqual(a, b *Set) (bool, error) {
@@ -685,20 +778,7 @@ func setDiscardMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: discard() takes exactly one argument")
 	}
-	s := args[0].(*Set)
-	h, err := Hash(args[1])
-	if err != nil {
-		return nil, err
-	}
-	idx, ok, err := s.lookup(h, args[1])
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		s.entries[idx] = setEntry{used: false}
-		s.used--
-	}
-	return None(), nil
+	return None(), args[0].(*Set).Discard(args[1])
 }
 
 func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -715,9 +795,15 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("KeyError: %v", args[1])
+		r, err2 := Repr(args[1])
+		if err2 != nil {
+			r = "?"
+		}
+		return nil, fmt.Errorf("KeyError: %s", r)
 	}
-	s.entries[idx] = setEntry{used: false}
+	// Tombstone: mark deleted but keep probe chain intact.
+	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	return None(), nil
 }
@@ -729,7 +815,7 @@ func setPopMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	for i, e := range s.entries {
 		if e.used {
-			s.entries[i] = setEntry{used: false}
+			s.entries[i] = setEntry{dummy: true}
 			s.used--
 			return e.key, nil
 		}
@@ -744,6 +830,7 @@ func setClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	s.entries = make([]setEntry, setMinSize)
 	s.used = 0
+	s.fill = 0
 	return None(), nil
 }
 
@@ -800,17 +887,43 @@ func setIntersectionMethod(args []Object, _ map[string]Object) (Object, error) {
 	s := args[0].(*Set)
 	result := s
 	for _, other := range args[1:] {
-		os, ok := toSet(other)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: intersection() argument must be a set")
-		}
 		var err error
-		result, err = setIntersect(result, os)
+		if os, ok := toSet(other); ok {
+			result, err = setIntersect(result, os)
+		} else {
+			result, err = setIntersectIterable(result, other)
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	return result, nil
+}
+
+// setIntersectIterable intersects a set with an arbitrary iterable,
+// mirroring CPython's set_intersection fast path for non-set iterables.
+//
+// CPython: Objects/setobject.c:1350 set_intersection
+func setIntersectIterable(a *Set, other Object) (*Set, error) {
+	items, err := IterToSlice(other)
+	if err != nil {
+		return nil, err
+	}
+	out := NewSet()
+	for _, item := range items {
+		ok, err := a.Contains(item)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			h, err := Hash(item)
+			if err != nil {
+				return nil, err
+			}
+			out.insert(h, item)
+		}
+	}
+	return out, nil
 }
 
 func setUnionMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -873,16 +986,40 @@ func setIsSupersetMethod(args []Object, _ map[string]Object) (Object, error) {
 	return setIsSubsetMethod([]Object{args[1], args[0]}, nil)
 }
 
+// setIsDisjointMethod implements set.isdisjoint(other). CPython accepts any
+// iterable for other; when other is a set or frozenset the Contains fast
+// path is used, otherwise each element from other is hashed and looked up.
+//
+// CPython: Objects/setobject.c:1424 set_isdisjoint_impl
 func setIsDisjointMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: isdisjoint() takes exactly one argument")
 	}
-	a, b := args[0].(*Set), args[1].(*Set)
-	for _, e := range a.entries {
-		if !e.used {
-			continue
+	a := args[0].(*Set)
+	other := args[1]
+	if b, ok := other.(*Set); ok {
+		for _, e := range a.entries {
+			if !e.used {
+				continue
+			}
+			ok, err := b.Contains(e.key)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return False(), nil
+			}
 		}
-		ok, err := b.Contains(e.key)
+		return True(), nil
+	}
+	// Generic iterable: iterate other and check membership in a.
+	items, err := SequenceList(other)
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: isdisjoint() argument is not iterable")
+	}
+	for i := 0; i < items.Len(); i++ {
+		item := items.Item(i)
+		ok, err := a.Contains(item)
 		if err != nil {
 			return nil, err
 		}

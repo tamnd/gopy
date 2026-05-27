@@ -17,6 +17,8 @@ import (
 //
 // CPython: Python/codegen.c:L2774 codegen_try
 func (c *Compiler) visitTry(s *ast.Try) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	if len(s.Finalbody) > 0 {
 		return c.visitTryFinally(s)
 	}
@@ -27,6 +29,8 @@ func (c *Compiler) visitTry(s *ast.Try) error {
 //
 // CPython: Python/codegen.c:L2782 codegen_try_star
 func (c *Compiler) visitTryStar(s *ast.TryStar) error {
+	c.unit().InConditionalBlock++
+	defer func() { c.unit().InConditionalBlock-- }()
 	if len(s.Finalbody) > 0 {
 		return c.visitTryStarFinally(s)
 	}

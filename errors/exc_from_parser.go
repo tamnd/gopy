@@ -24,6 +24,9 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 		typ = PyExc_IndentationError
 	case parsererrors.KindTab:
 		typ = PyExc_TabError
+	case parsererrors.KindIncompleteInput:
+		// CPython: Objects/exceptions.c _IncompleteInputError (SyntaxError subclass)
+		typ = PyExc_IncompleteInputError
 	}
 	filename := objects.None()
 	if se.Filename != "" {
@@ -46,17 +49,21 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 			text = objects.NewStr(se.Text)
 		}
 	}
+	// SyntaxError.offset and .end_offset are 1-indexed (CPython:
+	// pegen_errors.c:258 col_offset + 1). ColOff is 0-based (same as
+	// ast.col_offset), so we add 1 and allow column 0 (col_offset=-1 is
+	// the sentinel for "unknown" in CPython; -1 means truly absent).
 	offset := objects.None()
-	if se.Pos.ColOff > 0 {
-		offset = objects.NewInt(int64(se.Pos.ColOff))
+	if se.Pos.ColOff >= 0 {
+		offset = objects.NewInt(int64(se.Pos.ColOff + 1))
 	}
 	endLineno := objects.None()
 	if se.Pos.EndLine > 0 {
 		endLineno = objects.NewInt(int64(se.Pos.EndLine))
 	}
 	endOffset := objects.None()
-	if se.Pos.EndCol > 0 {
-		endOffset = objects.NewInt(int64(se.Pos.EndCol))
+	if se.Pos.EndCol >= 0 {
+		endOffset = objects.NewInt(int64(se.Pos.EndCol + 1))
 	}
 	lineno := objects.None()
 	if se.Pos.Lineno > 0 {
@@ -77,6 +84,19 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 		return New(typ, objects.NewTuple([]objects.Object{
 			objects.NewStr(se.Message),
 		}))
+	}
+	// Populate _metadata so traceback.py's _find_keyword_typos can suggest
+	// "Did you mean X?" corrections for keyword-like names in SyntaxErrors.
+	// Format matches CPython's Py_BuildValue("(iiN)", ...) call.
+	//
+	// CPython: Python/errors.c:902 _PyErr_SetSyntaxErrorMetadata
+	// CPython: Lib/traceback.py:793 _find_keyword_typos
+	if se.SourceText != "" && exc.SyntaxErr != nil {
+		exc.SyntaxErr.Metadata = objects.NewTuple([]objects.Object{
+			objects.NewInt(int64(se.LastStmtLineno)),
+			objects.NewInt(int64(se.LastStmtColOff)),
+			objects.NewStr(se.SourceText),
+		})
 	}
 	return exc
 }

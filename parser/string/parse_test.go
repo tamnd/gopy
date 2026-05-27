@@ -111,7 +111,10 @@ func TestUnknownEscapeWarns(t *testing.T) {
 	if len(r.Warnings) != 1 {
 		t.Fatalf("warnings = %v", r.Warnings)
 	}
-	if r.Warnings[0] != `invalid escape sequence '\q'` {
+	want := "\"\\q\" is an invalid escape sequence. " +
+		"Such sequences will not work in the future. " +
+		"Did you mean \"\\\\q\"? A raw string is also an option."
+	if r.Warnings[0] != want {
 		t.Errorf("warning text = %q", r.Warnings[0])
 	}
 }

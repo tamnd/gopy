@@ -47,7 +47,7 @@ const (
 // nameOp picks the (opcode, pool) pair based on the name's symtable
 // scope. Mirrors the dispatch table in codegen_nameop.
 //
-// CPython: Python/codegen.c:L3186 codegen_nameop
+// CPython: Python/codegen.c:3186 codegen_nameop
 func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 	// Mangle against the enclosing class name carried on the active
 	// unit. Inside a method, the symtable already records names like
@@ -58,6 +58,7 @@ func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 	mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
 	scope := c.scope.GetScope(mangled)
 	inFunc := c.scope.Type == symtable.FunctionBlock
+	canSeeClass := c.scope.CanSeeClassScope
 
 	switch scope {
 	case symtable.Local:
@@ -66,13 +67,36 @@ func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 		}
 		return c.emitNamed(mangled, mode, l)
 	case symtable.Cell, symtable.Free:
+		// In a CanSeeClassScope block (type alias body, generic scope),
+		// a deref load uses __classdict__ + LOAD_FROM_DICT_OR_DEREF so
+		// the class dict shadows the closure cell, mirroring CPython's
+		// "ste_can_see_class_scope" DEREF arm.
+		//
+		// CPython: Python/codegen.c:3225 codegen_load_classdict_freevar arm
+		if canSeeClass && mode == opLoad {
+			if err := c.emitLoadClassdict(l); err != nil {
+				return err
+			}
+			return c.emitDerefFromDict(mangled, l)
+		}
 		return c.emitDeref(mangled, mode, l)
 	case symtable.GlobalExplicit:
 		return c.emitGlobal(mangled, mode, l)
 	case symtable.GlobalImplicit:
-		// At function scope, GlobalImplicit prints LOAD_GLOBAL; at
-		// module/class scope, the same scope value resolves to
-		// LOAD_NAME because the namespace is the module dict.
+		// At function scope, GlobalImplicit emits LOAD_GLOBAL; at
+		// module/class scope it resolves to LOAD_NAME.
+		// In a CanSeeClassScope block, loads go through __classdict__
+		// + LOAD_FROM_DICT_OR_GLOBALS so class members are visible.
+		//
+		// CPython: Python/codegen.c:3251 ste_can_see_class_scope GLOBAL_IMPLICIT arm
+		if canSeeClass && mode == opLoad {
+			if err := c.emitLoadClassdict(l); err != nil {
+				return err
+			}
+			pool := poolNames
+			c.addOpName(LOAD_FROM_DICT_OR_GLOBALS, &pool, mangled, l)
+			return nil
+		}
 		if inFunc {
 			return c.emitGlobal(mangled, mode, l)
 		}
@@ -81,12 +105,50 @@ func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 		// 0 means the analyze pass left no scope. CPython treats
 		// this as implicit global, so apply the same module / class
 		// distinction.
+		if canSeeClass && mode == opLoad {
+			if err := c.emitLoadClassdict(l); err != nil {
+				return err
+			}
+			pool := poolNames
+			c.addOpName(LOAD_FROM_DICT_OR_GLOBALS, &pool, mangled, l)
+			return nil
+		}
 		if inFunc {
 			return c.emitGlobal(mangled, mode, l)
 		}
 		return c.emitNamed(mangled, mode, l)
 	}
 	return fmt.Errorf("compile: name %q has unknown scope %v", name, scope)
+}
+
+// emitLoadClassdict emits LOAD_DEREF __classdict__ from freevars,
+// used as the prefix for LOAD_FROM_DICT_OR_* in CanSeeClassScope blocks.
+//
+// CPython: Python/codegen.c:3179 codegen_load_classdict_freevar
+func (c *Compiler) emitLoadClassdict(l ast.Pos) error {
+	pool := poolFreeVars
+	idx := c.poolIndex(&pool, "__classdict__")
+	idx += len(c.unit().CellVars)
+	c.seq().Addop(LOAD_DEREF, int32(idx), l)
+	return nil
+}
+
+// emitDerefFromDict emits LOAD_FROM_DICT_OR_DEREF for the named variable,
+// used after emitLoadClassdict in CanSeeClassScope blocks.
+//
+// CPython: Python/codegen.c:3225 LOAD_FROM_DICT_OR_DEREF arm
+func (c *Compiler) emitDerefFromDict(name string, l ast.Pos) error {
+	scope := c.scope.GetScope(name)
+	pool := poolCellVars
+	if scope == symtable.Free {
+		pool = poolFreeVars
+	}
+	idx := c.poolIndex(&pool, name)
+	if scope == symtable.Free {
+		idx += len(c.unit().CellVars)
+	}
+	c.seq().Addop(LOAD_FROM_DICT_OR_DEREF, int32(idx), l)
+	return nil
 }
 
 // emitFastLocal emits LOAD_FAST / STORE_FAST / DELETE_FAST against
@@ -141,15 +203,6 @@ func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 // CPython: Python/flowgraph.c:3844 fix_cell_offsets
 func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	scope := c.scope.GetScope(name)
-	var op Opcode
-	switch mode {
-	case opLoad:
-		op = LOAD_DEREF
-	case opStore:
-		op = STORE_DEREF
-	case opDelete:
-		op = DELETE_DEREF
-	}
 	pool := poolCellVars
 	if scope == symtable.Free {
 		pool = poolFreeVars
@@ -157,6 +210,28 @@ func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	idx := c.poolIndex(&pool, name)
 	if scope == symtable.Free {
 		idx += len(c.unit().CellVars)
+	}
+	var op Opcode
+	switch mode {
+	case opLoad:
+		// In a class body, a deref load goes through
+		// LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF so a class-level
+		// `locals()["x"] = ...` can shadow the closure cell. Comprehensions
+		// inlined into the class body keep plain LOAD_DEREF, but gopy does
+		// not inline comprehensions today so the inlined-comp branch is
+		// inert here.
+		//
+		// CPython: Python/codegen.c:3215 codegen_nameop (ClassBlock arm)
+		if c.scope.Type == symtable.ClassBlock {
+			c.seq().Addop(LOAD_LOCALS, 0, l)
+			op = LOAD_FROM_DICT_OR_DEREF
+		} else {
+			op = LOAD_DEREF
+		}
+	case opStore:
+		op = STORE_DEREF
+	case opDelete:
+		op = DELETE_DEREF
 	}
 	c.seq().Addop(op, int32(idx), l)
 	return nil

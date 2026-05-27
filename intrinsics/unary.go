@@ -56,11 +56,22 @@ func Unary1InvalidFn(ts *state.Thread, v objects.Object) (objects.Object, error)
 	return nil, errors.New("intrinsics: invalid unary intrinsic id 0")
 }
 
+// PrintExprHook is installed by module/sys.init so CALL_INTRINSIC_1
+// PRINT can resolve sys.displayhook without an import cycle from
+// intrinsics into module/sys. nil indicates the sys module has not yet
+// been wired (e.g. unit tests that build the table in isolation).
+//
+// CPython: Python/intrinsics.c:28 print_expr
+var PrintExprHook func(objects.Object) (objects.Object, error)
+
 // UnaryPrint calls sys.displayhook on v (REPL print path).
 //
 // CPython: Python/intrinsics.c print_expr
 func UnaryPrint(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryPrint", "sys.displayhook lives in 1651")
+	if PrintExprHook == nil {
+		return nil, errors.New("RuntimeError: lost sys.displayhook")
+	}
+	return PrintExprHook(v)
 }
 
 // UnaryImportStar implements `from x import *`.
@@ -144,36 +155,118 @@ func UnaryListToTuple(ts *state.Thread, v objects.Object) (objects.Object, error
 }
 
 // UnaryTypevar builds a PEP 695 TypeVar(name) runtime object.
+// PEP 695 type parameters always have infer_variance=True.
 //
-// CPython: Python/intrinsics.c make_typevar
+// CPython: Python/intrinsics.c:200 make_typevar
 func UnaryTypevar(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypevar", "PEP 695 typevar lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVar name must be a str")
+	}
+	tv := objects.NewTypeVar(name.Value(), nil, nil)
+	tv.InferVariance = true
+	tv.Module = objects.CallerModuleName()
+	return tv, nil
 }
 
 // UnaryParamspec builds a PEP 695 ParamSpec(name) runtime object.
 //
-// CPython: Python/intrinsics.c make_paramspec
+// CPython: Python/intrinsics.c _Py_make_paramspec
 func UnaryParamspec(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryParamspec", "PEP 695 paramspec lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: ParamSpec name must be a str")
+	}
+	ps := objects.NewParamSpec(name.Value())
+	ps.InferVariance = true
+	ps.Module = objects.CallerModuleName()
+	return ps, nil
 }
 
 // UnaryTypevartuple builds a PEP 695 TypeVarTuple(name) runtime object.
 //
-// CPython: Python/intrinsics.c make_typevartuple
+// CPython: Python/intrinsics.c _Py_make_typevartuple
 func UnaryTypevartuple(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypevartuple", "PEP 695 typevartuple lives in 1689")
+	name, ok := v.(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: TypeVarTuple name must be a str")
+	}
+	tvt := objects.NewTypeVarTuple(name.Value())
+	tvt.Module = objects.CallerModuleName()
+	return tvt, nil
 }
 
-// UnarySubscriptGeneric implements Generic[T] subscription.
+// UnarySubscriptGeneric implements Generic[T] subscription via
+// typing.Generic.__class_getitem__(params). This produces a Python
+// typing._GenericAlias (not a bare Go GenericAlias), which is required
+// so typing._GenericAlias.__mro_entries__ fires correctly and the
+// isinstance(..., _BaseGenericAlias) dedup in __mro_entries__ works.
 //
-// CPython: Python/intrinsics.c subscript_generic
+// CPython: Python/intrinsics.c _Py_subscript_generic
+// CPython: Lib/typing.py _subscript_generic
+//
+//nolint:gocognit // mirrors CPython's generic subscript dispatch; complexity is the number of special cases, not algorithmic.
 func UnarySubscriptGeneric(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnarySubscriptGeneric", "Generic[...] lives in 1689")
+	params, ok := v.(*objects.Tuple)
+	if !ok {
+		return nil, errors.New("TypeError: Generic[...] requires a tuple of type parameters")
+	}
+	// Try to call Generic.__class_getitem__(params) via typing module.
+	// typing._is_typevar_like rejects raw TypeVarTuple; pre-process to
+	// Unpack[TypeVarTuple] so the validation passes (same shape CPython
+	// emits from CALL_INTRINSIC_1 INTRINSIC_SUBSCRIPT_GENERIC).
+	//
+	// CPython: Python/intrinsics.c _Py_subscript_generic
+	// CPython: Lib/typing.py _subscript_generic
+	if objects.SysModulesGetter != nil {
+		if sysmod := objects.SysModulesGetter(); sysmod != nil {
+			if typingMod, err := sysmod.GetItem(objects.NewStr("typing")); err == nil && typingMod != nil {
+				var unpackObj objects.Object
+				if u, err2 := objects.GetAttr(typingMod, objects.NewStr("Unpack")); err2 == nil {
+					unpackObj = u
+				}
+				processedItems := make([]objects.Object, params.Len())
+				for i := 0; i < params.Len(); i++ {
+					param := params.Item(i)
+					if _, isTvt := param.(*objects.TypeVarTuple); isTvt && unpackObj != nil {
+						if wrapped, werr := objects.GetItem(unpackObj, param); werr == nil {
+							processedItems[i] = wrapped
+							continue
+						}
+					}
+					processedItems[i] = param
+				}
+				processedParams := objects.NewTuple(processedItems)
+				if generic, err3 := objects.GetAttr(typingMod, objects.NewStr("Generic")); err3 == nil && generic != nil {
+					if fn, err4 := objects.GetAttr(generic, objects.NewStr("__class_getitem__")); err4 == nil && fn != nil {
+						if result, err5 := objects.Call(fn, objects.NewTuple([]objects.Object{processedParams}), nil); err5 == nil {
+							return result, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	// Fallback to Go GenericAlias when typing is not yet loaded.
+	return objects.NewGenericAlias(objects.GenericType, params), nil
 }
 
-// UnaryTypealias materializes a `type X = ...` runtime alias.
+// UnaryTypealias materializes a `type X = ...` runtime alias. The
+// argument is a 3-tuple (name, type_params, compute_value). For the
+// non-generic form CPython passes type_params=None and compute_value
+// is a function that evaluates the alias's value lazily.
 //
-// CPython: Python/intrinsics.c type_alias
+// CPython: Objects/typevarobject.c:2181 _Py_make_typealias
 func UnaryTypealias(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryTypealias", "PEP 695 type aliases live in 1689")
+	tup, ok := v.(*objects.Tuple)
+	if !ok || tup.Len() != 3 {
+		return nil, errors.New("TypeError: type alias intrinsic expects a 3-tuple")
+	}
+	name, ok := tup.Item(0).(*objects.Unicode)
+	if !ok {
+		return nil, errors.New("TypeError: type alias name must be a str")
+	}
+	a := objects.NewTypeAlias(name.Value(), tup.Item(1), tup.Item(2))
+	a.Module = objects.TypealiasModule()
+	return a, nil
 }

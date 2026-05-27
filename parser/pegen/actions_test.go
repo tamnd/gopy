@@ -68,12 +68,22 @@ func TestGetExprName(t *testing.T) {
 		e    ast.Expr
 		want string
 	}{
-		{&ast.Name{}, "Name"},
+		{&ast.Name{}, "name"},
 		{&ast.Attribute{}, "attribute"},
 		{&ast.Subscript{}, "subscript"},
 		{&ast.Tuple{}, "tuple"},
 		{&ast.List{}, "list"},
+		{&ast.Lambda{}, "lambda"},
 		{&ast.Call{}, "function call"},
+		{&ast.GeneratorExp{}, "generator expression"},
+		{&ast.ListComp{}, "list comprehension"},
+		{&ast.SetComp{}, "set comprehension"},
+		{&ast.DictComp{}, "dict comprehension"},
+		{&ast.Dict{}, "dict literal"},
+		{&ast.Set{}, "set display"},
+		{&ast.Compare{}, "comparison"},
+		{&ast.IfExp{}, "conditional expression"},
+		{&ast.NamedExpr{}, "named expression"},
 		{&ast.Constant{Value: nil}, "None"},
 		{&ast.Constant{Value: true}, "True"},
 		{&ast.Constant{Value: false}, "False"},

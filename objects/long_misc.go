@@ -43,11 +43,11 @@ func intHash(o Object) (int64, error) {
 //
 // CPython: Objects/longobject.c:3450 long_richcompare
 func intRichCmp(a, b Object, op CompareOp) (Object, error) {
-	ai, ok := a.(*Int)
+	ai, ok := asInt(a)
 	if !ok {
 		return nil, fmt.Errorf("intRichCmp: lhs is %T", a)
 	}
-	bi, ok := b.(*Int)
+	bi, ok := asInt(b)
 	if !ok {
 		return notImplemented(), nil
 	}

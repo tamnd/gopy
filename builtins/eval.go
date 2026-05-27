@@ -46,9 +46,36 @@ func Eval(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	if err != nil {
 		return nil, err
 	}
+	// CPython strips leading spaces and tabs from the eval source so
+	// `eval(" 'x' ")` doesn't trip the tokenizer's INDENT pass.
+	//
+	// CPython: Python/bltinmodule.c:1036 builtin_eval_impl
+	switch src := source.(type) {
+	case *objects.Unicode:
+		v := src.Value()
+		i := 0
+		for i < len(v) && (v[i] == ' ' || v[i] == '\t') {
+			i++
+		}
+		if i > 0 {
+			source = objects.NewStr(v[i:])
+		}
+	case *objects.Bytes:
+		raw := src.Bytes()
+		i := 0
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i > 0 {
+			source = objects.NewBytes(raw[i:])
+		}
+	}
 	code, err := codeForSource(source, "eval", parser.ModeEval)
 	if err != nil {
 		return nil, err
+	}
+	if len(code.Freevars) > 0 {
+		return nil, fmt.Errorf("TypeError: code object passed to eval() may not contain free variables")
 	}
 	return runCode(code, globals, locals)
 }
@@ -67,6 +94,15 @@ func Exec(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	code, err := codeForSource(source, "exec", parser.ModeFile)
 	if err != nil {
 		return nil, err
+	}
+	// builtin_exec_impl rejects a closure-less code object with
+	// nfreevars > 0 because there is no enclosing function to supply
+	// the cells. gopy doesn't accept a closure kwarg yet, so the
+	// presence of any free var is unconditionally an error.
+	//
+	// CPython: Python/bltinmodule.c:1146 builtin_exec_impl
+	if len(code.Freevars) > 0 {
+		return nil, fmt.Errorf("TypeError: code object requires a closure of exactly length %d", len(code.Freevars))
 	}
 	if _, err := runCode(code, globals, locals); err != nil {
 		return nil, err

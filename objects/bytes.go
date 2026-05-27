@@ -30,6 +30,7 @@ func init() {
 	BytesType.Str = bytesRepr
 	BytesType.Hash = bytesHash
 	BytesType.RichCmp = bytesRichCmp
+	BytesType.TpFlags |= TpFlagMatchSelf
 	BytesType.Sequence = &SequenceMethods{
 		Length:   bytesLen,
 		Concat:   bytesConcat,

@@ -29,25 +29,70 @@ func Str(o Object) (string, error) {
 	return Repr(o)
 }
 
-// Format is the protocol-level entry point that ports
-// PyObject_Format. An empty spec is shorthand for str(o); a non-empty
-// spec dispatches to the type's Format slot, falling back to a
-// TypeError for objects that don't define one.
+// Format ports PyObject_Format. Built-in types (str, int, float, …) have
+// a Go-level Format slot; for those, an empty spec short-circuits to
+// str(o) and a non-empty spec dispatches to the slot. User-defined types
+// have no Go-level slot; for those, __format__ is always called via
+// attribute lookup — even for an empty spec — because CPython's
+// PyObject_Format calls _PyObject_LookupSpecial for every type that is
+// not PyUnicode_CheckExact or PyLong_CheckExact.
 //
-// CPython: Objects/object.c:L803 PyObject_Format
+// CPython: Objects/abstract.c:843 PyObject_Format
 func Format(o Object, spec string) (string, error) {
 	if o == nil {
 		return "<nil>", nil
 	}
-	if spec == "" {
-		return Str(o)
-	}
 	if f := o.Type().Format; f != nil {
+		if spec == "" {
+			return Str(o)
+		}
 		return f(o, spec)
 	}
-	return "", fmt.Errorf(
-		"TypeError: unsupported format string passed to %s.__format__",
-		o.Type().Name)
+	// No Go-level slot: always call the Python-level __format__ method,
+	// even when spec is empty. object.__format__('') returns str(self),
+	// so the semantics match CPython's fast path for exact types.
+	//
+	// CPython uses _PyObject_LookupSpecial which does a TYPE-level MRO
+	// lookup (_PyType_Lookup) and then binds the descriptor to the
+	// instance. Using GetAttr (instance-level) fails for types like
+	// module whose Getattro slot ignores the type MRO.
+	//
+	// CPython: Objects/abstract.c:876 meth = _PyObject_LookupSpecial(obj, __format__)
+	// CPython: Objects/typeobject.c:1776 _PyObject_LookupSpecial
+	meth, err := lookupSpecial(o, "__format__")
+	if err != nil {
+		return "", err
+	}
+	if meth == nil {
+		return "", fmt.Errorf("TypeError: Type %s doesn't define __format__", o.Type().Name)
+	}
+	result, callErr := Call(meth, NewTuple([]Object{NewStr(spec)}), nil)
+	if callErr != nil {
+		return "", callErr
+	}
+	s, ok := result.(*Unicode)
+	if !ok {
+		return "", fmt.Errorf("TypeError: __format__ must return a str, not %s", result.Type().Name)
+	}
+	return s.v, nil
+}
+
+// lookupSpecial mirrors CPython's _PyObject_LookupSpecial: it walks
+// the TYPE's MRO for the named dunder method, then binds the descriptor
+// to the instance via DescrGet. Unlike GetAttr / LookupAttrString this
+// never goes through the instance's Getattro slot, so it works for
+// types whose Getattro ignores the type MRO (e.g. modules).
+//
+// CPython: Objects/typeobject.c:1776 _PyObject_LookupSpecial
+func lookupSpecial(o Object, name string) (Object, error) {
+	descr, _ := LookupDescriptor(o.Type(), name)
+	if descr == nil {
+		return nil, nil
+	}
+	if dg := descr.Type().DescrGet; dg != nil {
+		return dg(descr, o, o.Type())
+	}
+	return descr, nil
 }
 
 // Hash returns the hash of o. Errors with errUnhashable when the
@@ -90,7 +135,19 @@ func RichCmp(a, b Object, op CompareOp) (Object, error) {
 	case CompareNE:
 		return NewBool(a != b), nil
 	}
-	return notImplemented(), nil
+	// For ordering comparisons (LT, LE, GT, GE) where both sides return
+	// NotImplemented, CPython raises TypeError. Returning NotImplemented
+	// here would be truthy and silently mis-branch.
+	//
+	// CPython: Objects/object.c:876 do_richcompare (ordering fallthrough)
+	opStr := map[CompareOp]string{
+		CompareLT: "<",
+		CompareLE: "<=",
+		CompareGT: ">",
+		CompareGE: ">=",
+	}[op]
+	return nil, fmt.Errorf("TypeError: '%s' not supported between instances of '%s' and '%s'",
+		opStr, a.Type().Name, b.Type().Name)
 }
 
 // RichCmpBool runs RichCmp and converts the result to a Go bool.

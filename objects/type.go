@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"fmt"
 	"reflect"
 	"unsafe"
 )
@@ -156,6 +157,20 @@ type Type struct {
 	// CPython: Include/object.h Py_TPFLAGS_HEAPTYPE
 	IsUser bool
 
+	// TypeParams holds the PEP 695 type-parameter tuple set via
+	// __type_params__ in the class body. nil means "not set" which
+	// __type_params__ exposes as an empty tuple.
+	//
+	// CPython: Include/cpython/typeobject.h tp_typeparams
+	TypeParams Object
+
+	// TypingParameters holds the __parameters__ tuple set by
+	// typing.Generic.__init_subclass__ for traditional-style generic
+	// classes (class Foo(Generic[T])). nil means use TypeParams as fallback.
+	//
+	// CPython: Lib/typing.py:1209 cls.__parameters__ = tuple(tvars)
+	TypingParameters *Tuple
+
 	// Slots holds the resolved __slots__ names for this user type, in
 	// declaration order. Empty when the class did not declare __slots__
 	// or the class is a built-in. Each name has a fixed index into the
@@ -183,6 +198,16 @@ type Type struct {
 	//
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
+
+	// ClassAttrDict is the live attribute dict for user types, mirroring
+	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
+	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the
+	// __classdict__ closure cell always see the current attribute values.
+	// nil for built-in types (they use typeDescrTable only).
+	//
+	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
+	// (CPython sets the __classdictcell__ to tp_dict, not to ns)
+	ClassAttrDict *Dict
 
 	// subclasses tracks the direct subclasses of this type in
 	// registration order. CPython stores a dict of weak references in
@@ -292,6 +317,30 @@ const (
 	//
 	// CPython: Include/object.h:528 Py_TPFLAGS_MANAGED_DICT
 	TpFlagManagedDict uint64 = 1 << 4
+	// TpFlagMatchSelf marks the ten built-in types (bool/bytearray/
+	// bytes/dict/float/frozenset/int/list/set/str/tuple) that bind the
+	// subject itself when MATCH_CLASS receives exactly one positional
+	// sub-pattern and the type has no __match_args__. Subclasses
+	// inherit the flag through the type system.
+	//
+	// CPython: Include/object.h:588 _Py_TPFLAGS_MATCH_SELF
+	TpFlagMatchSelf uint64 = 1 << 22
+	// TpFlagImmutable mirrors Py_TPFLAGS_IMMUTABLETYPE. Set on every
+	// static built-in type so SetFlagsRecursive (called from
+	// Sequence.register(str) and friends in collections.abc) refuses
+	// to paint sequence/mapping bits onto str/bytes/int/etc. Without
+	// the guard MATCH_SEQUENCE on a plain string returns True.
+	//
+	// CPython: Include/object.h:289 Py_TPFLAGS_IMMUTABLETYPE
+	TpFlagImmutable uint64 = 1 << 8
+	// TpFlagBasetype mirrors Py_TPFLAGS_BASETYPE. When clear, the type
+	// cannot be used as a base class and type.__new__ raises
+	// "type '...' is not an acceptable base type". Set by default on
+	// every type created via NewType; explicitly cleared for types like
+	// TypeAliasType that prohibit subclassing.
+	//
+	// CPython: Include/object.h:264 Py_TPFLAGS_BASETYPE
+	TpFlagBasetype uint64 = 1 << 10
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
@@ -389,7 +438,7 @@ func (t *Type) SharedKeys() *SharedKeys { return t.sharedKeys }
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
 //
 // CPython: Objects/typeobject.c:L6361 PyType_Type
-var typeType = &Type{Name: "type"}
+var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype}
 
 func init() {
 	typeType.typ = typeType
@@ -401,6 +450,35 @@ func init() {
 	typeType.Bases = []*Type{objectType}
 	typeType.MRO = []*Type{typeType, objectType}
 	typeType.Hash = identityHash
+
+	// CPython: Objects/typeobject.c type_type_params getset
+	SetTypeDescr(typeType, "__type_params__", NewGetSetDescr("__type_params__",
+		func(o Object) (Object, error) {
+			t, ok := o.(*Type)
+			if !ok {
+				return NewTuple(nil), nil
+			}
+			if t.TypeParams == nil {
+				return NewTuple(nil), nil
+			}
+			return t.TypeParams, nil
+		},
+		func(o Object, v Object) error {
+			t, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: __type_params__ can only be set on types")
+			}
+			if v == None() || v == nil {
+				t.TypeParams = nil
+				return nil
+			}
+			if _, ok := v.(*Tuple); !ok {
+				return fmt.Errorf("TypeError: __type_params__ must be a tuple")
+			}
+			t.TypeParams = v
+			return nil
+		},
+	))
 }
 
 // identityHash hashes an object by its pointer address. Mirrors
@@ -430,19 +508,55 @@ func TypeType() *Type {
 
 // NewType constructs a built-in type with the given name and bases.
 // Bases must be non-empty for everything except `object`. The MRO
-// is computed via C3 linearization.
+// is computed via C3 linearization. Panics if C3 fails; use newTypeE
+// when the caller must surface MRO errors as Python exceptions.
 //
-// CPython: Objects/typeobject.c:L4153 type_new (adapted from)
+// CPython: Objects/typeobject.c:4153 type_new (adapted from)
 func NewType(name string, bases []*Type) *Type {
-	t := &Type{Name: name, Bases: bases}
+	t, err := newTypeE(name, bases)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+// newTypeE is the error-returning variant of NewType used by
+// NewUserTypeMetaE so an inconsistent MRO raises TypeError instead of
+// crashing.
+//
+// CPython: Objects/typeobject.c:4153 type_new (adapted from)
+func newTypeE(name string, bases []*Type) (*Type, error) {
+	// Check that every base allows subclassing.
+	//
+	// CPython: Objects/typeobject.c:3638 type_new_set_base
+	for _, b := range bases {
+		if b == nil {
+			continue
+		}
+		if b.TpFlags&TpFlagBasetype == 0 {
+			return nil, fmt.Errorf("TypeError: type '%s' is not an acceptable base type", b.Name)
+		}
+	}
+	t := &Type{Name: name, Bases: bases, TpFlags: TpFlagImmutable | TpFlagBasetype}
 	t.init(typeType)
-	t.MRO = c3Linearize(t)
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return nil, err
+	}
+	t.MRO = mro
 	for _, b := range bases {
 		if b == nil {
 			continue
 		}
 		b.addSubclass(t)
+		// MATCH_SELF carries from every base independently: bool is a
+		// self-matching int subclass, and we want that bit to ride
+		// down through any multiple-inheritance combination.
+		//
+		// CPython: Objects/typeobject.c:8204 inherit_flags
+		t.TpFlags |= b.TpFlags & TpFlagMatchSelf
 	}
+	inheritPatmaFlagsAllMRO(t)
 	// inherit slots from every ancestor so dispatch can resolve in
 	// one field load. Built-in types that set their own Number /
 	// Sequence / Mapping / Async bundle after NewType returns will
@@ -452,7 +566,7 @@ func NewType(name string, bases []*Type) *Type {
 	//
 	// CPython: Objects/typeobject.c:8712 type_ready_inherit
 	inheritSlotsAllMRO(t)
-	return t
+	return t, nil
 }
 
 // addSubclass appends sub to t.subclasses via a weak reference. CPython
@@ -479,8 +593,15 @@ func (t *Type) Subclasses() []*Type {
 // mask, then propagates the same edit to every transitive subclass.
 // Mirrors _PyType_SetFlagsRecursive.
 //
-// CPython: Objects/typeobject.c:1340 _PyType_SetFlagsRecursive
+// Immutable types are skipped (and stop the walk into their
+// subclasses) so collections.abc registrations like
+// Sequence.register(str) don't repaint built-in flag bits.
+//
+// CPython: Objects/typeobject.c:6042 set_flags_recursive
 func SetFlagsRecursive(t *Type, mask, add uint64) {
+	if t.TpFlags&TpFlagImmutable != 0 || (t.TpFlags&mask) == add {
+		return
+	}
 	t.TpFlags = (t.TpFlags &^ mask) | add
 	for _, sub := range t.Subclasses() {
 		SetFlagsRecursive(sub, mask, add)

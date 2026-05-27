@@ -19,11 +19,47 @@ import (
 
 func init() {
 	typeType.Call = typeCall
+	typeType.Vectorcall = typeVectorcall
 	// Register type.__new__ so super().__new__() inside a metaclass
 	// __new__ body can resolve it through the MRO.
 	//
 	// CPython: Objects/typeobject.c:4153 type_new
 	SetTypeDescr(typeType, "__new__", NewBuiltinFunction("type.__new__", typeNewBuiltin))
+	// Register type.__init__ so a metaclass that calls
+	// `super().__init__(*args, **kwargs)` resolves through type rather
+	// than tumbling through to object.__init__, which rejects extra args.
+	// type_init is a near no-op: it only validates the call shape is
+	// type(obj) or type(name, bases, ns).
+	//
+	// CPython: Objects/typeobject.c:4036 type_init
+	SetTypeDescr(typeType, "__init__", NewMethodDescr(typeType, "__init__", typeInitDescr))
+	// type.__prepare__(name, bases, /, **kwds) is the default classmethod
+	// that returns a fresh empty dict. CPython exposes it via the
+	// METH_CLASS row in type_methods so subclass-metaclasses that fall
+	// back to super().__prepare__() actually have something to resolve.
+	//
+	// CPython: Objects/typeobject.c:6609 type_methods __prepare__
+	// CPython: Objects/typeobject.c:6580 type_prepare
+	SetTypeDescr(typeType, "__prepare__", NewClassMethod(NewBuiltinFunction("type.__prepare__",
+		func(_ []Object, _ map[string]Object) (Object, error) {
+			return NewDict(), nil
+		})))
+}
+
+// typeInitDescr is the tp_init slot wrapper for type. Accepts 1 or 3
+// positional args beyond self (type(x) or type(name, bases, ns)) and
+// ignores keyword arguments, just like CPython.
+//
+// CPython: Objects/typeobject.c:4036 type_init
+func typeInitDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' of 'type' object needs an argument")
+	}
+	rest := len(args) - 1
+	if rest != 1 && rest != 3 {
+		return nil, fmt.Errorf("TypeError: type.__init__() takes 1 or 3 arguments")
+	}
+	return None(), nil
 }
 
 // typeCall is the tp_call slot for `type` itself (and, by inheritance,
@@ -54,6 +90,19 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaCall(args, kwargs)
 	}
 
+	// User-defined metaclasses (subtypes of type with IsUser=true) must go
+	// through typeMetaclassCall so ABCMeta.__new__ and similar overrides
+	// are honored. The TpNew check below fires first because user
+	// metaclasses inherit objectNew from objectType via the MRO (typeType
+	// leaves TpNew nil), and objectNew would create an *Instance instead
+	// of a *Type. CPython avoids this by always routing through type_new
+	// for metaclass calls.
+	//
+	// CPython: Objects/typeobject.c:1748 type_call (metaclass path)
+	if cls.IsUser && IsSubtype(cls, typeType) {
+		return typeMetaclassCall(cls, args, kwargs)
+	}
+
 	// Types that publish a tp_new slot: allocate via TpNew, then call
 	// __init__ if the type has one registered as a descriptor. For most
 	// built-in types TpNew handles everything itself and there is no
@@ -78,15 +127,6 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
 	}
 
-	// If cls is a subtype of type (a metaclass), dispatch through __new__
-	// to build a new *Type. This covers user-defined metaclasses like
-	// ABCMeta that override type.__new__ to customize class creation.
-	//
-	// CPython: Objects/typeobject.c:1748 type_call (tp_new/tp_init path)
-	if IsSubtype(cls, typeType) {
-		return typeMetaclassCall(cls, args, kwargs)
-	}
-
 	if err := checkNotAbstract(cls); err != nil {
 		return nil, err
 	}
@@ -103,15 +143,22 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 
 // typeCallViaTpNew allocates through the type's tp_new slot, then
 // runs __init__ when the type has one registered as a descriptor.
+// CPython skips __init__ entirely when the value returned from tp_new
+// is not an instance of the calling type (e.g. a metaclass __new__
+// that returns an int); the result is passed back untouched.
 //
-// CPython: Objects/typeobject.c:1748 type_call (tp_new + tp_init path)
+// CPython: Objects/typeobject.c:2331 type_call (tp_new + tp_init path)
 func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 	inst, err := cls.TpNew(cls, args, kwargs)
 	if err != nil {
 		return nil, err
 	}
-	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
-		bound := bindDescr(init, inst, cls)
+	if !IsSubtype(inst.Type(), cls) {
+		return inst, nil
+	}
+	actual := inst.Type()
+	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
+		bound := bindDescr(init, inst, actual)
 		if _, err := callBound(bound, args, kwargs); err != nil {
 			return nil, err
 		}
@@ -190,11 +237,8 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 	// CPython: Objects/typeobject.c:1800 type_call (__init__ guard)
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
-			initArgs := make([]Object, len(args)+1)
-			initArgs[0] = result
-			copy(initArgs[1:], args)
 			bound := bindDescr(init, result, cls)
-			if _, err := callBound(bound, initArgs, kwargs); err != nil {
+			if _, err := callBound(bound, args, kwargs); err != nil {
 				return nil, err
 			}
 		}
@@ -242,7 +286,10 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 	// metatype.
 	//
 	// CPython: Objects/typeobject.c:4153 type_new (Py_TYPE(type) = metatype)
-	t := NewUserTypeMeta(nameObj.v, bases, ns, kwargs, meta)
+	t, err := NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, meta)
+	if err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -291,7 +338,7 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	if winner != typeType {
 		return typeMetaclassCall(winner, args, kwargs)
 	}
-	return NewUserTypeKwargs(nameObj.v, bases, ns, kwargs), nil
+	return NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
 }
 
 // calculateMetaclass picks the most derived metaclass among metatype
@@ -340,4 +387,139 @@ func callBound(fn Object, args []Object, kwargs map[string]Object) (Object, erro
 		}
 	}
 	return Call(fn, NewTuple(args), kwd)
+}
+
+// typeVectorcall is the PEP 590 vectorcall entry for type objects. It
+// reconstructs a *Dict from kwnames (preserving original key objects like
+// FakeStr that compare equal to parameter names via __eq__ but are not
+// plain str instances) and dispatches through typeCallWithDict so those
+// original keys reach __init__'s **kwargs dict without being converted to
+// their Str() repr by dictToMap.
+//
+// CPython: Objects/typeobject.c:1748 type_call (the path that preserves
+// kwdict identity when vectorcall is used from Python/ceval.c)
+func typeVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error) {
+	npos := VectorcallNargs(nargsf)
+	posArgs := args[:npos]
+	var kwd *Dict
+	if kwnames != nil && kwnames.Len() > 0 {
+		nkw := kwnames.Len()
+		kwd = NewDict()
+		for i := 0; i < nkw; i++ {
+			if err := kwd.SetItem(kwnames.Item(i), args[npos+i]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return typeCallWithDict(callable, posArgs, kwd)
+}
+
+// typeCallWithDict mirrors typeCall but accepts a *Dict for kwargs so the
+// original key objects (non-str types that Python-compare equal to parameter
+// names) are preserved through to __init__'s **kwargs slot.
+//
+// CPython: Objects/typeobject.c:1748 type_call
+func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, error) {
+	cls, ok := callable.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: type.__call__ on non-type object")
+	}
+	var kwmap map[string]Object
+	if kwargs != nil && kwargs.Len() > 0 {
+		kwmap = dictToMap(kwargs)
+	}
+	if cls == typeType {
+		return typeMetaCall(args, kwmap)
+	}
+	if cls.IsUser && IsSubtype(cls, typeType) {
+		return typeMetaclassCallWithDict(cls, args, kwargs)
+	}
+	if cls.TpNew != nil {
+		return typeCallViaTpNewWithDict(cls, args, kwargs)
+	}
+	if cls.Call != nil && !cls.IsUser {
+		return cls.Call(callable, args, kwmap)
+	}
+	if !cls.IsUser {
+		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
+	}
+	if err := checkNotAbstract(cls); err != nil {
+		return nil, err
+	}
+	inst := NewInstance(cls)
+	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
+		bound := bindDescr(init, inst, cls)
+		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+			return nil, err
+		}
+	}
+	return inst, nil
+}
+
+// typeCallViaTpNewWithDict is typeCallViaTpNew with the kwargs preserved as
+// a *Dict so __init__ receives original key objects.
+//
+// CPython: Objects/typeobject.c:2331 type_call (tp_new + tp_init path)
+func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
+	var kwmap map[string]Object
+	if kwargs != nil && kwargs.Len() > 0 {
+		kwmap = dictToMap(kwargs)
+	}
+	inst, err := cls.TpNew(cls, args, kwmap)
+	if err != nil {
+		return nil, err
+	}
+	if !IsSubtype(inst.Type(), cls) {
+		return inst, nil
+	}
+	actual := inst.Type()
+	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
+		bound := bindDescr(init, inst, actual)
+		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+			return nil, err
+		}
+	}
+	return inst, nil
+}
+
+// typeMetaclassCallWithDict is typeMetaclassCall with the kwargs preserved
+// as a *Dict for the __init__ call.
+//
+// CPython: Objects/typeobject.c:1748 type_call
+func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
+	var kwmap map[string]Object
+	if kwargs != nil && kwargs.Len() > 0 {
+		kwmap = dictToMap(kwargs)
+	}
+	newArgs := make([]Object, len(args)+1)
+	newArgs[0] = cls
+	copy(newArgs[1:], args)
+
+	var result Object
+	newDescr, _ := LookupDescriptor(cls, "__new__")
+	if typeNewDescr, _ := LookupDescriptor(typeType, "__new__"); newDescr == typeNewDescr {
+		newDescr = nil
+	}
+	if newDescr != nil {
+		var err error
+		result, err = callBound(newDescr, newArgs, kwmap)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		result, err = typeNewBuiltin(newArgs, kwmap)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
+		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
+			bound := bindDescr(init, result, cls)
+			if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return result, nil
 }

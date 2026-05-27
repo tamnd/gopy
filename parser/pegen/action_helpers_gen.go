@@ -16,11 +16,14 @@
 package pegen
 
 import (
+	"errors"
+	"fmt"
 	"math/big"
 	"strconv"
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
+	perrors "github.com/tamnd/gopy/parser/errors"
 	stringparse "github.com/tamnd/gopy/parser/string"
 	"github.com/tamnd/gopy/token"
 )
@@ -46,6 +49,20 @@ func argAt(args []any, i int) any {
 		return nil
 	}
 	return args[i]
+}
+
+// toInt converts an any value to int. Returns 0 for nil or unrecognized types.
+// Used to extract explicit position ints from RAISE_ERROR_KNOWN_LOCATION args.
+func toInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case int32:
+		return int(x)
+	}
+	return 0
 }
 
 // asExpr unwraps any layers of []any wrapping until it lands on an
@@ -92,8 +109,10 @@ func tokenToExpr(t *Token) ast.Expr {
 	case token.NAME:
 		return &ast.Name{Id: string(t.Bytes), Ctx: ast.Load, Pos: pos}
 	case token.NUMBER:
-		if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+		if v, ok, limitErr := parseNumberLiteral(string(t.Bytes)); ok {
 			return &ast.Constant{Value: v, Pos: pos}
+		} else if limitErr != "" {
+			panic(NumberLitTooLargeError{Msg: limitErr, Line: t.Lineno, Col: t.ColOff})
 		}
 	case token.STRING:
 		if s, ok := decodeStringToken(string(t.Bytes)); ok {
@@ -201,9 +220,15 @@ func stmtSeqOf(v any) ast.Seq[ast.Stmt] {
 //
 // CPython: Parser/pegen.c:1203 _PyPegen_make_module
 func actionPgenMakeModule(p *Parser, args ...any) any {
-	_ = p
 	body := stmtSeqOf(argAt(args, 1))
-	return &ast.Module{Body: body}
+	var typeIgnores ast.Seq[ast.TypeIgnore]
+	for _, c := range p.TypeIgnoreComments() {
+		typeIgnores = append(typeIgnores, &ast.TypeIgnoreNode{
+			Lineno: c.Lineno,
+			Tag:    c.Tag,
+		})
+	}
+	return &ast.Module{Body: body, TypeIgnores: typeIgnores}
 }
 
 // actionPgenInteractiveExit returns the sentinel CPython uses to end
@@ -567,6 +592,22 @@ func actionAstMatchAs(p *Parser, args ...any) any {
 	return out
 }
 
+// actionAstMatchOr materializes a MatchOr from the gather-rule output.
+// The grammar wraps this in a `len == 1 ? get(0) : MatchOr(...)` ternary
+// so this helper always receives a sequence with at least two members;
+// the collapse case is handled by seqLenAny / seqGetAny in the
+// translated ternary.
+//
+// CPython: Parser/Python.asdl MatchOr(pattern* patterns)
+func actionAstMatchOr(p *Parser, args ...any) any {
+	_ = p
+	seq := patternSeqOf(argAt(args, 0))
+	if len(seq) == 0 {
+		return placeholderMatched
+	}
+	return &ast.MatchOr{Patterns: seq, Pos: ast.NoPos}
+}
+
 // SeqCountDots / SingletonSeq / SeqInsertInFront / JoinNamesWithDot
 // are direct ports of the helpers in actions.go, with the (p, p, ...)
 // variadic call shape the generator emits.
@@ -622,7 +663,7 @@ func actionPgenJoinSequences(p *Parser, args ...any) any {
 
 func actionPgenGetExprName(p *Parser, args ...any) any {
 	_ = p
-	if e := asExpr(argAt(args, 1)); e != nil {
+	if e := asExpr(argAt(args, 0)); e != nil {
 		return GetExprName(e)
 	}
 	return "expression"
@@ -702,7 +743,7 @@ func actionPgenConstantFromToken(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: string(t.Bytes), Pos: ast.NoPos}
+	return &ast.Constant{Value: string(t.Bytes), Pos: tokenPos(t)}
 }
 
 // actionPgenConstantFromString builds a string-literal Constant. The
@@ -711,19 +752,37 @@ func actionPgenConstantFromToken(p *Parser, args ...any) any {
 //
 // CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
 func actionPgenConstantFromString(p *Parser, args ...any) any {
-	_ = p
 	t, ok := argAt(args, 1).(*Token)
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	body, isBytes, ok := decodeStringTokenTagged(string(t.Bytes))
+	body, isBytes, ok, warns, warnOff, derr := decodeStringTokenTaggedErrWithWarns(string(t.Bytes))
 	if !ok {
+		if derr != nil && p != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  t.Lineno,
+				ColOff:  t.ColOff,
+				EndLine: t.EndLine,
+				EndCol:  t.EndCol,
+			}, "%s", derr.Error())
+		}
 		return placeholderMatched
 	}
+	forwardDecodeWarnings(p, t, warns, warnOff)
 	if isBytes {
-		return &ast.Constant{Value: []byte(body), Pos: ast.NoPos}
+		return &ast.Constant{Value: []byte(body), Pos: tokenPos(t)}
 	}
-	return &ast.Constant{Value: body, Pos: ast.NoPos}
+	// Detect u/U prefix: CPython sets Constant.kind = "u" for u'...'
+	// so that ast.unparse() can reproduce the original source form.
+	//
+	// CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
+	// CPython: Python/ast_unparse.c (kind check in append_repr)
+	var kind *string
+	if raw := string(t.Bytes); len(raw) > 0 && (raw[0] == 'u' || raw[0] == 'U') {
+		k := "u"
+		kind = &k
+	}
+	return &ast.Constant{Value: body, Kind: kind, Pos: tokenPos(t)}
 }
 
 // actionPgenDecodedConstantFromToken builds a Constant from
@@ -741,45 +800,211 @@ func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
 	if p != nil && p.tok != nil && p.tok.InsideFString() {
 		isRaw = p.tok.CurrentFStringRaw()
 	}
-	text, _, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
+	text, warns, warnOff, err := stringparse.DecodeFStringPart(isRaw, string(t.Bytes))
 	if err != nil {
+		// CPython: Parser/action_helpers.c:1288 _PyPegen_decode_fstring_part
+		// surfaces decode errors through _Pypegen_raise_decode_error so the
+		// resulting SyntaxError carries the codec-prefixed message.
+		if p != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  t.Lineno,
+				ColOff:  t.ColOff,
+				EndLine: t.EndLine,
+				EndCol:  t.EndCol,
+			}, "%s", err.Error())
+		}
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: text, Pos: ast.NoPos}
+	forwardDecodeWarnings(p, t, warns, warnOff)
+	return &ast.Constant{Value: text, Pos: tokenPos(t)}
 }
 
+// forwardDecodeWarnings funnels the SyntaxWarning-class messages the
+// string decoder produced back to the lexer's warning channel. CPython
+// raises these inline from warn_invalid_escape_sequence inside
+// _PyUnicode_DecodeUnicodeEscapeInternal2; gopy collects them on the
+// Result and the parser stage forwards each one.
+//
+// For multiline string literals, CPython walks the body buffer from the
+// checkVersion mirrors INVALID_VERSION_CHECK from CPython's parser. If
+// p.featureVersion is set and less than the required minor version, it
+// raises a SyntaxError and returns nil. If node is nil (inline CHECK
+// semantics), it also sets errorIndicator and returns nil. Otherwise
+// it returns node unchanged.
+//
+// CPython: Parser/pegen.h:294 INVALID_VERSION_CHECK
+// CPython: Parser/pegen.h:308 CHECK_VERSION macro
+func checkVersion(p *Parser, version int, msg string, node any) any {
+	if node == nil {
+		if p != nil {
+			p.errorIndicator = true
+		}
+		return nil
+	}
+	if p != nil && p.featureVersion > 0 && p.featureVersion < version {
+		p.errorIndicator = true
+		p.RaiseSyntaxError("%s only supported in Python 3.%d and greater", msg, version)
+		return nil
+	}
+	return node
+}
+
+// token start to the escape position counting '\n' to get the actual
+// lineno (Parser/string_parser.c:53-68 warn_invalid_escape_sequence).
+// We reproduce that by counting '\n' chars in the raw token body up to
+// each WarnOffset.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+func forwardDecodeWarnings(p *Parser, t *Token, warns []string, offsets []int) {
+	if p == nil || p.tok == nil || len(warns) == 0 || t == nil {
+		return
+	}
+	// CPython: Parser/string_parser.c:16 do not report warnings in second pass
+	// (call_invalid_rules is true) to avoid duplicate warnings.
+	if p.callInvalid {
+		return
+	}
+	body := tokenBodyBytes(t.Bytes)
+	for i, msg := range warns {
+		lineno, col := t.Lineno, t.ColOff
+		if i < len(offsets) && body != nil {
+			off := offsets[i]
+			if off > len(body) {
+				off = len(body)
+			}
+			for _, ch := range body[:off] {
+				if ch == '\n' {
+					lineno++
+					col = 0
+				} else {
+					col++
+				}
+			}
+		}
+		p.tok.AppendWarning(lineno, col, "SyntaxWarning", msg)
+	}
+}
+
+// forwardDecodeWarningsAt forwards decode warnings anchored to a fixed
+// position (used by the f-string constant merger where no token is
+// available but a start position is).
+func forwardDecodeWarningsAt(p *Parser, lineno, col int, body []byte, warns []string, offsets []int) {
+	if p == nil || p.tok == nil || len(warns) == 0 {
+		return
+	}
+	for i, msg := range warns {
+		ln, c := lineno, col
+		if i < len(offsets) && body != nil {
+			off := offsets[i]
+			if off > len(body) {
+				off = len(body)
+			}
+			for _, ch := range body[:off] {
+				if ch == '\n' {
+					ln++
+					c = 0
+				} else {
+					c++
+				}
+			}
+		}
+		p.tok.AppendWarning(ln, c, "SyntaxWarning", msg)
+	}
+}
+
+// tokenBodyBytes returns the bytes of the string body from a raw token
+// (prefix and opening quotes stripped). Used for multiline-string lineno
+// calculation in forwardDecodeWarnings.
+//
+// CPython: Parser/string_parser.c:53 warn_invalid_escape_sequence:
+// `buffer` is the body passed in after quote-stripping.
+func tokenBodyBytes(tok []byte) []byte {
+	i := 0
+	// skip prefix chars
+	for i < len(tok) {
+		switch tok[i] {
+		case 'b', 'B', 'r', 'R', 'u', 'U', 'f', 'F', 't', 'T':
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(tok) {
+		return nil
+	}
+	quote := tok[i]
+	i++
+	// check for triple-quote
+	if i+1 < len(tok) && tok[i] == quote && tok[i+1] == quote {
+		i += 2
+		// body ends before last 3 quotes
+		if len(tok)-i >= 3 {
+			return tok[i : len(tok)-3]
+		}
+		return tok[i:]
+	}
+	// single-quote: body ends before last quote
+	if len(tok)-i >= 1 {
+		return tok[i : len(tok)-1]
+	}
+	return tok[i:]
+}
+
+// actionPgenEnsureImaginary validates that exp is a Constant carrying
+// a complex value. The complex_number grammar rule requires the right
+// operand to be an imaginary literal; anything else (a real, an
+// integer) raises a SyntaxError at the operand's location so the
+// parser fails fast rather than letting codegen do shape checks.
+//
+// CPython: Parser/action_helpers.c:843 _PyPegen_ensure_imaginary
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
-	_ = p
-	t, ok := argAt(args, 1).(*Token)
-	if !ok || t == nil {
-		return placeholderMatched
-	}
-	s := string(t.Bytes)
-	if !strings.HasSuffix(s, "j") && !strings.HasSuffix(s, "J") {
-		return placeholderMatched
-	}
-	v, ok := parseNumberLiteral(s)
+	exp := asExpr(argAt(args, 1))
+	c, ok := exp.(*ast.Constant)
 	if !ok {
+		raiseEnsureNumberError(p, exp, "imaginary number required in complex literal")
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	if _, isComplex := c.Value.(complex128); !isComplex {
+		raiseEnsureNumberError(p, c, "imaginary number required in complex literal")
+		return placeholderMatched
+	}
+	return c
 }
 
+// actionPgenEnsureReal validates that exp is a Constant carrying a
+// non-complex numeric value. The complex_number grammar rule requires
+// the left operand to be a real literal (signed_real_number); a
+// complex literal here raises the symmetric SyntaxError.
+//
+// CPython: Parser/action_helpers.c:853 _PyPegen_ensure_real
 func actionPgenEnsureReal(p *Parser, args ...any) any {
-	_ = p
-	t, ok := argAt(args, 1).(*Token)
-	if !ok || t == nil {
-		return placeholderMatched
-	}
-	s := string(t.Bytes)
-	if strings.HasSuffix(s, "j") || strings.HasSuffix(s, "J") {
-		return placeholderMatched
-	}
-	v, ok := parseNumberLiteral(s)
+	exp := asExpr(argAt(args, 1))
+	c, ok := exp.(*ast.Constant)
 	if !ok {
+		raiseEnsureNumberError(p, exp, "real number required in complex literal")
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	if _, isComplex := c.Value.(complex128); isComplex {
+		raiseEnsureNumberError(p, c, "real number required in complex literal")
+		return placeholderMatched
+	}
+	return c
+}
+
+// raiseEnsureNumberError reports a SyntaxError at the expression's
+// span. ensureReal / ensureImaginary share this path so the location
+// arithmetic stays in one place.
+func raiseEnsureNumberError(p *Parser, exp ast.Expr, msg string) {
+	if p == nil || exp == nil {
+		return
+	}
+	pos := exp.Position()
+	p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+		Lineno:  pos.Lineno,
+		ColOff:  pos.ColOffset,
+		EndLine: pos.EndLineno,
+		EndCol:  pos.EndColOffset,
+	}, "%s", msg)
 }
 
 // The remaining pgen helpers cover string-formatting, function/class
@@ -791,9 +1016,11 @@ func actionPgenEnsureReal(p *Parser, args ...any) any {
 
 // actionPgenFormattedValue ports `_PyPegen_formatted_value`. Args:
 // (p, expression, debug_token, conversion_result, format_result, rbrace).
-// For the no-debug path we just build a FormattedValue. The debug-text
-// shim that wraps the value into a JoinedStr is intentionally
-// minimal until the parser exposes the metadata we'd need.
+// The debug form (`f'{x=}'`) wraps the FormattedValue in a JoinedStr
+// whose first child is a Constant carrying the source text up to and
+// including the `=`. CPython reads that text from whichever follow-on
+// token holds the metadata: conversion first, format next, then the
+// closing brace.
 //
 // CPython: Parser/action_helpers.c:1564 _PyPegen_formatted_value
 func actionPgenFormattedValue(p *Parser, args ...any) any {
@@ -804,17 +1031,47 @@ func actionPgenFormattedValue(p *Parser, args ...any) any {
 	}
 	debug, _ := argAt(args, 2).(*Token)
 	conv := fstringConversionChar(argAt(args, 3))
-	format := asExpr(argAt(args, 4))
+	// args[4] may be a plain ast.Expr or a fstringFormatSpecResult (when
+	// the colon token carried debug metadata). CPython: action_helpers.c:1581
+	// reads format->metadata when format is present.
+	var format ast.Expr
+	var formatMeta []byte
+	if fsr, ok := argAt(args, 4).(*fstringFormatSpecResult); ok {
+		format = fsr.Expr
+		formatMeta = fsr.Metadata
+	} else {
+		format = asExpr(argAt(args, 4))
+	}
+	rbrace, _ := argAt(args, 5).(*Token)
 	if conv == 0 && debug != nil && format == nil {
 		conv = 'r'
 	} else if conv == 0 {
 		conv = -1
 	}
-	return &ast.FormattedValue{
+	formattedValue := &ast.FormattedValue{
 		Value:      value,
 		Conversion: conv,
 		FormatSpec: format,
 		Pos:        ast.NoPos,
+	}
+	if debug == nil {
+		return formattedValue
+	}
+	// CPython: action_helpers.c:1581 _PyPegen_formatted_value
+	// debug_metadata = conversion->metadata ?? format->metadata ?? closing_brace->metadata
+	var exprstr string
+	switch {
+	case len(formatMeta) > 0:
+		exprstr = string(formatMeta)
+	case rbrace != nil && len(rbrace.Metadata) > 0:
+		exprstr = string(rbrace.Metadata)
+	}
+	return &ast.JoinedStr{
+		Values: []ast.Expr{
+			&ast.Constant{Value: exprstr, Pos: ast.NoPos},
+			formattedValue,
+		},
+		Pos: ast.NoPos,
 	}
 }
 
@@ -845,10 +1102,79 @@ func fstringConversionChar(v any) int {
 	return 0
 }
 
+// actionPgenInterpolation builds an Interpolation node for a t-string
+// {expr!conv:fmt} chunk. Call shape:
+//
+//	(p, p, expression, debug_expr_token, conversion, format, rbrace)
+//
+// CPython captures the source text of `expr` via set_ftstring_expr, so
+// it is reachable as the closing brace token's metadata.
+//
+// CPython: Parser/action_helpers.c:1508 _PyPegen_interpolation (PEP 750)
 func actionPgenInterpolation(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	value := asExpr(argAt(args, 1))
+	if value == nil {
+		return placeholderMatched
+	}
+	debug, _ := argAt(args, 2).(*Token)
+	conv := fstringConversionChar(argAt(args, 3))
+	var format ast.Expr
+	var formatMeta []byte
+	if fsr, ok := argAt(args, 4).(*fstringFormatSpecResult); ok {
+		format = fsr.Expr
+		formatMeta = fsr.Metadata
+	} else {
+		format = asExpr(argAt(args, 4))
+	}
+	rbrace, _ := argAt(args, 5).(*Token)
+	if conv == 0 && debug != nil && format == nil {
+		conv = 'r'
+	} else if conv == 0 {
+		conv = -1
+	}
+	var exprstr string
+	switch {
+	case len(formatMeta) > 0:
+		exprstr = string(formatMeta)
+	case rbrace != nil && len(rbrace.Metadata) > 0:
+		exprstr = string(rbrace.Metadata)
+	}
+	interp := &ast.Interpolation{
+		Value:      value,
+		Str:        stripInterpolationExpr(exprstr),
+		Conversion: conv,
+		FormatSpec: format,
+		Pos:        ast.NoPos,
+	}
+	if debug == nil {
+		return interp
+	}
+	return &ast.JoinedStr{
+		Values: []ast.Expr{
+			&ast.Constant{Value: exprstr, Pos: ast.NoPos},
+			interp,
+		},
+		Pos: ast.NoPos,
+	}
+}
+
+// stripInterpolationExpr drops trailing whitespace and '=' from the
+// expression source. Used so the Interpolation.str field carries the
+// pre-'=' expression while the debug Constant keeps the full text.
+//
+// CPython: Parser/action_helpers.c:1491 _strip_interpolation_expr
+func stripInterpolationExpr(s string) string {
+	end := len(s)
+	for end > 0 {
+		c := s[end-1]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '=' {
+			end--
+			continue
+		}
+		break
+	}
+	return s[:end]
 }
 
 // actionPgenConcatenateStrings dispatches the `strings` rule's
@@ -871,46 +1197,111 @@ func actionPgenConcatenateStrings(p *Parser, args ...any) any {
 
 // actionPgenTemplateStr builds a TemplateStr from the tstring tokens.
 // Call shape: (p, p, TSTRING_START, loop0_66_result, TSTRING_END).
-// Arg[3] is the _loop0_66 result: []any of Constant / Interpolation exprs.
+// Arg[2] is the _loop0_66 result: []any of Constant / Interpolation /
+// JoinedStr(debug) exprs.
 //
-// CPython: Parser/action_helpers.c _PyPegen_tstring_node (PEP 750)
+// CPython splits JoinedStr nodes (which only arise from debug
+// interpolations) into their [Constant, Interpolation] pair so the
+// constant text sits in the TemplateStr.values stream rather than
+// inside a nested JoinedStr. Empty Constants from TSTRING_MIDDLE
+// tokens between adjacent {expr} / closing quote get dropped here so
+// they do not flow into BUILD_TEMPLATE.
+//
+// CPython: Parser/action_helpers.c:1300 _get_resized_exprs
+// CPython: Parser/action_helpers.c:1387 _PyPegen_template_str
 func actionPgenTemplateStr(p *Parser, args ...any) any {
 	_ = p
-	parts := exprSeqOf(argAt(args, 3))
-	return TemplateStrFromValues([]ast.Expr(parts))
+	parts := exprSeqOf(argAt(args, 2))
+	out := make([]ast.Expr, 0, len(parts))
+	for _, item := range parts {
+		if js, ok := item.(*ast.JoinedStr); ok && len(js.Values) == 2 {
+			out = append(out, js.Values[0], js.Values[1])
+			continue
+		}
+		if c, ok := item.(*ast.Constant); ok {
+			if s, isStr := c.Value.(string); isStr && s == "" {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	return TemplateStrFromValues(out)
 }
 
 // actionPgenConcatenateTstrings joins one or more TemplateStr nodes
-// produced by a tstring+ loop into a single TemplateStr. Arg[2] is
-// the loop result ([]any of *ast.TemplateStr).
+// produced by a tstring+ loop into a single TemplateStr, folding runs
+// of adjacent Constants and dropping empty ones. Arg[1] is the loop
+// result ([]any of *ast.TemplateStr).
 //
-// CPython: Parser/action_helpers.c _PyPegen_concatenate_tstrings
+// CPython: Parser/action_helpers.c:1849 _PyPegen_concatenate_tstrings
 func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
 	_ = p
-	items := exprSeqOf(argAt(args, 2))
-	var allValues []ast.Expr
+	items := exprSeqOf(argAt(args, 1))
+	parts := make([]ast.Expr, 0, len(items))
 	for _, item := range items {
-		if ts, ok := item.(*ast.TemplateStr); ok {
-			allValues = append(allValues, ts.Values...)
-		}
+		parts = append(parts, item)
 	}
-	return TemplateStrFromValues(allValues)
+	return TemplateStrFromValues(buildConcatenatedStr(parts))
 }
 
 // actionPgenCheckFstringConversion validates the conversion specifier
-// after `!` in an f-string interpolation and returns the conv Name so
-// downstream FormattedValue construction can read its single-character
-// id. The CPython helper wraps this in a ResultTokenWithMetadata; our
-// fstringConversionChar accepts the bare *ast.Name directly.
+// after `!` in an f-string or t-string interpolation. The conversion
+// must be a single-character Name whose id is one of 's', 'r', or 'a',
+// and it must sit immediately after the `!` (no whitespace allowed).
+// Violations turn into SyntaxError at the conv's span, so the lexer's
+// generic Unrecognized conversion character SystemError never reaches
+// user code. Returns the conv Name on success so downstream
+// FormattedValue construction can read its single-character id via
+// fstringConversionChar.
 //
 // CPython: Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion
 func actionPgenCheckFstringConversion(p *Parser, args ...any) any {
-	_ = p
+	convToken, _ := argAt(args, 1).(*Token)
 	conv := asExpr(argAt(args, 2))
 	if conv == nil {
 		return placeholderMatched
 	}
-	return conv
+	name, ok := conv.(*ast.Name)
+	if !ok {
+		return placeholderMatched
+	}
+	prefix := byte('f')
+	if p != nil && p.tok != nil {
+		prefix = p.tok.CurrentFStringPrefixChar()
+	}
+	convPos := name.Position()
+	// CPython rejects whitespace between `!` and the conversion char by
+	// comparing the `!` token's end_col_offset to the conv name's
+	// col_offset on the same line. The range carrying both spans pins
+	// the caret at the gap.
+	//
+	// CPython: Parser/action_helpers.c:968 RAISE_SYNTAX_ERROR_KNOWN_RANGE
+	if convToken != nil && (convToken.EndLine != convPos.Lineno || convToken.EndCol != convPos.ColOffset) {
+		p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+			Lineno:  convToken.Lineno,
+			ColOff:  convToken.ColOff,
+			EndLine: convPos.EndLineno,
+			EndCol:  convPos.EndColOffset,
+		}, "%c-string: conversion type must come right after the exclamation mark", prefix)
+		return placeholderMatched
+	}
+	id := name.Id
+	if len(id) != 1 || (id[0] != 's' && id[0] != 'r' && id[0] != 'a') {
+		// CPython renders the bad id with %R, which for a str object
+		// emits Python's repr (single-quoted ASCII for short ids).
+		// Build the same shape by hand: %q would pick double quotes
+		// and diverge from CPython's caret message.
+		//
+		// CPython: Parser/action_helpers.c:979 RAISE_SYNTAX_ERROR_KNOWN_LOCATION
+		p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+			Lineno:  convPos.Lineno,
+			ColOff:  convPos.ColOffset,
+			EndLine: convPos.EndLineno,
+			EndCol:  convPos.EndColOffset,
+		}, "%c-string: invalid conversion character '%s': expected 's', 'r', or 'a'", prefix, id)
+		return placeholderMatched
+	}
+	return name
 }
 
 // actionPgenAddTypeCommentToArg wires the param-with-type-comment alt
@@ -930,10 +1321,24 @@ func actionPgenAddTypeCommentToArg(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenArgumentsParsingError raises the second-pass diagnostic
+// for a call whose argument list mixes positionals after kwargs (or
+// after a **kwargs unpacking). args = (p, callExpr); we inspect the
+// keywords list to pick the longer "unpacking" phrasing when any
+// keyword has a nil Arg (i.e., **expr).
+//
+// CPython: Parser/action_helpers.c:1224 _PyPegen_arguments_parsing_error
 func actionPgenArgumentsParsingError(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	msg := "positional argument follows keyword argument"
+	if call, ok := asExpr(argAt(args, 1)).(*ast.Call); ok {
+		for _, kw := range call.Keywords {
+			if kw.Arg == nil {
+				msg = "positional argument follows keyword argument unpacking"
+				break
+			}
+		}
+	}
+	return raiseAction(p, "RAISE_SYNTAX_ERROR", msg)
 }
 
 // actionPgenClassDefDecorators stamps decorators onto a ClassDef built
@@ -1125,10 +1530,51 @@ func actionPgenMakeArguments(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenNonparenGenexpInCall raises a SyntaxError when a genexp
+// is used as an argument in a call without parentheses and there are
+// other arguments present. Only fires when len(call.args) > 1.
+//
+// CPython: Parser/action_helpers.c:1244 _PyPegen_nonparen_genexp_in_call
 func actionPgenNonparenGenexpInCall(p *Parser, args ...any) any {
+	call, _ := argAt(args, 1).(*ast.Call)
+	if call == nil {
+		return nil
+	}
+	if len(call.Args) <= 1 {
+		return nil
+	}
+	comps := comprehensionSeqOf(argAt(args, 2))
+	if len(comps) == 0 {
+		return nil
+	}
+	lastArg := call.Args[len(call.Args)-1]
+	lastComp := comps[len(comps)-1]
+	var endExpr ast.Expr
+	if len(lastComp.Ifs) > 0 {
+		endExpr = lastComp.Ifs[len(lastComp.Ifs)-1]
+	} else {
+		endExpr = lastComp.Iter
+	}
+	return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", lastArg, endExpr,
+		"Generator expression must be parenthesized")
+}
+
+// actionPgenCheckLegacyStmt returns the name node when it is "print"
+// or "exec" so the invalid_legacy_expression rule can raise a helpful
+// "Missing parentheses in call to 'print'" error. Returns nil for any
+// other name so the rule falls through without raising.
+//
+// CPython: Parser/action_helpers.c:940 _PyPegen_check_legacy_stmt
+func actionPgenCheckLegacyStmt(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	a, _ := argAt(args, 1).(*ast.Name)
+	if a == nil {
+		return nil
+	}
+	if a.Id == "print" || a.Id == "exec" {
+		return a
+	}
+	return nil
 }
 
 // actionPgenStarEtc bundles the (*vararg, kwonlyargs, **kwarg) tail of
@@ -1244,6 +1690,10 @@ func patternSeqOf(v any) ast.Seq[ast.Pattern] {
 		case nil:
 		case ast.Pattern:
 			out = append(out, t)
+		case ast.Seq[ast.Pattern]:
+			out = append(out, t...)
+		case []ast.Pattern:
+			out = append(out, t...)
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -1353,31 +1803,46 @@ func intOf(v any) *int {
 	return nil
 }
 
+// NumberLitTooLargeError is the panic payload raised when a decimal
+// integer literal exceeds sys.int_max_str_digits. tokenToExpr panics
+// with this type so the error can propagate through the generated
+// grammar without changing return signatures; parser.runParse recovers
+// it and converts it to a *perrors.SyntaxError.
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+type NumberLitTooLargeError struct {
+	Msg  string
+	Line int
+	Col  int
+}
+
 // parseNumberLiteral turns a NUMBER token's text into the Go value
 // CPython's PyAST_Num would land on: int (math/big when oversized,
 // kept as int64 for now), float64, or complex128 for the j-suffixed
 // form. Returns ok=false if the literal does not parse cleanly.
+// Returns a non-nil string when the decimal literal exceeds the
+// sys.int_max_str_digits ceiling; tokenToExpr turns that into a panic.
 //
 // CPython: Parser/string_parser.c parsenumber
-func parseNumberLiteral(s string) (any, bool) {
+func parseNumberLiteral(s string) (any, bool, string) {
 	if s == "" {
-		return nil, false
+		return nil, false, ""
 	}
 	clean := strings.ReplaceAll(s, "_", "")
 	last := clean[len(clean)-1]
 	if last == 'j' || last == 'J' {
 		f, err := strconv.ParseFloat(clean[:len(clean)-1], 64)
-		if err != nil {
-			return nil, false
+		if err != nil && !isFloatRange(err) {
+			return nil, false, ""
 		}
-		return complex(0, f), true
+		return complex(0, f), true, ""
 	}
 	if strings.ContainsAny(clean, ".eE") && !strings.HasPrefix(clean, "0x") && !strings.HasPrefix(clean, "0X") {
 		f, err := strconv.ParseFloat(clean, 64)
-		if err != nil {
-			return nil, false
+		if err != nil && !isFloatRange(err) {
+			return nil, false, ""
 		}
-		return f, true
+		return f, true, ""
 	}
 	base := 10
 	body := clean
@@ -1392,17 +1857,46 @@ func parseNumberLiteral(s string) (any, bool) {
 		base = 2
 		body = body[2:]
 	}
+	// Check sys.int_max_str_digits: decimal literals with more digits than
+	// the limit trigger a SyntaxError during compilation, matching CPython's
+	// _PyLong_FromTokenString which calls PyLong_FromString → limit check.
+	//
+	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+	if base == 10 && IntMaxStrDigitsHook != nil {
+		if limit := IntMaxStrDigitsHook(); limit > 0 && int32(len(body)) > limit {
+			msg := fmt.Sprintf(
+				"Exceeds the limit (%d digits) for integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit"+
+					" - Consider hexadecimal for huge integer literals to avoid decimal conversion limits.",
+				limit, len(body))
+			return nil, false, msg
+		}
+	}
 	if n, err := strconv.ParseInt(body, base, 64); err == nil {
-		return n, true
+		return n, true, ""
 	}
 	// Out of int64 range: lift to *big.Int. CPython routes this through
 	// PyLong_FromString (Parser/string_parser.c parsenumber), which is
 	// arbitrary-precision; the validator accepts *big.Int.
 	bi, ok := new(big.Int).SetString(body, base)
 	if !ok {
-		return nil, false
+		return nil, false, ""
 	}
-	return bi, true
+	return bi, true, ""
+}
+
+// isFloatRange reports whether err from strconv.ParseFloat indicates an
+// out-of-range value (returns +Inf or -Inf in that case). CPython
+// silently accepts overflows: `1e1000` evaluates to inf at parse time,
+// matching the C strtod default rounding to infinity, so the lexer must
+// accept the same surface.
+//
+// CPython: Parser/string_parser.c:1280 parsenumber_raw (PyOS_string_to_double accepts overflow)
+func isFloatRange(err error) bool {
+	var ne *strconv.NumError
+	if !errors.As(err, &ne) {
+		return false
+	}
+	return errors.Is(ne.Err, strconv.ErrRange)
 }
 
 // decodeStringToken strips quote/prefix wrapping and decodes escapes
@@ -1423,17 +1917,42 @@ func decodeStringToken(s string) (string, bool) {
 //
 // CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringTokenTagged(s string) (string, bool, bool) {
+	body, isBytes, ok, _ := decodeStringTokenTaggedErr(s)
+	return body, isBytes, ok
+}
+
+// decodeStringTokenTaggedErr is the underlying form that surfaces the
+// decode error (e.g. unknown \N{NAME}) so callers with a Parser handle
+// can pin a SyntaxError at the token. decodeStringToken /
+// decodeStringTokenTagged keep swallowing the error for callers that
+// only have a Token, but in practice the explicit-constant path in
+// actionPgenConstantFromString routes through this variant.
+//
+// CPython: Parser/string_parser.c:253 _PyPegen_parse_string
+func decodeStringTokenTaggedErr(s string) (string, bool, bool, error) {
+	body, isBytes, ok, _, _, err := decodeStringTokenTaggedErrWithWarns(s)
+	return body, isBytes, ok, err
+}
+
+// decodeStringTokenTaggedErrWithWarns is the form that also surfaces
+// any SyntaxWarning text the decoder collected. CPython routes the
+// warning through warn_invalid_escape_sequence inline; gopy lifts the
+// slice out of the Result so the parser stage can forward it to the
+// lexer's warning channel.
+//
+// CPython: Parser/string_parser.c:206 warn_invalid_escape_sequence call
+func decodeStringTokenTaggedErrWithWarns(s string) (string, bool, bool, []string, []int, error) {
 	if len(s) < 2 {
-		return "", false, false
+		return "", false, false, nil, nil, nil
 	}
 	res, err := stringparse.ParseString([]byte(s))
 	if err != nil {
-		return "", false, false
+		return "", false, false, nil, nil, err
 	}
 	if res.IsBytes {
-		return string(res.Bytes), true, true
+		return string(res.Bytes), true, true, res.Warnings, res.WarnOffsets, nil
 	}
-	return res.Text, false, true
+	return res.Text, false, true, res.Warnings, res.WarnOffsets, nil
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
@@ -1725,7 +2244,7 @@ func constantValue(v any) any {
 		}
 		switch t.Type {
 		case token.NUMBER:
-			if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+			if v, ok, _ := parseNumberLiteral(string(t.Bytes)); ok {
 				return v
 			}
 		case token.STRING:
@@ -1929,15 +2448,41 @@ func actionPgenSeqFlatten(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_seq_append_to_end
 func actionPgenSeqAppendToEnd(p *Parser, args ...any) any {
 	_ = p
-	seq := stmtSeqOf(argAt(args, 1))
-	item := asStmt(argAt(args, 2))
+	// Used by both statement lists and type_expressions (expr lists).
+	// Flatten the existing sequence into []any and append the new item.
+	// CPython: Parser/action_helpers.c:52 _PyPegen_seq_append_to_end
+	seq := flattenAnySeq(argAt(args, 1))
+	item := argAt(args, 2)
 	if item == nil {
 		return seq
 	}
-	out := make([]ast.Stmt, 0, len(seq)+1)
-	out = append(out, seq...)
-	out = append(out, item)
-	return ast.Seq[ast.Stmt](out)
+	return append(seq, item)
+}
+
+// flattenAnySeq normalises the varied sequence types the generated parser
+// produces into a flat []any. Handles []any, ast.Seq[ast.Stmt],
+// ast.Seq[ast.Expr], and single-element non-slice values.
+func flattenAnySeq(v any) []any {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []any:
+		return t
+	case ast.Seq[ast.Stmt]:
+		out := make([]any, len(t))
+		for i, s := range t {
+			out[i] = s
+		}
+		return out
+	case ast.Seq[ast.Expr]:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = e
+		}
+		return out
+	}
+	return []any{v}
 }
 
 // actionPgenRegisterStmts annotates the parser's current statement
@@ -1964,16 +2509,26 @@ func actionPgenSlashWithDefault(p *Parser, args ...any) any {
 	return out
 }
 
+// fstringFormatSpecResult mirrors CPython's ResultTokenWithMetadata: it
+// carries the AST expression for the format spec plus the metadata bytes
+// that the COLON token holds (the debug expression text "expr =  ").
+//
+// CPython: Parser/pegen.h ResultTokenWithMetadata
+type fstringFormatSpecResult struct {
+	Expr     ast.Expr
+	Metadata []byte
+}
+
 // actionPgenSetupFullFormatSpec wraps a format-spec body (from
 // `:spec*` in fstring_full_format_spec) into the expression that
 // FormattedValue.format_spec carries. CPython filters out empty
-// Constant nodes and either returns a JoinedStr or concatenates the
-// surviving parts; the result is then wrapped in a ResultTokenWithMetadata.
-// We return the bare expression since the FormatSpec slot reads an Expr.
+// Constant nodes, concatenates survivors, and wraps the result in a
+// ResultTokenWithMetadata so _PyPegen_formatted_value can read
+// colon->metadata for the debug expression text.
 //
 // CPython: Parser/action_helpers.c:990 _PyPegen_setup_full_format_spec
 func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
-	_ = p
+	colon, _ := argAt(args, 1).(*Token)
 	spec := joinedStrValues(argAt(args, 2))
 	filtered := make([]ast.Expr, 0, len(spec))
 	for _, item := range spec {
@@ -1985,19 +2540,40 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 		filtered = append(filtered, item)
 	}
 	n := len(filtered)
+	var expr ast.Expr
 	if n == 0 {
-		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
-	}
-	if n == 1 {
+		expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	} else if n == 1 {
 		if _, ok := filtered[0].(*ast.Constant); ok {
-			return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+			expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
 		}
 	}
-	concat := ConcatenateStrings(p, filtered)
-	if concat == nil {
-		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	if expr == nil {
+		concat := ConcatenateStrings(p, filtered)
+		if concat == nil {
+			expr = &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+		} else {
+			expr = concat
+		}
 	}
-	return concat
+	// CPython: Parser/action_helpers.c:1030 _PyPegen_setup_full_format_spec
+	// The format-spec JoinedStr starts at the colon token and ends at the
+	// last spec element so the position tuple is emitted in the Python AST.
+	if colon != nil && colon.Lineno > 0 {
+		pos := tokenPos(colon)
+		if n > 0 {
+			lastPos := filtered[n-1].Position()
+			if lastPos.Lineno > 0 {
+				pos.EndLineno = lastPos.EndLineno
+				pos.EndColOffset = lastPos.EndColOffset
+			}
+		}
+		expr.SetPos(pos)
+	}
+	if colon != nil && len(colon.Metadata) > 0 {
+		return &fstringFormatSpecResult{Expr: expr, Metadata: colon.Metadata}
+	}
+	return expr
 }
 
 // actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:
@@ -2012,11 +2588,23 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
 // CPython: Parser/action_helpers.c:1301 _get_resized_exprs
 func actionPgenJoinedStr(p *Parser, args ...any) any {
-	_ = p
 	start, _ := argAt(args, 1).(*Token)
 	values := joinedStrValues(argAt(args, 2))
-	resized, err := resizeFStringExprs(start, values)
+	resized, err := resizeFStringExprs(p, start, values)
 	if err != nil {
+		// CPython: Parser/action_helpers.c:1354 _PyPegen_decode_fstring_part
+		// reports the decode failure via _Pypegen_raise_decode_error so the
+		// SyntaxError carries the codec-prefixed text. Pin at the f-string
+		// start token (the resize walker lost the per-Constant position by
+		// this point; CPython attaches at the same outer span).
+		if p != nil && start != nil {
+			p.RaiseSyntaxErrorKnownLocation(perrors.Pos{
+				Lineno:  start.Lineno,
+				ColOff:  start.ColOff,
+				EndLine: start.EndLine,
+				EndCol:  start.EndCol,
+			}, "%s", err.Error())
+		}
 		return placeholderMatched
 	}
 	return &ast.JoinedStr{Values: resized, Pos: ast.NoPos}
@@ -2029,7 +2617,7 @@ func actionPgenJoinedStr(p *Parser, args ...any) any {
 // drops empty Constants the lexer emits for adjacent escape runs.
 //
 // CPython: Parser/action_helpers.c:1301 _get_resized_exprs
-func resizeFStringExprs(start *Token, raw []ast.Expr) ([]ast.Expr, error) {
+func resizeFStringExprs(p *Parser, start *Token, raw []ast.Expr) ([]ast.Expr, error) {
 	isRaw := fstringStartIsRaw(start)
 	out := make([]ast.Expr, 0, len(raw))
 	for _, item := range raw {
@@ -2047,9 +2635,12 @@ func resizeFStringExprs(start *Token, raw []ast.Expr) ([]ast.Expr, error) {
 			out = append(out, item)
 			continue
 		}
-		decoded, _, err := stringparse.DecodeFStringPart(isRaw, s)
+		decoded, warns, warnOff, err := stringparse.DecodeFStringPart(isRaw, s)
 		if err != nil {
 			return nil, err
+		}
+		if p != nil && p.tok != nil && start != nil {
+			forwardDecodeWarningsAt(p, start.Lineno, start.ColOff, nil, warns, warnOff)
 		}
 		if decoded == "" {
 			continue
@@ -2163,6 +2754,20 @@ type posSetter interface {
 // CPython: Tools/peg_generator/pegen/c_generator.py EXTRA
 func withSpan(p *Parser, startMark int, v any) any {
 	if v == nil || v == placeholderMatched {
+		return v
+	}
+	// kwarg_or_starred and kwarg_or_double_starred wrap the constructed
+	// Keyword in a KeywordOrStarred carrier. CPython applies EXTRA to
+	// the Keyword itself inside _PyAST_keyword; here the carrier sits
+	// between withSpan and the node that holds the Pos, so peel it
+	// open and stamp the inner Keyword directly.
+	//
+	// CPython: Grammar/python.gram:1081 kwarg_or_starred (EXTRA passed
+	// to _PyAST_keyword, not the outer keyword_or_starred wrapper).
+	if k, ok := v.(*KeywordOrStarred); ok && k != nil {
+		if kw, ok := k.Element.(*ast.Keyword); ok && kw != nil && kw.Pos == ast.NoPos {
+			kw.Pos = p.Span(startMark)
+		}
 		return v
 	}
 	n, ok := v.(posSetter)
@@ -2573,6 +3178,18 @@ func actionAstTypeVar(p *Parser, args ...any) any {
 	}
 }
 
+// isTupleKind reports whether v is an *ast.Tuple. The grammar uses
+// `e->kind == Tuple_kind` (CPython asdl enum) to distinguish between
+// a bound annotation (`*A: str`) and a constraints annotation
+// (`*A: (int, str)`); Go has no such enum so the generator emits a
+// type assertion helper instead.
+//
+// CPython: Grammar/python.gram invalid_type_param Tuple_kind check
+func isTupleKind(v any) bool {
+	_, ok := v.(*ast.Tuple)
+	return ok
+}
+
 // actionAstTypeVarTuple builds TypeVarTuple. Args: (name_id, default).
 //
 // CPython: Parser/Python.asdl TypeVarTuple(identifier name, expr? default_value)
@@ -2608,7 +3225,7 @@ func actionAstParamSpec(p *Parser, args ...any) any {
 // actionPgenMapNamesToIDs extracts the identifier text from a
 // sequence of NAME tokens or *ast.Name expressions.
 //
-// CPython: Parser/action_helpers.c _PyPegen_map_names_to_ids
+// CPython: Parser/action_helpers.c:444 _PyPegen_map_names_to_ids
 func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 	_ = p
 	v := argAt(args, 1)
@@ -2625,8 +3242,20 @@ func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 			if t != nil {
 				out = append(out, t.Id)
 			}
+		case ast.Expr:
+			if n, ok := t.(*ast.Name); ok && n != nil {
+				out = append(out, n.Id)
+			}
 		case string:
 			out = append(out, t)
+		case ast.Seq[ast.Expr]:
+			for _, e := range t {
+				walk(e)
+			}
+		case []ast.Expr:
+			for _, e := range t {
+				walk(e)
+			}
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -2643,11 +3272,22 @@ func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 // actionPgenAliasForStar builds the alias entry for `from X import *`.
 // CPython spells the asname as "*" and leaves asname unset.
 //
-// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+// CPython: Parser/action_helpers.c:163 _PyPegen_alias_for_star
 func actionPgenAliasForStar(p *Parser, args ...any) any {
-	_ = p
 	_ = args
-	return &ast.Alias{Name: "*", Pos: ast.NoPos}
+	// Use the last consumed token (the '*') for the alias position,
+	// matching CPython's EXTRA which captures the rule's source span.
+	pos := ast.NoPos
+	if p.Mark() > 0 && p.Mark()-1 < len(p.tokens) {
+		tok := p.tokens[p.Mark()-1]
+		pos = ast.Pos{
+			Lineno:       tok.Lineno,
+			ColOffset:    tok.ColOff,
+			EndLineno:    tok.EndLine,
+			EndColOffset: tok.EndCol,
+		}
+	}
+	return &ast.Alias{Name: "*", Pos: pos}
 }
 
 // actionPgenGetCmpops returns the operator slice from a list of
@@ -2724,15 +3364,13 @@ func actionPgenGetPatternKeys(p *Parser, args ...any) any {
 // actionPgenGetPatterns returns the pattern column from a list of
 // [2]any (key, pattern) pairs.
 //
-// CPython: Parser/action_helpers.c _PyPegen_get_patterns
+// CPython: Parser/action_helpers.c:415 _PyPegen_get_patterns
 func actionPgenGetPatterns(p *Parser, args ...any) any {
 	_ = p
 	pairs := flattenKVPairs(argAt(args, 1))
 	out := make(ast.Seq[ast.Pattern], 0, len(pairs))
 	for _, pr := range pairs {
-		if pat := patternOf(pr[1]); pat != nil {
-			out = append(out, pat)
-		}
+		out = append(out, patternOf(pr[1]))
 	}
 	return out
 }
@@ -2806,4 +3444,307 @@ func actionPgenCheckedFutureImport(p *Parser, args ...any) any {
 		out.Level = lvl
 	}
 	return out
+}
+
+// positioner is anything that exposes an ast.Pos. Both ast.Stmt and
+// ast.Expr interfaces require Position(); ast.Keyword and the type
+// params likewise expose one.
+type positioner interface{ Position() ast.Pos }
+
+// extractLineno returns the starting line number of v. Used to
+// translate C `a->lineno` in RAISE_INDENTATION_ERROR format args.
+//
+// CPython: Parser/tokenize/tokenize.h Token.lineno
+func extractLineno(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.Lineno
+	case ast.Pos:
+		return x.Lineno
+	case positioner:
+		return x.Position().Lineno
+	case []any:
+		if len(x) > 0 {
+			return extractLineno(x[0])
+		}
+	}
+	return 0
+}
+
+// extractEndColOffset returns the exclusive end column offset of v.
+// Translates C `a->end_col_offset` in RAISE_ERROR_KNOWN_LOCATION args.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int end_col_offset
+func extractEndColOffset(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.EndCol
+	case ast.Pos:
+		return x.EndColOffset
+	case positioner:
+		return x.Position().EndColOffset
+	case []any:
+		if len(x) > 0 {
+			return extractEndColOffset(x[0])
+		}
+	}
+	return 0
+}
+
+// extractEndLineno returns the last source line number of v.
+// Translates C `a->end_lineno` in RAISE_ERROR_KNOWN_LOCATION args.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int end_lineno
+func extractEndLineno(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.EndLine
+	case ast.Pos:
+		return x.EndLineno
+	case positioner:
+		return x.Position().EndLineno
+	case []any:
+		if len(x) > 0 {
+			return extractEndLineno(x[0])
+		}
+	}
+	return 0
+}
+
+// extractColOffset returns the start column offset of v.
+// Translates C `a->col_offset` in position-bearing macros.
+//
+// CPython: Include/internal/pycore_ast.h asdl_int col_offset
+func extractColOffset(v any) int {
+	switch x := v.(type) {
+	case *Token:
+		return x.ColOff
+	case ast.Pos:
+		return x.ColOffset
+	case positioner:
+		return x.Position().ColOffset
+	case []any:
+		if len(x) > 0 {
+			return extractColOffset(x[0])
+		}
+	}
+	return 0
+}
+
+// extractPos peels the variadic wrapper layers a translated action
+// emits and returns the underlying source-span. Handles tokens,
+// typed AST nodes, and pre-built position quads.
+func extractPos(v any) ast.Pos {
+	for {
+		switch x := v.(type) {
+		case nil:
+			return ast.NoPos
+		case *Token:
+			return tokenPos(x)
+		case ast.Pos:
+			return x
+		case positioner:
+			return x.Position()
+		case []any:
+			if len(x) == 0 {
+				return ast.NoPos
+			}
+			v = x[0]
+		default:
+			return ast.NoPos
+		}
+	}
+}
+
+// errPosFromAst converts an ast.Pos to the perrors.Pos shape used by
+// the pinned SyntaxError record.
+func errPosFromAst(p ast.Pos) perrors.Pos {
+	return perrors.Pos{
+		Lineno:  p.Lineno,
+		ColOff:  p.ColOffset,
+		EndLine: p.EndLineno,
+		EndCol:  p.EndColOffset,
+	}
+}
+
+// peekTokenPos returns the perrors.Pos of the next token, or the zero
+// value if the buffer is empty.
+func peekTokenPos(p *Parser) perrors.Pos {
+	t := p.Peek()
+	if t == nil {
+		return perrors.Pos{}
+	}
+	return perrors.Pos{
+		Lineno:  t.Lineno,
+		ColOff:  t.ColOff,
+		EndLine: t.EndLine,
+		EndCol:  t.EndCol,
+	}
+}
+
+// normalizeFormat rewrites CPython printf conversions that don't exist
+// in Go: %U (PyUnicode) becomes %s. The translator passes Go strings
+// for the corresponding format arguments, so a plain %s round-trips
+// the value.
+func normalizeFormat(s string) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	return strings.ReplaceAll(s, "%U", "%s")
+}
+
+// raiseAction is the runtime fan-out for the RAISE_SYNTAX_ERROR_*
+// macros the action translator emits. `kind` selects the position
+// style; `args` holds the optional start/end nodes followed by the
+// printf-style format and its arguments.
+//
+// Returns nil so the calling alt records a parse failure. The
+// SyntaxError is pinned on the Parser via the existing record path
+// so SetSyntaxError surfaces it after Dispatch.
+//
+// CPython: Parser/pegen.h RAISE_SYNTAX_ERROR / RAISE_ERROR_KNOWN_LOCATION
+func raiseAction(p *Parser, kind string, args ...any) any {
+	if p == nil {
+		return nil
+	}
+	var (
+		pos     perrors.Pos
+		msg     string
+		fmtArgs []any
+	)
+	switch kind {
+	case "RAISE_SYNTAX_ERROR_KNOWN_RANGE":
+		start := extractPos(argAt(args, 0))
+		end := extractPos(argAt(args, 1))
+		pos = perrors.Pos{
+			Lineno:  start.Lineno,
+			ColOff:  start.ColOffset,
+			EndLine: end.EndLineno,
+			EndCol:  end.EndColOffset,
+		}
+		msg, _ = argAt(args, 2).(string)
+		if len(args) > 3 {
+			fmtArgs = args[3:]
+		}
+	case "RAISE_SYNTAX_ERROR_KNOWN_LOCATION":
+		pos = errPosFromAst(extractPos(argAt(args, 0)))
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_INVALID_TARGET":
+		// CPython: Parser/pegen.h:240 _RAISE_SYNTAX_ERROR_INVALID_TARGET
+		// args[0] = kind string ("STAR_TARGETS", "DEL_TARGETS", "FOR_TARGETS")
+		// args[1] = the star_expressions / yield_expr node
+		kind, _ := argAt(args, 0).(string)
+		expr, _ := argAt(args, 1).(ast.Expr)
+		var invalidTarget ast.Expr
+		switch kind {
+		case "DEL_TARGETS":
+			invalidTarget = GetInvalidDelTarget(expr)
+		case "FOR_TARGETS":
+			invalidTarget = GetInvalidForTarget(expr)
+		default: // STAR_TARGETS
+			invalidTarget = GetInvalidStarTarget(expr)
+		}
+		if invalidTarget == nil {
+			return nil
+		}
+		pos = errPosFromAst(extractPos(invalidTarget))
+		exprName := GetExprName(invalidTarget)
+		if kind == "DEL_TARGETS" {
+			msg = "cannot delete %s"
+		} else {
+			msg = "cannot assign to %s"
+		}
+		fmtArgs = []any{exprName}
+	case "RAISE_ERROR_KNOWN_LOCATION":
+		// Full explicit-position form from the grammar:
+		// RAISE_ERROR_KNOWN_LOCATION(p, PyExc_SyntaxError, lineno, col_offset, end_lineno, end_col_offset, msg)
+		// Translated args: [p, excType, lineno, colOff, endLineno, endColOff, msg]
+		//
+		// CPython: Parser/pegen.h RAISE_ERROR_KNOWN_LOCATION
+		// CPython: Grammar/python.gram:1502 invalid_kvpair
+		lineno := toInt(argAt(args, 2))
+		colOff := toInt(argAt(args, 3))
+		endLineno := toInt(argAt(args, 4))
+		endCol := toInt(argAt(args, 5))
+		pos = perrors.Pos{
+			Lineno:  lineno,
+			ColOff:  colOff,
+			EndLine: endLineno,
+			EndCol:  endCol,
+		}
+		msg, _ = argAt(args, 6).(string)
+		if len(args) > 7 {
+			fmtArgs = args[7:]
+		}
+	case "RAISE_ERROR_AT_EXPR_END":
+		// CPython: Grammar/python.gram invalid_kvpair
+		// RAISE_ERROR_KNOWN_LOCATION(p, exc, a->lineno, a->end_col_offset-1, a->end_lineno, -1, msg)
+		// Points the caret at the last column of the expression (one before end_col_offset),
+		// indicating where the ':' was expected.
+		aPos := extractPos(argAt(args, 0))
+		pos = perrors.Pos{
+			Lineno:  aPos.Lineno,
+			ColOff:  aPos.EndColOffset - 1,
+			EndLine: aPos.EndLineno,
+			EndCol:  -1,
+		}
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_STARTING_FROM":
+		start := extractPos(argAt(args, 0))
+		peek := peekTokenPos(p)
+		pos = perrors.Pos{
+			Lineno:  start.Lineno,
+			ColOff:  start.ColOffset,
+			EndLine: peek.EndLine,
+			EndCol:  peek.EndCol,
+		}
+		msg, _ = argAt(args, 1).(string)
+		if len(args) > 2 {
+			fmtArgs = args[2:]
+		}
+	case "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN":
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+	case "RAISE_INDENTATION_ERROR":
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+		if msg == "" {
+			msg = "unexpected indent"
+		}
+		msg = normalizeFormat(msg)
+		if len(fmtArgs) > 0 {
+			p.RaiseIndentationError(msg, fmtArgs...)
+		} else {
+			p.RaiseIndentationError("%s", msg)
+		}
+		return nil
+	default: // RAISE_SYNTAX_ERROR
+		pos = peekTokenPos(p)
+		msg, _ = argAt(args, 0).(string)
+		if len(args) > 1 {
+			fmtArgs = args[1:]
+		}
+	}
+	if msg == "" {
+		msg = "invalid syntax"
+	}
+	msg = normalizeFormat(msg)
+	if len(fmtArgs) > 0 {
+		p.RaiseSyntaxErrorKnownLocation(pos, msg, fmtArgs...)
+	} else {
+		p.RaiseSyntaxErrorKnownLocation(pos, "%s", msg)
+	}
+	return nil
 }

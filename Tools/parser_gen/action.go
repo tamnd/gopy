@@ -201,8 +201,18 @@ func (tr *cTranslator) parseInfix() (string, bool) {
 	for {
 		op := tr.peek().text
 		switch op {
-		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||", "+", "-", "*", "/", "%":
 			tr.advance()
+			// Special case: `<recv>->kind == Tuple_kind` is an AST node
+			// kind check. CPython's asdl enum has a Tuple_kind tag; Go
+			// has no such enum so we emit a type assertion helper instead.
+			//
+			// CPython: Grammar/python.gram invalid_type_param (Tuple_kind check)
+			if op == "==" && tr.pos < len(tr.toks) && tr.peek().kind == "id" && tr.peek().text == "Tuple_kind" {
+				tr.advance() // consume "Tuple_kind"
+				left = "isTupleKind(" + left + ")"
+				continue
+			}
 			right, ok := tr.parsePrimary()
 			if !ok {
 				return "", false
@@ -326,11 +336,28 @@ var astEnumConstants = map[string]string{
 // that grammar actions reach into when building Constant nodes. The
 // Go side surfaces them through helper sentinels so the action layer
 // can land them as ast.Constant values.
+//
+// The TARGETS_TYPE enum values (STAR_TARGETS, DEL_TARGETS, FOR_TARGETS)
+// are also surfaced here as quoted strings so raiseAction can dispatch
+// to the correct GetInvalid*Target helper at runtime.
+//
+// CPython: Parser/pegen.h:211 RAISE_SYNTAX_ERROR_INVALID_TARGET
 var pyConstants = map[string]string{
 	"Py_True":     "pyTrueSentinel",
 	"Py_False":    "pyFalseSentinel",
 	"Py_None":     "pyNoneSentinel",
 	"Py_Ellipsis": "pyEllipsisSentinel",
+	"STAR_TARGETS": `"STAR_TARGETS"`,
+	"DEL_TARGETS":  `"DEL_TARGETS"`,
+	"FOR_TARGETS":  `"FOR_TARGETS"`,
+	// CPython exception type constants passed to RAISE_ERROR_KNOWN_LOCATION.
+	// The Go raiseAction handler uses the kind string to decide the error
+	// class; passing the name as a string preserves the information without
+	// requiring a live Python exception type object.
+	// CPython: Include/cpython/pyerrors.h PyExc_SyntaxError
+	"PyExc_SyntaxError":      `"SyntaxError"`,
+	"PyExc_IndentationError": `"IndentationError"`,
+	"PyExc_TabError":         `"TabError"`,
 }
 
 // cTypeNames lists the C / asdl type names the grammar uses inside
@@ -512,6 +539,34 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		// form so the surrounding call-arg join sees an exact match.
 		return recv + ".arena", true
 	}
+	if first == "tokens" && recv == "p" {
+		// p->tokens[p->mark-1]->level → p.PrevTokenLevel()
+		// CPython: Parser/pegen.h:592 p->tokens[p->mark-1]->level
+		if tr.peek().text != "[" {
+			return "", false
+		}
+		tr.advance() // consume "["
+		// consume "p->mark-1" or similar index expression
+		depth := 1
+		for depth > 0 && tr.pos < len(tr.toks) {
+			tok := tr.advance()
+			if tok.text == "[" {
+				depth++
+			} else if tok.text == "]" {
+				depth--
+			}
+		}
+		// now expect ->level
+		if tr.peek().text != "->" && tr.peek().text != "." {
+			return "", false
+		}
+		tr.advance()
+		if tr.peek().text != "level" {
+			return "", false
+		}
+		tr.advance()
+		return recv + ".PrevTokenLevel()", true
+	}
 	// KeyValuePair / KeyPatternPair / NameDefaultPair top-level
 	// fields. The Go encoding stores these as `[2]any{a, b}` so we
 	// pull out the column directly.
@@ -524,6 +579,30 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		return "kvKey(" + recv + ")", true
 	case "pattern":
 		return "kvValue(" + recv + ")", true
+	case "bytes":
+		// a->bytes on a Token* gives the token's text bytes object.
+		// nameIDOf already extracts the text string from a *Token.
+		// CPython: Parser/tokenize/tokenize.h tok_state.bytes
+		return "nameIDOf(" + recv + ")", true
+	case "lineno":
+		// a->lineno on a Token* or expr_ty gives the start line number.
+		// Used by RAISE_INDENTATION_ERROR format args ("on line %d").
+		// CPython: Parser/tokenize/tokenize.h Token.lineno / asdl lineno
+		return "extractLineno(" + recv + ")", true
+	case "end_col_offset":
+		// a->end_col_offset on an expr_ty gives the exclusive end column.
+		// Used by RAISE_ERROR_KNOWN_LOCATION to point the caret after the
+		// last character of the expression (e.g. "':' expected after dictionary key").
+		// CPython: Include/internal/pycore_ast.h asdl_int end_col_offset
+		return "extractEndColOffset(" + recv + ")", true
+	case "end_lineno":
+		// a->end_lineno on an expr_ty gives the last source line of the expression.
+		// CPython: Include/internal/pycore_ast.h asdl_int end_lineno
+		return "extractEndLineno(" + recv + ")", true
+	case "col_offset":
+		// a->col_offset on an expr_ty gives the start column offset.
+		// CPython: Include/internal/pycore_ast.h asdl_int col_offset
+		return "extractColOffset(" + recv + ")", true
 	}
 	if first != "v" {
 		return "", false
@@ -593,8 +672,11 @@ func translateCall(fname string, args []string) (string, bool) {
 			return args[len(args)-1], true
 		}
 	case "CHECK_VERSION":
+		// CPython: Parser/pegen.h:308 CHECK_VERSION(type, version, msg, node)
+		// → INVALID_VERSION_CHECK(p, version, msg, node).
+		// args[0]=C type (ignored), args[1]=version int, args[2]=message, args[3]=node.
 		if len(args) >= 4 {
-			return args[len(args)-1], true
+			return "checkVersion(p, " + args[1] + ", " + args[2] + ", " + args[3] + ")", true
 		}
 	case "NEW_TYPE_COMMENT":
 		// Macro that wraps an optional TYPE_COMMENT token into a
@@ -604,8 +686,12 @@ func translateCall(fname string, args []string) (string, bool) {
 			return args[1], true
 		}
 	case "INVALID_VERSION_CHECK":
-		// Version-gate macro: emits the body when the runtime is at
-		// least the named version. Pass-through to the body arg.
+		// CPython: Parser/pegen.h:294 INVALID_VERSION_CHECK(p, version, msg, node).
+		// args[0]=p (ignored), args[1]=version int, args[2]=message, args[3]=node.
+		if len(args) >= 4 {
+			return "checkVersion(p, " + args[1] + ", " + args[2] + ", " + args[3] + ")", true
+		}
+		// 3-arg form (no msg): pass through node as before.
 		if len(args) >= 3 {
 			return args[len(args)-1], true
 		}
@@ -614,6 +700,58 @@ func translateCall(fname string, args []string) (string, bool) {
 		"RAISE_SYNTAX_ERROR_STARTING_FROM", "RAISE_SYNTAX_ERROR_INVALID_TARGET",
 		"RAISE_INDENTATION_ERROR", "RAISE_ERROR_KNOWN_LOCATION":
 		return "raiseAction(p, " + strconv.Quote(fname) + ", " + joinArgsForRaise(args) + ")", true
+	case "PyErr_Occurred":
+		// Conditional raise pattern in invalid_*_replacement_field
+		// and friends: `PyErr_Occurred() ? NULL : RAISE_SYNTAX_ERROR_*(...)`.
+		// Returns true when a SyntaxError is already pinned; the
+		// ternary then skips the new raise. gopy's recordError has
+		// the same idempotency guard but the ternary still needs a
+		// truthy boolean here so the action body type-checks.
+		//
+		// CPython: Include/cpython/pyerrors.h PyErr_Occurred
+		if len(args) == 0 {
+			return "(p.PinnedError() != nil)", true
+		}
+	case "PyBytes_AS_STRING":
+		// PyBytes_AS_STRING(b) extracts the C string from a bytes object.
+		// In gopy, token->bytes comes through nameIDOf already as a string,
+		// so this is a pass-through.
+		// CPython: Include/cpython/bytesobject.h PyBytes_AS_STRING
+		if len(args) == 1 {
+			return args[0], true
+		}
+	case "PyPegen_first_item":
+		// PyPegen_first_item(seq, type) returns the first element of a
+		// sequence. The second arg is a C type tag dropped on the Go side.
+		// CPython: Parser/pegen.h:267 PyPegen_first_item macro
+		if len(args) >= 1 {
+			return "seqFirstAny(" + args[0] + ")", true
+		}
+	case "PyPegen_last_item":
+		// PyPegen_last_item(seq, type) returns the last element of a
+		// sequence. The second arg is a C type tag that the Go side
+		// does not need; sequences are untyped []any in the action
+		// helpers.
+		// CPython: Parser/pegen.h:265 PyPegen_last_item macro
+		if len(args) >= 1 {
+			return "seqLastAny(" + args[0] + ")", true
+		}
+	case "asdl_seq_LEN":
+		// asdl_seq_LEN(seq) returns the length of an asdl sequence.
+		// Gather-rule results arrive as []any from the generator; the
+		// Go helper unwraps and reports the count.
+		// CPython: Include/internal/pycore_asdl.h:18 asdl_seq_LEN
+		if len(args) == 1 {
+			return "seqLenAny(" + args[0] + ")", true
+		}
+	case "asdl_seq_GET":
+		// asdl_seq_GET(seq, i) fetches the i-th element of an asdl
+		// sequence. The Go-side helper accepts a []any or a typed
+		// sequence and returns the element as any.
+		// CPython: Include/internal/pycore_asdl.h:19 asdl_seq_GET
+		if len(args) == 2 {
+			return "seqGetAny(" + args[0] + ", " + args[1] + ")", true
+		}
 	}
 	if strings.HasPrefix(fname, "_PyAST_") {
 		ctor := fname[len("_PyAST_"):]

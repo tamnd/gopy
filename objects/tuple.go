@@ -41,7 +41,7 @@ var TupleType = NewType("tuple", []*Type{objectType})
 var emptyTuple *Tuple
 
 func init() {
-	TupleType.TpFlags = TpFlagSequence
+	TupleType.TpFlags |= TpFlagSequence | TpFlagMatchSelf
 	TupleType.Repr = tupleRepr
 	TupleType.Str = tupleRepr
 	TupleType.Hash = tupleHash
@@ -69,6 +69,8 @@ func init() {
 	// CPython: Objects/typeobject.c add_operators slot wrapper for sq_item / sq_length
 	SetTypeDescr(TupleType, "__getitem__", NewMethodDescr(TupleType, "__getitem__", tupleGetItemMethod))
 	SetTypeDescr(TupleType, "__len__", NewMethodDescr(TupleType, "__len__", tupleLenMethod))
+	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
+	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
@@ -246,6 +248,12 @@ func tupleHash(o Object) (int64, error) {
 	return int64(acc), nil
 }
 
+// tupleRichCmp ports tuplerichcompare: EQ/NE compare length+element-wise,
+// LT/LE/GT/GE compare lexicographically, returning the result of the
+// first differing pair's comparison or the length comparison when one
+// tuple is a prefix of the other.
+//
+// CPython: Objects/tupleobject.c:L703 tuplerichcompare
 func tupleRichCmp(a, b Object, op CompareOp) (Object, error) {
 	at, ok := a.(*Tuple)
 	if !ok {
@@ -265,6 +273,33 @@ func tupleRichCmp(a, b Object, op CompareOp) (Object, error) {
 			eq = !eq
 		}
 		return NewBool(eq), nil
+	}
+	// Find the first differing slot, then return the result of that
+	// element's comparison for op. If one tuple is a prefix of the
+	// other, fall back to comparing lengths.
+	la, lb := len(at.items), len(bt.items)
+	n := la
+	if lb < n {
+		n = lb
+	}
+	for i := 0; i < n; i++ {
+		eq, err := RichCmpBool(at.items[i], bt.items[i], CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if !eq {
+			return RichCmp(at.items[i], bt.items[i], op)
+		}
+	}
+	switch op {
+	case CompareLT:
+		return NewBool(la < lb), nil
+	case CompareLE:
+		return NewBool(la <= lb), nil
+	case CompareGT:
+		return NewBool(la > lb), nil
+	case CompareGE:
+		return NewBool(la >= lb), nil
 	}
 	return notImplemented(), nil
 }
@@ -344,6 +379,97 @@ func tupleIter(o Object) (Object, error) {
 	it := &tupleIterator{src: o.(*Tuple)}
 	it.init(tupleIterType)
 	return it, nil
+}
+
+// tupleIndexMethod ports tuple.index(value, [start, [stop]]): returns
+// the first index of value, raising ValueError if not present.
+//
+// CPython: Objects/tupleobject.c:736 tupleindex
+func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: index() takes at least 1 argument")
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'index' requires a 'tuple' object")
+	}
+	target := args[1]
+	n := len(t.items)
+	start := 0
+	stop := n
+	if len(args) >= 3 {
+		s, err := toGoInt(args[2])
+		if err != nil {
+			return nil, fmt.Errorf("TypeError: 'start' must be an integer")
+		}
+		start = s
+		if start < 0 {
+			start += n
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+	if len(args) >= 4 {
+		s, err := toGoInt(args[3])
+		if err != nil {
+			return nil, fmt.Errorf("TypeError: 'stop' must be an integer")
+		}
+		stop = s
+		if stop < 0 {
+			stop += n
+			if stop < 0 {
+				stop = 0
+			}
+		}
+	}
+	if stop > n {
+		stop = n
+	}
+	for i := start; i < stop; i++ {
+		eq, err := RichCmpBool(t.items[i], target, CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			return NewInt(int64(i)), nil
+		}
+	}
+	return nil, fmt.Errorf("ValueError: tuple.index(x): x not in tuple")
+}
+
+// tupleCountMethod ports tuple.count(value): counts occurrences.
+//
+// CPython: Objects/tupleobject.c:777 tuplecount
+func tupleCountMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: count() takes exactly one argument (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'count' requires a 'tuple' object")
+	}
+	target := args[1]
+	count := 0
+	for _, item := range t.items {
+		eq, err := RichCmpBool(item, target, CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			count++
+		}
+	}
+	return NewInt(int64(count)), nil
+}
+
+// toGoInt converts an Object to a Go int for use as a sequence index.
+func toGoInt(o Object) (int, error) {
+	if i, ok := o.(*Int); ok {
+		n, _ := i.Int64()
+		return int(n), nil
+	}
+	return 0, fmt.Errorf("not an integer")
 }
 
 // TupleIterNextFast advances o as a tuple_iterator without going

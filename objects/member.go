@@ -19,6 +19,7 @@ type MemberDescr struct {
 	Header
 	name  string
 	index int
+	owner *Type
 }
 
 // MemberDescrType is the type singleton for __slots__ descriptors.
@@ -32,7 +33,11 @@ func init() {
 	MemberDescrType.DescrGet = memberDescrGet
 	MemberDescrType.DescrSet = memberDescrSet
 	addDescriptorSlotWrappers(MemberDescrType)
+	addDescrIntrospectionDescriptors(MemberDescrType)
 }
+
+// Owner returns the type this member descriptor is registered on.
+func (d *MemberDescr) Owner() *Type { return d.owner }
 
 // NewMemberDescr builds a slot descriptor for name backed by the slot
 // at index in the instance slots array.

@@ -182,7 +182,14 @@ func codeCoLinesMethod(args []Object, kwargs map[string]Object) (Object, error) 
 }
 
 // codeCoPositionsMethod backs code.co_positions(). Returns an iterator
-// of (line, end_line, col, end_col) tuples; None replaces a missing field.
+// of (line, end_line, col, end_col) tuples, one tuple per codeunit
+// (2 bytes), not per coalesced linetable run. dis.py and other
+// consumers call next() once per instruction plus once per inline cache
+// slot, so a coalesced run that covers N codeunits must yield N copies.
+//
+// CPython: Objects/codeobject.c:1492 positionsiter_next advances
+// pi_offset by 2 (one codeunit) on every call and only re-decodes the
+// linetable when the cursor reaches the end of the current range.
 //
 // CPython: Objects/codeobject.c:1554 code_positionsiterator
 func codeCoPositionsMethod(args []Object, kwargs map[string]Object) (Object, error) {
@@ -194,20 +201,24 @@ func codeCoPositionsMethod(args []Object, kwargs map[string]Object) (Object, err
 	}
 	c := args[0].(*Code)
 	entries := CoPositions(c)
-	items := make([]Object, len(entries))
 	posField := func(v int) Object {
 		if v < 0 {
 			return None()
 		}
 		return NewInt(int64(v))
 	}
-	for i, p := range entries {
-		items[i] = NewTuple([]Object{
+	var items []Object
+	for _, p := range entries {
+		tup := NewTuple([]Object{
 			posField(p.Line),
 			posField(p.EndLine),
 			posField(p.Column),
 			posField(p.EndColumn),
 		})
+		units := max((p.End-p.Start)/2, 1)
+		for range units {
+			items = append(items, tup)
+		}
 	}
 	return listIter(NewList(items))
 }

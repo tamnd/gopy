@@ -297,9 +297,8 @@ func (ub *unionBuilder) makeUnion() (Object, error) {
 }
 
 // isUnionable reports whether obj can sit inside a union. CPython
-// accepts None, types, GenericAliases, existing unions, and
-// TypeAlias instances. gopy has no TypeAlias yet so the test stops
-// at the first four.
+// accepts None, types, GenericAliases, existing unions, TypeAlias
+// instances, and the type-parameter objects TypeVar/ParamSpec/TypeVarTuple.
 //
 // CPython: Objects/unionobject.c:244 is_unionable
 func isUnionable(obj Object) bool {
@@ -313,6 +312,18 @@ func isUnionable(obj Object) bool {
 		return true
 	}
 	if _, ok := obj.(*UnionType); ok {
+		return true
+	}
+	if _, ok := obj.(*TypeAliasObj); ok {
+		return true
+	}
+	if _, ok := obj.(*TypeVar); ok {
+		return true
+	}
+	if _, ok := obj.(*ParamSpec); ok {
+		return true
+	}
+	if _, ok := obj.(*TypeVarTuple); ok {
 		return true
 	}
 	return false
@@ -374,10 +385,19 @@ func unionFromTuple(args Object) (Object, error) {
 	return ub.makeUnion()
 }
 
-// unionTypeCheck is the analog of type_check in unionobject.c. The
-// gopy slice does not call into typing._type_check (typing.py is not
-// runnable yet), so anything that is not directly unionable raises
-// the same TypeError CPython would surface.
+// UnionTypeCheckHook is set by the _typing module after typing.py
+// defines _type_check. It delegates non-directly-unionable args to
+// Python's typing._type_check, which accepts ForwardRef, strings
+// (wrapping them to ForwardRef), TypeVar, and other typing forms.
+// Before typing is imported the field is nil and only directly
+// unionable objects are accepted.
+//
+// CPython: Objects/unionobject.c:478 call_typing_func_object("_type_check")
+var UnionTypeCheckHook func(Object, string) (Object, error)
+
+// unionTypeCheck is the analog of type_check in unionobject.c. When
+// UnionTypeCheckHook is wired (typing.py has been imported) it
+// delegates to typing._type_check for non-directly-unionable args.
 //
 // CPython: Objects/unionobject.c:463 type_check
 func unionTypeCheck(arg Object, msg string) (Object, error) {
@@ -386,6 +406,9 @@ func unionTypeCheck(arg Object, msg string) (Object, error) {
 	}
 	if isUnionable(arg) {
 		return arg, nil
+	}
+	if UnionTypeCheckHook != nil {
+		return UnionTypeCheckHook(arg, msg)
 	}
 	return nil, fmt.Errorf("TypeError: %s Got %s", msg, typeNameOf(arg))
 }

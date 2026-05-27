@@ -209,6 +209,10 @@ func typeSingletons() []struct {
 		{"enumerate", objects.EnumerateType},
 		{"reversed", objects.ReversedType},
 		{"memoryview", objects.MemoryViewType},
+		// CPython: Python/bltinmodule.c:3461 SETBUILTIN block
+		// NoneType and ellipsis are exposed so pickle/copyreg can find them.
+		{"NoneType", objects.NoneType()},
+		{"ellipsis", objects.EllipsisType()},
 	}
 }
 
@@ -236,6 +240,7 @@ func wireTypeCalls() {
 		// __new__ descriptor needs binding here.
 		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
+		bindCtor(objects.ComplexType, ComplexCtor)
 		bindCtor(objects.SetType, SetCtor)
 		bindCtor(objects.FrozensetType, FrozensetCtor)
 		bindCtor(objects.BytesType, BytesCtor)
@@ -372,6 +377,8 @@ func exceptionSingletons() []struct {
 		{"SyntaxError", errors.PyExc_SyntaxError},
 		{"IndentationError", errors.PyExc_IndentationError},
 		{"TabError", errors.PyExc_TabError},
+		// CPython: Python/bltinmodule.c _IncompleteInputError registration
+		{"_IncompleteInputError", errors.PyExc_IncompleteInputError},
 		{"UnicodeError", errors.PyExc_UnicodeError},
 		{"UnicodeDecodeError", errors.PyExc_UnicodeDecodeError},
 		{"UnicodeEncodeError", errors.PyExc_UnicodeEncodeError},
@@ -409,6 +416,7 @@ func scopePanel() []struct {
 	}{
 		{"globals", Globals},
 		{"locals", Locals},
+		{"vars", Vars},
 	}
 }
 
@@ -539,5 +547,8 @@ func iterationPanel() []builtinRow {
 //
 // CPython: Python/bltinmodule.c:3451 SETBUILTIN
 func setBuiltin(dict *objects.Dict, name string, value objects.Object) error {
+	if bf, ok := value.(*objects.BuiltinFunction); ok && bf.Module == "" {
+		bf.Module = "builtins"
+	}
 	return dict.SetItem(objects.NewStr(name), value)
 }

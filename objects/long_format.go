@@ -70,6 +70,12 @@ func intFormat(o Object, spec string) (string, error) {
 		return "", fmt.Errorf("ValueError: %w", err)
 	}
 	switch parsed.Type {
+	case 0, 'b', 'c', 'd', 'o', 'x', 'X', 'n':
+		out, err := format.FormatInt(v, parsed)
+		if err != nil {
+			return "", fmt.Errorf("ValueError: %w", err)
+		}
+		return out, nil
 	case 'e', 'E', 'f', 'F', 'g', 'G', '%':
 		// Promote to float and dispatch through float's renderer so
 		// '{:.2g}'.format(255) goes through the IEEE-754 path. CPython
@@ -84,11 +90,20 @@ func intFormat(o Object, spec string) (string, error) {
 		}
 		return out, nil
 	}
-	out, err := format.FormatInt(v, parsed)
-	if err != nil {
-		return "", fmt.Errorf("ValueError: %w", err)
+	return "", unknownPresentationType(parsed.Type, o.Type().Name)
+}
+
+// unknownPresentationType ports the unknown_presentation_type helper
+// CPython uses across the four __format__ slots. The %c / \\x%x split
+// keeps the rendered ValueError byte-identical to PyErr_Format's
+// output when the presentation byte is outside printable ASCII.
+//
+// CPython: Python/formatter_unicode.c:14 unknown_presentation_type
+func unknownPresentationType(presentationType byte, typeName string) error {
+	if presentationType > 32 && presentationType < 128 {
+		return fmt.Errorf("ValueError: Unknown format code '%c' for object of type '%s'", presentationType, typeName)
 	}
-	return out, nil
+	return fmt.Errorf("ValueError: Unknown format code '\\x%x' for object of type '%s'", uint(presentationType), typeName)
 }
 
 // bigIntFromIntLike unwraps an Int or Bool into its underlying big.Int.

@@ -84,7 +84,7 @@ var DictType = NewType("dict", []*Type{objectType})
 const dictMinSize = 8
 
 func init() {
-	DictType.TpFlags = TpFlagMapping
+	DictType.TpFlags |= TpFlagMapping | TpFlagMatchSelf
 	DictType.Repr = dictRepr
 	DictType.Str = dictRepr
 	DictType.Iter = dictIter
@@ -106,6 +106,23 @@ func init() {
 		d.init(cls)
 		return d, nil
 	}
+	// dict.__new__ slot wrapper. CPython installs tp_new_wrapper for every
+	// type whose tp_new is not NULL; the wrapper calls type->tp_new(subtype,
+	// args, kwds). Without this, dict.__new__(SubClass) falls through to
+	// objectNewBuiltin which creates *Instance instead of *Dict, breaking
+	// dict subclasses that define their own __new__ (e.g. collections.OrderedDict).
+	//
+	// CPython: Objects/typeobject.c:9952 tp_new_wrapper / add_tp_new_wrapper
+	SetTypeDescr(DictType, "__new__", NewBuiltinFunction("dict.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: dict.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: dict.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return DictType.TpNew(cls, args[1:], kwargs)
+	}))
 	// dict.__repr__ slot wrapper (tp_repr add_operators path).
 	//
 	// CPython: Objects/typeobject.c add_operators
@@ -127,6 +144,16 @@ func init() {
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
 	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
 	SetTypeDescr(DictType, "popitem", NewMethodDescr(DictType, "popitem", dictPopItemMethod))
+	SetTypeDescr(DictType, "__or__", NewMethodDescr(DictType, "__or__", dictOrMethod))
+	SetTypeDescr(DictType, "__ior__", NewMethodDescr(DictType, "__ior__", dictIOrMethod))
+	SetTypeDescr(DictType, "__ror__", NewMethodDescr(DictType, "__ror__", dictROrMethod))
+	// __iter__ slot wrapper. CPython's add_operators installs this for
+	// every type with a non-NULL tp_iter; without it, things like
+	// `dict.__iter__(d)` and CrazyDict's `for x in self.d.__iter__()`
+	// raise AttributeError.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_iter
+	AddIterSlotWrappers(DictType)
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a
@@ -366,7 +393,8 @@ func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 // dictMappingGet is the type-level __getitem__. Mirrors dict_subscript:
 // on miss it raises KeyError with the key as the value, so user code
 // `except KeyError` catches the failure instead of seeing the raw
-// errKeyNotFound sentinel.
+// errKeyNotFound sentinel. For dict subclasses, calls __missing__(key)
+// on a cache miss before raising KeyError.
 //
 // CPython: Objects/dictobject.c:2229 dict_subscript
 func dictMappingGet(o, key Object) (Object, error) {
@@ -374,6 +402,13 @@ func dictMappingGet(o, key Object) (Object, error) {
 	v, err := d.GetItem(key)
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
+			// For dict subclasses, invoke __missing__ before raising KeyError.
+			// CPython: Objects/dictobject.c:2242 (non-exact dict __missing__ path)
+			if d.Type() != DictType {
+				if missingFn, merr := GetAttr(o, NewStr("__missing__")); merr == nil && missingFn != nil {
+					return CallOneArg(missingFn, key)
+				}
+			}
 			repr, rerr := Repr(key)
 			if rerr != nil {
 				repr = "?"
@@ -501,6 +536,35 @@ func dictLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(args[0].(*Dict).Len())), nil
 }
 
+// DictBacking is implemented by every type whose instances are a dict
+// subclass (collections.defaultdict, collections.OrderedDict, ...).
+// asDictBacking() returns the underlying *Dict so dict's tp_richcompare,
+// MATCH_KEYS, and friends can operate on the storage that the subclass
+// inherits from PyDict_Type, mirroring CPython's tp_basicsize sharing.
+//
+// CPython: Objects/dictobject.c PyDict_Check / PyDictObject layout
+type DictBacking interface {
+	AsDictBacking() *Dict
+}
+
+// AsDictBacking returns d itself; *Dict implements DictBacking.
+func (d *Dict) AsDictBacking() *Dict { return d }
+
+// asDictBacking returns the *Dict stored inside o, or (nil, false) if
+// o is not a dict subclass. Used by dict slots to accept defaultdict
+// and similar subclass instances.
+func asDictBacking(o Object) (*Dict, bool) {
+	if d, ok := o.(*Dict); ok {
+		return d, true
+	}
+	if b, ok := o.(DictBacking); ok {
+		if d := b.AsDictBacking(); d != nil {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
 // dictEqual reports whether two dicts compare equal by key/value.
 //
 // CPython: Objects/dictobject.c:3494 dict_equal
@@ -536,11 +600,11 @@ func dictEqual(a, b *Dict) (bool, error) {
 //
 // CPython: Objects/dictobject.c:3554 dict_richcompare
 func dictRichCmp(a, b Object, op CompareOp) (Object, error) {
-	ad, ok := a.(*Dict)
+	ad, ok := asDictBacking(a)
 	if !ok {
 		return notImplemented(), nil
 	}
-	bd, ok := b.(*Dict)
+	bd, ok := asDictBacking(b)
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -564,11 +628,11 @@ func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __eq__() takes exactly one argument (%d given)", len(args)-1)
 	}
-	a, ok := args[0].(*Dict)
+	a, ok := asDictBacking(args[0])
 	if !ok {
 		return NotImplemented(), nil
 	}
-	b, ok := args[1].(*Dict)
+	b, ok := asDictBacking(args[1])
 	if !ok {
 		return NotImplemented(), nil
 	}
@@ -756,6 +820,88 @@ func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	atomic.OrUint64(&dst.watcherTag, had)
 	return dst, nil
+}
+
+// dictOrMethod backs dict.__or__(other). Returns a new dict with all
+// entries from self followed by entries from other (other wins on
+// duplicate keys). Mirrors PEP 584 / dict___or___impl.
+//
+// CPython: Objects/dictobject.c:3890 dict___or___impl
+func dictOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __or__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	self, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	other, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	return dst, nil
+}
+
+// dictROrMethod backs dict.__ror__(other). Same as __or__ with swapped
+// operands.
+//
+// CPython: Objects/dictobject.c:3908 dict___ror___impl
+func dictROrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ror__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	other, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	self, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	return dst, nil
+}
+
+// dictIOrMethod backs dict.__ior__(other) (the |= operator). Updates
+// self in place with entries from other and returns self.
+//
+// CPython: Objects/dictobject.c:3922 dict___ior___impl
+func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ior__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	self, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	other, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	for _, k := range other.Keys() {
+		v, _ := other.GetItem(k)
+		if err := self.SetItem(k, v); err != nil {
+			return nil, err
+		}
+	}
+	return self, nil
 }
 
 // dictSetDefaultMethod backs dict.setdefault(key[, default]).

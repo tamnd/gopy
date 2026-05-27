@@ -177,6 +177,18 @@ func init() {
 	}
 }
 
+// GCWeakrefRegisterHook is called from PyWeakref_NewRef whenever a
+// new weakref is created, so the cycle collector can clear it when the
+// referent becomes unreachable. The gc module sets this at startup to
+// avoid an objects -> gc import cycle.
+//
+// CPython: Objects/weakrefobject.c:271 PyWeakref_NewRef (registers via
+// tp_weaklistoffset; CPython's GC walks that list during handle_weakrefs)
+var GCWeakrefRegisterHook func(*Weakref)
+
+// GCWeakProxyRegisterHook is the proxy counterpart of GCWeakrefRegisterHook.
+var GCWeakProxyRegisterHook func(*WeakProxy)
+
 // NewWeakref builds a fresh weakref pointing at referent. callback
 // may be nil or None for no callback, or any callable. The new
 // weakref is inserted into referent's per-object list and a runtime
@@ -215,6 +227,14 @@ func PyWeakref_NewRef(referent, callback Object) (*Weakref, error) {
 	insertEntryLocked(list, &weakrefEntry{ref: w}, w, nil)
 	list.mu.Unlock()
 	armWeakrefFinalizer(referent)
+	// Register with the Python-level cycle GC so handle_weakrefs can
+	// clear this ref when the referent becomes unreachable during gc.collect().
+	//
+	// CPython: Objects/weakrefobject.c:271 PyWeakref_NewRef (implicit via
+	// tp_weaklistoffset: GC walks the per-object list during handle_weakrefs)
+	if h := GCWeakrefRegisterHook; h != nil {
+		h(w)
+	}
 	return w, nil
 }
 

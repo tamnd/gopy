@@ -12,8 +12,13 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/frame"
+	"github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 )
+
+func init() {
+	sys.SysTraceBuiltinsHook = RegisterSysTraceBuiltins
+}
 
 // whatStrings packs the legacy event-kind names sys.settrace /
 // sys.setprofile pass to the Python callback as the second argument.

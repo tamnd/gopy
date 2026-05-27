@@ -38,6 +38,7 @@ func init() {
 	BuiltinFunctionType.Str = builtinFunctionRepr
 	BuiltinFunctionType.Call = builtinFunctionCall
 	BuiltinFunctionType.Vectorcall = builtinFunctionVectorcall
+	AddCallSlotWrapper(BuiltinFunctionType)
 	// Identity hash so builtin functions are usable as set/dict keys.
 	// CPython inherits tp_hash from object for cfunction objects.
 	//

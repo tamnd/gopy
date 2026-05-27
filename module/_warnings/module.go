@@ -18,7 +18,16 @@ import (
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/module/contextvars"
 	"github.com/tamnd/gopy/objects"
+	pystate "github.com/tamnd/gopy/state"
 )
+
+// CurrentThreadHook is set by the vm package so that getWarningsContext
+// can read the active PEP 567 ContextVar without importing vm (which
+// would cycle). Mirrors the pattern used by module/contextvars and
+// module/sys.
+//
+// CPython: Python/_warnings.c:267 get_warnings_context (PyContextVar_Get)
+var CurrentThreadHook func() *pystate.Thread
 
 // MODULE_NAME mirrors the C constant.
 //
@@ -281,13 +290,29 @@ func getWarningsAttr(name string, tryImport bool) (objects.Object, error) { //no
 	return v, nil
 }
 
-// getWarningsContext returns the active warnings context. gopy does
-// not surface PyContextVar.get from builtin scope, so this always
-// reports "no context".
+// getWarningsContext returns the active _Context for the running
+// thread. With context-aware warnings (_use_context=True in CPython
+// 3.14), catch_warnings stores the per-call filter list in a ContextVar
+// rather than on warnings.filters, so we must read the ContextVar to
+// see filters installed by simplefilter/filterwarnings inside a
+// catch_warnings block.
 //
 // CPython: Python/_warnings.c:267 get_warnings_context
-func getWarningsContext() (objects.Object, error) { //nolint:unparam // error slot mirrors CPython, kept for future plumbing.
-	return objects.None(), nil
+func getWarningsContext() (objects.Object, error) {
+	cv, _ := state.context.(*contextvars.ContextVar)
+	if cv == nil || CurrentThreadHook == nil {
+		return objects.None(), nil
+	}
+	ts := CurrentThreadHook()
+	if ts == nil {
+		return objects.None(), nil
+	}
+	ctx, err := cv.Get(ts)
+	if err != nil {
+		// LookupError → no context set; treat as global context.
+		return objects.None(), nil
+	}
+	return ctx, nil
 }
 
 // getWarningsContextFilters reads the _filters list off the active
@@ -727,7 +752,6 @@ func warnExplicit(category objects.Object, message objects.Object, filename obje
 	if err != nil {
 		return nil, err
 	}
-
 	stopShort, rc, err := applyAction(actStr, registry, key, text, catType)
 	if err != nil {
 		return nil, err
@@ -735,7 +759,16 @@ func warnExplicit(category objects.Object, message objects.Object, filename obje
 	if stopShort {
 		if actStr == "error" {
 			msgText, _ := objects.Str(text)
-			return nil, fmt.Errorf("%s: %s", catType.Name, msgText)
+			// CPython: Python/_warnings.c:870 warn_explicit action=='error'
+			// sets SyntaxWarning via PyErr_SetObject(category, message).
+			// Callers (_PyTokenizer_parser_warn, _PyCompile_Warn) then
+			// convert the SyntaxWarning exception to a SyntaxError for a
+			// more precise error report. Emit "SyntaxError:" so the VM
+			// prefix table maps this to PyExc_SyntaxError.
+			//
+			// CPython: Parser/tokenizer/helpers.c:174 _PyTokenizer_parser_warn
+			// CPython: Python/codegen.c:237 _PyCompile_Warn
+			return nil, fmt.Errorf("SyntaxError: %s", msgText)
 		}
 		return objects.None(), nil
 	}

@@ -84,6 +84,7 @@ func init() {
 	// CPython: Objects/classobject.c:103 method_methods
 	SetTypeDescr(BoundMethodType, "__reduce__",
 		NewMethodDescr(BoundMethodType, "__reduce__", boundMethodReduceMethod))
+	AddCallSlotWrapper(BoundMethodType)
 }
 
 // boundMethodGetattro looks for name on the method type first (so

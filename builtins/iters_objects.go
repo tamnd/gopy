@@ -23,7 +23,7 @@ type seqIter struct {
 	idx int
 }
 
-var seqIterType = objects.NewType("iterator", []*objects.Type{objects.TypeType()})
+var seqIterType = objects.NewType("iterator", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	seqIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
@@ -63,7 +63,7 @@ type callIter struct {
 	done     bool
 }
 
-var callIterType = objects.NewType("callable_iterator", []*objects.Type{objects.TypeType()})
+var callIterType = objects.NewType("callable_iterator", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	callIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
@@ -104,7 +104,7 @@ type reversedIter struct {
 	idx int
 }
 
-var reversedIterType = objects.NewType("reversed", []*objects.Type{objects.TypeType()})
+var reversedIterType = objects.NewType("reversed", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	reversedIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
@@ -138,7 +138,7 @@ type enumerateIter struct {
 	index int64
 }
 
-var enumerateType = objects.NewType("enumerate", []*objects.Type{objects.TypeType()})
+var enumerateType = objects.NewType("enumerate", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	enumerateType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }

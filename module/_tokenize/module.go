@@ -274,7 +274,9 @@ func tokenizerIterNext(o objects.Object) (objects.Object, error) {
 	// between iterator steps.
 	if all := it.tok.Warnings(); len(all) > it.warnIdx {
 		if lexer.WarnHook != nil {
-			lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:])
+			if err := lexer.WarnHook(it.tok.Filename(), all[it.warnIdx:]); err != nil {
+				return nil, err
+			}
 		}
 		it.warnIdx = len(all)
 	}
@@ -474,6 +476,12 @@ func tokenizerError(st *lexer.State, lines []string) error {
 		pos.ColOff = se.Pos.Col
 	}
 
+	// Use -1 sentinel for EndCol (means "not set"); exc_from_parser.go
+	// checks EndCol >= 0 to decide whether to populate end_offset.
+	//
+	// CPython: Python/Python-tokenize.c _tokenizer_error (no end-pos set)
+	pos.EndCol = -1
+
 	kind := parsererrors.KindSyntax
 	msg := ""
 	useLineEndOffset := false
@@ -513,7 +521,7 @@ func tokenizerError(st *lexer.State, lines []string) error {
 
 	// CPython overrides the canonical message with the lexer's stored
 	// text on the SyntaxError path when it carries more detail (e.g.
-	// "invalid character ... (U+...)"). Preserve that behaviour without
+	// "invalid character ... (U+...)"). Preserve that behavior without
 	// shadowing the dedicated TabError / IndentationError text.
 	if kind == parsererrors.KindSyntax && storedMsg != "" && msg != storedMsg {
 		msg = storedMsg
@@ -534,12 +542,12 @@ func tokenizerError(st *lexer.State, lines []string) error {
 	}
 	text = trimLineTerminator(text)
 	if useLineEndOffset {
-		pos.ColOff = utf8.RuneCountInString(text) + 1
-	} else if pos.ColOff > 0 {
-		// SyntaxError.offset is 1-based; the lexer records s.col as a
-		// 0-based byte position. Convert by adding one (the bytes are
-		// ASCII for every error path the lexer currently records).
-		pos.ColOff = pos.ColOff + 1
+		// CPython: tok->inp - tok->buf gives len(text_with_newline).
+		// exc_from_parser.go adds 1 to ColOff to get the 1-indexed offset,
+		// so store len(text_stripped) here (0-based position of the newline).
+		//
+		// CPython: Python/Python-tokenize.c:148 col_offset computation
+		pos.ColOff = utf8.RuneCountInString(text)
 	}
 
 	return &parsererrors.SyntaxError{

@@ -28,6 +28,11 @@ import (
 //
 // CPython: Python/compile.c:L353 _PyAST_Compile
 func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
+	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
+	// CPython: Python/ast.c:1047 _PyAST_Validate
+	if err := ast.Validate(mod); err != nil {
+		return nil, fmt.Errorf("ValueError: %s", err.Error())
+	}
 	ff, err := future.FromAST(mod, filename)
 	if err != nil {
 		return nil, err
@@ -36,15 +41,25 @@ func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
 	// the CPython ordering in compiler_init. The pass applies printf-format
 	// folding, __debug__ substitution, MatchValue numeric folding, and (at
 	// -OO) docstring removal. SyntaxCheckOnly stays false so mutations land
-	// before symtable sees the tree.
+	// before symtable sees the tree. Returned warnings are PEP 765
+	// control-flow-in-finally diagnostics; emit them via WarnHook so the
+	// Python warnings filter sees them (and can elevate to SyntaxError).
 	//
 	// CPython: Python/compile.c:139 compiler_init
-	ast.Preprocess(mod, ast.PreprocessOptions{
+	// CPython: Python/ast_preprocess.c:66 control_flow_in_finally_warning
+	warns := ast.Preprocess(mod, ast.PreprocessOptions{
 		Filename:       filename,
 		OptimizeLevel:  optimize,
 		FFFeatures:     ff.Bits,
 		EnableWarnings: true,
 	})
+	if WarnHook != nil {
+		for _, w := range warns {
+			if err := WarnHook("SyntaxWarning", w.Msg, w.Filename, w.Pos.Lineno); err != nil {
+				return nil, err
+			}
+		}
+	}
 	st, err := symtable.Build(mod, filename, ff)
 	if err != nil {
 		return nil, err

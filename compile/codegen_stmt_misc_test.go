@@ -136,19 +136,24 @@ func TestAugAssignAttributeEmitsCopyLoadBinarySwapStore(t *testing.T) {
 // AnnAssign ----------------------------------------------------------
 
 func TestAnnAssignWithValueAssigns(t *testing.T) {
-	// x: int = 1 — value lands in the local namespace; PEP 649 records
-	// the annotation into the deferred list and the module body emits
-	// MAKE_FUNCTION + STORE_NAME __annotate__ after visitStmts.
+	// x: int = 1 at module scope. The annotation stash (AnnoCode) emits
+	// BUILD_SET/__conditional_annotations__ + __annotate__ BEFORE the body.
+	// The body stores x=1 and records condIdx=0 in __conditional_annotations__.
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
 		Value:      cnst(int64(1)),
+		Simple:     1,
 	}
 	u := compileMod(t, module(a))
+	// opNames prepends AnnoCode then body (minus RESUME).
 	want := []string{
+		// AnnoCode: conditional-annotations prologue + __annotate__ setup
 		"BUILD_SET", "STORE_NAME",
-		"LOAD_CONST", "STORE_NAME",
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
+		// body: x = 1, then record condIdx in __conditional_annotations__
+		"LOAD_CONST", "STORE_NAME",
+		"LOAD_NAME", "LOAD_CONST", "SET_ADD", "POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
@@ -160,17 +165,20 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 }
 
 func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
-	// x: int — no store of x. The annotation lands in
-	// DeferredAnnotations and the module body's __annotate__ install
-	// follows.
+	// x: int at module scope — no value store. AnnoCode stash emits the
+	// prologue + __annotate__ first; body records condIdx=0.
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
+		Simple:     1,
 	}
 	u := compileMod(t, module(a))
 	want := []string{
+		// AnnoCode: conditional-annotations prologue + __annotate__
 		"BUILD_SET", "STORE_NAME",
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
+		// body: record condIdx=0 in __conditional_annotations__
+		"LOAD_NAME", "LOAD_CONST", "SET_ADD", "POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {

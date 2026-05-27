@@ -44,6 +44,15 @@ type Result struct {
 	// CPython: Objects/unicodeobject.c emits PyExc_SyntaxWarning
 	// from _PyUnicode_DecodeUnicodeEscapeInternal.
 	Warnings []string
+	// WarnOffsets holds the byte offset within the raw string body
+	// (after prefix and opening quotes are stripped) at which each
+	// warning escape was found. Parallel to Warnings. Used by the
+	// caller to compute accurate lineno for multiline string literals
+	// by counting '\n' characters from the token start to the offset.
+	//
+	// CPython: Parser/string_parser.c:53 warn_invalid_escape_sequence
+	// (walks buffer from token start to first_invalid_escape to compute lineno)
+	WarnOffsets []int
 }
 
 // errBadInternalCall mirrors PyErr_BadInternalCall: the caller fed
@@ -108,19 +117,22 @@ stripped:
 		}
 		out := s
 		var warns []string
+		var offsets []int
 		if !noEscape {
-			b, w, err := decodeBytesEscapes(s)
+			b, w, off, err := decodeBytesEscapes(s)
 			if err != nil {
 				return Result{}, err
 			}
 			out = b
 			warns = w
+			offsets = off
 		}
 		return Result{
-			Bytes:    append([]byte(nil), out...),
-			IsBytes:  true,
-			IsRaw:    rawMode,
-			Warnings: warns,
+			Bytes:       append([]byte(nil), out...),
+			IsBytes:     true,
+			IsRaw:       rawMode,
+			Warnings:    warns,
+			WarnOffsets: offsets,
 		}, nil
 	}
 
@@ -130,11 +142,28 @@ stripped:
 		}
 		return Result{Text: string(s), IsRaw: rawMode}, nil
 	}
-	text, warns, err := decodeUnicodeEscapes(s)
+	text, warns, offsets, err := decodeUnicodeEscapes(s)
 	if err != nil {
-		return Result{}, err
+		return Result{}, wrapDecodeError(err)
 	}
-	return Result{Text: text, Warnings: warns}, nil
+	return Result{Text: text, Warnings: warns, WarnOffsets: offsets}, nil
+}
+
+// wrapDecodeError formats a *DecodeError into the codec-prefix string
+// the parser surface expects. Mirrors what
+// _PyUnicode_DecodeUnicodeEscapeInternal2 stores on the
+// PyUnicodeDecodeError plus the `(unicode error)` tag added by
+// _Pypegen_raise_decode_error.
+//
+// CPython: Parser/pegen_errors.c:130 _Pypegen_raise_decode_error
+// CPython: Objects/unicodeobject.c:6854 raise "unicodeescape"
+func wrapDecodeError(err error) error {
+	var de *DecodeError
+	if errors.As(err, &de) {
+		pos := fmt.Sprintf("%d-%d", de.Start, de.End)
+		return fmt.Errorf("(unicode error) 'unicodeescape' codec can't decode bytes in position %s: %s", pos, de.Reason)
+	}
+	return err
 }
 
 func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 0 }
@@ -147,18 +176,53 @@ func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 
 // fstring_find_literal_and_field), so the {{/}} length=1 trick the C
 // helper applies after the lexer is a no-op here.
 //
+// `\{` and `\}` SyntaxWarnings are dropped here. The tokenizer already
+// emits them when it scans the FSTRING_MIDDLE / FSTRING_END body
+// (Parser/lexer/lexer.c:1581, ported in parser/lexer/fstring.go), and
+// CPython suppresses the decoder copy via the explicit token-type
+// guard in warn_invalid_escape_sequence so the user only sees one
+// warning per occurrence.
+//
 // CPython: Parser/action_helpers.c:1270 _PyPegen_decode_fstring_part
 // CPython: Parser/string_parser.c:242 _PyPegen_decode_string
-func DecodeFStringPart(isRaw bool, s string) (string, []string, error) {
+// CPython: Parser/string_parser.c:22 warn_invalid_escape_sequence
+// f-string brace dedup
+func DecodeFStringPart(isRaw bool, s string) (string, []string, []int, error) {
 	if isRaw || !hasBackslash([]byte(s)) {
 		if !utf8.Valid([]byte(s)) {
-			return "", nil, fmt.Errorf("invalid utf-8 in string literal")
+			return "", nil, nil, fmt.Errorf("invalid utf-8 in string literal")
 		}
-		return s, nil, nil
+		return s, nil, nil, nil
 	}
-	text, warns, err := decodeUnicodeEscapes([]byte(s))
+	text, warns, offsets, err := decodeUnicodeEscapes([]byte(s))
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, wrapDecodeError(err)
 	}
-	return text, warns, nil
+	warns, offsets = dropFStringBraceWarnings(warns, offsets)
+	return text, warns, offsets, nil
+}
+
+// dropFStringBraceWarnings strips the `\{` and `\}` invalid-escape
+// warnings the decoder would otherwise duplicate against the
+// tokenizer's copy. Matches the long-form CPython text by looking at
+// the leading `"\X"` prefix so the filter is stable across both the
+// non-octal and the future "deprecated" wording.
+//
+// CPython: Parser/string_parser.c:22 warn_invalid_escape_sequence
+func dropFStringBraceWarnings(warns []string, offsets []int) ([]string, []int) {
+	if len(warns) == 0 {
+		return warns, offsets
+	}
+	outW := warns[:0]
+	var outO []int
+	for idx, w := range warns {
+		if strings.HasPrefix(w, "\"\\{\"") || strings.HasPrefix(w, "\"\\}\"") {
+			continue
+		}
+		outW = append(outW, w)
+		if idx < len(offsets) {
+			outO = append(outO, offsets[idx])
+		}
+	}
+	return outW, outO
 }

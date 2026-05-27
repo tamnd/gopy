@@ -137,9 +137,32 @@ func (b *builder) visitAnnotation(annotation ast.Expr, key any) error {
 				return err
 			}
 		}
+		// When the class has conditional annotations, __conditional_annotations__
+		// must be visible as a free variable inside the annotation block so that
+		// emitAnnotateBody can emit LOAD_DEREF to test which indices were reached.
+		// The outer class scope will have the corresponding cell (via dropClassFree
+		// + stampImplicitCell). Module scope uses LOAD_GLOBAL instead, so no
+		// free-var injection is needed there.
+		//
+		// CPython: Python/compile.c:630 (implicit cellvar cook-up)
 	} else {
 		if err := b.enterExisting(parent.AnnotationBlock, false); err != nil {
 			return err
+		}
+	}
+	// When the class has conditional annotations, __conditional_annotations__
+	// must be visible as a free variable inside the annotation block so that
+	// emitAnnotateBody can emit LOAD_DEREF to test which indices were reached.
+	// The outer class scope will have the corresponding cell (via dropClassFree
+	// + stampImplicitCell). Module scope uses LOAD_GLOBAL instead, so no
+	// free-var injection is needed there. addDef is idempotent for USE flags.
+	//
+	// CPython: Python/compile.c:630 (implicit cellvar cook-up)
+	if parent.HasConditionalAnnotations && parent.Type == ClassBlock {
+		if _, exists := b.cur.Symbols["__conditional_annotations__"]; !exists {
+			if err := b.addDef("__conditional_annotations__", Use, exprPos(annotation)); err != nil {
+				return err
+			}
 		}
 	}
 	if isUnevaluated {
@@ -295,6 +318,9 @@ func (b *builder) visitPattern(p ast.Pattern) error {
 // CPython: Python/symtable.c VISIT_SEQ(c, pattern, seq)
 func (b *builder) visitPatternSeq(seq ast.Seq[ast.Pattern]) error {
 	for _, p := range seq {
+		if p == nil {
+			continue
+		}
 		if err := b.visitPattern(p); err != nil {
 			return err
 		}
@@ -308,11 +334,9 @@ func (b *builder) visitPatternSeq(seq ast.Seq[ast.Pattern]) error {
 // CPython: Python/symtable.c:L1620 check_kwd_patterns
 func (b *builder) checkKwdPatterns(p *ast.MatchClass) error {
 	for i, name := range p.KwdAttrs {
-		var loc ast.Pos
-		if i < len(p.KwdPatterns) {
+		loc := p.Pos
+		if i < len(p.KwdPatterns) && p.KwdPatterns[i] != nil {
 			loc = p.KwdPatterns[i].Position()
-		} else {
-			loc = p.Pos
 		}
 		if err := b.checkName(name, loc, ast.Store); err != nil {
 			return err

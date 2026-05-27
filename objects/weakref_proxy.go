@@ -117,6 +117,9 @@ func newWeakProxy(referent, callback Object, callable bool) *WeakProxy {
 	insertEntryLocked(list, &weakrefEntry{proxy: p}, nil, p)
 	list.mu.Unlock()
 	armWeakrefFinalizer(referent)
+	if h := GCWeakProxyRegisterHook; h != nil {
+		h(p)
+	}
 	return p
 }
 

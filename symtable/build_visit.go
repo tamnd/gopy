@@ -45,6 +45,17 @@ func (b *builder) visitStmtDef(s ast.Stmt) (bool, error) {
 		return true, nil
 	case *ast.ImportFrom:
 		for _, a := range n.Names {
+			// `from X import *` parses with the alias's position
+			// unset (the star token has no inline location info on
+			// the parser side). Fall back to the statement's
+			// position so the SyntaxError we may raise here lands
+			// with a real lineno / col_offset, matching CPython
+			// where the alias inherits the import's source span.
+			//
+			// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+			if a.Pos == ast.NoPos {
+				a.Pos = n.Pos
+			}
 			if err := b.visitAlias(a); err != nil {
 				return true, err
 			}
@@ -641,9 +652,11 @@ func (b *builder) checkImportFrom(s *ast.ImportFrom) error {
 		return nil
 	}
 	fut := b.future.Location
-	if fut == (ast.Pos{}) || fut == ast.NoPos {
-		return nil
-	}
+	// CPython: Python/symtable.c:L1813 check_import_from
+	// ff_location starts at {-1,-1,-1,-1} (ast.NoPos). Any real lineno > -1
+	// satisfies the guard, so a future import after a non-future statement
+	// (including the case where the scanner found NO future imports at all)
+	// is correctly rejected.
 	if s.Pos.Lineno > fut.Lineno ||
 		(s.Pos.Lineno == fut.EndLineno && s.Pos.ColOffset > fut.EndColOffset) {
 		return errorf(b.filename, s.Pos, msgFutureLate)
