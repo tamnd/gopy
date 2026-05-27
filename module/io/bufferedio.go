@@ -530,7 +530,7 @@ func (b *Buffered) readerReadGeneric(n int) (objects.Object, error) {
 			return nil, err
 		}
 		if got == 0 || got == -2 {
-			if got == 0 || written > 0 {
+			if written > 0 || got == 0 {
 				return objects.NewBytes(out[:written]), nil
 			}
 			return objects.None(), nil
@@ -547,7 +547,7 @@ func (b *Buffered) readerReadGeneric(n int) (objects.Object, error) {
 			return nil, err
 		}
 		if r == 0 || r == -2 {
-			if r == 0 || written > 0 {
+			if written > 0 || r == 0 {
 				return objects.NewBytes(out[:written]), nil
 			}
 			return objects.None(), nil

@@ -143,6 +143,11 @@ func encodeGB18030(_ *codecState, input []rune, inpos int, out *encodeBuffer, _ 
 		out.writeByte(byte(c))
 		return 1
 	}
+	if c >= 0xD800 && c <= 0xDFFF {
+		// Surrogates are not valid Unicode codepoints; CPython rejects them.
+		// Return 1 with no bytes written so the outer loop treats it as unmapped.
+		return 1
+	}
 	if c >= 0x10000 {
 		tc := c - 0x10000
 		b4 := byte(tc%10) + 0x30
@@ -312,10 +317,13 @@ func decodeHZ(state *codecState, in []byte, w *unicodeWriter) int {
 			w.writeRune('~')
 		case c2 == '{' && state.cBytes[cnStateOffset] == 0:
 			state.cBytes[cnStateOffset] = 1
+			w.stateAdv = 2
 		case c2 == '\n' && state.cBytes[cnStateOffset] == 0:
 			// line continuation, drop
+			w.stateAdv = 2
 		case c2 == '}' && state.cBytes[cnStateOffset] == 1:
 			state.cBytes[cnStateOffset] = 0
+			w.stateAdv = 2
 		default:
 			return 1
 		}

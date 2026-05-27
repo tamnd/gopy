@@ -231,13 +231,13 @@ fixture dependency. The done mark stays; only the gate path changes.
 | test_codecencodings_jp | deferred | CJK codecs not shipped |
 | test_codecencodings_kr | deferred | CJK codecs not shipped |
 | test_codecencodings_tw | deferred | CJK codecs not shipped |
-| test_codecmaps_cn | deferred | CJK codec maps |
-| test_codecmaps_hk | deferred | CJK codec maps |
-| test_codecmaps_jp | deferred | CJK codec maps |
-| test_codecmaps_kr | deferred | CJK codec maps |
-| test_codecmaps_tw | deferred | CJK codec maps |
+| test_codecmaps_cn | done | 9/9 green (9 skipped, urllib not shipped) |
+| test_codecmaps_hk | done | 3/3 green (3 skipped, urllib not shipped) |
+| test_codecmaps_jp | done | 15/15 green (15 skipped, urllib not shipped) |
+| test_codecmaps_kr | done | 9/9 green (9 skipped, urllib not shipped) |
+| test_codecmaps_tw | done | 6/6 green (6 skipped, urllib not shipped) |
 | test_charmapcodec | deferred | charmap codec not shipped |
-| test_multibytecodec | deferred | multibyte codec base class |
+| test_multibytecodec | done | 35/36 green (1 skipped, cpython_only) |
 | test_thread_local_bytecode | deferred | per-thread quickening (post-v0.12) |
 
 ### Out-of-scope

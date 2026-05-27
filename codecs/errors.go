@@ -94,10 +94,15 @@ func ignoreHandler(_, _ string, _ []byte, _ int, end int) (replacement string, n
 	return "", end, nil
 }
 
-// replaceHandler substitutes U+FFFD for undecodable bytes.
+// replaceHandler substitutes U+FFFD for undecodable bytes or ? for
+// unencodable characters. The encode path prefixes the reason string
+// with "encode:" so this handler can distinguish the two.
 //
 // CPython: Python/codecs.c:L882 replace_errors
-func replaceHandler(_, _ string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
+func replaceHandler(_, reason string, _ []byte, _ int, end int) (replacement string, newpos int, err error) {
+	if len(reason) >= 7 && reason[:7] == "encode:" {
+		return "?", end, nil
+	}
 	return string(utf8.RuneError), end, nil
 }
 

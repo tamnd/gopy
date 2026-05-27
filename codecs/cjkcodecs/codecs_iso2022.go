@@ -107,6 +107,10 @@ func iso2022EncodeInit(state *codecState) {
 
 // CPython: _codecs_iso2022.c:167 ENCODER_RESET(iso2022)
 func iso2022EncodeReset(state *codecState, out *encodeBuffer) {
+	// G0==0 means the lazy ENCODER_INIT never ran (empty input); nothing to do.
+	if iso2022GetG(state, 0) == 0 {
+		return
+	}
 	if iso2022GetFlag(state, flagShifted) {
 		out.writeByte(iso2022SI)
 		iso2022ClrFlag(state, flagShifted)
@@ -412,8 +416,15 @@ func makeISO2022Decoder(cfg *iso2022Config) decodeFunc {
 			switch {
 			case isISO2022Esc(in[1]):
 				r := iso2022ProcessEsc(cfg, state, in)
+				if r == MBERR_TOOFEW {
+					return MBERR_TOOFEW
+				}
 				if r < 0 {
-					return -r
+					// Successful escape: state changed, no char output.
+					// Signal the outer loop that this is not an error.
+					consumed := -r
+					w.stateAdv = consumed
+					return consumed
 				}
 				return r
 			case iso2022CfgIsSet(cfg, configUseG2) && in[1] == 'N':
@@ -421,6 +432,9 @@ func makeISO2022Decoder(cfg *iso2022Config) decodeFunc {
 					return MBERR_TOOFEW
 				}
 				r := iso2022ProcessG2(state, in, w)
+				if r == MBERR_TOOFEW {
+					return MBERR_TOOFEW
+				}
 				if r < 0 {
 					return -r
 				}
@@ -436,6 +450,7 @@ func makeISO2022Decoder(cfg *iso2022Config) decodeFunc {
 				return 1
 			}
 			iso2022ClrFlag(state, flagShifted)
+			w.stateAdv = 1
 			return 1
 		case iso2022SO:
 			if iso2022CfgIsSet(cfg, configNoShift) {
@@ -443,6 +458,7 @@ func makeISO2022Decoder(cfg *iso2022Config) decodeFunc {
 				return 1
 			}
 			iso2022SetFlag(state, flagShifted)
+			w.stateAdv = 1
 			return 1
 		case iso2022LF:
 			iso2022ClrFlag(state, flagShifted)

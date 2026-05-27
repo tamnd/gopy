@@ -11,10 +11,14 @@ package _codecs
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/codecs"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
+	mbcodec "github.com/tamnd/gopy/module/_multibytecodec"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -46,6 +50,7 @@ func buildModule() (*objects.Module, error) {
 		{"charmap_decode", charmapDecode},
 		{"charmap_build", charmapBuild},
 		{"register", codecsRegister},
+		{"unregister", codecsUnregister},
 		{"register_error", codecsRegisterError},
 		{"lookup_error", codecsLookupError},
 	}
@@ -150,9 +155,10 @@ func makeCodecInfo(ci *codecs.CodecInfo) objects.Object {
 	_ = d.SetItem(objects.NewStr("name"), objects.NewStr(ci.Name))
 	_ = d.SetItem(objects.NewStr("encode"), encodeFn)
 	_ = d.SetItem(objects.NewStr("decode"), decodeFn)
-	// stream_reader and stream_writer are None until streaming codecs land.
-	_ = d.SetItem(objects.NewStr("streamreader"), objects.None())
-	_ = d.SetItem(objects.NewStr("streamwriter"), objects.None())
+	_ = d.SetItem(objects.NewStr("incrementalencoder"), mbcodec.MakeIncrementalEncoderClass(ci))
+	_ = d.SetItem(objects.NewStr("incrementaldecoder"), mbcodec.MakeIncrementalDecoderClass(ci))
+	_ = d.SetItem(objects.NewStr("streamreader"), mbcodec.MakeStreamReaderClass(ci))
+	_ = d.SetItem(objects.NewStr("streamwriter"), mbcodec.MakeStreamWriterClass(ci))
 	return inst
 }
 
@@ -742,6 +748,14 @@ func callEncodeErrorHandler(enc, reason, input string, start, end int, errors st
 // Python/codecs.c:50 PyCodec_Register)
 // ---------------------------------------------------------------------------
 
+// pySearchRegistry tracks the mapping from Python callable object identity
+// to the registry handle returned by codecs.Register. Required so that
+// codecs.unregister(fn) can find the exact Go-side entry to remove.
+var (
+	pySearchMu       sync.Mutex
+	pySearchRegistry = map[uintptr]uint64{} // object pointer -> registry handle
+)
+
 func codecsRegister(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: register() takes exactly 1 argument (%d given)", len(args))
@@ -750,7 +764,34 @@ func codecsRegister(args []objects.Object, kwargs map[string]objects.Object) (ob
 	if !objects.Callable(search) {
 		return nil, fmt.Errorf("TypeError: argument must be callable")
 	}
-	codecs.Register(pythonSearchFunc(search))
+	id := codecs.Register(pythonSearchFunc(search))
+	pySearchMu.Lock()
+	pySearchRegistry[reflect.ValueOf(search).Pointer()] = id
+	pySearchMu.Unlock()
+	return objects.None(), nil
+}
+
+// codecsUnregister removes a previously registered search function.
+//
+// CPython: Python/codecs.c:68 PyCodec_Unregister
+func codecsUnregister(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: unregister() takes exactly 1 argument (%d given)", len(args))
+	}
+	search := args[0]
+	if !objects.Callable(search) {
+		return nil, fmt.Errorf("TypeError: argument must be callable")
+	}
+	key := reflect.ValueOf(search).Pointer()
+	pySearchMu.Lock()
+	id, ok := pySearchRegistry[key]
+	if ok {
+		delete(pySearchRegistry, key)
+	}
+	pySearchMu.Unlock()
+	if ok {
+		codecs.UnregisterByID(id)
+	}
 	return objects.None(), nil
 }
 
@@ -780,21 +821,26 @@ func pythonSearchFunc(fn objects.Object) codecs.SearchFunc {
 // CPython: Lib/encodings/__init__.py:120 search_function (entry =
 // getregentry(); coercion to codecs.CodecInfo)
 func codecInfoFromPython(info objects.Object, name string) (*codecs.CodecInfo, error) {
-	getAttr := func(key string) (objects.Object, error) {
-		// CodecInfo from Lib/codecs.py: namedtuple-like instance with
-		// attribute access on encode / decode. Our stdlib CodecInfo
-		// implements __getattr__ via the standard generic getattr path.
-		v, err := objects.GetAttr(info, objects.NewStr(key))
-		if err != nil {
-			return nil, err
+	// Try attribute access first (CodecInfo namedtuple has .encode/.decode).
+	// Fall back to positional indexing for plain 4-tuples returned by
+	// legacy search functions (e.g. testcodec.getregentry()).
+	//
+	// CPython: Python/codecs.c:99 _PyCodec_Lookup normalises via PySequence_GetItem
+	getCallable := func(attrName string, idx int) (objects.Object, error) {
+		v, err := objects.GetAttr(info, objects.NewStr(attrName))
+		if err == nil {
+			return v, nil
 		}
-		return v, nil
+		if t, ok := info.(*objects.Tuple); ok && t.Len() > idx {
+			return t.Item(idx), nil
+		}
+		return nil, fmt.Errorf("TypeError: codec search function must return a CodecInfo or 4-tuple")
 	}
-	enc, err := getAttr("encode")
+	enc, err := getCallable("encode", 0)
 	if err != nil {
 		return nil, err
 	}
-	dec, err := getAttr("decode")
+	dec, err := getCallable("decode", 1)
 	if err != nil {
 		return nil, err
 	}
@@ -877,6 +923,13 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 	pyErrHandlers[name] = handler
 	pyErrMu.Unlock()
 	// Bridge the Python callable into the Go error handler registry.
+	// The handler receives byte-offset positions (matching the Go
+	// ErrorHandler contract), but we build a UnicodeEncodeError with
+	// character positions so Python-level handlers see exc.start/end as
+	// character indices, matching CPython's UnicodeError contract.
+	//
+	// CPython: Objects/exceptions.c:3040 UnicodeError_init
+	// CPython: Modules/cjkcodecs/multibytecodec.c:507 error handler call
 	codecs.RegisterError(name, func(enc, reason string, input []byte, start, end int) (string, int, error) {
 		pyErrMu.RLock()
 		h := pyErrHandlers[name]
@@ -887,15 +940,13 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 		if reason == "" {
 			reason = "codec error"
 		}
-		// Build a minimal UnicodeDecodeError-like tuple to pass to the handler.
-		errArg := objects.NewTuple([]objects.Object{
-			objects.NewStr(enc),
-			objects.NewBytes(input),
-			objects.NewInt(int64(start)),
-			objects.NewInt(int64(end)),
-			objects.NewStr(reason),
-		})
-		result, cerr := objects.Call(h, objects.NewTuple([]objects.Object{errArg}), nil)
+		// Convert byte offsets to character positions for the Python exc.
+		inputStr := string(input)
+		inputRunes := []rune(inputStr)
+		startChar := len([]rune(string(input[:start])))
+		endChar := len([]rune(string(input[:end])))
+		exc := pyerrors.NewUnicodeEncodeError(enc, objects.NewStr(inputStr), startChar, endChar, reason)
+		result, cerr := objects.Call(h, objects.NewTuple([]objects.Object{exc}), nil)
 		if cerr != nil {
 			return "", 0, cerr
 		}
@@ -903,16 +954,34 @@ func codecsRegisterError(args []objects.Object, kwargs map[string]objects.Object
 		if !ok || tup.Len() != 2 {
 			return "", 0, fmt.Errorf("TypeError: error handler must return a (str, int) tuple")
 		}
-		rep, ok := tup.Item(0).(*objects.Unicode)
-		if !ok {
-			return "", 0, fmt.Errorf("TypeError: error handler replacement must be str")
+		// Accept str or bytes as the replacement.
+		var repStr string
+		switch r := tup.Item(0).(type) {
+		case *objects.Unicode:
+			repStr = r.Value()
+		case *objects.Bytes:
+			repStr = string(r.Bytes())
+		default:
+			return "", 0, fmt.Errorf("TypeError: error handler replacement must be str or bytes")
 		}
-		pos, ok := tup.Item(1).(*objects.Int)
+		posObj, ok := tup.Item(1).(*objects.Int)
 		if !ok {
 			return "", 0, fmt.Errorf("TypeError: error handler new position must be int")
 		}
-		newpos, _ := pos.Int64()
-		return rep.Value(), int(newpos), nil
+		newposChar, ok := posObj.Int64()
+		if !ok {
+			return "", 0, fmt.Errorf("IndexError: new position is out of bounds")
+		}
+		// Convert returned character index to byte offset.
+		nChar := int(newposChar)
+		if nChar < 0 {
+			nChar += len(inputRunes)
+		}
+		if nChar < 0 || nChar > len(inputRunes) {
+			return "", 0, fmt.Errorf("IndexError: new position is out of bounds")
+		}
+		newposByte := charToByte(inputRunes, nChar)
+		return repStr, newposByte, nil
 	})
 	return objects.None(), nil
 }
@@ -933,14 +1002,64 @@ func codecsLookupError(args []objects.Object, kwargs map[string]objects.Object) 
 		return h, nil
 	}
 	// Check if it is a built-in Go-level handler.
-	_, err := codecs.LookupError(name)
+	goHandler, err := codecs.LookupError(name)
 	if err != nil {
 		return nil, fmt.Errorf("LookupError: unknown error handler name %q", name)
 	}
-	// Return a wrapped callable for the built-in handler.
+	// Return a callable wrapper that bridges a Python UnicodeError argument
+	// to the Go-level handler. CPython exposes built-in handlers as Python
+	// callables (e.g. codecs.ignore_errors) so user code can pass them to
+	// register_error.
+	//
+	// CPython: Python/codecs.c:893 PyCodec_LookupError (returns Python callable)
 	return objects.NewBuiltinFunction(name, func(args2 []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		return nil, fmt.Errorf("LookupError: built-in error handler %q is not directly callable from Python", name)
+		if len(args2) != 1 {
+			return nil, fmt.Errorf("TypeError: %s() takes exactly 1 argument (%d given)", name, len(args2))
+		}
+		exc := args2[0]
+		encObj, _ := objects.GetAttr(exc, objects.NewStr("encoding"))
+		reasonObj, _ := objects.GetAttr(exc, objects.NewStr("reason"))
+		inputObj, _ := objects.GetAttr(exc, objects.NewStr("object"))
+		startObj, _ := objects.GetAttr(exc, objects.NewStr("start"))
+		endObj, _ := objects.GetAttr(exc, objects.NewStr("end"))
+		enc, _ := objects.Str(encObj)
+		reason, _ := objects.Str(reasonObj)
+		var input []byte
+		switch v := inputObj.(type) {
+		case *objects.Bytes:
+			input = v.Bytes()
+		case *objects.Unicode:
+			input = []byte(v.Value())
+		}
+		startN := int64(0)
+		if si, ok := startObj.(*objects.Int); ok {
+			startN, _ = si.Int64()
+		}
+		endN := int64(0)
+		if ei, ok := endObj.(*objects.Int); ok {
+			endN, _ = ei.Int64()
+		}
+		rep, newpos, err := goHandler(enc, reason, input, int(startN), int(endN))
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewTuple([]objects.Object{objects.NewStr(rep), objects.NewInt(int64(newpos))}), nil
 	}), nil
+}
+
+// charToByte returns the byte offset of the nth rune in runes, which is
+// the UTF-8 encoding of the rune slice as a flat byte string.
+// charToByte(runes, len(runes)) returns the total byte length.
+func charToByte(runes []rune, n int) int {
+	off := 0
+	for i := 0; i < n && i < len(runes); i++ {
+		sz := utf8.RuneLen(runes[i])
+		if sz < 0 {
+			sz = 3 // replacement for invalid rune (CESU-8 surrogates etc.)
+		}
+		off += sz
+	}
+	return off
 }
 
 // ---------------------------------------------------------------------------

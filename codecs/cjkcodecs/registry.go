@@ -11,6 +11,37 @@ package cjkcodecs
 import "github.com/tamnd/gopy/codecs"
 
 func newInfo(name string, enc encodeFunc, dec decodeFunc, config int) *codecs.CodecInfo {
+	makeEncoderFull := func() (
+		func(string, string, bool) ([]byte, int, error),
+		func() ([]rune, [8]byte),
+		func([]rune, [8]byte) error,
+	) {
+		st := &codecState{config: config}
+		var pending []rune
+		encodeFn := func(input string, errors string, final bool) ([]byte, int, error) {
+			savedPending := pending
+			runes := append(pending, wtf8ToRunes(input)...)
+			pending = nil
+			out, remaining, n, err := runEncodeStatefulWithState(name, enc, nil, st, runes, errors, final)
+			if err != nil {
+				pending = savedPending
+				return nil, n, err
+			}
+			if len(remaining) > 0 && !final {
+				pending = append(pending[:0], remaining...)
+			}
+			return out, n, err
+		}
+		getStateFn := func() ([]rune, [8]byte) {
+			return pending, st.cBytes
+		}
+		setStateFn := func(newPending []rune, newCBytes [8]byte) error {
+			pending = newPending
+			st.cBytes = newCBytes
+			return nil
+		}
+		return encodeFn, getStateFn, setStateFn
+	}
 	return &codecs.CodecInfo{
 		Name: name,
 		Encode: func(input, errors string) ([]byte, int, error) {
@@ -19,6 +50,20 @@ func newInfo(name string, enc encodeFunc, dec decodeFunc, config int) *codecs.Co
 		Decode: func(input []byte, errors string) (string, int, error) {
 			return runDecode(name, dec, config, input, errors)
 		},
+		IncrementalDecode: func(input []byte, errors string, final bool) (string, []byte, error) {
+			return runDecodeIncremental(name, dec, config, input, errors, final)
+		},
+		NewIncrementalDecoder: func() func([]byte, string, bool) (string, []byte, error) {
+			st := &codecState{config: config}
+			return func(input []byte, errors string, final bool) (string, []byte, error) {
+				return runDecodeIncrementalWithState(name, dec, st, input, errors, final)
+			}
+		},
+		NewIncrementalEncoder: func() func(string, string, bool) ([]byte, int, error) {
+			encodeFn, _, _ := makeEncoderFull()
+			return encodeFn
+		},
+		NewIncrementalEncoderFull: makeEncoderFull,
 	}
 }
 
@@ -27,8 +72,47 @@ func newInfo(name string, enc encodeFunc, dec decodeFunc, config int) *codecs.Co
 // callback as the last action of multibytecodec_encode (line 595);
 // gopy threads the callback through runEncodeStateful.
 //
+// encoderInitFn, when non-nil, is called on a fresh codecState immediately
+// after construction, mirroring CPython's mbincrencoder_init which calls
+// encinit before returning the new encoder object.
+//
 // CPython: Modules/cjkcodecs/multibytecodec.c:595
-func newStatefulInfo(name string, enc encodeFunc, dec decodeFunc, reset encodeResetFunc) *codecs.CodecInfo {
+// CPython: Modules/cjkcodecs/multibytecodec.c:749 mbincrencoder_new
+func newStatefulInfo(name string, enc encodeFunc, dec decodeFunc, reset encodeResetFunc, encoderInitFn func(*codecState)) *codecs.CodecInfo {
+	makeEncoderFull := func() (
+		func(string, string, bool) ([]byte, int, error),
+		func() ([]rune, [8]byte),
+		func([]rune, [8]byte) error,
+	) {
+		st := &codecState{}
+		if encoderInitFn != nil {
+			encoderInitFn(st)
+		}
+		var pending []rune
+		encodeFn := func(input string, errors string, final bool) ([]byte, int, error) {
+			savedPending := pending
+			runes := append(pending, wtf8ToRunes(input)...)
+			pending = nil
+			out, remaining, n, err := runEncodeStatefulWithState(name, enc, reset, st, runes, errors, final)
+			if err != nil {
+				pending = savedPending
+				return nil, n, err
+			}
+			if len(remaining) > 0 && !final {
+				pending = append(pending[:0], remaining...)
+			}
+			return out, n, err
+		}
+		getStateFn := func() ([]rune, [8]byte) {
+			return pending, st.cBytes
+		}
+		setStateFn := func(newPending []rune, newCBytes [8]byte) error {
+			pending = newPending
+			st.cBytes = newCBytes
+			return nil
+		}
+		return encodeFn, getStateFn, setStateFn
+	}
 	return &codecs.CodecInfo{
 		Name: name,
 		Encode: func(input, errors string) ([]byte, int, error) {
@@ -37,6 +121,20 @@ func newStatefulInfo(name string, enc encodeFunc, dec decodeFunc, reset encodeRe
 		Decode: func(input []byte, errors string) (string, int, error) {
 			return runDecode(name, dec, 0, input, errors)
 		},
+		IncrementalDecode: func(input []byte, errors string, final bool) (string, []byte, error) {
+			return runDecodeIncremental(name, dec, 0, input, errors, final)
+		},
+		NewIncrementalDecoder: func() func([]byte, string, bool) (string, []byte, error) {
+			st := &codecState{}
+			return func(input []byte, errors string, final bool) (string, []byte, error) {
+				return runDecodeIncrementalWithState(name, dec, st, input, errors, final)
+			}
+		},
+		NewIncrementalEncoder: func() func(string, string, bool) ([]byte, int, error) {
+			encodeFn, _, _ := makeEncoderFull()
+			return encodeFn
+		},
+		NewIncrementalEncoderFull: makeEncoderFull,
 	}
 }
 
@@ -82,20 +180,20 @@ var (
 	gb2312Codec  = newInfo("gb2312", encodeGB2312, decodeGB2312, 0)
 	gbkCodec     = newInfo("gbk", encodeGBK, decodeGBK, 0)
 	gb18030Codec = newInfo("gb18030", encodeGB18030, decodeGB18030, 0)
-	hzCodec      = newStatefulInfo("hz", encodeHZ, decodeHZ, hzEncodeReset)
+	hzCodec      = newStatefulInfo("hz", encodeHZ, decodeHZ, hzEncodeReset, nil)
 )
 
 // ISO-2022 codecs.
 //
 // CPython: Modules/cjkcodecs/_codecs_iso2022.c BEGIN_CODECS_LIST
 var (
-	iso2022KR     = newStatefulInfo("iso2022_kr", makeISO2022Encoder(&iso2022KRConfig), makeISO2022Decoder(&iso2022KRConfig), iso2022EncodeReset)
-	iso2022JP     = newStatefulInfo("iso2022_jp", makeISO2022Encoder(&iso2022JPConfig), makeISO2022Decoder(&iso2022JPConfig), iso2022EncodeReset)
-	iso2022JP1    = newStatefulInfo("iso2022_jp_1", makeISO2022Encoder(&iso2022JP1Config), makeISO2022Decoder(&iso2022JP1Config), iso2022EncodeReset)
-	iso2022JP2    = newStatefulInfo("iso2022_jp_2", makeISO2022Encoder(&iso2022JP2Config), makeISO2022Decoder(&iso2022JP2Config), iso2022EncodeReset)
-	iso2022JP2004 = newStatefulInfo("iso2022_jp_2004", makeISO2022Encoder(&iso2022JP2004Config), makeISO2022Decoder(&iso2022JP2004Config), iso2022EncodeReset)
-	iso2022JP3    = newStatefulInfo("iso2022_jp_3", makeISO2022Encoder(&iso2022JP3Config), makeISO2022Decoder(&iso2022JP3Config), iso2022EncodeReset)
-	iso2022JPExt  = newStatefulInfo("iso2022_jp_ext", makeISO2022Encoder(&iso2022JPExtConfig), makeISO2022Decoder(&iso2022JPExtConfig), iso2022EncodeReset)
+	iso2022KR     = newStatefulInfo("iso2022_kr", makeISO2022Encoder(&iso2022KRConfig), makeISO2022Decoder(&iso2022KRConfig), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JP     = newStatefulInfo("iso2022_jp", makeISO2022Encoder(&iso2022JPConfig), makeISO2022Decoder(&iso2022JPConfig), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JP1    = newStatefulInfo("iso2022_jp_1", makeISO2022Encoder(&iso2022JP1Config), makeISO2022Decoder(&iso2022JP1Config), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JP2    = newStatefulInfo("iso2022_jp_2", makeISO2022Encoder(&iso2022JP2Config), makeISO2022Decoder(&iso2022JP2Config), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JP2004 = newStatefulInfo("iso2022_jp_2004", makeISO2022Encoder(&iso2022JP2004Config), makeISO2022Decoder(&iso2022JP2004Config), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JP3    = newStatefulInfo("iso2022_jp_3", makeISO2022Encoder(&iso2022JP3Config), makeISO2022Decoder(&iso2022JP3Config), iso2022EncodeReset, iso2022EncodeInit)
+	iso2022JPExt  = newStatefulInfo("iso2022_jp_ext", makeISO2022Encoder(&iso2022JPExtConfig), makeISO2022Decoder(&iso2022JPExtConfig), iso2022EncodeReset, iso2022EncodeInit)
 )
 
 // Search is the SearchFunc that codecs.Register dispatches into for

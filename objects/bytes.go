@@ -160,7 +160,7 @@ func bytesRepeat(o Object, n int) (Object, error) {
 //
 // CPython: Objects/bytesobject.c:38 nullstring
 var emptyBytes = func() *Bytes {
-	b := &Bytes{}
+	b := &Bytes{v: []byte{}}
 	b.init(BytesType)
 	return b
 }()

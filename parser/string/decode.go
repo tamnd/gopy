@@ -193,7 +193,17 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, off
 			if err != nil {
 				return "", nil, nil, newDecodeError("truncated \\uXXXX escape", escStart, i+4)
 			}
-			out = utf8.AppendRune(out, rune(v))
+			// Lone surrogates (U+D800-U+DFFF) are valid in Python string literals.
+			// Go's utf8.AppendRune silently replaces them with U+FFFD; use WTF-8
+			// encoding instead so the encoder path can recover the original value.
+			//
+			// CPython: Objects/unicodeobject.c stores surrogates as raw code points.
+			if v >= 0xD800 && v <= 0xDFFF {
+				r := rune(v)
+				out = append(out, byte(0xE0|(r>>12)), byte(0x80|((r>>6)&0x3F)), byte(0x80|(r&0x3F)))
+			} else {
+				out = utf8.AppendRune(out, rune(v))
+			}
 			i += 4
 		case 'U':
 			if i+8 > len(s) {
@@ -250,10 +260,38 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, off
 			warnOffsets = append(warnOffsets, escStart)
 		}
 	}
-	if !utf8.Valid(out) {
+	if !isValidWTF8(out) {
 		return "", nil, nil, fmt.Errorf("invalid utf-8 in string literal")
 	}
 	return string(out), warns, warnOffsets, nil
+}
+
+// isValidWTF8 returns true when b is valid WTF-8. WTF-8 is a superset of
+// UTF-8 that also accepts lone surrogates (U+D800-U+DFFF) encoded as
+// three-byte sequences 0xED 0xA0-0xBF 0x80-0xBF. All other invalid UTF-8
+// sequences are rejected.
+//
+// CPython: Python strings may contain lone surrogates; gopy stores them as
+// WTF-8 so the raw codepoint value survives Go string storage.
+func isValidWTF8(b []byte) bool {
+	for i := 0; i < len(b); {
+		if b[i] < 0x80 {
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(b[i:])
+		if r != utf8.RuneError || size != 1 {
+			i += size
+			continue
+		}
+		// RuneError with size 1 means invalid UTF-8. Check for WTF-8 surrogate.
+		if i+2 < len(b) && b[i] == 0xED && b[i+1] >= 0xA0 && b[i+1] <= 0xBF && b[i+2] >= 0x80 && b[i+2] <= 0xBF {
+			i += 3
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // decodeBytesEscapes is the bytes form. The unicode escapes are
