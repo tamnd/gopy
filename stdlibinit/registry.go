@@ -304,6 +304,11 @@ import (
 	// CPython: Modules/zlibmodule.c:77 zlib_compress_impl
 	_ "github.com/tamnd/gopy/module/zlib"
 
+	// Built-in module: binascii. Registers itself via module/binascii/module.go
+	// init(). Ports Modules/binascii.c: UU, base64, hex, QP, CRC functions.
+	// CPython: Modules/binascii.c:1270 binascii_exec
+	_ "github.com/tamnd/gopy/module/binascii"
+
 	// Built-in module: _socket. Registers itself via module/_socket/module.go
 	// init(). Backs Lib/socket.py with the low-level socket API.
 	// CPython: Modules/socketmodule.c:4040 socket_getaddrinfo

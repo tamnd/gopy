@@ -160,6 +160,18 @@ def search_function(encoding):
 # Register the search_function in the Python codec registry
 codecs.register(search_function)
 
+def __getattr__(name):
+    # Lazily import encodings.<name> when accessed as an attribute.
+    # This mirrors how CPython makes encodings.ascii available after any
+    # codec lookup that triggers search_function('ascii').
+    import importlib
+    try:
+        mod = importlib.import_module('encodings.' + name)
+    except ImportError:
+        raise AttributeError('module %r has no attribute %r' % (__name__, name))
+    globals()[name] = mod
+    return mod
+
 if sys.platform == 'win32':
     from ._win_cp_codecs import create_win32_code_page_codec
 
