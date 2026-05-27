@@ -605,6 +605,137 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 	}
 }
 
+// ComplexCtor ports complex(). Accepts complex(real=0, imag=0) or
+// complex(x) where x is a number or string.
+//
+// CPython: Objects/complexobject.c:739 complex_new_impl
+func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// Pick up keyword args.
+	var realObj, imagObj objects.Object
+	if v, ok := kwargs["real"]; ok {
+		realObj = v
+	}
+	if v, ok := kwargs["imag"]; ok {
+		imagObj = v
+	}
+	for k := range kwargs {
+		if k != "real" && k != "imag" {
+			return nil, fmt.Errorf("TypeError: complex() got unexpected keyword argument '%s'", k)
+		}
+	}
+	switch len(args) {
+	case 0:
+		// complex() or complex(real=x, imag=y)
+	case 1:
+		if realObj != nil {
+			return nil, fmt.Errorf("TypeError: complex() got multiple values for argument 'real'")
+		}
+		realObj = args[0]
+	case 2:
+		if realObj != nil {
+			return nil, fmt.Errorf("TypeError: complex() got multiple values for argument 'real'")
+		}
+		if imagObj != nil {
+			return nil, fmt.Errorf("TypeError: complex() got multiple values for argument 'imag'")
+		}
+		realObj = args[0]
+		imagObj = args[1]
+	default:
+		return nil, fmt.Errorf("TypeError: complex() takes at most 2 arguments (%d given)", len(args))
+	}
+	toFloat := func(o objects.Object) (float64, error) {
+		if o == nil {
+			return 0, nil
+		}
+		switch v := o.(type) {
+		case *objects.Float:
+			return v.Float64(), nil
+		case *objects.Int:
+			f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
+			return f, nil
+		case *objects.Complex:
+			return real(v.Complex128()), nil
+		}
+		if n := o.Type().Number; n != nil && n.Float != nil {
+			fv, err := n.Float(o)
+			if err != nil {
+				return 0, err
+			}
+			return fv.(*objects.Float).Float64(), nil
+		}
+		return 0, fmt.Errorf("TypeError: complex() argument must be a string or a number, not '%s'", o.Type().Name)
+	}
+	// String form: complex("1+2j")
+	if realObj != nil && imagObj == nil {
+		if realObj.Type() == objects.StrType() {
+			s, _ := objects.Str(realObj)
+			// strip whitespace
+			s = trimSpace(s)
+			c, err := parseComplexString(s)
+			if err != nil {
+				return nil, fmt.Errorf("ValueError: complex() arg is a malformed string")
+			}
+			return objects.NewComplex(real(c), imag(c)), nil
+		}
+		// If it's a complex, return it (imagObj ignored).
+		if cv, ok := realObj.(*objects.Complex); ok {
+			return cv, nil
+		}
+	}
+	re, err := toFloat(realObj)
+	if err != nil {
+		return nil, err
+	}
+	im, err := toFloat(imagObj)
+	if err != nil {
+		return nil, err
+	}
+	// If real was complex, add its imag to im.
+	if realObj != nil {
+		if cv, ok := realObj.(*objects.Complex); ok {
+			re = real(cv.Complex128())
+			im += imag(cv.Complex128())
+		}
+	}
+	return objects.NewComplex(re, im), nil
+}
+
+// parseComplexString parses a Python-style complex literal like "1+2j".
+// Minimal port of CPython Objects/complexobject.c:392 complex_from_string_inner.
+func parseComplexString(s string) (complex128, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	// Remove surrounding parens.
+	if s[0] == '(' && s[len(s)-1] == ')' {
+		s = trimSpace(s[1 : len(s)-1])
+	}
+	// Try parsing as a single float (real only or pure imaginary).
+	if s[len(s)-1] == 'j' || s[len(s)-1] == 'J' {
+		im, err := pystrconv.ParseFloat(s[:len(s)-1])
+		if err == nil {
+			return complex(0, im), nil
+		}
+		// Try "a+bj" or "a-bj" form.
+		for i := len(s) - 2; i > 0; i-- {
+			if s[i] == '+' || s[i] == '-' {
+				re, err1 := pystrconv.ParseFloat(s[:i])
+				im2, err2 := pystrconv.ParseFloat(s[i : len(s)-1])
+				if err1 == nil && err2 == nil {
+					return complex(re, im2), nil
+				}
+				break
+			}
+		}
+		return 0, fmt.Errorf("malformed")
+	}
+	re, err := pystrconv.ParseFloat(s)
+	if err != nil {
+		return 0, err
+	}
+	return complex(re, 0), nil
+}
+
 // memoryViewCtor ports memoryview(). Accepts a single bytes-like object
 // and returns a MemoryView wrapping it.
 //

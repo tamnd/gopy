@@ -512,10 +512,10 @@ func (b *astBridge) convertPattern(p ast.Pattern) objects.Object {
 		}, n.Pos)
 	case *ast.MatchClass:
 		return b.withPos("MatchClass", map[string]objects.Object{
-			"cls":           b.convertExpr(n.Cls),
-			"patterns":      b.convertPatternList(n.Patterns),
-			"kwd_attrs":     b.convertStrNames(n.KwdAttrs),
-			"kwd_patterns":  b.convertPatternList(n.KwdPatterns),
+			"cls":          b.convertExpr(n.Cls),
+			"patterns":     b.convertPatternList(n.Patterns),
+			"kwd_attrs":    b.convertStrNames(n.KwdAttrs),
+			"kwd_patterns": b.convertPatternList(n.KwdPatterns),
 		}, n.Pos)
 	case *ast.MatchStar:
 		return b.withPos("MatchStar", map[string]objects.Object{
@@ -796,6 +796,10 @@ func (b *astBridge) convertConstantValue(v any) objects.Object {
 		return objects.NewBool(x)
 	case []byte:
 		return objects.NewBytes(x)
+	case complex128:
+		return objects.NewComplex(real(x), imag(x))
+	case complex64:
+		return objects.NewComplex(float64(real(x)), float64(imag(x)))
 	case ast.EllipsisType:
 		_ = x
 		return objects.Ellipsis()

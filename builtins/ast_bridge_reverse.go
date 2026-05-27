@@ -11,30 +11,80 @@
 package builtins
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/objects"
 )
 
-// PyASTObjectToMod converts a Python _ast top-level node to a Go ast.Mod.
-// Returns (nil, false) when the argument is not recognised as an AST object.
+// reverseBridgeRecursionLimit caps the AST conversion depth so that
+// circular Python AST objects (e.g. test_recursion_direct) produce a
+// RecursionError instead of overflowing the goroutine stack.
 //
 // CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
-func PyASTObjectToMod(o objects.Object) (ast.Mod, bool) {
-	inst, ok := o.(*objects.Instance)
-	if !ok {
-		return nil, false
+// uses Py_EnterRecursiveCall which maps to the same limit.
+const reverseBridgeRecursionLimit = 500
+
+// astRecursionSentinel is panicked (and recovered) when the reverse
+// bridge conversion depth exceeds reverseBridgeRecursionLimit.
+type astRecursionSentinel struct{}
+
+// astValidationError is panicked when a required integer field (lineno,
+// col_offset) is present on a Python AST node but holds None instead of an
+// integer. Mirrors CPython's PyAST_Validate behavior.
+//
+// CPython: Python/ast.c:validate_expr / validate_stmt LOCATION checks
+type astValidationError struct{ msg string }
+
+// astTypeError is panicked when a field holds a value of the wrong type,
+// matching CPython's obj2ast_identifier / obj2ast_expr TypeError raises.
+//
+// CPython: Python/Python-ast.c obj2ast_identifier / obj2ast_expr
+type astTypeError struct{ msg string }
+
+// PyASTObjectToMod converts a Python _ast top-level node to a Go ast.Mod.
+// Returns (nil, false) when the argument is not recognized as an AST object.
+// Returns (nil, false, RecursionError) when the AST is circular.
+// Returns (nil, false, ValueError) when a required integer field is None.
+//
+// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
+func PyASTObjectToMod(o objects.Object) (mod ast.Mod, ok bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, isSentinel := r.(astRecursionSentinel); isSentinel {
+				err = fmt.Errorf("RecursionError: maximum recursion depth exceeded during compilation")
+				return
+			}
+			if ve, isValidation := r.(astValidationError); isValidation {
+				err = fmt.Errorf("ValueError: %s", ve.msg)
+				return
+			}
+			if te, isType := r.(astTypeError); isType {
+				err = fmt.Errorf("TypeError: %s", te.msg)
+				return
+			}
+			panic(r)
+		}
+	}()
+	inst, instOK := o.(*objects.Instance)
+	if !instOK {
+		return nil, false, nil
 	}
-	r := &reverseASTBridge{}
-	mod := r.convertMod(inst)
+	r := &reverseASTBridge{depth: reverseBridgeRecursionLimit}
+	mod = r.convertMod(inst)
 	if mod == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	return mod, true
+	return mod, true, nil
 }
 
-// reverseASTBridge holds no state; methods are defined on it for
-// readability, mirroring the forward astBridge.
-type reverseASTBridge struct{}
+// reverseASTBridge carries recursion depth for circular-AST detection.
+//
+// CPython: Python/bltinmodule.c PyAST_obj2mod equivalent (stateless in
+// CPython; depth tracking is done via Py_EnterRecursiveCall on the thread).
+type reverseASTBridge struct {
+	depth int
+}
 
 func (r *reverseASTBridge) convertMod(inst *objects.Instance) ast.Mod {
 	switch inst.Type().Name {
@@ -56,10 +106,13 @@ func (r *reverseASTBridge) stmtList(o objects.Object) ast.Seq[ast.Stmt] {
 	if !ok {
 		return nil
 	}
-	out := make(ast.Seq[ast.Stmt], 0, lst.Len())
+	out := make(ast.Seq[ast.Stmt], lst.Len())
 	for i := 0; i < lst.Len(); i++ {
-		if s := r.convertStmt(lst.Item(i)); s != nil {
-			out = append(out, s)
+		item := lst.Item(i)
+		if item == nil || item == objects.None() {
+			out[i] = nil
+		} else {
+			out[i] = r.convertStmt(item)
 		}
 	}
 	return out
@@ -74,10 +127,6 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 	switch inst.Type().Name {
 	case "Assign":
 		targets := r.exprList(r.getAttr(inst, "targets"))
-		// Mark assignment targets as Store so the compiler emits STORE_*.
-		for _, t := range targets {
-			r.setStoreCtx(t)
-		}
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.Assign{Targets: targets, Value: value, Pos: pos}
 	case "Expr":
@@ -85,7 +134,6 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		return &ast.ExprStmt{Value: value, Pos: pos}
 	case "AugAssign":
 		target := r.convertExpr(r.getAttr(inst, "target"))
-		r.setStoreCtx(target)
 		op := r.convertOperator(r.getAttr(inst, "op"))
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.AugAssign{Target: target, Op: op, Value: value, Pos: pos}
@@ -103,7 +151,6 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		return &ast.If{Test: test, Body: body, Orelse: orelse, Pos: pos}
 	case "For":
 		target := r.convertExpr(r.getAttr(inst, "target"))
-		r.setStoreCtx(target)
 		iter := r.convertExpr(r.getAttr(inst, "iter"))
 		body := r.stmtList(r.getAttr(inst, "body"))
 		orelse := r.stmtList(r.getAttr(inst, "orelse"))
@@ -128,9 +175,238 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 	case "Delete":
 		targets := r.exprList(r.getAttr(inst, "targets"))
 		return &ast.Delete{Targets: targets, Pos: pos}
+	case "Import":
+		names := r.convertAliases(r.getAttr(inst, "names"))
+		return &ast.Import{Names: names, Pos: pos}
+	case "ImportFrom":
+		module := r.getAttrString(inst, "module")
+		names := r.convertAliases(r.getAttr(inst, "names"))
+		level := r.convertImportLevel(inst)
+		return &ast.ImportFrom{Module: &module, Names: names, Level: level, Pos: pos}
+	case "Global":
+		names := r.stringList(r.getAttr(inst, "names"))
+		return &ast.Global{Names: names, Pos: pos}
+	case "Nonlocal":
+		names := r.stringList(r.getAttr(inst, "names"))
+		return &ast.Nonlocal{Names: names, Pos: pos}
+	case "Raise":
+		exc := r.convertExprOrNil(r.getAttr(inst, "exc"))
+		cause := r.convertExprOrNil(r.getAttr(inst, "cause"))
+		return &ast.Raise{Exc: exc, Cause: cause, Pos: pos}
+	case "Assert":
+		test := r.convertExpr(r.getAttr(inst, "test"))
+		msg := r.convertExprOrNil(r.getAttr(inst, "msg"))
+		return &ast.Assert{Test: test, Msg: msg, Pos: pos}
+	case "Try":
+		body := r.stmtList(r.getAttr(inst, "body"))
+		handlers := r.convertExceptHandlers(r.getAttr(inst, "handlers"))
+		orelse := r.stmtList(r.getAttr(inst, "orelse"))
+		finalbody := r.stmtList(r.getAttr(inst, "finalbody"))
+		return &ast.Try{Body: body, Handlers: handlers, Orelse: orelse, Finalbody: finalbody, Pos: pos}
+	case "TryStar":
+		body := r.stmtList(r.getAttr(inst, "body"))
+		handlers := r.convertExceptHandlers(r.getAttr(inst, "handlers"))
+		orelse := r.stmtList(r.getAttr(inst, "orelse"))
+		finalbody := r.stmtList(r.getAttr(inst, "finalbody"))
+		return &ast.TryStar{Body: body, Handlers: handlers, Orelse: orelse, Finalbody: finalbody, Pos: pos}
+	case "With":
+		items := r.convertWithitems(r.getAttr(inst, "items"))
+		body := r.stmtList(r.getAttr(inst, "body"))
+		return &ast.With{Items: items, Body: body, Pos: pos}
+	case "AsyncWith":
+		items := r.convertWithitems(r.getAttr(inst, "items"))
+		body := r.stmtList(r.getAttr(inst, "body"))
+		return &ast.AsyncWith{Items: items, Body: body, Pos: pos}
+	case "AsyncFor":
+		target := r.convertExpr(r.getAttr(inst, "target"))
+		iter := r.convertExpr(r.getAttr(inst, "iter"))
+		body := r.stmtList(r.getAttr(inst, "body"))
+		orelse := r.stmtList(r.getAttr(inst, "orelse"))
+		return &ast.AsyncFor{Target: target, Iter: iter, Body: body, Orelse: orelse, Pos: pos}
+	case "Match":
+		subject := r.convertExpr(r.getAttr(inst, "subject"))
+		cases := r.convertMatchCases(r.getAttr(inst, "cases"))
+		return &ast.Match{Subject: subject, Cases: cases, Pos: pos}
 	}
 	// Unknown statement: emit a Pass so the body remains valid.
 	return &ast.Pass{Pos: pos}
+}
+
+func (r *reverseASTBridge) convertExceptHandlers(o objects.Object) ast.Seq[ast.Excepthandler] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[ast.Excepthandler], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		pos := r.getPos(inst)
+		var typ ast.Expr
+		if t := r.getAttr(inst, "type"); t != nil && t != objects.None() {
+			typ = r.convertExpr(t)
+		}
+		var name *string
+		if n := r.getAttr(inst, "name"); n != nil && n != objects.None() {
+			s := r.getAttrString(inst, "name")
+			name = &s
+		}
+		body := r.stmtList(r.getAttr(inst, "body"))
+		out = append(out, ast.Excepthandler(&ast.ExceptHandler{Type: typ, Name: name, Body: body, Pos: pos}))
+	}
+	return out
+}
+
+func (r *reverseASTBridge) convertWithitems(o objects.Object) ast.Seq[*ast.Withitem] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[*ast.Withitem], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		ctxExpr := r.convertExpr(r.getAttr(inst, "context_expr"))
+		var optVars ast.Expr
+		if ov := r.getAttr(inst, "optional_vars"); ov != nil && ov != objects.None() {
+			optVars = r.convertExpr(ov)
+		}
+		out = append(out, &ast.Withitem{ContextExpr: ctxExpr, OptionalVars: optVars})
+	}
+	return out
+}
+
+func (r *reverseASTBridge) convertMatchCases(o objects.Object) ast.Seq[*ast.MatchCase] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[*ast.MatchCase], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		pattern := r.convertPattern(r.getAttr(inst, "pattern"))
+		var guard ast.Expr
+		if g := r.getAttr(inst, "guard"); g != nil && g != objects.None() {
+			guard = r.convertExpr(g)
+		}
+		body := r.stmtList(r.getAttr(inst, "body"))
+		out = append(out, &ast.MatchCase{Pattern: pattern, Guard: guard, Body: body})
+	}
+	return out
+}
+
+func (r *reverseASTBridge) convertPattern(o objects.Object) ast.Pattern {
+	if o == nil || o == objects.None() {
+		return nil
+	}
+	inst, ok := o.(*objects.Instance)
+	if !ok {
+		return nil
+	}
+	r.depth--
+	if r.depth <= 0 {
+		panic(astRecursionSentinel{})
+	}
+	defer func() { r.depth++ }()
+	pos := r.getPos(inst)
+	switch inst.Type().Name {
+	case "MatchValue":
+		value := r.convertExpr(r.getAttr(inst, "value"))
+		return &ast.MatchValue{Value: value, Pos: pos}
+	case "MatchSingleton":
+		val := r.convertConstantValue(r.getAttr(inst, "value"))
+		return &ast.MatchSingleton{Value: val, Pos: pos}
+	case "MatchSequence":
+		patterns := r.convertPatternList(r.getAttr(inst, "patterns"))
+		return &ast.MatchSequence{Patterns: patterns, Pos: pos}
+	case "MatchMapping":
+		keys := r.exprListWithNone(r.getAttr(inst, "keys"))
+		patterns := r.convertPatternList(r.getAttr(inst, "patterns"))
+		var rest *string
+		if rv := r.getAttr(inst, "rest"); rv != nil && rv != objects.None() {
+			s := r.getAttrString(inst, "rest")
+			rest = &s
+		}
+		return &ast.MatchMapping{Keys: keys, Patterns: patterns, Rest: rest, Pos: pos}
+	case "MatchClass":
+		cls := r.convertExpr(r.getAttr(inst, "cls"))
+		patterns := r.convertPatternList(r.getAttr(inst, "patterns"))
+		kwdAttrs := r.stringList(r.getAttr(inst, "kwd_attrs"))
+		kwdPatterns := r.convertPatternList(r.getAttr(inst, "kwd_patterns"))
+		return &ast.MatchClass{Cls: cls, Patterns: patterns, KwdAttrs: kwdAttrs, KwdPatterns: kwdPatterns, Pos: pos}
+	case "MatchStar":
+		var name *string
+		if nv := r.getAttr(inst, "name"); nv != nil && nv != objects.None() {
+			s := r.getAttrString(inst, "name")
+			name = &s
+		}
+		return &ast.MatchStar{Name: name, Pos: pos}
+	case "MatchAs":
+		var pattern ast.Pattern
+		if pv := r.getAttr(inst, "pattern"); pv != nil && pv != objects.None() {
+			pattern = r.convertPattern(pv)
+		}
+		var name *string
+		if nv := r.getAttr(inst, "name"); nv != nil && nv != objects.None() {
+			s := r.getAttrString(inst, "name")
+			name = &s
+		}
+		return &ast.MatchAs{Pattern: pattern, Name: name, Pos: pos}
+	case "MatchOr":
+		patterns := r.convertPatternList(r.getAttr(inst, "patterns"))
+		return &ast.MatchOr{Patterns: patterns, Pos: pos}
+	}
+	return nil
+}
+
+func (r *reverseASTBridge) convertPatternList(o objects.Object) ast.Seq[ast.Pattern] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[ast.Pattern], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		if p := r.convertPattern(lst.Item(i)); p != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (r *reverseASTBridge) convertComprehension(inst *objects.Instance) *ast.Comprehension {
+	if inst == nil {
+		return nil
+	}
+	target := r.convertExpr(r.getAttr(inst, "target"))
+	iter := r.convertExpr(r.getAttr(inst, "iter"))
+	ifs := r.exprList(r.getAttr(inst, "ifs"))
+	isAsync := r.getAttrInt(inst, "is_async")
+	return &ast.Comprehension{Target: target, Iter: iter, Ifs: ifs, IsAsync: isAsync}
+}
+
+func (r *reverseASTBridge) convertComprehensions(o objects.Object) ast.Seq[*ast.Comprehension] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[*ast.Comprehension], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		if c := r.convertComprehension(inst); c != nil {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (r *reverseASTBridge) convertFunctionDef(inst *objects.Instance, pos ast.Pos) *ast.FunctionDef {
@@ -178,9 +454,11 @@ func (r *reverseASTBridge) convertClassDef(inst *objects.Instance, pos ast.Pos) 
 	body := r.stmtList(r.getAttr(inst, "body"))
 	decorators := r.exprList(r.getAttr(inst, "decorator_list"))
 	bases := r.exprList(r.getAttr(inst, "bases"))
+	keywords := r.convertKeywords(r.getAttr(inst, "keywords"))
 	return &ast.ClassDef{
 		Name:          name,
 		Bases:         bases,
+		Keywords:      keywords,
 		Body:          body,
 		DecoratorList: decorators,
 		Pos:           pos,
@@ -203,12 +481,16 @@ func (r *reverseASTBridge) convertArguments(o objects.Object) *ast.Arguments {
 	if v := r.getAttr(inst, "kwarg"); v != nil && v != objects.None() {
 		kwarg = r.convertArg(v)
 	}
+	defaults := r.exprList(r.getAttr(inst, "defaults"))
+	kwDefaults := r.exprListWithNone(r.getAttr(inst, "kw_defaults"))
 	return &ast.Arguments{
 		Posonlyargs: posonlyargs,
 		Args:        args,
 		Vararg:      vararg,
 		Kwonlyargs:  kwonlyargs,
+		KwDefaults:  kwDefaults,
 		Kwarg:       kwarg,
+		Defaults:    defaults,
 	}
 }
 
@@ -231,10 +513,14 @@ func (r *reverseASTBridge) convertArg(o objects.Object) *ast.Arg {
 	if !ok {
 		return nil
 	}
-	return &ast.Arg{
+	a := &ast.Arg{
 		Arg: r.getAttrString(inst, "arg"),
 		Pos: r.getPos(inst),
 	}
+	if ann := r.getAttr(inst, "annotation"); ann != nil && ann != objects.None() {
+		a.Annotation = r.convertExpr(ann)
+	}
+	return a
 }
 
 func (r *reverseASTBridge) exprList(o objects.Object) ast.Seq[ast.Expr] {
@@ -242,10 +528,35 @@ func (r *reverseASTBridge) exprList(o objects.Object) ast.Seq[ast.Expr] {
 	if !ok {
 		return nil
 	}
-	out := make(ast.Seq[ast.Expr], 0, lst.Len())
+	out := make(ast.Seq[ast.Expr], lst.Len())
 	for i := 0; i < lst.Len(); i++ {
-		if e := r.convertExpr(lst.Item(i)); e != nil {
-			out = append(out, e)
+		item := lst.Item(i)
+		if item == nil || item == objects.None() {
+			out[i] = nil
+		} else {
+			out[i] = r.convertExpr(item)
+		}
+	}
+	return out
+}
+
+// exprListWithNone converts a list that may contain Python None entries,
+// preserving them as nil in the Go slice (used for kw_defaults where
+// absent defaults are represented as None in the Python AST).
+//
+// CPython: Python/Python-ast.c arguments_obj2ast kw_defaults field
+func (r *reverseASTBridge) exprListWithNone(o objects.Object) ast.Seq[ast.Expr] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[ast.Expr], lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		item := lst.Item(i)
+		if item == nil || item == objects.None() {
+			out[i] = nil
+		} else {
+			out[i] = r.convertExpr(item)
 		}
 	}
 	return out
@@ -259,10 +570,15 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 	if !ok {
 		return nil
 	}
+	r.depth--
+	if r.depth <= 0 {
+		panic(astRecursionSentinel{})
+	}
+	defer func() { r.depth++ }()
 	pos := r.getPos(inst)
 	switch inst.Type().Name {
 	case "Name":
-		id := r.getAttrString(inst, "id")
+		id := r.getAttrIdentifier(inst, "id")
 		ctx := r.readCtx(inst)
 		return &ast.Name{Id: id, Ctx: ctx, Pos: pos}
 	case "Constant":
@@ -295,6 +611,9 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 	case "JoinedStr":
 		values := r.exprList(r.getAttr(inst, "values"))
 		return &ast.JoinedStr{Values: values, Pos: pos}
+	case "TemplateStr":
+		values := r.exprList(r.getAttr(inst, "values"))
+		return &ast.TemplateStr{Values: values, Pos: pos}
 	case "FormattedValue":
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		conv := r.getAttrInt(inst, "conversion")
@@ -307,6 +626,21 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 			fmtSpec = r.convertExpr(fs)
 		}
 		return &ast.FormattedValue{Value: value, Conversion: conv, FormatSpec: fmtSpec, Pos: pos}
+	case "Interpolation":
+		value := r.convertExpr(r.getAttr(inst, "value"))
+		conv := r.getAttrInt(inst, "conversion")
+		if conv == 0 {
+			conv = -1
+		}
+		var fmtSpec ast.Expr
+		if fs := r.getAttr(inst, "format_spec"); fs != nil && fs != objects.None() {
+			fmtSpec = r.convertExpr(fs)
+		}
+		var strField any
+		if sv := r.getAttr(inst, "str"); sv != nil && sv != objects.None() {
+			strField = r.convertConstantValue(sv)
+		}
+		return &ast.Interpolation{Value: value, Str: strField, Conversion: conv, FormatSpec: fmtSpec, Pos: pos}
 	case "Tuple":
 		elts := r.exprList(r.getAttr(inst, "elts"))
 		ctx := r.readCtx(inst)
@@ -330,7 +664,6 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 		return &ast.Lambda{Args: args, Body: body, Pos: pos}
 	case "NamedExpr":
 		target := r.convertExpr(r.getAttr(inst, "target"))
-		r.setStoreCtx(target)
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.NamedExpr{Target: target, Value: value, Pos: pos}
 	case "Yield":
@@ -347,7 +680,7 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.Await{Value: value, Pos: pos}
 	case "Dict":
-		keys := r.exprList(r.getAttr(inst, "keys"))
+		keys := r.exprListWithNone(r.getAttr(inst, "keys"))
 		values := r.exprList(r.getAttr(inst, "values"))
 		return &ast.Dict{Keys: keys, Values: values, Pos: pos}
 	case "Set":
@@ -362,9 +695,40 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 		op := r.convertBoolOperator(r.getAttr(inst, "op"))
 		values := r.exprList(r.getAttr(inst, "values"))
 		return &ast.BoolOp{Op: op, Values: values, Pos: pos}
+	case "Slice":
+		var lower, upper, step ast.Expr
+		if v := r.getAttr(inst, "lower"); v != nil && v != objects.None() {
+			lower = r.convertExpr(v)
+		}
+		if v := r.getAttr(inst, "upper"); v != nil && v != objects.None() {
+			upper = r.convertExpr(v)
+		}
+		if v := r.getAttr(inst, "step"); v != nil && v != objects.None() {
+			step = r.convertExpr(v)
+		}
+		return &ast.Slice{Lower: lower, Upper: upper, Step: step, Pos: pos}
+	case "ListComp":
+		elt := r.convertExpr(r.getAttr(inst, "elt"))
+		generators := r.convertComprehensions(r.getAttr(inst, "generators"))
+		return &ast.ListComp{Elt: elt, Generators: generators, Pos: pos}
+	case "SetComp":
+		elt := r.convertExpr(r.getAttr(inst, "elt"))
+		generators := r.convertComprehensions(r.getAttr(inst, "generators"))
+		return &ast.SetComp{Elt: elt, Generators: generators, Pos: pos}
+	case "GeneratorExp":
+		elt := r.convertExpr(r.getAttr(inst, "elt"))
+		generators := r.convertComprehensions(r.getAttr(inst, "generators"))
+		return &ast.GeneratorExp{Elt: elt, Generators: generators, Pos: pos}
+	case "DictComp":
+		key := r.convertExpr(r.getAttr(inst, "key"))
+		value := r.convertExpr(r.getAttr(inst, "value"))
+		generators := r.convertComprehensions(r.getAttr(inst, "generators"))
+		return &ast.DictComp{Key: key, Value: value, Generators: generators, Pos: pos}
 	}
-	// Unknown expression: return a None constant to keep the tree valid.
-	return &ast.Constant{Value: nil, Pos: pos}
+	// CPython: Python/Python-ast.c obj2ast_expr raises TypeError for unknown
+	// types (e.g., abstract ast.expr() instances).
+	typeName := inst.Type().Name
+	panic(astTypeError{fmt.Sprintf("expected some sort of expr, but got %s()", typeName)})
 }
 
 func (r *reverseASTBridge) convertKeywords(o objects.Object) ast.Seq[*ast.Keyword] {
@@ -386,6 +750,72 @@ func (r *reverseASTBridge) convertKeywords(o objects.Object) ast.Seq[*ast.Keywor
 		}
 		val := r.convertExpr(r.getAttr(inst, "value"))
 		out = append(out, &ast.Keyword{Arg: arg, Value: val, Pos: r.getPos(inst)})
+	}
+	return out
+}
+
+// convertExprOrNil converts an expression object that may be None. Returns nil
+// (not a Constant(nil)) when obj is None or absent.
+//
+// CPython: Python/Python-ast.c optional Expr fields use PyObject_IsInstance
+func (r *reverseASTBridge) convertExprOrNil(obj objects.Object) ast.Expr {
+	if obj == nil || obj == objects.None() {
+		return nil
+	}
+	return r.convertExpr(obj)
+}
+
+// convertAliases converts a list of alias objects into ast.Alias nodes.
+//
+// CPython: Python/Python-ast.c alias constructor
+func (r *reverseASTBridge) convertAliases(o objects.Object) ast.Seq[*ast.Alias] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[*ast.Alias], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		name := r.getAttrString(inst, "name")
+		var asname *string
+		asnameVal := r.getAttr(inst, "asname")
+		if asnameVal != nil && asnameVal != objects.None() {
+			s := r.getAttrString(inst, "asname")
+			asname = &s
+		}
+		out = append(out, &ast.Alias{Name: name, Asname: asname, Pos: r.getPos(inst)})
+	}
+	return out
+}
+
+// convertImportLevel reads the level attribute of an ImportFrom node. None or
+// absent is treated as 0 (absolute import), matching CPython's behavior.
+//
+// CPython: Python/bltinmodule.c level handling in builtin_compile_impl
+func (r *reverseASTBridge) convertImportLevel(inst *objects.Instance) *int {
+	levelVal := r.getAttr(inst, "level")
+	if levelVal == nil || levelVal == objects.None() {
+		zero := 0
+		return &zero
+	}
+	level := r.getAttrInt(inst, "level")
+	return &level
+}
+
+// stringList converts a Python list of str to ast.Seq[string].
+func (r *reverseASTBridge) stringList(o objects.Object) ast.Seq[string] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[string], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		if u, ok := lst.Item(i).(*objects.Unicode); ok {
+			out = append(out, u.Value())
+		}
 	}
 	return out
 }
@@ -415,28 +845,6 @@ func (r *reverseASTBridge) readCtx(inst *objects.Instance) ast.ExprContext {
 // leaves when a target has no explicit ctx set. This covers the case
 // where the forward bridge omitted ctx (old objects produced before
 // the ctx fix landed).
-func (r *reverseASTBridge) setStoreCtx(e ast.Expr) {
-	switch v := e.(type) {
-	case *ast.Name:
-		v.Ctx = ast.Store
-	case *ast.Attribute:
-		v.Ctx = ast.Store
-	case *ast.Subscript:
-		v.Ctx = ast.Store
-	case *ast.Starred:
-		r.setStoreCtx(v.Value)
-	case *ast.Tuple:
-		for _, elt := range v.Elts {
-			r.setStoreCtx(elt)
-		}
-		v.Ctx = ast.Store
-	case *ast.List:
-		for _, elt := range v.Elts {
-			r.setStoreCtx(elt)
-		}
-		v.Ctx = ast.Store
-	}
-}
 
 func (r *reverseASTBridge) convertOperator(o objects.Object) ast.Operator {
 	inst, ok := o.(*objects.Instance)
@@ -562,6 +970,8 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 		return i64
 	case *objects.Float:
 		return v.Float64()
+	case *objects.Complex:
+		return v.Complex128()
 	case *objects.Bool:
 		return o == objects.True()
 	case *objects.Bytes:
@@ -572,8 +982,18 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 			items[i] = r.convertConstantValue(v.Item(i))
 		}
 		return items
+	case *objects.Set:
+		if objects.IsExactFrozenSet(v) {
+			elems := v.Items()
+			fs := make(ast.FrozenSet, len(elems))
+			for i, e := range elems {
+				fs[i] = r.convertConstantValue(e)
+			}
+			return fs
+		}
 	}
-	return nil
+	// CPython: Python/ast.c:195 validate_expr Constant_kind
+	panic(astTypeError{fmt.Sprintf("got an invalid type in Constant: %s", o.Type().Name)})
 }
 
 // getAttr reads an attribute from an instance. Returns None() on error.
@@ -594,6 +1014,22 @@ func (r *reverseASTBridge) getAttrString(inst *objects.Instance, name string) st
 	return ""
 }
 
+// getAttrIdentifier reads a str identifier field and panics with astTypeError
+// when it is not a str, mirroring CPython's obj2ast_identifier.
+//
+// CPython: Python/Python-ast.c:6112 obj2ast_identifier
+func (r *reverseASTBridge) getAttrIdentifier(inst *objects.Instance, name string) string {
+	v := r.getAttr(inst, name)
+	if v == objects.None() {
+		return ""
+	}
+	u, ok := v.(*objects.Unicode)
+	if !ok {
+		panic(astTypeError{"AST identifier must be of type str"})
+	}
+	return u.Value()
+}
+
 // getAttrInt reads an int attribute. Returns 0 on error.
 func (r *reverseASTBridge) getAttrInt(inst *objects.Instance, name string) int {
 	v := r.getAttr(inst, name)
@@ -604,18 +1040,51 @@ func (r *reverseASTBridge) getAttrInt(inst *objects.Instance, name string) int {
 	return 0
 }
 
+// getAttrPresent reads an attribute and reports whether it was present on the
+// instance (vs. absent with an AttributeError). This lets callers distinguish
+// "attribute not set" from "attribute set to None".
+//
+// CPython: Python/ast.c validate_expr uses PyObject_GetAttr + PyErr_Clear
+func (r *reverseASTBridge) getAttrPresent(inst *objects.Instance, name string) (objects.Object, bool) {
+	v, err := objects.GetAttr(inst, objects.NewStr(name))
+	if err != nil || v == nil {
+		return objects.None(), false
+	}
+	return v, true
+}
+
 // getPos extracts lineno/col_offset/end_lineno/end_col_offset from an
-// instance, mirroring the forward bridge's withPos. Returns ast.NoPos
-// if the attributes are missing.
+// instance. Returns ast.NoPos when lineno is absent. Panics with
+// astValidationError when lineno is present but holds None. When end_lineno or
+// end_col_offset are absent or None, substitutes lineno/col_offset respectively,
+// matching CPython's Python/Python-ast.c:11187 obj2ast_stmt.
+//
+// CPython: Python/ast.c:1043 validate_stmt LOCATION macro
 func (r *reverseASTBridge) getPos(inst *objects.Instance) ast.Pos {
-	lineno := r.getAttrInt(inst, "lineno")
-	if lineno <= 0 {
+	linenoVal, linenoPresent := r.getAttrPresent(inst, "lineno")
+	if !linenoPresent {
 		return ast.NoPos
 	}
+	if linenoVal == objects.None() {
+		panic(astValidationError{"invalid integer value: None"})
+	}
+	lineno := r.getAttrInt(inst, "lineno")
+	colOffset := r.getAttrInt(inst, "col_offset")
+
+	endLineno := lineno
+	if endVal, present := r.getAttrPresent(inst, "end_lineno"); present && endVal != objects.None() {
+		endLineno = r.getAttrInt(inst, "end_lineno")
+	}
+
+	endColOffset := colOffset
+	if endColVal, present := r.getAttrPresent(inst, "end_col_offset"); present && endColVal != objects.None() {
+		endColOffset = r.getAttrInt(inst, "end_col_offset")
+	}
+
 	return ast.Pos{
 		Lineno:       lineno,
-		ColOffset:    r.getAttrInt(inst, "col_offset"),
-		EndLineno:    r.getAttrInt(inst, "end_lineno"),
-		EndColOffset: r.getAttrInt(inst, "end_col_offset"),
+		ColOffset:    colOffset,
+		EndLineno:    endLineno,
+		EndColOffset: endColOffset,
 	}
 }

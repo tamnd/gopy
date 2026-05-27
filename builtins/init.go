@@ -209,6 +209,10 @@ func typeSingletons() []struct {
 		{"enumerate", objects.EnumerateType},
 		{"reversed", objects.ReversedType},
 		{"memoryview", objects.MemoryViewType},
+		// CPython: Python/bltinmodule.c:3461 SETBUILTIN block
+		// NoneType and ellipsis are exposed so pickle/copyreg can find them.
+		{"NoneType", objects.NoneType()},
+		{"ellipsis", objects.EllipsisType()},
 	}
 }
 
@@ -236,6 +240,7 @@ func wireTypeCalls() {
 		// __new__ descriptor needs binding here.
 		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
+		bindCtor(objects.ComplexType, ComplexCtor)
 		bindCtor(objects.SetType, SetCtor)
 		bindCtor(objects.FrozensetType, FrozensetCtor)
 		bindCtor(objects.BytesType, BytesCtor)

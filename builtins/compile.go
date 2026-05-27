@@ -31,13 +31,14 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 		return nil, err
 	}
 	var mod ast.Mod
-	if parsed.astMod != nil {
+	switch {
+	case parsed.astMod != nil:
 		// Source was a Python _ast object; use the reverse-bridged Go AST directly.
 		// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod path
 		mod = parsed.astMod
-	} else if parsed.sourceBytes != nil {
+	case parsed.sourceBytes != nil:
 		mod, err = parser.ParseBytesFlagsVersion(parsed.sourceBytes, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
-	} else {
+	default:
 		mod, err = parser.ParseStringFlagsVersion(parsed.source, parsed.filename, parsed.mode, parsed.flags, parsed.featureVersion)
 	}
 	if err != nil {
@@ -59,7 +60,7 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	//
 	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
 	if parsed.flags&(cfOnlyAST|cfOptimizedAST) != 0 {
-		return parseOnlyResult(mod), nil
+		return parseOnlyResult(mod, &parsed)
 	}
 	cco, err := compile.Compile(mod, parsed.filename, parsed.optimize)
 	if err != nil {
@@ -95,7 +96,9 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	// Check for Python _ast object before falling through to text source.
 	// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_Check
 	var astMod ast.Mod
-	if mod, ok := PyASTObjectToMod(bound[0]); ok {
+	if mod, ok, convErr := PyASTObjectToMod(bound[0]); convErr != nil {
+		return compileArgs{}, convErr
+	} else if ok {
 		astMod = mod
 	}
 	var source string
@@ -134,10 +137,7 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
-	featureVersion, err := parseFeatureVersion(bound[6])
-	if err != nil {
-		return compileArgs{}, err
-	}
+	featureVersion := parseFeatureVersion(bound[6])
 	return compileArgs{
 		source:         source,
 		sourceBytes:    sourceBytes,
@@ -224,18 +224,18 @@ func bindCompileArgs(args []objects.Object, kwargs map[string]objects.Object) ([
 //
 // CPython: Python/clinic/bltinmodule.c.h:289 builtin_compile (feature_version param)
 // CPython: Lib/ast.py:38-44 (feature_version normalization: tuple→minor int)
-func parseFeatureVersion(obj objects.Object) (int, error) {
+func parseFeatureVersion(obj objects.Object) int {
 	if obj == nil {
-		return 0, nil
+		return 0
 	}
 	if n, ok := obj.(*objects.Int); ok {
 		v, exact := n.Int64()
 		if !exact || v <= 0 {
-			return 0, nil
+			return 0
 		}
-		return int(v), nil
+		return int(v)
 	}
-	return 0, nil
+	return 0
 }
 
 // parseCompileMode maps the mode string to the parser mode constant.
@@ -260,8 +260,10 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 // PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.
 //
 // CPython: Include/cpython/code.h PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
-const cfOnlyAST = 0x0400
-const cfOptimizedAST = 0x2400
+const (
+	cfOnlyAST      = 0x0400
+	cfOptimizedAST = 0x8400
+)
 
 // parseCompileFlags reads the optional flags arg. PyCF_ONLY_AST is now
 // accepted and triggers parse-only mode (no codegen). Other flag bits are
@@ -333,13 +335,26 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 // Falls back to a sentinel int(0) if the bridge cannot find _ast, so
 // callers that only check for SyntaxError still see a successful parse.
 //
-// CPython: Python/bltinmodule.c:813 builtin_compile_impl PyAST_obj2mod
-func parseOnlyResult(mod ast.Mod) objects.Object {
-	obj := astModToObject(mod)
-	if obj == nil {
-		return objects.NewInt(0)
+// When PyCF_OPTIMIZED_AST is set (i.e. both 0x8000 and 0x0400 bits),
+// the Preprocess pass runs constant-folding and other optimizations before
+// converting to Python objects. When only PyCF_ONLY_AST (0x0400) is set,
+// only syntax-check mode is used (no mutations).
+//
+// CPython: Python/bltinmodule.c:840 builtin_compile_impl (PyCF_ONLY_AST branch)
+func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
+	// CPython: Python/bltinmodule.c:843 _PyAST_Validate
+	if err := ast.Validate(mod); err != nil {
+		return nil, fmt.Errorf("ValueError: %w", err)
 	}
-	return obj
+	// CPython: Python/bltinmodule.c:846
+	// syntax_check_only = ((flags & PyCF_OPTIMIZED_AST) == PyCF_ONLY_AST)
+	syntaxCheckOnly := (parsed.flags & cfOptimizedAST) == cfOnlyAST
+	ast.Preprocess(mod, ast.PreprocessOptions{
+		Filename:        parsed.filename,
+		OptimizeLevel:   parsed.optimize,
+		SyntaxCheckOnly: syntaxCheckOnly,
+	})
+	return astModToObject(mod), nil
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the
