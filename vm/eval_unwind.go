@@ -12,6 +12,7 @@ package vm
 // See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
 import (
+	"github.com/tamnd/gopy/codecs"
 	"errors"
 	"os"
 	"strings"
@@ -130,6 +131,17 @@ func synthesizeException(err error) *pyerrors.Exception {
 	var fse *future.SyntaxError
 	if errors.As(err, &fse) {
 		return pyerrors.SyntaxFromFuture(fse)
+	}
+	// Structured codec UnicodeEncodeError: carries encoding, object, start,
+	// end, reason so Python code can access exc.object[exc.start:exc.end].
+	// CPython: Objects/exceptions.c:3040 UnicodeError_init
+	var uee *codecs.UnicodeEncodeErr
+	if errors.As(err, &uee) {
+		return pyerrors.NewUnicodeEncodeError(uee.Encoding, objects.NewStr(uee.Object), uee.Start, uee.End, uee.Reason)
+	}
+	var ude *codecs.UnicodeDecodeErr
+	if errors.As(err, &ude) {
+		return pyerrors.NewUnicodeDecodeError(ude.Encoding, ude.Object, ude.Start, ude.End, ude.Reason)
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.

@@ -37,6 +37,26 @@ func NewUnicodeEncodeError(encoding string, obj objects.Object, start, end int, 
 	return exc
 }
 
+// NewUnicodeDecodeError returns a UnicodeDecodeError instance with the
+// standard .encoding, .object, .start, .end, .reason attributes.
+//
+// CPython: Objects/exceptions.c:3040 UnicodeError_init
+func NewUnicodeDecodeError(encoding string, obj []byte, start, end int, reason string) *Exception {
+	args := objects.NewTuple([]objects.Object{
+		objects.NewStr(encoding), objects.NewBytes(obj),
+		objects.NewInt(int64(start)), objects.NewInt(int64(end)),
+		objects.NewStr(reason),
+	})
+	exc := New(PyExc_UnicodeDecodeError, args)
+	d := exc.EnsureAttrDict()
+	_ = d.SetItem(objects.NewStr("encoding"), objects.NewStr(encoding))
+	_ = d.SetItem(objects.NewStr("object"), objects.NewBytes(obj))
+	_ = d.SetItem(objects.NewStr("start"), objects.NewInt(int64(start)))
+	_ = d.SetItem(objects.NewStr("end"), objects.NewInt(int64(end)))
+	_ = d.SetItem(objects.NewStr("reason"), objects.NewStr(reason))
+	return exc
+}
+
 // CPython: Objects/exceptions.c:3030 Py_UNICODE_ENCODE_ERROR_NAME panel
 var (
 	PyExc_UnicodeError          = newExcType("UnicodeError", []*objects.Type{PyExc_ValueError})
