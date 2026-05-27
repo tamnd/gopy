@@ -12,7 +12,6 @@
 package objects
 
 const (
-	locShort0   = 0
 	locOneLine0 = 10
 	locNoCols   = 13
 	locLong     = 14
@@ -190,20 +189,25 @@ func CoPositions(c *Code) []PositionEntry {
 	return out
 }
 
-// CoLines projects CoPositions down to (start, end, line). The
-// caller pays the column-decoding cost only when they need column
-// data via CoPositions.
+// CoLines projects CoPositions down to (start, end, line), coalescing
+// consecutive entries that share the same line number. This matches
+// CPython's linesiterator which merges runs with the same lineno.
 //
-// CPython: Objects/codeobject.c:1017 PyCode_Addr2Line (called per
-// instruction range).
+// CPython: Objects/codeobject.c:1017 PyCode_Addr2Line
+// CPython: Objects/codeobject.c:1069 linesiterator_next (coalesces same-line spans)
 func CoLines(c *Code) []LineEntry {
 	pos := CoPositions(c)
 	if pos == nil {
 		return nil
 	}
-	out := make([]LineEntry, len(pos))
-	for i, p := range pos {
-		out[i] = LineEntry{Start: p.Start, End: p.End, Line: p.Line}
+	var out []LineEntry
+	for _, p := range pos {
+		e := LineEntry{Start: p.Start, End: p.End, Line: p.Line}
+		if len(out) > 0 && out[len(out)-1].Line == e.Line {
+			out[len(out)-1].End = e.End
+		} else {
+			out = append(out, e)
+		}
 	}
 	return out
 }

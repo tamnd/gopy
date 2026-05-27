@@ -164,14 +164,15 @@ type State struct {
 	// CPython: Parser/tokenizer/helpers.c:153 _PyTokenizer_parser_warn
 	warnings []SyntaxError
 
-	mode     Mode
-	tabSize  int
-	indent   int
-	indstack [maxIndent]int
-	altstack [maxIndent]int
-	atbol    bool
-	pendin   int // >0 indents pending, <0 dedents pending
-	lineno   int
+	mode            Mode
+	tabSize         int
+	dontImplyDedent bool // CPython: PyPARSE_DONT_IMPLY_DEDENT
+	indent          int
+	indstack        [maxIndent]int
+	altstack        [maxIndent]int
+	atbol           bool
+	pendin          int // >0 indents pending, <0 dedents pending
+	lineno          int
 	// pendingLineno defers the post-'\n' line bump until the next
 	// non-EOF byte is actually consumed. CPython's tok_underflow_*
 	// callbacks call ADVANCE_LINENO when they successfully fetch the
@@ -479,6 +480,13 @@ func (s *State) EOFLineText() string {
 // stale (e.g., a backslash continuation consumed the '\n' but the
 // pending lineno bump never flushed because there is no next char).
 func (s *State) Lineno() int { return s.lineno }
+
+// SetDontImplyDedent tells the lexer not to auto-emit DEDENT tokens at EOF.
+// Mirrors PyPARSE_DONT_IMPLY_DEDENT: used by codeop so that compound
+// statements without a trailing blank line remain incomplete.
+//
+// CPython: Parser/pegen.c:273 PyPARSE_DONT_IMPLY_DEDENT check
+func (s *State) SetDontImplyDedent() { s.dontImplyDedent = true }
 
 // ForceDedentsAtEOF queues one DEDENT per open indent on the lexer's
 // pending stack so the next Get() calls drain them before returning

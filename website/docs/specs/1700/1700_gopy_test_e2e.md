@@ -25,7 +25,7 @@ fixes the underlying gopy package on red):
 - [ ] v0.2.0 type panel (#479)
 - [ ] v0.3.0 exceptions panel (#485)
 - [ ] v0.4.0 number / string panel (#487)
-- [ ] v0.5.0 compile panel (#475)
+- [x] v0.5.0 compile panel (#475) — spec [1720](1720_compile_codegen_test_panel.md) shipped (all 9 phases green)
 - [x] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md) (closed by [spec 1718](1718_lexer_gate_closers.md), PR #76, `bd1e9cce`)
 - [ ] v0.7.0 lifecycle panel (#482)
 - [ ] v0.8.0 import panel (#481)

@@ -89,6 +89,13 @@ func (s *State) nextC() int {
 		}
 		if s.underflow == nil || !s.underflow(s) {
 			s.cur = s.inp
+			// CPython: Parser/tokenizer/string_tokenizer.c:15 tok_underflow_string
+			// sets tok->done = E_EOF eagerly when the buffer is exhausted so
+			// IsEndOfSource() returns true before endmarker() is ever called.
+			// Without this, AllowIncompleteInput+IsEndOfSource gating in the
+			// parser cannot promote to _IncompleteInputError when the grammar
+			// fails before reading the ENDMARKER token.
+			s.done = eEOF
 			return eof
 		}
 		s.lineStart = s.cur
@@ -408,18 +415,31 @@ loop:
 	}
 
 	// Blank line, comment-only line, or in-paren continuation: do not
-	// adjust indent stack.
+	// adjust indent stack. EOF at beginning of line is NOT a blank line
+	// for indentation purposes: CPython processes col=0 vs. the indent
+	// stack and generates DEDENT tokens before emitting ENDMARKER. This
+	// is the mechanism that lets "def x():\n  pass\n" parse correctly
+	// even with PyCF_DONT_IMPLY_DEDENT (the DEDENT comes from the
+	// normal atbol loop, not from ForceDedentsAtEOF).
 	//
-	// CPython: Parser/lexer/lexer.c:550 sets blankline=1 when the
-	// indent loop lands on '#', '\n', or '\r'. The '\n' branch later
-	// uses blankline to drop the newline via `goto nextline` so blank
-	// and comment-only lines don't reach the parser as NEWLINE tokens.
+	// CPython: Parser/lexer/lexer.c:550 blankline check (c=='\n' only,
+	// not c==EOF which falls through to the indentation comparison)
 	c = s.peek()
-	if c == '#' || c == '\n' || c == eof {
+	if c == '#' || c == '\n' {
 		s.blankline = true
 	}
-	if c == '#' || c == '\n' || c == eof || s.level > 0 {
+	if c == '#' || c == '\n' || s.level > 0 {
 		return Tok{}, false
+	}
+	if c == eof {
+		// EOF at beginning-of-line: process as col=0. If indent stack
+		// has open levels, they emit DEDENT (pendin--). This mirrors
+		// CPython's tok_get_normal_mode atbol branch where col remains
+		// 0 when EOF is the first character and the indentation
+		// comparison runs normally.
+		//
+		// CPython: Parser/lexer/lexer.c:571 !blankline && level==0 branch
+		s.blankline = true // suppress blank-line NEWLINE token
 	}
 
 	// CPython preserves the column captured before the first `\\`
@@ -1296,30 +1316,21 @@ func (s *State) popParen(c byte) bool {
 	return false
 }
 
-// endmarker emits the terminal ENDMARKER, also flushing any pending
-// dedents back to indent level 0. CPython leaves p_start / p_end NULL
-// on the EOF branch (Parser/lexer/lexer.c:738), so col_offset and
-// end_col_offset stay -1; the (lineno+1, 0) reshape happens later in
-// the Python-tokenize wrapper when extra_tokens is on.
+// endmarker emits the terminal ENDMARKER. CPython leaves p_start /
+// p_end NULL on the EOF branch (Parser/lexer/lexer.c:738), so
+// col_offset and end_col_offset stay -1.
 //
-// s.done is set to eEOF on the first call so the DEDENT-at-EOF
-// tokens that flush ahead of ENDMARKER report E_EOF to the wrapper.
-// In CPython this happens in the underflow (file/string/utf8
-// tokenizer) before the indent-unwind branch queues DEDENTs via
-// tok->pendin; gopy collapses that into endmarker() because the
-// buffer is already fully loaded.
+// Dedents at EOF for file-input are emitted by the normal atbol path
+// after the trailing \n injected by TranslateNewlines. For
+// single-input, pegen's ForceDedentsAtEOF primes pendin after the
+// ENDMARKER-to-NEWLINE rewrite so DEDENTs arrive in the correct order
+// (NEWLINE-first, then DEDENT). Emitting DEDENT here would put DEDENT
+// before the pegen-synthetic NEWLINE, breaking the grammar's block
+// rule (NEWLINE INDENT statements DEDENT).
 //
 // CPython: Parser/lexer/lexer.c:734 EOF branch in tok_get_normal_mode
 func (s *State) endmarker() Tok {
 	s.done = eEOF
-	if s.indent > 0 {
-		s.indent--
-		start, end := -1, -1
-		if s.tokExtraTokens {
-			start, end = s.cur, s.cur
-		}
-		return s.tokenSetup(token.DEDENT, start, end)
-	}
 	return s.tokenSetup(token.ENDMARKER, -1, -1)
 }
 

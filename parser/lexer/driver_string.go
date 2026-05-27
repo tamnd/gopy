@@ -80,13 +80,15 @@ func FromString(src string, mode Mode) *State {
 		)
 		s.done = eEncoding
 	}
-	// exec-input and single-input both need a trailing newline so the
-	// lexer can close the indent stack before EOF. Only eval-input
-	// skips injection since it parses a single expression with no suite.
+	// exec-input (Py_file_input) gets a trailing newline injection so the
+	// lexer closes the indent stack at EOF via the normal atbol path.
+	// single-input and eval-input do NOT inject: pegen rewrites the first
+	// ENDMARKER to NEWLINE and forces remaining dedents via ForceDedentsAtEOF.
+	// Injecting \n for single mode would close open indent blocks before
+	// ENDMARKER is processed, making PyCF_DONT_IMPLY_DEDENT a no-op.
 	//
-	// CPython: Parser/lexer/state.c readl_stdin (single mode always has
-	// the final \n from the interactive prompt or injected here).
-	buf = TranslateNewlines(buf, mode == ModeFile || mode == ModeSingle)
+	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
+	buf = TranslateNewlines(buf, mode == ModeFile)
 	s.encoding = "utf-8"
 	s.buf = buf
 	s.cur = 0
@@ -180,7 +182,7 @@ func FromBytes(src []byte, mode Mode) *State {
 		}
 	}
 	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
-	src = TranslateNewlines(src, mode == ModeFile || mode == ModeSingle)
+	src = TranslateNewlines(src, mode == ModeFile)
 	s.buf = src
 	s.cur = 0
 	s.inp = len(src)

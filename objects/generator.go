@@ -12,6 +12,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 )
 
 // ErrGeneratorExit is the Go-level sentinel for PyExc_GeneratorExit.
@@ -75,6 +76,14 @@ type Generator struct {
 
 	started bool
 	closed  bool
+
+	// Running is 1 while the generator goroutine is actively executing
+	// the body (between reading from SendCh and writing to YieldCh).
+	// Mirrors CPython's gi_frame_state == FRAME_EXECUTING check that
+	// prevents re-entrant calls from deadlocking.
+	//
+	// CPython: Objects/genobject.c:275 gen_send_ex2 FRAME_EXECUTING check
+	Running atomic.Int32
 }
 
 // GeneratorType is the type singleton for generator.
@@ -96,6 +105,22 @@ func init() {
 	} {
 		SetTypeDescr(GeneratorType, name, NewMethodDescr(GeneratorType, name, fn))
 	}
+	// gi_running: 1 when the generator body is executing, 0 otherwise.
+	//
+	// CPython: Objects/genobject.c gi_running member (PyMemberDef)
+	SetTypeDescr(GeneratorType, "gi_running", NewGetSetDescr("gi_running",
+		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			return NewInt(int64(g.Running.Load())), nil
+		}, nil))
+	// gi_frame: the frame object of the suspended generator. Returns None
+	// when the generator is exhausted or not yet started.
+	//
+	// CPython: Objects/genobject.c gi_frame member
+	SetTypeDescr(GeneratorType, "gi_frame", NewGetSetDescr("gi_frame",
+		func(o Object) (Object, error) {
+			return None(), nil
+		}, nil))
 	AddIterSlotWrappers(GeneratorType)
 }
 
@@ -181,6 +206,15 @@ func (g *Generator) Send(v Object) (Object, error) {
 	}
 	if !g.started && v != None() {
 		return nil, errors.New("TypeError: can't send non-None value to a just-started generator")
+	}
+	// Detect re-entrant calls: if the generator body is currently executing
+	// (e.g., the body calls next() on itself), raise ValueError immediately
+	// rather than deadlocking on the channel. Mirrors CPython's
+	// gi_frame_state == FRAME_EXECUTING guard.
+	//
+	// CPython: Objects/genobject.c:275 gen_send_ex2
+	if g.Running.Load() == 1 {
+		return nil, fmt.Errorf("ValueError: generator already executing")
 	}
 	g.started = true
 	g.SendCh <- GenMsg{Val: v}

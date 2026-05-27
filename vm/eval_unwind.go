@@ -387,9 +387,9 @@ func (e *evalState) handleException(err error) bool {
 // no associated frame data worth recording at this layer.
 //
 // TbFrame wraps the live interpreter frame so traceback.py can walk
-// f.f_code / f.f_globals. TbLasti=-1 makes _get_code_position return
-// (None,)*4 so traceback.py skips the co_positions lookup (which the
-// gopy Code object does not expose yet).
+// f.f_code / f.f_globals. TbLasti is set to the byte offset of the
+// last-executed instruction so _get_code_position can resolve column
+// info from co_positions().
 //
 // CPython: Python/traceback.c:154 PyTraceBack_Here
 func (e *evalState) attachFrameTraceback() {
@@ -431,7 +431,7 @@ func (e *evalState) attachFrameTraceback() {
 		Entry:   entry,
 		Next:    exc.TB,
 		TbFrame: objects.NewFrame(snap),
-		TbLasti: -1,
+		TbLasti: off,
 	}
 	tb.Init(traceback.Type)
 	exc.TB = tb

@@ -82,7 +82,7 @@ func intFloorDiv(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bi.v.Sign() == 0 {
-		return nil, errors.New("ZeroDivisionError: integer division or modulo by zero")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	q, r := new(big.Int), new(big.Int)
 	q.QuoRem(&ai.v, &bi.v, r)
@@ -103,7 +103,7 @@ func intMod(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bi.v.Sign() == 0 {
-		return nil, errors.New("ZeroDivisionError: integer division or modulo by zero")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	q, r := new(big.Int), new(big.Int)
 	q.QuoRem(&ai.v, &bi.v, r)

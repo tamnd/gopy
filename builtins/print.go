@@ -89,9 +89,20 @@ func Print(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	}
 
 	if flush {
-		if f, ok := file.(interface{ Flush() error }); ok {
-			if err := f.Flush(); err != nil {
-				return nil, err
+		// Call the Python-level flush() method on the file object, matching
+		// CPython's builtin_print_impl which calls PyObject_CallMethodNoArgs(file, "flush").
+		//
+		// CPython: Python/bltinmodule.c:2278 PyObject_CallMethodNoArgs(file, &_Py_ID(flush))
+		fileObj := kwargs["file"]
+		if fileObj == nil || objects.IsNone(fileObj) {
+			fileObj = sysStdout()
+		}
+		if fileObj != nil && !objects.IsNone(fileObj) {
+			flushAttr, ferr := objects.GetAttr(fileObj, objects.NewStr("flush"))
+			if ferr == nil {
+				if _, ferr = objects.Call(flushAttr, objects.NewTuple(nil), nil); ferr != nil {
+					return nil, ferr
+				}
 			}
 		}
 	}
@@ -170,7 +181,7 @@ func writerFromObject(o objects.Object) (io.Writer, error) {
 	if err == nil {
 		return &callableWriter{write: writeAttr}, nil
 	}
-	return nil, fmt.Errorf("TypeError: %s object has no write() method", o.Type().Name)
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute 'write'", o.Type().Name)
 }
 
 // fileWriter adapts an objects.File to io.Writer by funneling raw byte

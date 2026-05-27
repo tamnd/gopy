@@ -196,15 +196,23 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 			return
 		}
+		// Mark generator as actively executing so re-entrant Send() calls
+		// raise ValueError instead of deadlocking on the channel.
+		//
+		// CPython: Objects/genobject.c:275 gi_frame_state = FRAME_EXECUTING
+		if gen, ok := retVal.(*objects.Generator); ok {
+			gen.Running.Store(1)
+		}
 		// Run the generator body. yieldCh/sendCh are threaded through
 		// evalState so YIELD_VALUE can reach them.
 		ge := &evalState{
-			ts:       savedTS,
-			f:        savedFrame,
-			breaker:  breakerFor(savedTS),
-			genYield: yieldCh,
-			genSend:  sendCh,
-			code:     savedFrame.Code.Code,
+			ts:         savedTS,
+			f:          savedFrame,
+			breaker:    breakerFor(savedTS),
+			genYield:   yieldCh,
+			genSend:    sendCh,
+			code:       savedFrame.Code.Code,
+			genRunning: retVal,
 		}
 		retVal, runErr := ge.run()
 		switch {
@@ -246,9 +254,22 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		return genResult{ok: true}, fmt.Errorf("vm: YIELD_VALUE outside generator context")
 	}
 	val := e.popObject()
+	// Mark generator as suspended (not executing) so re-entrant Send()
+	// calls from other goroutines can proceed if they resume this generator.
+	//
+	// CPython: Objects/genobject.c gi_frame_state = FRAME_SUSPENDED
+	if gen, ok := e.genRunning.(*objects.Generator); ok {
+		gen.Running.Store(0)
+	}
 	e.genYield <- objects.GenMsg{Val: val}
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
+	// Mark generator as executing again after being resumed.
+	//
+	// CPython: Objects/genobject.c gi_frame_state = FRAME_EXECUTING
+	if gen, ok := e.genRunning.(*objects.Generator); ok {
+		gen.Running.Store(1)
+	}
 	if msg.Err != nil {
 		// A throw() that carried a Python exception object travels as
 		// objects.RaisedError. Install it on the thread state so

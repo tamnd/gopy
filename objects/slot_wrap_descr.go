@@ -127,7 +127,10 @@ func AddIterSlotWrappers(t *Type) {
 	}
 	if t.IterNext != nil {
 		if _, exists := typeDescrTable[t]["__next__"]; !exists {
-			SetTypeDescr(t, "__next__", NewMethodDescr(t, "__next__", makeWrapIterNext(t)))
+			d := NewMethodDescr(t, "__next__", makeWrapIterNext(t))
+			// CPython: Objects/typeobject.c slotdefs tp_iternext wrapper doc
+			d.doc = "Implement next(self)."
+			SetTypeDescr(t, "__next__", d)
 		}
 	}
 }

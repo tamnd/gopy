@@ -20,6 +20,9 @@ import (
 func init() {
 	lexer.WarnHook = FlushLexerWarnings
 	compile.WarnHook = compileWarn
+	objects.DeprecWarnHook = func(msg string) error {
+		return WarnUnicode(errors.PyExc_DeprecationWarning, msg, 2, nil)
+	}
 }
 
 // FlushLexerWarnings posts every SyntaxWarning-class diagnostic the
