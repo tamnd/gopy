@@ -13,6 +13,8 @@
 
 package objects
 
+import "fmt"
+
 // MethodFunc is the gopy-internal callable used when a Go closure needs
 // the full PyFunction descriptor surface but cannot back the body with
 // bytecode (e.g. the @contextmanager helper).
@@ -34,6 +36,7 @@ func init() {
 	MethodFuncType.Call = methodFuncCall
 	MethodFuncType.DescrGet = methodFuncDescrGet
 	MethodFuncType.Hash = identityHash
+	MethodFuncType.Getattro = methodFuncGetAttr
 }
 
 // NewMethodFunc wraps fn so it dispatches like a Python def.
@@ -54,6 +57,31 @@ func methodFuncRepr(o Object) (string, error) {
 func methodFuncCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
 	f := o.(*MethodFunc)
 	return f.fn(args, kwargs)
+}
+
+// methodFuncGetAttr exposes the standard Python function attributes on a
+// MethodFunc. CPython PyFunction_Type defines __doc__, __name__,
+// __qualname__, __module__, __dict__, and __wrapped__ as member/getset
+// slots; gopy surfaces the subset that test code actually reads.
+//
+// CPython: Objects/funcobject.c:590 func_getattro
+func methodFuncGetAttr(o Object, name Object) (Object, error) {
+	f := o.(*MethodFunc)
+	key, ok := name.(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("AttributeError: attribute name must be string")
+	}
+	switch key.Value() {
+	case "__doc__":
+		return None(), nil
+	case "__name__", "__qualname__":
+		return NewStr(f.name), nil
+	case "__module__":
+		return None(), nil
+	case "__dict__":
+		return NewDict(), nil
+	}
+	return nil, fmt.Errorf("AttributeError: 'function' object has no attribute %q", key.Value())
 }
 
 // methodFuncDescrGet implements the function descriptor protocol:

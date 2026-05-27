@@ -331,9 +331,9 @@ func objectDelattrDescr(args []Object, _ map[string]Object) (Object, error) {
 }
 
 // richCompareDescr returns the slot wrapper for the named rich
-// comparison operator. EQ / NE compare by identity; ordering ops
-// return NotImplemented so the protocol can try the reflected
-// operator on the other operand.
+// comparison operator. EQ compares by identity (returns NotImplemented
+// for non-identical so the reflected operator gets a turn); NE delegates
+// to EQ and negates. Ordering ops return NotImplemented.
 //
 // CPython: Objects/typeobject.c:6950 object_richcompare
 func richCompareDescr(op CompareOp) func(args []Object, kwargs map[string]Object) (Object, error) {
@@ -343,9 +343,28 @@ func richCompareDescr(op CompareOp) func(args []Object, kwargs map[string]Object
 		}
 		switch op {
 		case CompareEQ:
-			return NewBool(args[0] == args[1]), nil
+			if args[0] == args[1] {
+				return True(), nil
+			}
+			return notImplemented(), nil
 		case CompareNE:
-			return NewBool(args[0] != args[1]), nil
+			// CPython object.__ne__ delegates to __eq__ and inverts.
+			// CPython: Objects/typeobject.c:6975 object_richcompare NE
+			if args[0] == args[1] {
+				return False(), nil
+			}
+			eq, err := RichCmp(args[0], args[1], CompareEQ)
+			if err != nil {
+				return nil, err
+			}
+			if IsNotImplemented(eq) {
+				return notImplemented(), nil
+			}
+			b, berr := IsTruthy(eq)
+			if berr != nil {
+				return nil, berr
+			}
+			return NewBool(!b), nil
 		default:
 			return notImplemented(), nil
 		}
