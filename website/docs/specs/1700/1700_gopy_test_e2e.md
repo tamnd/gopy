@@ -23,7 +23,7 @@ Infrastructure (gates the panel work below):
 Per-version panel tasks (each lands its slice of `test/cpython/` and
 fixes the underlying gopy package on red):
 - [ ] v0.2.0 type panel (#479)
-- [ ] v0.3.0 exceptions panel (#485) — spec [1721](1721_exceptions_traceback_test_panel.md) open
+- [x] v0.3.0 exceptions panel (#485) — spec [1721](1721_exceptions_traceback_test_panel.md) shipped (all 7 phases green)
 - [ ] v0.4.0 number / string panel (#487)
 - [x] v0.5.0 compile panel (#475) — spec [1720](1720_compile_codegen_test_panel.md) shipped (all 9 phases green)
 - [x] v0.5.5 lexer panel (#484) — full port under [spec 1710](1710_v0124_lexer_tokenizer_full_port.md) (closed by [spec 1718](1718_lexer_gate_closers.md), PR #76, `bd1e9cce`)
@@ -263,18 +263,18 @@ release is named.
 
 ### Exceptions / traceback (8 files)
 
-Spec [1721](1721_exceptions_traceback_test_panel.md) open.
+Spec [1721](1721_exceptions_traceback_test_panel.md) shipped (all 7 phases green).
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_exceptions | v0.3 | ready | full exception type panel |
-| test_baseexception | v0.3 | ready | BaseException root |
-| test_exception_hierarchy | v0.3 | ready | MRO of builtin exceptions |
-| test_exception_variations | v0.3 | ready | except / except\* shapes |
-| test_exception_group | v0.3 | ready | PEP 654 exception groups |
-| test_except_star | v0.3 | ready | except\* syntax |
-| test_traceback | v0.3 | ready | traceback module |
-| test_raise | v0.3 | ready | raise / raise from semantics |
+| test_exceptions | v0.12.7 | done | 107/107 green (2 skipped: _testcapi) |
+| test_baseexception | v0.12.7 | done | 11/11 green |
+| test_exception_hierarchy | v0.12.7 | done | 16/16 green (1 skip: WindowsError) |
+| test_exception_variations | v0.12.7 | done | 30/30 green |
+| test_exception_group | v0.12.7 | done | 52/52 green |
+| test_except_star | v0.12.7 | done | 60/60 green |
+| test_traceback | v0.12.7 | done | 370/370 green |
+| test_raise | v0.12.7 | done | 37/37 green |
 
 ### Builtins / types (28 files)
 

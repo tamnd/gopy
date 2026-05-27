@@ -8,8 +8,12 @@ description: "Vendor and gate all 8 CPython 3.14.5 Lib/test/ files in the spec 1
 
 ## Status
 
-Pending. Branch not yet opened. Spec scaffold written post-merge of PR #79
-(spec 1720 compile/codegen panel, commit `9cb0f44d`).
+Shipped. All 8 rows green on macOS/Linux/Windows. Branch
+`feat/v0.12.7-spec-1721-exceptions-traceback`, opened as PR #80 post-merge of
+PR #79 (spec 1720 compile/codegen panel, commit `9cb0f44d`). No runtime code
+changes were required; the only blocking issues were two missing data files
+(`exception_hierarchy.txt` and `levenshtein_examples.json`) vendored alongside
+the test files.
 
 ## Goal
 
@@ -377,12 +381,12 @@ green; `@cpython_only` tests self-skip; `ExceptionGroupTests` green.
 
 ## Checklist
 
-- [ ] Phase 1: vendor 8 test files; MANIFEST updated with ready marks
-- [ ] Phase 2: test_baseexception (11/11), test_exception_hierarchy (16/16),
+- [x] Phase 1: vendor 8 test files; MANIFEST updated with ready marks
+- [x] Phase 2: test_baseexception (11/11), test_exception_hierarchy (16/16),
       test_exception_variations (30/30) done
-- [ ] Phase 3: test_raise (37/37) done
-- [ ] Phase 4: test_exception_group (52/52) done
-- [ ] Phase 5: test_except_star (60/60) done
-- [ ] Phase 6: test_exceptions (107/107, ~6 skipped _testcapi) done
-- [ ] Phase 7: test_traceback (~370/~370, @cpython_only skipped) done
-- [ ] spec 1700 "Exceptions / traceback" checklist item flipped to `[x]`
+- [x] Phase 3: test_raise (37/37) done
+- [x] Phase 4: test_exception_group (52/52) done
+- [x] Phase 5: test_except_star (60/60) done
+- [x] Phase 6: test_exceptions (107/107, 2 skipped _testcapi) done
+- [x] Phase 7: test_traceback (370/370, @cpython_only self-skipped) done
+- [x] spec 1700 "Exceptions / traceback" checklist item flipped to `[x]`
