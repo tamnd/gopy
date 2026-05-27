@@ -304,6 +304,7 @@ func (s *Set) insertClean(h int64, key Object) {
 	idx, _, _ := s.lookup(h, key)
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	s.used++
+	s.fill++
 }
 
 func (s *Set) grow() {
@@ -320,8 +321,6 @@ func (s *Set) grow() {
 	for _, e := range old {
 		if e.used {
 			s.insertClean(e.hash, e.key)
-			s.used++
-			s.fill++
 		}
 	}
 }

@@ -151,15 +151,13 @@ func TestCodeRichCompareNotEqualOnConsts(t *testing.T) {
 	}
 }
 
-func TestCodeRichCompareOrderingNotImplemented(t *testing.T) {
+func TestCodeRichCompareOrderingRaisesTypeError(t *testing.T) {
+	// CPython: code < code raises TypeError (Objects/object.c:876 do_richcompare)
 	a := NewCode()
 	b := NewCode()
-	got, err := RichCmp(a, b, CompareLT)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != NotImplemented() {
-		t.Errorf("ordering should be NotImplemented, got %v", got)
+	_, err := RichCmp(a, b, CompareLT)
+	if err == nil {
+		t.Fatal("expected TypeError for code < code, got nil error")
 	}
 }
 

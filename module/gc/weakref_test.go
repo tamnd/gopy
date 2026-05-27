@@ -27,6 +27,9 @@ func TestRegisterWeakrefSkipsNoneAndNil(t *testing.T) {
 
 	dead := objects.NewWeakref(objects.NewList(nil), nil)
 	dead.Clear()
+	// The hook registered dead when it was alive; reset before checking
+	// that the explicit RegisterWeakref on a dead weakref is a no-op.
+	clearWeakrefs()
 	RegisterWeakref(dead)
 
 	state.mu.Lock()

@@ -18,6 +18,9 @@ func TestRegisterWeakProxySkipsNilAndDead(t *testing.T) {
 
 	dead := objects.NewWeakProxy(objects.NewList(nil), nil)
 	dead.Clear()
+	// The hook registered dead when it was alive; reset before checking
+	// that the explicit RegisterWeakProxy on a dead proxy is a no-op.
+	clearProxies()
 	RegisterWeakProxy(dead)
 
 	state.mu.Lock()
