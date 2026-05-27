@@ -93,6 +93,14 @@ func newGenCMType() *objects.Type {
 	t.Getattro = objects.GenericGetAttr
 	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", genCMEnter))
 	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", genCMExit))
+	objects.SetTypeDescr(t, "__call__", objects.NewMethodDescr(t, "__call__", genCMCall))
+	// Wire t.Call so instances are callable; SetTypeDescr alone doesn't
+	// install the slot when the type is constructed outside the normal
+	// Python class machinery.
+	t.Call = func(self objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+		all := append([]objects.Object{self}, args...)
+		return genCMCall(all, kwargs)
+	}
 	return t
 }
 
@@ -118,7 +126,33 @@ func contextManager(args []objects.Object, _ map[string]objects.Object) (objects
 			return nil, err
 		}
 		inst := objects.NewInstance(genCMType)
-		if err := inst.EnsureDict().SetItem(objects.NewStr("gen"), genObj); err != nil {
+		d := inst.EnsureDict()
+		if err := d.SetItem(objects.NewStr("gen"), genObj); err != nil {
+			return nil, err
+		}
+		// _recreate: CPython: Lib/contextlib.py:112 _GeneratorContextManagerBase._recreate_cm
+		// Captures fn + original call args so __call__ can mint a fresh CM.
+		// Use an indirect holder to allow the closure to reference itself.
+		capturedArgs := hArgs
+		capturedKwargs := hKwargs
+		var recreateHolder [1]objects.Object
+		recreateHolder[0] = objects.NewBuiltinFunction("_recreate_cm", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			newGen, err := objects.Call(fn, objects.NewTuple(capturedArgs), kwargsToDict(capturedKwargs))
+			if err != nil {
+				return nil, err
+			}
+			newInst := objects.NewInstance(genCMType)
+			nd := newInst.EnsureDict()
+			if err := nd.SetItem(objects.NewStr("gen"), newGen); err != nil {
+				return nil, err
+			}
+			// propagate _recreate to the new instance too
+			if err := nd.SetItem(objects.NewStr("_recreate"), recreateHolder[0]); err != nil {
+				return nil, err
+			}
+			return newInst, nil
+		})
+		if err := d.SetItem(objects.NewStr("_recreate"), recreateHolder[0]); err != nil {
 			return nil, err
 		}
 		return inst, nil
@@ -226,6 +260,56 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		return objects.NewBool(false), nil
 	}
 	return nil, thrErr
+}
+
+// genCMCall makes _GeneratorContextManager instances callable as method
+// decorators. When used as @run_with_locale('LC_CTYPE', 'tr_TR') on a
+// method, Python calls the returned CM instance with the decorated function.
+// Each invocation of the returned wrapper recreates the CM via _recreate so
+// the generator is fresh on every call.
+//
+// CPython: Lib/contextlib.py:116 _GeneratorContextManagerBase.__call__
+func genCMCall(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __call__() missing self and func argument")
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __call__ self not Instance")
+	}
+	fn := args[1]
+	recreateFn, err := inst.Dict().GetItem(objects.NewStr("_recreate"))
+	if err != nil || recreateFn == nil {
+		return nil, fmt.Errorf("RuntimeError: _GeneratorContextManager missing _recreate")
+	}
+	inner := objects.NewMethodFunc("inner", func(iArgs []objects.Object, iKwargs map[string]objects.Object) (objects.Object, error) {
+		// _recreate_cm() -> fresh CM instance
+		cmObj, err := objects.Call(recreateFn, objects.NewTuple(nil), nil)
+		if err != nil {
+			return nil, err
+		}
+		enterFn, err := objects.GetAttr(cmObj, objects.NewStr("__enter__"))
+		if err != nil {
+			return nil, err
+		}
+		exitFn, err := objects.GetAttr(cmObj, objects.NewStr("__exit__"))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := objects.Call(enterFn, objects.NewTuple(nil), nil); err != nil {
+			return nil, err
+		}
+		result, fnErr := objects.Call(fn, objects.NewTuple(iArgs), kwargsToDict(iKwargs))
+		if fnErr != nil {
+			_, _ = objects.Call(exitFn, objects.NewTuple([]objects.Object{objects.None(), objects.None(), objects.None()}), nil)
+			return nil, fnErr
+		}
+		if _, err := objects.Call(exitFn, objects.NewTuple([]objects.Object{objects.None(), objects.None(), objects.None()}), nil); err != nil {
+			return nil, err
+		}
+		return result, nil
+	})
+	return inner, nil
 }
 
 // kwargsToDict converts a Go kwargs map into a Python *Dict for Call.
