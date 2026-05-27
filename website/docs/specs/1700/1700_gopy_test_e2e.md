@@ -32,7 +32,7 @@ fixes the underlying gopy package on red):
 - [ ] v0.9.0 vm tail panel (#483)
 - [ ] v0.10.0 gc panel (#474)
 - [ ] v0.10.1 language / stdlib panel (#486)
-- [ ] v0.10.2 parser panel (#476)
+- [x] v0.10.2 parser panel (#476) — spec [1719](1719_parser_ast_full_port.md) shipped (PR #78, `9d0a3199`); test_asdl_parser + test_ast/ + test_patma pending
 - [ ] v0.11.0 specializer / monitor panel (#477)
 - [ ] v0.12.0 optimizer panel (#478)
 
@@ -160,38 +160,40 @@ release is named.
 
 ### Parser / grammar / AST (27 files + test_ast/, test_future_stmt/, test_peg_generator/)
 
-| Test | Owner | Mark | Notes |
-|------|-------|------|-------|
-| test_grammar | v0.10.2 | done | Already pinned in v0.10.2 release notes |
-| test_syntax | v0.10.2 | ready | parser/errors panel |
-| test_eof | v0.10.2 | ready | EOF / continuation handling in parser |
-| test_fstring | v0.10.2 | ready | PEP 701 f-strings |
-| test_tstring | v0.10.2 | ready | PEP 750 t-strings |
-| test_named_expressions | v0.10.2 | ready | walrus parser/codegen |
-| test_unparse | v0.5 | ready | ast/unparse.go |
-| test_asdl_parser | v0.5 | ready | ast/asdl.go |
-| test_pep646_syntax | v0.10.2 | ready | starred type-param syntax |
-| test_type_params | v0.10.2 | ready | PEP 695 type parameters |
-| test_type_aliases | v0.10.2 | ready | `type Foo = ...` |
-| test_type_annotations | v0.10.2 | ready | annotation lowering |
-| test_type_comments | v0.10.2 | ready | parser type-comment mode |
-| test_annotationlib | v0.10.1 | ready | annotation lazy resolver |
-| test_string_literals | v0.10.2 | ready | string parser corner cases |
-| test_int_literal | v0.4 | ready | int parsing in pystrconv |
-| test_unicode_identifiers | v0.10.2 | ready | NFKC identifier normalization |
-| test_patma | v0.9 | ready | PEP 634 pattern matching |
-| test_decorators | v0.5 | ready | decorator codegen |
-| test_global | v0.5 | ready | symtable global / nonlocal |
-| test_scope | v0.5 | ready | symtable scoping |
-| test_keywordonlyarg | v0.5 | ready | parser kw-only args |
-| test_positional_only_arg | v0.5 | ready | parser pos-only args |
-| test_unpack | v0.5 | ready | tuple unpack codegen |
-| test_unpack_ex | v0.5 | ready | starred unpack |
-| test_metaclass | v0.10.1 | ready | __build_class__ + type creation |
-| test_subclassinit | v0.10.1 | ready | __init_subclass__ hook |
-| test_ast/ (dir) | v0.10.2 | ready | full ast.dump panel |
-| test_future_stmt/ (dir) | v0.5 | ready | __future__ flag plumbing |
-| test_peg_generator/ (dir) | v0.5.5 | deferred | tools/parser_gen still WIP |
+Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d0a3199`).
+
+| Test | Owner | Mark | Commit | Notes |
+|------|-------|------|--------|-------|
+| test_grammar | v0.10.2 | done | `9d0a3199` | 75/75 green — spec 1719 P7 (PR #78) |
+| test_syntax | v0.12.5 | done | `9d0a3199` | 45/45 green (7 skipped) — spec 1719 (PR #78) |
+| test_eof | v0.12.5 | done | `9d0a3199` | 6/6 green — spec 1719 (PR #78) |
+| test_fstring | v0.12.5 | done | `9d0a3199` | 90/90 green — spec 1719 (PR #78) |
+| test_tstring | v0.12.5 | done | `9d0a3199` | 12/12 green — spec 1719 (PR #78) |
+| test_named_expressions | v0.12.5 | done | `9d0a3199` | 74/74 green — spec 1719 (PR #78) |
+| test_unparse | v0.12.5 | done | `9d0a3199` | 79/79 green — spec 1719 (PR #78) |
+| test_asdl_parser | v0.5 | ready | | ast/asdl.go |
+| test_pep646_syntax | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
+| test_type_params | v0.12.5 | done | `9d0a3199` | 108/108 green — spec 1719 (PR #78) |
+| test_type_aliases | v0.12.5 | done | `9d0a3199` | 30/30 green — spec 1719 (PR #78) |
+| test_type_annotations | v0.12.5 | done | `9d0a3199` | 47/47 green (1 skip) — spec 1719 (PR #78) |
+| test_type_comments | v0.12.5 | done | `9d0a3199` | 18/18 green (1 skip) — spec 1719 (PR #78) |
+| test_annotationlib | v0.12.5 | done | `9d0a3199` | 117/117 green (1 skip) — spec 1719 (PR #78) |
+| test_string_literals | v0.12.5 | done | `9d0a3199` | 20/20 green — spec 1719 (PR #78) |
+| test_int_literal | v0.12.5 | done | `9d0a3199` | 6/6 green — spec 1719 (PR #78) |
+| test_unicode_identifiers | v0.12.5 | done | `9d0a3199` | 5/5 green — spec 1719 (PR #78) |
+| test_patma | v0.9 | ready | | 322/328 partial (6 TestTracing need sys.settrace) |
+| test_decorators | v0.12.5 | done | `9d0a3199` | 16/16 green — spec 1719 (PR #78) |
+| test_global | v0.12.5 | done | `9d0a3199` | 20/20 green — spec 1719 (PR #78) |
+| test_scope | v0.12.5 | done | `9d0a3199` | 41/41 green (3 skipped) — spec 1719 (PR #78) |
+| test_keywordonlyarg | v0.12.5 | done | `9d0a3199` | 11/11 green — spec 1719 (PR #78) |
+| test_positional_only_arg | v0.12.5 | done | `9d0a3199` | 28/28 green — spec 1719 (PR #78) |
+| test_unpack | v0.12.5 | done | `9d0a3199` | 2/2 green — spec 1719 (PR #78) |
+| test_unpack_ex | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
+| test_metaclass | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
+| test_subclassinit | v0.12.5 | done | `9d0a3199` | 17/17 green — spec 1719 (PR #78) |
+| test_ast/ (dir) | v0.10.2 | ready | | blocked on `_ast_unparse` (task #74) |
+| test_future_stmt/ (dir) | v0.12.5 | done | `9d0a3199` | 7/7 green (AnnotationsFutureTestCase); 7 FutureTest rows need spawn_python — spec 1719 (PR #78) |
+| test_peg_generator/ (dir) | v0.5.5 | deferred | | tools/parser_gen still WIP |
 
 ### Compile / codegen (36 files)
 
