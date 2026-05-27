@@ -30,7 +30,7 @@ test_utf8source	done	v0.12.4	3/3 green after compile(bytes), str.encode latin-1,
 
 # ---- Parser / grammar / AST ----------------------------------------
 test_annotationlib	done	v0.12.5	117/117 green (1 skip). Template.__new__ + PEP 563 class body inline __annotations__ + partial.__wrapped__ removed
-test_asdl_parser	done	v0.12.5	skip (not a build-tree install). SkipTest at module level now classified as skip by runner
+test_asdl_parser	done	v0.12.5	6/6 green. Vendor Parser/asdl.py + Python.asdl; sysconfig.is_python_build() returns True; importlib.util.spec_from_loader + module_from_spec implemented (7db2ad9b, eb91a139)
 test_ast/	done	v0.12.5	215/215 green (7 skipped). Package entry support + refcounting fixes
 test_decorators	done	v0.12.5	16/16 green
 test_eof	done	v0.12.5	EOF / continuation handling in parser

@@ -150,13 +150,13 @@ release is named.
 
 ### Lexer / tokenizer (5 files)
 
-| Test | Owner | Mark | Notes |
-|------|-------|------|-------|
-| test_tokenize | v0.9 | done | Closed by spec 1718 P29..P59 (PR #76, `bd1e9cce`) 130/130 green |
-| test_tabnanny | v0.9 | done | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76, `bd1e9cce`) 20/20 green |
-| test_source_encoding | v0.5.5 | done | Closed by spec 1718 P6..P29 cookie/BOM + P60 long-cookie line (PR #76, `bd1e9cce`) 91/91 green (1 skip; flaky fd error in test_utf8_shebang_error pre-existing in subprocess) |
-| test_utf8source | v0.5.5 | done | parser/lexer utf-8 default; greens with spec 1718 (PR #76, `bd1e9cce`) 3/3 green |
-| test_keyword | v0.5.5 | done | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76, `bd1e9cce`) 11/11 green |
+| Test | Owner | Mark | Commit | Notes |
+|------|-------|------|--------|-------|
+| test_tokenize | v0.9 | done | `bd1e9cce` | Closed by spec 1718 P29..P59 (PR #76) 130/130 green |
+| test_tabnanny | v0.9 | done | `bd1e9cce` | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76) 20/20 green |
+| test_source_encoding | v0.5.5 | done | `7db2ad9b` | Closed by spec 1718 P6..P29 + P60 (PR #76, `bd1e9cce`); subprocess EBADF fixed (`7db2ad9b`) 91/91 green (1 skip) |
+| test_utf8source | v0.5.5 | done | `bd1e9cce` | parser/lexer utf-8 default; greens with spec 1718 (PR #76) 3/3 green |
+| test_keyword | v0.5.5 | done | `bd1e9cce` | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76) 11/11 green |
 
 ### Parser / grammar / AST (27 files + test_ast/, test_future_stmt/, test_peg_generator/)
 
@@ -171,7 +171,7 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_tstring | v0.12.5 | done | `9d0a3199` | 12/12 green — spec 1719 (PR #78) |
 | test_named_expressions | v0.12.5 | done | `9d0a3199` | 74/74 green — spec 1719 (PR #78) |
 | test_unparse | v0.12.5 | done | `9d0a3199` | 79/79 green — spec 1719 (PR #78) |
-| test_asdl_parser | v0.12.5 | done | `00546397` | skip (not a build-tree install); module-level SkipTest now classified as skip by runner |
+| test_asdl_parser | v0.12.5 | done | `7db2ad9b` | 6/6 green; vendor Parser/asdl.py + Python.asdl, sysconfig.is_python_build() probe, importlib.util.spec_from_loader + module_from_spec |
 | test_pep646_syntax | v0.12.5 | done | `9d0a3199` | 1/1 green — spec 1719 (PR #78) |
 | test_type_params | v0.12.5 | done | `9d0a3199` | 108/108 green — spec 1719 (PR #78) |
 | test_type_aliases | v0.12.5 | done | `9d0a3199` | 30/30 green — spec 1719 (PR #78) |

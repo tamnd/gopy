@@ -136,7 +136,7 @@ Baseline column captures the post-spec-1718 starting point on commit
 | test_type_comments        |  447 | **done** | **18/18 OK** (1 skip) |
 | test_unicode_identifiers  |   32 | **done** | **5/5 OK** |
 | test_annotationlib        | 2375 | **done** | **117/117 OK** (1 skip) |
-| test_asdl_parser          |  131 | **done** | skip (irrelevant for installed interpreter) |
+| test_asdl_parser          |  131 | **done** | **6/6 OK** (`7db2ad9b`) |
 | test_fstring              | 1871 | **done** | **90/90 OK** |
 | test_global               |  214 | **done** | **20/20 OK** |
 | test_metaclass            |  302 | **done** | **1/1 OK** |
@@ -319,7 +319,7 @@ shows `done` for every non-deferred row.
 - [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
 - [ ] P8: `test_int_literal` re-run
 - [ ] P9: PEG generator follow-up spec (deferred)
-- [x] P10: flip spec 1700 panel + #476 checklist — test_asdl_parser (skip), test_patma (328/328), test_ast/ (215/215) closed (PR #81, `00546397`)
+- [x] P10: flip spec 1700 panel + #476 checklist — test_asdl_parser (skip at `00546397`, 6/6 green at `7db2ad9b`), test_patma (328/328), test_ast/ (215/215) closed (PR #81, `00546397`)
 
 ## Working notes
 
