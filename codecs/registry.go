@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // SearchFunc is a callable that receives a normalized codec name and
@@ -18,30 +19,93 @@ import (
 // CPython: Python/codecs.c:L50 codec_register
 type SearchFunc func(name string) (*CodecInfo, error)
 
-// CodecInfo holds the four callables that implement a codec.
+// CodecInfo holds the callables that implement a codec.
 //
 // CPython: Modules/_codecsmodule.c:L34 codec_info_new
 type CodecInfo struct {
 	Name   string
 	Encode func(input string, errors string) ([]byte, int, error)
 	Decode func(input []byte, errors string) (string, int, error)
-	// StreamReader and StreamWriter are omitted until streaming codecs land.
+	// IncrementalDecode is like Decode but returns (output, remaining, err).
+	// remaining holds any trailing bytes that form an incomplete multibyte
+	// sequence; the caller buffers them for the next chunk.
+	// When nil, the incremental decoder falls back to Decode (no buffering).
+	//
+	// CPython: Modules/cjkcodecs/multibytecodec.c:803 mbstreamreader_iread
+	IncrementalDecode func(input []byte, errors string, final bool) (string, []byte, error)
+	// NewIncrementalDecoder creates a fresh, independent stateful incremental
+	// decoder for this codec. The returned closure owns its own codec state
+	// and accepts errors at each call so the caller can change error handling
+	// without recreating the instance. Required for stateful codecs (HZ,
+	// ISO-2022) where shift/escape state must survive across chunk boundaries.
+	//
+	// CPython: Modules/cjkcodecs/multibytecodec.c:887 mbincrdecoder_decode
+	NewIncrementalDecoder func() func(input []byte, errors string, final bool) (string, []byte, error)
+	// NewIncrementalEncoder creates a fresh, independent stateful incremental
+	// encoder for this codec. The returned closure owns its own codec state
+	// and accepts errors at each call so the caller can change error handling
+	// without recreating the instance. Required for stateful codecs (HZ,
+	// ISO-2022) where shift/escape state must survive across encode() calls.
+	//
+	// CPython: Modules/cjkcodecs/multibytecodec.c:747 mbincrencoder_encode
+	NewIncrementalEncoder func() func(input string, errors string, final bool) ([]byte, int, error)
+	// NewIncrementalEncoderFull is like NewIncrementalEncoder but also returns
+	// state accessors for getstate/setstate support. Returns the encode func,
+	// a getState func (pending runes + 8-byte codec state), and a setState func.
+	//
+	// CPython: Modules/cjkcodecs/multibytecodec.c:852 mbincrencoder_getstate
+	NewIncrementalEncoderFull func() (
+		encode func(string, string, bool) ([]byte, int, error),
+		getState func() (pending []rune, cBytes [8]byte),
+		setState func(pending []rune, cBytes [8]byte) error,
+	)
+}
+
+// searchEntry pairs a search function with a unique registration handle.
+type searchEntry struct {
+	id uint64
+	fn SearchFunc
 }
 
 var (
 	registryMu sync.RWMutex
-	searchPath []SearchFunc
+	searchPath []searchEntry
 	codecCache = map[string]*CodecInfo{}
+	nextID     uint64
 )
 
-// Register appends fn to the codec search path. When Lookup is called
-// it tries each function in order until one returns non-nil.
+// Register appends fn to the codec search path and returns an opaque
+// handle that can be passed to UnregisterByID to remove the entry.
 //
 // CPython: Python/codecs.c:L50 PyCodec_Register
-func Register(fn SearchFunc) {
+func Register(fn SearchFunc) uint64 {
+	id := atomic.AddUint64(&nextID, 1)
 	registryMu.Lock()
-	searchPath = append(searchPath, fn)
+	searchPath = append(searchPath, searchEntry{id, fn})
 	registryMu.Unlock()
+	return id
+}
+
+// UnregisterByID removes the search function registered under the given
+// handle (returned by Register) and clears the codec cache.
+//
+// CPython: Python/codecs.c:L68 PyCodec_Unregister
+func UnregisterByID(id uint64) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	out := searchPath[:0]
+	removed := false
+	for _, e := range searchPath {
+		if e.id == id {
+			removed = true
+		} else {
+			out = append(out, e)
+		}
+	}
+	searchPath = out
+	if removed {
+		codecCache = map[string]*CodecInfo{}
+	}
 }
 
 // Lookup finds the codec for encoding. The name is normalized before
@@ -55,12 +119,12 @@ func Lookup(encoding string) (*CodecInfo, error) {
 		registryMu.RUnlock()
 		return ci, nil
 	}
-	fns := make([]SearchFunc, len(searchPath))
-	copy(fns, searchPath)
+	entries := make([]searchEntry, len(searchPath))
+	copy(entries, searchPath)
 	registryMu.RUnlock()
 
-	for _, fn := range fns {
-		ci, err := fn(name)
+	for _, e := range entries {
+		ci, err := e.fn(name)
 		if err != nil {
 			return nil, err
 		}

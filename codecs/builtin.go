@@ -88,9 +88,10 @@ func builtinSearch(name string) (*CodecInfo, error) {
 }
 
 var utf8Codec = &CodecInfo{
-	Name:   "utf-8",
-	Encode: encodeUTF8,
-	Decode: decodeUTF8,
+	Name:              "utf-8",
+	Encode:            encodeUTF8,
+	Decode:            decodeUTF8,
+	IncrementalDecode: decodeUTF8Incremental,
 }
 
 var asciiCodec = &CodecInfo{
@@ -162,6 +163,63 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 	}
 	s := b.String()
 	return s, len(s), nil
+}
+
+// decodeUTF8Incremental is like decodeUTF8 but, when final=false,
+// holds back trailing bytes that form an incomplete multibyte sequence
+// rather than calling the error handler.
+//
+// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
+func decodeUTF8Incremental(input []byte, errors string, final bool) (string, []byte, error) {
+	if final {
+		out, _, err := decodeUTF8(input, errors)
+		return out, nil, err
+	}
+	// Find the longest valid UTF-8 prefix, trimming any trailing incomplete sequence.
+	trim := utf8IncompleteTrail(input)
+	safe := input[:len(input)-trim]
+	out, _, err := decodeUTF8(safe, errors)
+	if err != nil {
+		return "", nil, err
+	}
+	return out, input[len(input)-trim:], nil
+}
+
+// utf8IncompleteTrail returns the number of trailing bytes that form
+// an incomplete UTF-8 multibyte sequence. Returns 0 if input ends on
+// a complete sequence boundary.
+func utf8IncompleteTrail(b []byte) int {
+	n := len(b)
+	if n == 0 {
+		return 0
+	}
+	// Walk back at most 3 bytes looking for a leading byte followed by
+	// too few continuation bytes.
+	for i := n - 1; i >= n-4 && i >= 0; i-- {
+		c := b[i]
+		if c < 0x80 {
+			return 0 // ASCII byte — everything before is complete
+		}
+		if c >= 0xC0 {
+			// c is a leading byte. Check how many continuation bytes it needs.
+			var need int
+			switch {
+			case c < 0xE0:
+				need = 2
+			case c < 0xF0:
+				need = 3
+			default:
+				need = 4
+			}
+			have := n - i
+			if have < need {
+				return have // incomplete sequence
+			}
+			return 0
+		}
+		// c is a continuation byte (0x80..0xBF); keep looking back.
+	}
+	return 0
 }
 
 // encodeASCII encodes a string to ASCII bytes, failing on any

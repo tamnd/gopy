@@ -1744,7 +1744,7 @@ def _simple_enum(etype=Enum, *, boundary=None, use_args=None):
             use_args = etype._use_args_
         __new__ = cls.__dict__.get('__new__')
         if __new__ is not None:
-            new_member = __new__.__func__
+            new_member = __new__.__func__ if isinstance(__new__, staticmethod) else __new__
         else:
             new_member = etype._member_type_.__new__
         attrs = {}

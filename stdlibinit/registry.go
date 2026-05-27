@@ -162,6 +162,11 @@ import (
 	// CPython: Modules/cjkcodecs/_codecs_jp.c BEGIN_CODECS_LIST
 	_ "github.com/tamnd/gopy/codecs/cjkcodecs"
 
+	// Built-in module: _multibytecodec. Exposes MultibyteStreamReader and
+	// MultibyteStreamWriter Python types backed by the cjkcodecs runtime.
+	// CPython: Modules/cjkcodecs/multibytecodec.c:1 _multibytecodec module
+	_ "github.com/tamnd/gopy/module/_multibytecodec"
+
 	// Built-in module: _csv. Registers itself via
 	// module/_csv/module.go init(). Backs Lib/csv.py with the reader,
 	// writer, Dialect, and quoting constants.
