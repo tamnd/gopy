@@ -68,7 +68,12 @@ def get_python_version():
 
 
 def is_python_build(check_home=None):
-    return False
+    # Return True when Parser/asdl.py lives alongside the stdlib directory,
+    # which is the case for the gopy source tree (Parser/ is vendored there).
+    # Mirrors CPython's Modules/Setup probe in Lib/sysconfig/__init__.py:70.
+    _f = os.path.abspath(__file__)
+    _root = os.path.dirname(os.path.dirname(os.path.dirname(_f)))
+    return os.path.isfile(os.path.join(_root, 'Parser', 'asdl.py'))
 
 
 def get_paths(scheme=None, vars=None, expand=True):
