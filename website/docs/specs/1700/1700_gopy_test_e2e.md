@@ -152,11 +152,11 @@ release is named.
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_tokenize | v0.9 | done | Closed by spec 1718 P29..P59 (PR #76, `bd1e9cce`) |
-| test_tabnanny | v0.9 | done | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76, `bd1e9cce`) |
-| test_source_encoding | v0.5.5 | done | Closed by spec 1718 P6..P29 cookie/BOM + P60 long-cookie line (PR #76, `bd1e9cce`) |
-| test_utf8source | v0.5.5 | done | parser/lexer utf-8 default; greens with spec 1718 (PR #76, `bd1e9cce`) |
-| test_keyword | v0.5.5 | done | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76, `bd1e9cce`) |
+| test_tokenize | v0.9 | done | Closed by spec 1718 P29..P59 (PR #76, `bd1e9cce`) 130/130 green |
+| test_tabnanny | v0.9 | done | Rides on `_tokenize` iterator; greens with spec 1718 (PR #76, `bd1e9cce`) 20/20 green |
+| test_source_encoding | v0.5.5 | done | Closed by spec 1718 P6..P29 cookie/BOM + P60 long-cookie line (PR #76, `bd1e9cce`) 91/91 green (1 skip; flaky fd error in test_utf8_shebang_error pre-existing in subprocess) |
+| test_utf8source | v0.5.5 | done | parser/lexer utf-8 default; greens with spec 1718 (PR #76, `bd1e9cce`) 3/3 green |
+| test_keyword | v0.5.5 | done | `keyword` module is a generated table; pinned alongside spec 1718 (PR #76, `bd1e9cce`) 11/11 green |
 
 ### Parser / grammar / AST (27 files + test_ast/, test_future_stmt/, test_peg_generator/)
 
