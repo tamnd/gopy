@@ -440,8 +440,11 @@ func mbIncrementalDecoderGetattr(o objects.Object, name objects.Object) (objects
 		return nil, fmt.Errorf("TypeError: expected MultibyteIncrementalDecoder")
 	}
 	s, _ := objects.Str(name)
-	if s == "errors" {
+	switch s {
+	case "errors":
 		return objects.NewStr(dec.errors), nil
+	case "buffer":
+		return objects.NewBytes(dec.buf), nil
 	}
 	return objects.GenericGetAttr(o, name)
 }
@@ -843,6 +846,18 @@ func init() {
 		objects.NewMethodDescr(mbStreamReaderInstanceType, "reset", mbSRIReset))
 	objects.SetTypeDescr(mbStreamReaderInstanceType, "seek",
 		objects.NewMethodDescr(mbStreamReaderInstanceType, "seek", mbSRISeek))
+	// CPython: Lib/codecs.py:648 StreamReader.__iter__ / __next__
+	mbStreamReaderInstanceType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
+	mbStreamReaderInstanceType.IterNext = func(o objects.Object) (objects.Object, error) {
+		lineObj, err := mbSRIReadline([]objects.Object{o}, nil)
+		if err != nil {
+			return nil, err
+		}
+		if s, ok := lineObj.(*objects.Unicode); ok && s.Value() != "" {
+			return lineObj, nil
+		}
+		return nil, objects.ErrStopIteration
+	}
 }
 
 // MakeStreamReaderClass returns a Python callable that creates a StreamReader
@@ -886,6 +901,8 @@ func mbSRIGetattr(o objects.Object, name objects.Object) (objects.Object, error)
 		return objects.NewStr(sr.errors), nil
 	case "stream":
 		return sr.stream, nil
+	case "bytebuffer":
+		return objects.NewBytes(sr.buf), nil
 	}
 	// Try type dict (methods) first, then proxy to stream.
 	if v, err := objects.GenericGetAttr(o, name); err == nil {
@@ -963,15 +980,25 @@ func mbSRIReadBytes(sr *mbStreamReaderInstance, size int) (objects.Object, error
 			return nil, err
 		}
 		buf = append(buf, rawBytes...)
+		// Only finalize (flush partial sequences as errors) when the stream
+		// returned empty — that signals EOF. For a live Queue, empty means
+		// no data *yet*, so keep partial bytes buffered for the next call.
+		// CPython: Lib/codecs.py:502-526 StreamReader.read bytebuffer logic
+		final := len(rawBytes) == 0
 		if len(buf) > 0 {
 			var out string
 			var remaining []byte
 			if sr.decodeFn != nil {
-				out, remaining, err = sr.decodeFn(buf, sr.errors, true)
+				out, remaining, err = sr.decodeFn(buf, sr.errors, final)
 			} else if sr.ci.IncrementalDecode != nil {
-				out, remaining, err = sr.ci.IncrementalDecode(buf, sr.errors, true)
+				out, remaining, err = sr.ci.IncrementalDecode(buf, sr.errors, final)
 			} else {
 				out, _, err = sr.ci.Decode(buf, sr.errors)
+			}
+			if err != nil && !final {
+				// Non-fatal on incomplete sequence when not at EOF.
+				sr.buf = buf
+				return objects.NewStr(string(decoded)), nil
 			}
 			if err != nil {
 				return nil, err
@@ -1053,50 +1080,152 @@ func mbSRIReadBytes(sr *mbStreamReaderInstance, size int) (objects.Object, error
 	return objects.NewStr(string(decoded)), nil
 }
 
+// pythonSplitlines splits s on Python line boundaries (keepends controls whether
+// line endings are included in the results).
+//
+// CPython: Objects/unicodeobject.c unicode_splitlines_impl
+func pythonSplitlines(s string, keepends bool) []string {
+	var out []string
+	start := 0
+	runes := []rune(s)
+	n := len(runes)
+	for i := 0; i < n; {
+		r := runes[i]
+		end := i
+		var skip int
+		switch r {
+		case '\n', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', ' ', ' ':
+			end = i
+			skip = 1
+		case '\r':
+			end = i
+			if i+1 < n && runes[i+1] == '\n' {
+				skip = 2
+			} else {
+				skip = 1
+			}
+		default:
+			i++
+			continue
+		}
+		if keepends {
+			out = append(out, string(runes[start:end+skip]))
+		} else {
+			out = append(out, string(runes[start:end]))
+		}
+		i += skip
+		start = i
+	}
+	if start < n {
+		out = append(out, string(runes[start:]))
+	}
+	return out
+}
+
+// pythonStripLineEnd removes a trailing line ending from s.
+func pythonStripLineEnd(s string) string {
+	runes := []rune(s)
+	n := len(runes)
+	if n == 0 {
+		return s
+	}
+	if n >= 2 && runes[n-2] == '\r' && runes[n-1] == '\n' {
+		return string(runes[:n-2])
+	}
+	last := runes[n-1]
+	switch last {
+	case '\n', '\r', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', ' ', ' ':
+		return string(runes[:n-1])
+	}
+	return s
+}
+
 // mbSRIReadline reads one line from the stream.
 //
-// CPython: Lib/codecs.py:521 StreamReader.readline
+// CPython: Lib/codecs.py:537 StreamReader.readline
 func mbSRIReadline(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: readline() requires self")
 	}
-	// Delegate to the stream's readline and decode.
 	sr, ok := args[0].(*mbStreamReaderInstance)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: expected StreamReader")
 	}
-	readFn, err := objects.GetAttr(sr.stream, objects.NewStr("readline"))
-	if err != nil {
-		return nil, err
+
+	keepends := true
+	if len(args) >= 2 {
+		if b, err := objects.IsTruthy(args[1]); err == nil {
+			keepends = b
+		}
 	}
-	rawObj, err := objects.Call(readFn, objects.NewTuple(nil), nil)
-	if err != nil {
-		return nil, err
+	if v, ok2 := kwargs["keepends"]; ok2 {
+		if b, err := objects.IsTruthy(v); err == nil {
+			keepends = b
+		}
 	}
-	rawBytes, err := asBytesSlice(rawObj)
-	if err != nil {
-		return nil, err
+
+	readsize := 72
+	line := ""
+
+	for {
+		charsObj, err := mbSRIReadBytes(sr, readsize)
+		if err != nil {
+			return nil, err
+		}
+		data := ""
+		if u, ok2 := charsObj.(*objects.Unicode); ok2 {
+			data = u.Value()
+		}
+
+		// If data ends with \r, peek one more char to handle \r\n pair.
+		// CPython: Lib/codecs.py:569-570
+		if len(data) > 0 && data[len(data)-1] == '\r' {
+			oneObj, err2 := mbSRIReadBytes(sr, 1)
+			if err2 == nil {
+				if u, ok2 := oneObj.(*objects.Unicode); ok2 {
+					data += u.Value()
+				}
+			}
+		}
+
+		line += data
+		lines := pythonSplitlines(line, true)
+		if len(lines) > 0 {
+			if len(lines) > 1 {
+				// First line is complete; stash the rest back into charbuf.
+				result := lines[0]
+				rest := ""
+				for _, l := range lines[1:] {
+					rest += l
+				}
+				sr.charbuf = append([]rune(rest), sr.charbuf...)
+				if !keepends {
+					result = pythonStripLineEnd(result)
+				}
+				return objects.NewStr(result), nil
+			}
+			withEnd := lines[0]
+			withoutEnd := pythonStripLineEnd(withEnd)
+			if withEnd != withoutEnd {
+				// Complete line with ending found.
+				if !keepends {
+					return objects.NewStr(withoutEnd), nil
+				}
+				return objects.NewStr(withEnd), nil
+			}
+		}
+
+		if data == "" {
+			// EOF
+			if !keepends && line != "" {
+				line = pythonStripLineEnd(line)
+			}
+			return objects.NewStr(line), nil
+		}
+		if readsize < 8000 {
+			readsize *= 2
+		}
 	}
-	if len(rawBytes) == 0 {
-		return objects.NewStr(""), nil
-	}
-	buf := append(sr.buf, rawBytes...)
-	sr.buf = nil
-	var out string
-	var remaining []byte
-	var decErr error
-	if sr.decodeFn != nil {
-		out, remaining, decErr = sr.decodeFn(buf, sr.errors, true)
-	} else if sr.ci.IncrementalDecode != nil {
-		out, remaining, decErr = sr.ci.IncrementalDecode(buf, sr.errors, true)
-	} else {
-		out, _, decErr = sr.ci.Decode(buf, sr.errors)
-	}
-	if decErr != nil {
-		return nil, decErr
-	}
-	sr.buf = remaining
-	return objects.NewStr(out), nil
 }
 
 // mbSRIReadlines reads all lines from the stream.
