@@ -137,13 +137,13 @@ func unicodeGetItemKind(s *Unicode, i int) (Object, error) {
 		if r < 0x100 {
 			return latin1Cache[r], nil
 		}
-		return NewStr(string(r)), nil
+		return NewStr(runeToStr(r)), nil
 	case StrKind4Byte:
 		r := rune(s.data4[i])
 		if r < 0x100 {
 			return latin1Cache[r], nil
 		}
-		return NewStr(string(r)), nil
+		return NewStr(runeToStr(r)), nil
 	}
 	return nil, fmt.Errorf("IndexError: string index out of range")
 }

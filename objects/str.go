@@ -350,13 +350,13 @@ func NewStr(s string) Object {
 // CPython: Objects/unicodeobject.c:1696 find_maxchar_surrogates
 // CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (slab fill)
 func (s *Unicode) classify() {
+	runes := strLenientRunes(s.v)
+	n := len(runes)
 	maxr := rune(0)
-	n := 0
-	for _, r := range s.v {
+	for _, r := range runes {
 		if r > maxr {
 			maxr = r
 		}
-		n++
 	}
 	s.length = n
 	switch {
@@ -365,15 +365,48 @@ func (s *Unicode) classify() {
 		s.ascii = true
 	case maxr < 0x100:
 		s.kind = StrKind1Byte
-		s.data1 = encodeUCS1(s.v, n)
+		s.data1 = encodeUCS1Runes(runes)
 	case maxr < 0x10000:
 		s.kind = StrKind2Byte
-		s.data2 = encodeUCS2(s.v, n)
+		s.data2 = encodeUCS2Runes(runes)
 	default:
 		s.kind = StrKind4Byte
-		s.data4 = encodeUCS4(s.v, n)
+		s.data4 = encodeUCS4Runes(runes)
 	}
 	s.ready = true
+}
+
+// strLenientRunes decodes a Go string to runes, accepting lone surrogates
+// stored as 3-byte pseudo-UTF-8 (0xED 0xA0-0xBF 0x80-0xBF). Go's standard
+// range loop rejects surrogates; this decoder passes them through.
+//
+// CPython: Objects/unicodeobject.c:1696 find_maxchar_surrogates
+func strLenientRunes(s string) []rune {
+	b := []byte(s)
+	var out []rune
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c < 0x80 {
+			out = append(out, rune(c))
+			i++
+		} else if c&0xE0 == 0xC0 && i+1 < len(b) && b[i+1]&0xC0 == 0x80 {
+			r := rune(c&0x1F)<<6 | rune(b[i+1]&0x3F)
+			out = append(out, r)
+			i += 2
+		} else if c&0xF0 == 0xE0 && i+2 < len(b) && b[i+1]&0xC0 == 0x80 && b[i+2]&0xC0 == 0x80 {
+			r := rune(c&0x0F)<<12 | rune(b[i+1]&0x3F)<<6 | rune(b[i+2]&0x3F)
+			out = append(out, r) // includes surrogates U+D800..U+DFFF
+			i += 3
+		} else if c&0xF8 == 0xF0 && i+3 < len(b) && b[i+1]&0xC0 == 0x80 && b[i+2]&0xC0 == 0x80 && b[i+3]&0xC0 == 0x80 {
+			r := rune(c&0x07)<<18 | rune(b[i+1]&0x3F)<<12 | rune(b[i+2]&0x3F)<<6 | rune(b[i+3]&0x3F)
+			out = append(out, r)
+			i += 4
+		} else {
+			out = append(out, 0xFFFD)
+			i++
+		}
+	}
+	return out
 }
 
 // encodeUCS1 fills the kind-1 latin1 slab. Reached only for non-ASCII
@@ -381,11 +414,13 @@ func (s *Unicode) classify() {
 //
 // CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS1 branch)
 func encodeUCS1(s string, n int) []uint8 {
-	out := make([]uint8, n)
-	i := 0
-	for _, r := range s {
+	return encodeUCS1Runes(strLenientRunes(s))
+}
+
+func encodeUCS1Runes(runes []rune) []uint8 {
+	out := make([]uint8, len(runes))
+	for i, r := range runes {
 		out[i] = uint8(r)
-		i++
 	}
 	return out
 }
@@ -395,11 +430,13 @@ func encodeUCS1(s string, n int) []uint8 {
 //
 // CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS2 branch)
 func encodeUCS2(s string, n int) []uint16 {
-	out := make([]uint16, n)
-	i := 0
-	for _, r := range s {
+	return encodeUCS2Runes(strLenientRunes(s))
+}
+
+func encodeUCS2Runes(runes []rune) []uint16 {
+	out := make([]uint16, len(runes))
+	for i, r := range runes {
 		out[i] = uint16(r)
-		i++
 	}
 	return out
 }
@@ -410,13 +447,30 @@ func encodeUCS2(s string, n int) []uint16 {
 //
 // CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (UCS4 branch)
 func encodeUCS4(s string, n int) []uint32 {
-	out := make([]uint32, n)
-	i := 0
-	for _, r := range s {
+	return encodeUCS4Runes(strLenientRunes(s))
+}
+
+func encodeUCS4Runes(runes []rune) []uint32 {
+	out := make([]uint32, len(runes))
+	for i, r := range runes {
 		out[i] = uint32(r)
-		i++
 	}
 	return out
+}
+
+// runeToStr converts a rune to a Go string, emitting pseudo-UTF-8
+// for surrogates (U+D800..U+DFFF) instead of U+FFFD. Go's string(r)
+// maps surrogates to the replacement character; this function preserves
+// them so Python strings containing lone surrogates round-trip correctly.
+func runeToStr(r rune) string {
+	if r >= 0xD800 && r <= 0xDFFF {
+		return string([]byte{
+			byte(0xE0 | (r >> 12)),
+			byte(0x80 | ((r >> 6) & 0x3F)),
+			byte(0x80 | (r & 0x3F)),
+		})
+	}
+	return string(r)
 }
 
 // Value returns the canonical Go string. Same-package callers may
