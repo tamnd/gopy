@@ -626,7 +626,7 @@ fixtures for these four files removed or stubbed out.
 - [x] Phase 1: vendor 15 active + 4 legacy test files; MANIFEST updated;
       test_generated_cases re-triaged to out-of-scope
 - [x] Phase 2: test_listcomps, test_dictcomps, test_setcomps, test_genexps done
-- [x] Phase 3: test_print, test_opcodes done
+- [x] Phase 3: test_print (9/9), test_opcodes (8/8), test__opcode (7/7) done
 - [x] Phase 4: test_code done (37/37 green, 25 skipped: constructor, co_branches, weakref GC, subprocess flags)
 - [x] Phase 5: test_compile (185/185), test_codeop (9/9) done
 - [x] Phase 6: test_peepholer (130/130) done

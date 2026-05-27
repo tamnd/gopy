@@ -61,7 +61,7 @@ test_unpack_ex	done	v0.12.5	1/1 green. __main__.f() module prefix + integer key 
 test_unparse	done	v0.12.5	79/79 green
 
 # ---- Compile / codegen / dis ---------------------------------------
-test__opcode	ready	v0.5.0	_opcode module surface; SpecializationStatsTests skipped (CPython-internal adaptive counters)
+test__opcode	done	v0.12.5	7/7 green (SpecializationStatsTests skipped: CPython-internal adaptive counters)
 test_clinic	out-of-scope	-	CPython tooling, not a runtime feature
 test_code	done	v0.12.5	37/37 green (25 skipped: constructor, co_branches, weakref GC, subprocess flags)
 test_code_module	done	v0.12.5	17/17 green
