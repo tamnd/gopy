@@ -1,13 +1,22 @@
 package symtable
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/ast"
 )
 
 // visitExpr dispatches to per-expression-kind helpers.
 //
 // CPython: Python/symtable.c:L2409 symtable_visit_expr
+// CPython: Python/symtable.c:L1771 ENTER_RECURSIVE macro
 func (b *builder) visitExpr(e ast.Expr) error {
+	b.recursionRemaining--
+	if b.recursionRemaining <= 0 {
+		b.recursionRemaining++
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded during compilation")
+	}
+	defer func() { b.recursionRemaining++ }()
 	if handled, err := b.visitExprComp(e); handled {
 		return err
 	}

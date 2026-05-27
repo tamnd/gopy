@@ -140,13 +140,14 @@ func (c *Compiler) matchOneCase(m *ast.MatchCase, i, limit, cases int,
 	if err := c.visitStmts(m.Body); err != nil {
 		return err
 	}
-	// gh-123048: stamp the case-pattern location on the post-body JUMP
-	// so the optimizer's jump-threading pass does not propagate an
-	// empty location across folded blocks. dis(get_instructions) needs
-	// every jump to carry a lineno.
+	// Use NO_LOCATION so the JUMP does not override the line number
+	// propagated from the last statement in the case body. Jump-threading
+	// inlines the end-label content in place of this JUMP; with a real
+	// source location stamped here, the inlined return would inherit the
+	// pattern line instead of the body's last line.
 	//
-	// CPython: Python/codegen.c:6407 codegen_match_inner
-	c.addOpJump(JUMP, end, loc(m.Pattern))
+	// CPython: Python/codegen.c:6433 ADDOP_JUMP(c, NO_LOCATION, JUMP, end)
+	c.addOpJump(JUMP, end, ast.NoPos)
 	return c.emitAndResetFailPop(pc, loc(m.Pattern))
 }
 

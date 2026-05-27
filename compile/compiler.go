@@ -28,6 +28,11 @@ import (
 //
 // CPython: Python/compile.c:L353 _PyAST_Compile
 func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
+	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
+	// CPython: Python/ast.c:1047 _PyAST_Validate
+	if err := ast.Validate(mod); err != nil {
+		return nil, fmt.Errorf("ValueError: %s", err.Error())
+	}
 	ff, err := future.FromAST(mod, filename)
 	if err != nil {
 		return nil, err

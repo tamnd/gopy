@@ -52,7 +52,6 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	body ast.Seq[ast.Stmt], returns ast.Expr, decorators ast.Seq[ast.Expr],
 	typeParams ast.Seq[ast.TypeParam], isLambda bool, scopeKey any,
 ) error {
-
 	// Evaluate decorator expressions (in source order, top-to-bottom)
 	// before the function is created. They wrap the result of
 	// MAKE_FUNCTION in reverse order via CALL.

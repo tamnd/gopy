@@ -20,6 +20,12 @@ import (
 //
 // CPython: Python/codegen.c:L5172 codegen_visit_expr
 func (c *Compiler) visitExpr(e ast.Expr) error {
+	c.recursionRemaining--
+	if c.recursionRemaining <= 0 {
+		c.recursionRemaining++
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded during compilation")
+	}
+	defer func() { c.recursionRemaining++ }()
 	if handled, err := c.visitExprPrimary(e); handled {
 		return err
 	}

@@ -22,7 +22,7 @@ func Build(mod ast.Mod, filename string, ff *future.Features) (*Table, error) {
 		Blocks:   make(map[any]*Entry),
 		Future:   ff,
 	}
-	b := &builder{table: t, filename: filename, future: ff}
+	b := &builder{table: t, filename: filename, future: ff, recursionRemaining: recursionLimit}
 	if err := b.enterBlock("top", ModuleBlock, mod, ast.NoPos); err != nil {
 		return nil, err
 	}
@@ -72,14 +72,19 @@ func hasModuleDocstring(body ast.Seq[ast.Stmt]) bool {
 
 // builder is the visit-pass state. It tracks the block stack and the
 // current `private` name used for PEP 8 mangling.
+// recursionLimit mirrors CPython Python/symtable.c C_RECURSION_LIMIT used
+// via ENTER_RECURSIVE / Py_EnterRecursiveCall during symbol table building.
+const recursionLimit = 500
+
 type builder struct {
-	table    *Table
-	cur      *Entry
-	stack    []*Entry
-	private  string
-	filename string
-	future   *future.Features
-	nextID   int
+	table              *Table
+	cur                *Entry
+	stack              []*Entry
+	private            string
+	filename           string
+	future             *future.Features
+	nextID             int
+	recursionRemaining int
 }
 
 // enterBlock allocates a new Entry, inherits Nested from the parent,

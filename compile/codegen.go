@@ -139,11 +139,19 @@ type deferredAnnotation struct {
 // call within one Compile invocation.
 //
 // CPython: Python/compile.c compiler
+// compilerRecursionLimit mirrors CPython Python/symtable.c C_RECURSION_LIMIT
+// used via ENTER_RECURSIVE / Py_EnterRecursiveCall during compilation.
+const compilerRecursionLimit = 500
+
 type Compiler struct {
 	Filename string
 	Optimize int
 	Future   *future.Features
 	Symtable *symtable.Table
+
+	// recursionRemaining guards visitExpr / visitStmt against circular ASTs.
+	// CPython: Python/compile.c (via Py_EnterRecursiveCall in codegen.c)
+	recursionRemaining int
 
 	// units stacks active scopes during the recursive descent. The
 	// top-of-stack is the scope currently being codegen'd; nested
@@ -177,10 +185,11 @@ type Compiler struct {
 // CPython: Python/compile.c new_compiler
 func NewCompiler(filename string, optimize int, ff *future.Features, st *symtable.Table) *Compiler {
 	return &Compiler{
-		Filename: filename,
-		Optimize: optimize,
-		Future:   ff,
-		Symtable: st,
+		Filename:           filename,
+		Optimize:           optimize,
+		Future:             ff,
+		Symtable:           st,
+		recursionRemaining: compilerRecursionLimit,
 	}
 }
 
