@@ -112,14 +112,14 @@ test_generators	ready	v0.9.0	generator protocol panel
 test_yield_from	ready	v0.9.0	yield from semantics
 
 # ---- Exceptions / traceback ----------------------------------------
-test_baseexception	ready	v0.3.0	BaseException root
-test_except_star	ready	v0.3.0	except* syntax
-test_exception_group	ready	v0.3.0	PEP 654 exception groups
-test_exception_hierarchy	ready	v0.3.0	MRO of builtin exceptions
-test_exception_variations	ready	v0.3.0	except / except* shapes
-test_exceptions	ready	v0.3.0	full exception type panel
-test_raise	ready	v0.3.0	raise / raise from semantics
-test_traceback	ready	v0.3.0	traceback module
+test_baseexception	done	v0.12.7	11/11 green
+test_except_star	done	v0.12.7	60/60 green
+test_exception_group	done	v0.12.7	52/52 green
+test_exception_hierarchy	done	v0.12.7	16/16 green (1 skip: WindowsError platform guard)
+test_exception_variations	done	v0.12.7	30/30 green
+test_exceptions	done	v0.12.7	107/107 green (2 skipped: _testcapi C infrastructure)
+test_raise	done	v0.12.7	37/37 green
+test_traceback	done	v0.12.7	370/370 green
 
 # ---- Builtins / types ----------------------------------------------
 test_abstract_numbers	ready	v0.4.0	numbers module
