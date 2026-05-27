@@ -139,6 +139,10 @@ func pegenFlags(pyFlags int) int {
 	if pyFlags&PyCFAllowIncompleteInput != 0 {
 		f |= pegen.FlagAllowIncompleteInput
 	}
+	// CPython: Parser/peg_api.c:786 PyCF_DONT_IMPLY_DEDENT → PyPARSE_DONT_IMPLY_DEDENT
+	if pyFlags&PyCFDontImplyDedent != 0 {
+		f |= pegen.FlagDontImplyDedent
+	}
 	// CPython: Parser/peg_api.c:795 PyCF_TYPE_COMMENTS → PyPARSE_TYPE_COMMENTS
 	if pyFlags&PyCFTypeComments != 0 {
 		f |= pegen.FlagTypeComments
@@ -146,7 +150,7 @@ func pegenFlags(pyFlags int) int {
 	return f
 }
 
-//nolint:gocognit // mirrors CPython Parser/parser.c mode-dispatch + error-promotion; all branches are linear.
+//nolint:gocognit,gocyclo // mirrors CPython Parser/parser.c mode-dispatch + error-promotion; all branches are linear.
 func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (mod ast.Mod, retErr error) {
 	// Recover numberLitTooLargeError panics raised from tokenToExpr when a
 	// decimal integer literal exceeds sys.int_max_str_digits. The panic
@@ -192,6 +196,19 @@ func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (mod
 			kind = perrors.KindTab
 		case lexer.DoneColumnOverflow:
 			kind = perrors.KindOverflow
+		case lexer.DoneEOFS:
+			// CPython: Parser/pegen.c:952 _PyPegen_run_parser
+			// E_EOFS (EOF in string) and E_EOLS (EOF in single-quoted string)
+			// trigger _IncompleteInputError when ALLOW_INCOMPLETE_INPUT is set.
+			// gopy's eEOFS covers both CPython cases (eof path in scanString);
+			// eEOLS is gopy's newline-in-single-quoted path which CPython keeps
+			// as E_ERROR and does NOT promote to _IncompleteInputError.
+			//
+			// CPython: Parser/lexer/lexer.c:1199 E_EOFS / 1217 E_EOLS
+			// CPython: Parser/pegen.c:897 _is_end_of_source
+			if flags&pegen.FlagAllowIncompleteInput != 0 {
+				kind = perrors.KindIncompleteInput
+			}
 		}
 		return nil, &perrors.SyntaxError{
 			Kind: kind,

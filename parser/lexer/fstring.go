@@ -221,7 +221,13 @@ func (s *State) fstringMiddle(m *tokenizerMode) Tok {
 				s.err.Pos.Col = col
 				s.err.EndPos.Col = col
 			}
-			s.done = eSyntax
+			// CPython: Parser/lexer/lexer.c:1506
+			// triple-quoted at EOF → E_EOFS (incomplete); single/newline → E_ERROR.
+			if m.quoteSize == 3 && c == eof {
+				s.done = eEOFS
+			} else {
+				s.done = eSyntax
+			}
 			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 		}
 		if c == int(m.quote) {

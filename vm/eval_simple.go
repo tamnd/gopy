@@ -299,7 +299,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		v, nerr := t.IterNext(it)
 		if nerr != nil {
-			if errors.Is(nerr, objects.ErrStopIteration) {
+			// Accept both the Go-sentinel ErrStopIteration (from built-in
+			// iterators) and a Python-level StopIteration raised by a
+			// user-defined __next__. Mirrors CPython's FOR_ITER which
+			// terminates the loop when tp_iternext returns NULL with no
+			// exception or with StopIteration set on the thread state.
+			//
+			// CPython: Python/bytecodes.c:1398 FOR_ITER (_PyErr_ExceptionMatches)
+			stop := errors.Is(nerr, objects.ErrStopIteration)
+			if !stop {
+				if exc := pyerrors.Occurred(e.ts); exc != nil {
+					stop = pyerrors.IsSubtype(exc.Type(), pyerrors.PyExc_StopIteration)
+				}
+			}
+			if stop {
 				// CPython iter_iternext clears the IndexError /
 				// StopIteration on the thread state when it absorbs it
 				// (Objects/iterobject.c:62). Gopy's seqIterNext folds
@@ -1824,16 +1837,24 @@ func convertValue(v objects.Object, oparg uint32) (objects.Object, error) {
 
 func deleteIn(scope objects.Object, key objects.Object, name string) error {
 	if scope == nil {
-		return fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+		return fmt.Errorf("NameError: name '%s' is not defined", name)
 	}
 	// Exact-dict fast path. Dict subclasses (and any non-Dict mapping
 	// returned by a metaclass __prepare__) need to route through the
 	// mapping protocol so an overridden __delitem__ fires.
 	//
-	// CPython: Python/bytecodes.c DELETE_NAME (PyObject_DelItem on
-	// locals)
+	// CPython: Python/bytecodes.c DELETE_NAME
+	var err error
 	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
-		return d.DelItem(key)
+		err = d.DelItem(key)
+	} else {
+		err = objects.DelItem(scope, key)
 	}
-	return objects.DelItem(scope, key)
+	if err != nil {
+		// CPython converts any PyObject_DelItem failure to NameError.
+		//
+		// CPython: Python/bytecodes.c:3498 format_exc_check_arg NameError
+		return fmt.Errorf("NameError: name '%s' is not defined", name)
+	}
+	return nil
 }

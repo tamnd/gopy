@@ -58,6 +58,14 @@ type evalState struct {
 	genYield chan<- objects.GenMsg
 	genSend  <-chan objects.GenMsg
 
+	// genRunning is the generator object whose Running flag should be
+	// cleared before yielding and restored after resuming. Set only for
+	// plain generators (not coroutines/async generators). Mirrors CPython's
+	// gi_frame_state transition FRAME_EXECUTING <-> FRAME_SUSPENDED.
+	//
+	// CPython: Objects/genobject.c:275 gen_send_ex2
+	genRunning objects.Object
+
 	// pendingErr is set by translator-emitted helper wrappers (the ones
 	// modeled on CPython helpers that return NULL + set the thread
 	// exception state). The matching ERROR_IF in the body checks for

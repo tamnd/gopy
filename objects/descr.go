@@ -48,6 +48,16 @@ func addDescrIntrospectionDescriptors(t *Type) {
 	SetTypeDescr(t, "__name__", NewGetSetDescr("__name__", descrNameGetter, nil))
 	SetTypeDescr(t, "__objclass__", NewGetSetDescr("__objclass__", descrObjclassGetter, nil))
 	SetTypeDescr(t, "__qualname__", NewGetSetDescr("__qualname__", descrQualnameGetter, nil))
+	// CPython: Objects/descrobject.c:642 descr_members ml_doc → __doc__
+	SetTypeDescr(t, "__doc__", NewGetSetDescr("__doc__", func(o Object) (Object, error) {
+		if d, ok := o.(descrDocer); ok {
+			doc := d.Doc()
+			if doc != "" {
+				return NewStr(doc), nil
+			}
+		}
+		return None(), nil
+	}, nil))
 }
 
 // descrName reads the bound name from any descriptor type the port
@@ -60,6 +70,12 @@ type descrNamer interface {
 // GetSetDescr exposes its owner via the field accessor here.
 type descrOwner interface {
 	Owner() *Type
+}
+
+// descrDocer exposes an optional documentation string for __doc__.
+// CPython: Objects/descrobject.c:642 ml_doc member
+type descrDocer interface {
+	Doc() string
 }
 
 // Owner returns the type this getset descriptor is registered on.

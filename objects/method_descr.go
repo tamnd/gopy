@@ -26,6 +26,7 @@ import "fmt"
 type MethodDescr struct {
 	Header
 	name  string
+	doc   string
 	conv  MethFlag
 	fn    func(args []Object, kwargs map[string]Object) (Object, error)
 	owner *Type
@@ -76,6 +77,9 @@ func NewMethodDescrConv(owner *Type, name string, conv MethFlag, fn func(args []
 
 // Name returns the attribute name this descriptor binds to.
 func (d *MethodDescr) Name() string { return d.name }
+
+// Doc returns the documentation string for this descriptor, or "".
+func (d *MethodDescr) Doc() string { return d.doc }
 
 // Conv returns the METH_* calling-convention tag the specializer
 // uses to pick the descriptor-specific CALL fast arm.

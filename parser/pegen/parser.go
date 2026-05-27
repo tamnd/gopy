@@ -171,6 +171,10 @@ func New(tok *lexer.State, start StartRule, flags int) *Parser {
 		// CPython: Parser/pegen.c:815 tok->type_comments = (flags & PyPARSE_TYPE_COMMENTS) > 0
 		tok.SetTypeComments(true)
 	}
+	if tok != nil && flags&FlagDontImplyDedent != 0 {
+		// CPython: Parser/pegen.c:786 PyPARSE_DONT_IMPLY_DEDENT
+		tok.SetDontImplyDedent()
+	}
 	return &Parser{
 		tok:            tok,
 		startRule:      start,
@@ -232,12 +236,16 @@ restart:
 	// on a non-newline char like "x"). Mirrors the C fill_token arm
 	// that also primes the lexer with a -indent pendin so the
 	// follow-up calls flush DEDENTs before the real ENDMARKER.
+	// With FlagDontImplyDedent set, skip the ForceDedentsAtEOF call
+	// so that unterminated compound statements remain incomplete.
 	//
 	// CPython: Parser/pegen.c:268 _PyPegen_fill_token single-input
 	if p.startRule == StartSingle && kind == token.ENDMARKER && p.parsingStarted {
 		kind = token.NEWLINE
 		p.parsingStarted = false
-		p.tok.ForceDedentsAtEOF()
+		if p.flags&FlagDontImplyDedent == 0 {
+			p.tok.ForceDedentsAtEOF()
+		}
 	} else if kind != token.ENDMARKER {
 		p.parsingStarted = true
 	}
@@ -684,7 +692,15 @@ func (p *Parser) IsEndOfSource() bool {
 		return false
 	}
 	done := p.tok.Done()
-	return done == lexer.DoneEOF || done == lexer.DoneEOFS || done == lexer.DoneEOLS
+	// DoneEOF: buffer exhausted (CPython E_EOF).
+	// DoneEOFS: EOF in string (CPython E_EOFS for triple, E_EOLS for single at EOF).
+	// DoneEOLS: gopy's "newline in single-quoted string" = CPython E_ERROR (hard
+	// error, NOT _is_end_of_source). CPython E_EOLS means "EOF in single-quoted
+	// string" which gopy maps to DoneEOFS. Do NOT include DoneEOLS here.
+	//
+	// CPython: Parser/pegen.c:897 _is_end_of_source
+	// CPython: Parser/lexer/lexer.c:1217 E_EOLS set when c != '\n'
+	return done == lexer.DoneEOF || done == lexer.DoneEOFS
 }
 
 // AllowIncompleteInput reports whether the FlagAllowIncompleteInput

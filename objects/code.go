@@ -214,6 +214,10 @@ func init() {
 	//
 	// CPython: Objects/codeobject.c:2858 code_replace_impl
 	SetTypeDescr(CodeType, "replace", NewMethodDescr(CodeType, "replace", codeReplaceMethod))
+	// copy.replace() dispatches through __replace__; wire it to the same impl.
+	//
+	// CPython: Objects/codeobject.c:2858 code_replace_impl (same function)
+	SetTypeDescr(CodeType, "__replace__", NewMethodDescr(CodeType, "__replace__", codeReplaceMethod))
 }
 
 // codeReplaceMethod backs code.replace. The first positional argument
@@ -300,12 +304,96 @@ func codeReplaceMethod(args []Object, kwargs map[string]Object) (Object, error) 
 				return nil, err
 			}
 			r.Qualname = p
+		case "co_nlocals":
+			p, err := intPtr(v)
+			if err != nil {
+				return nil, err
+			}
+			r.Nlocals = p
+		case "co_code":
+			b, ok := v.(*Bytes)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: replace() co_code must be bytes, not %s", v.Type().Name)
+			}
+			r.Code = b.Bytes()
+			r.SetCode = true
+		case "co_linetable":
+			b, ok := v.(*Bytes)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: replace() co_linetable must be bytes, not %s", v.Type().Name)
+			}
+			r.Linetable = b.Bytes()
+			r.SetLinetable = true
+		case "co_exceptiontable":
+			b, ok := v.(*Bytes)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: replace() co_exceptiontable must be bytes, not %s", v.Type().Name)
+			}
+			r.ExceptionTable = b.Bytes()
+			r.SetExceptionTable = true
+		case "co_consts":
+			t, ok := v.(*Tuple)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: replace() co_consts must be tuple, not %s", v.Type().Name)
+			}
+			consts := make([]any, t.Len())
+			for i := range consts {
+				consts[i] = t.Item(i)
+			}
+			r.Consts = consts
+			r.SetConsts = true
+		case "co_names":
+			strs, err := tupleToStrings(v, "co_names")
+			if err != nil {
+				return nil, err
+			}
+			r.Names = strs
+			r.SetNames = true
+		case "co_varnames":
+			strs, err := tupleToStrings(v, "co_varnames")
+			if err != nil {
+				return nil, err
+			}
+			r.Varnames = strs
+			r.SetVarnames = true
+		case "co_freevars":
+			strs, err := tupleToStrings(v, "co_freevars")
+			if err != nil {
+				return nil, err
+			}
+			r.Freevars = strs
+			r.SetFreevars = true
+		case "co_cellvars":
+			strs, err := tupleToStrings(v, "co_cellvars")
+			if err != nil {
+				return nil, err
+			}
+			r.Cellvars = strs
+			r.SetCellvars = true
 		default:
-			// Silently ignore unknown kwargs; the field surface grows
-			// with the bytecode/specializer ports.
+			return nil, fmt.Errorf("TypeError: code.replace() got unexpected keyword argument %q", k)
 		}
 	}
 	return c.Replace(r)
+}
+
+// tupleToStrings converts a Python tuple-of-str to a []string.
+//
+// CPython: Objects/codeobject.c:2858 code_replace_impl (varnames / names validation)
+func tupleToStrings(o Object, field string) ([]string, error) {
+	t, ok := o.(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: replace() %s must be tuple, not %s", field, o.Type().Name)
+	}
+	out := make([]string, t.Len())
+	for i := range out {
+		s, ok := t.Item(i).(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: replace() %s items must be str", field)
+		}
+		out[i] = s.v
+	}
+	return out, nil
 }
 
 // codeGetAttr exposes the read-only co_* fields the traceback
@@ -638,6 +726,7 @@ type CodeReplace struct {
 	Argcount        *int
 	PosonlyArgcount *int
 	KwonlyArgcount  *int
+	Nlocals         *int
 	Stacksize       *int
 	Flags           *int
 	Firstlineno     *int
@@ -742,6 +831,11 @@ func (c *Code) Replace(r CodeReplace) (*Code, error) {
 	}
 	if r.SetExceptionTable {
 		out.ExceptionTable = cloneBytes(r.ExceptionTable)
+	}
+	// co_nlocals must equal len(co_varnames) after all replacements are applied.
+	// CPython: Objects/codeobject.c:2858 code_replace_impl nlocals validation
+	if r.Nlocals != nil && *r.Nlocals != len(out.Varnames) {
+		return nil, fmt.Errorf("ValueError: co_nlocals (%d) != len(co_varnames) (%d)", *r.Nlocals, len(out.Varnames))
 	}
 	return out, nil
 }

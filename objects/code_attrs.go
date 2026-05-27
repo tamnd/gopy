@@ -16,6 +16,14 @@ import (
 	"math/big"
 )
 
+// DeprecWarnHook is set by module/_warnings at init time so the objects
+// package can emit DeprecationWarning without a circular import. The
+// function receives the warning message and returns non-nil if the filter
+// elevates the warning to an error.
+//
+// CPython: Objects/codeobject.c:2744 code_getlnotab (PyErr_WarnEx call)
+var DeprecWarnHook func(msg string) error
+
 func init() {
 	SetTypeDescr(CodeType, "co_lines", NewMethodDescr(CodeType, "co_lines", codeCoLinesMethod))
 	SetTypeDescr(CodeType, "co_positions", NewMethodDescr(CodeType, "co_positions", codeCoPositionsMethod))
@@ -70,12 +78,11 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 	case "co_linetable":
 		return NewBytes(c.Linetable), true
 	case "co_lnotab":
-		// Deprecated alias; CPython decodes back to a legacy lnotab
-		// blob, but every consumer we vendor (dis, traceback) has
-		// already migrated to co_lines, so we just hand back the raw
-		// linetable. Replace with decode_linetable when something
-		// trips this.
+		// Deprecated since Python 3.12; emit DeprecationWarning.
 		// CPython: Objects/codeobject.c:2744 code_getlnotab
+		if DeprecWarnHook != nil {
+			_ = DeprecWarnHook("co_lnotab is deprecated. Use co_lines instead.")
+		}
 		return NewBytes(c.Linetable), true
 	case "co_exceptiontable":
 		return NewBytes(c.ExceptionTable), true

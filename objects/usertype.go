@@ -560,6 +560,7 @@ func fixupSlotDispatchers(t *Type) {
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
 	fixupAsyncSlots(t)
+	fixupNumberSlots(t)
 	fixupTpNew(t)
 	fixupFinalize(t)
 }
@@ -847,6 +848,223 @@ func fixupDescriptorSlots(t *Type) {
 	if lookupDunderCallable(t, "__set__") || lookupDunderCallable(t, "__delete__") {
 		t.DescrSet = slotTpDescrSet
 	}
+}
+
+// fixupNumberSlots wires the Number protocol slots (nb_add, nb_subtract,
+// nb_multiply, nb_matmul, nb_remainder, nb_divmod, nb_power, nb_lshift,
+// nb_rshift, nb_and, nb_xor, nb_or, nb_floordiv, nb_truediv, and inplace
+// variants) when the class body or any direct base provides the matching
+// dunder. Only wires slots where isOwnDescriptor(t, dunder) is true, so
+// inherited slot wrappers from C built-ins are left in place. Mirrors
+// CPython's fixup_slot_dispatchers / update_one_slot for the nb_* group.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+// CPython: Objects/typeobject.c:11291 update_one_slot
+// CPython: Objects/typeobject.c:9997 SLOT1BIN / SLOT1BINFULL
+func fixupNumberSlots(t *Type) {
+	type nbEntry struct {
+		dunder  string
+		rdunder string
+		set     func(*NumberMethods, func(a, b Object) (Object, error))
+	}
+	entries := []nbEntry{
+		{"__add__", "__radd__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Add = f }},
+		{"__sub__", "__rsub__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Subtract = f }},
+		{"__mul__", "__rmul__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Multiply = f }},
+		{"__matmul__", "__rmatmul__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.MatrixMultiply = f }},
+		{"__mod__", "__rmod__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Remainder = f }},
+		{"__divmod__", "__rdivmod__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Divmod = f }},
+		{"__lshift__", "__rlshift__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Lshift = f }},
+		{"__rshift__", "__rrshift__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Rshift = f }},
+		{"__and__", "__rand__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.And = f }},
+		{"__xor__", "__rxor__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Xor = f }},
+		{"__or__", "__ror__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.Or = f }},
+		{"__floordiv__", "__rfloordiv__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.FloorDivide = f }},
+		{"__truediv__", "__rtruediv__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.TrueDivide = f }},
+		// Inplace variants — the slot dispatcher always calls the dunder by
+		// name so forward and inplace use the same SLOT1BINFULL shape.
+		// update_one_slot uses the same slot function for normal and inplace.
+		{"__iadd__", "__add__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceAdd = f }},
+		{"__isub__", "__sub__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceSubtract = f }},
+		{"__imul__", "__mul__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceMultiply = f }},
+		{"__imatmul__", "__matmul__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceMatrixMultiply = f }},
+		{"__imod__", "__mod__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceRemainder = f }},
+		{"__ifloordiv__", "__floordiv__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceFloorDivide = f }},
+		{"__itruediv__", "__truediv__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceTrueDivide = f }},
+		{"__ilshift__", "__lshift__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceLshift = f }},
+		{"__irshift__", "__rshift__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceRshift = f }},
+		{"__iand__", "__and__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceAnd = f }},
+		{"__ixor__", "__xor__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceXor = f }},
+		{"__ior__", "__or__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceOr = f }},
+	}
+	for _, e := range entries {
+		if !isOwnDescriptor(t, e.dunder) {
+			continue
+		}
+		dunder := e.dunder
+		rdunder := e.rdunder
+		fn := makeSlot1Bin(dunder, rdunder)
+		e.set(ensureNumberMethods(t), fn)
+	}
+	// Power and InPlacePower have a 3-arg signature (mod for 3-arg pow()).
+	// Wrap slot1BinFull ignoring the mod argument for the 2-arg bytecode form.
+	//
+	// CPython: Objects/typeobject.c:10129 SLOT1BINFULL(slot_nb_power_binary, ...)
+	if isOwnDescriptor(t, "__pow__") {
+		ensureNumberMethods(t).Power = func(a, b, _ Object) (Object, error) {
+			return slot1BinFull(a, b, "__pow__", "__rpow__")
+		}
+	}
+	if isOwnDescriptor(t, "__ipow__") {
+		ensureNumberMethods(t).InPlacePower = func(a, b, _ Object) (Object, error) {
+			return slot1BinFull(a, b, "__ipow__", "__pow__")
+		}
+	}
+	// Unary number ops.
+	if isOwnDescriptor(t, "__neg__") {
+		ensureNumberMethods(t).Negative = makeSlotNbUnary("__neg__")
+	}
+	if isOwnDescriptor(t, "__pos__") {
+		ensureNumberMethods(t).Positive = makeSlotNbUnary("__pos__")
+	}
+	if isOwnDescriptor(t, "__abs__") {
+		ensureNumberMethods(t).Absolute = makeSlotNbUnary("__abs__")
+	}
+	if isOwnDescriptor(t, "__invert__") {
+		ensureNumberMethods(t).Invert = makeSlotNbUnary("__invert__")
+	}
+	if isOwnDescriptor(t, "__int__") {
+		ensureNumberMethods(t).Int = makeSlotNbUnary("__int__")
+	}
+	if isOwnDescriptor(t, "__float__") {
+		ensureNumberMethods(t).Float = makeSlotNbUnary("__float__")
+	}
+	if isOwnDescriptor(t, "__index__") {
+		ensureNumberMethods(t).Index = makeSlotNbUnaryIndex("__index__")
+	}
+}
+
+// makeSlot1Bin returns a Number slot function that implements CPython's
+// SLOT1BINFULL dispatch: try dunder on self, handle subtype __rdunder__
+// priority, fall back to rdunder on other.
+//
+// CPython: Objects/typeobject.c:9954 SLOT1BINFULL
+func makeSlot1Bin(dunder, rdunder string) func(a, b Object) (Object, error) {
+	return func(a, b Object) (Object, error) {
+		return slot1BinFull(a, b, dunder, rdunder)
+	}
+}
+
+// slot1BinFull implements SLOT1BINFULL: call dunder(a, b); if a's type is a
+// superclass of b's type and b overloads rdunder, try rdunder first; fall
+// through to rdunder(b, a) when dunder returns NotImplemented.
+//
+// CPython: Objects/typeobject.c:9954 SLOT1BINFULL
+func slot1BinFull(a, b Object, dunder, rdunder string) (Object, error) {
+	aType := a.Type()
+	bType := b.Type()
+
+	// If b's type is a strict subtype of a's type, and b overloads rdunder
+	// differently from a, give b a chance to handle it first.
+	//
+	// CPython: Objects/typeobject.c:9961 (do_other && issubtype check)
+	if aType != bType && IsSubtype(bType, aType) {
+		if methodIsOverloaded(a, b, rdunder) {
+			rd, err := callBinaryDunder(b, a, rdunder)
+			if err != nil {
+				return nil, err
+			}
+			if rd != nil && !IsNotImplemented(rd) {
+				return rd, nil
+			}
+		}
+	}
+
+	// Try dunder on a.
+	//
+	// CPython: Objects/typeobject.c:9973 (self dunder call)
+	r, err := callBinaryDunder(a, b, dunder)
+	if err != nil {
+		return nil, err
+	}
+	if r != nil && !IsNotImplemented(r) {
+		return r, nil
+	}
+	if aType == bType {
+		return notImplemented(), nil
+	}
+
+	// If b's type also defines rdunder, try it.
+	//
+	// CPython: Objects/typeobject.c:9985 (do_other rdunder call)
+	if IsSubtype(bType, aType) || methodIsOverloaded(a, b, rdunder) {
+		rd, err := callBinaryDunder(b, a, rdunder)
+		if err != nil {
+			return nil, err
+		}
+		if rd != nil {
+			return rd, nil
+		}
+	}
+	return notImplemented(), nil
+}
+
+// methodIsOverloaded reports whether b's type defines rdunder differently
+// from a's type. Matches CPython's method_is_overloaded: if the descriptor
+// is the same object on both types, there is no override.
+//
+// CPython: Objects/typeobject.c:9921 method_is_overloaded
+func methodIsOverloaded(a, b Object, rdunder string) bool {
+	da, _ := LookupDescriptor(a.Type(), rdunder)
+	db, _ := LookupDescriptor(b.Type(), rdunder)
+	if db == nil {
+		return false
+	}
+	return da != db
+}
+
+// callBinaryDunder looks up dunder on self.Type() via the MRO and calls
+// it with (self, other). Returns (nil, nil) if the dunder is not found.
+//
+// CPython: Objects/typeobject.c:9960 vectorcall_maybe
+func callBinaryDunder(self, other Object, dunder string) (Object, error) {
+	descr, _ := LookupDescriptor(self.Type(), dunder)
+	if descr == nil || IsNone(descr) {
+		return nil, nil
+	}
+	var bound Object
+	if dg := descr.Type().DescrGet; dg != nil {
+		var err error
+		bound, err = dg(descr, self, self.Type())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		bound = descr
+	}
+	return Call(bound, NewTuple([]Object{other}), nil)
+}
+
+// makeSlotNbUnary returns a unary Number slot function that looks up the
+// named dunder on self via the MRO and calls it with no arguments.
+//
+// CPython: Objects/typeobject.c SLOT0 macro
+func makeSlotNbUnary(dunder string) func(Object) (Object, error) {
+	return func(self Object) (Object, error) {
+		fn, err := lookupMethodOnSelf(self, dunder)
+		if err != nil {
+			return nil, err
+		}
+		return Call(fn, NewTuple(nil), nil)
+	}
+}
+
+// makeSlotNbUnaryIndex is the __index__ variant: same as unary but the
+// result must be an int.
+//
+// CPython: Objects/typeobject.c slot_nb_index
+func makeSlotNbUnaryIndex(dunder string) func(Object) (Object, error) {
+	return makeSlotNbUnary(dunder)
 }
 
 // ensureNumberMethods allocates t.Number on demand. Built-in types

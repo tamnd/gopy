@@ -61,27 +61,27 @@ test_unpack_ex	done	v0.12.5	1/1 green. __main__.f() module prefix + integer key 
 test_unparse	done	v0.12.5	79/79 green
 
 # ---- Compile / codegen / dis ---------------------------------------
-test__opcode	ready	v0.5.0	_opcode module surface
+test__opcode	done	v0.12.5	7/7 green (SpecializationStatsTests skipped: CPython-internal adaptive counters)
 test_clinic	out-of-scope	-	CPython tooling, not a runtime feature
-test_code	ready	v0.5.0	Code object reflection
-test_code_module	ready	v0.10.1	code module (REPL helper)
-test_codeop	ready	v0.10.1	codeop on top of compile()
-test_compile	ready	v0.10.1	full compile() builtin panel
-test_compileall	ready	v0.10.1	needs py_compile + filesystem walk
-test_compiler_assemble	done	v0.5.0	gated in v05test/
-test_compiler_codegen	done	v0.5.0	gated in v05test/
-test_dictcomps	ready	v0.5.0	dict comprehension codegen
-test_dis	done	v0.5.0	gated via golden corpus in v05test/
-test_format	done	v0.4.0	gated in v04test/
-test_generated_cases	ready	v0.12.0	tools/uops_gen panel
-test_genexps	ready	v0.9.0	generator expressions
-test_listcomps	ready	v0.5.0	list comprehension codegen
+test_code	done	v0.12.5	37/37 green (25 skipped: constructor, co_branches, weakref GC, subprocess flags)
+test_code_module	done	v0.12.5	17/17 green
+test_codeop	done	v0.12.5	codeop on top of compile()
+test_compile	done	v0.12.5	185/185 green
+test_compileall	done	v0.12.5	145/145 green (2 skipped: filesystem-specific)
+test_compiler_assemble	done	v0.12.5	145/145 green
+test_compiler_codegen	done	v0.12.5	re-gated from v05test/ to test/cpython/
+test_dictcomps	done	v0.12.5	10/10 green
+test_dis	done	v0.12.5	re-gated from v05test/ golden corpus to test/cpython/
+test_format	done	v0.12.5	re-gated from v04test/ to test/cpython/
+test_generated_cases	out-of-scope	-	CPython-internal Tier1/Tier2 JIT generator toolchain; not a runtime feature
+test_genexps	done	v0.12.5	doctest suite green
+test_listcomps	done	v0.12.5	61/61 green (1 skipped: PEP 667 FrameLocalsProxy)
 test_lltrace	out-of-scope	-	low-level dispatch trace, build-time only
-test_opcodes	ready	v0.5.0	bytecode opcode table
-test_peepholer	ready	v0.5.0	flowgraph optimization panel
-test_print	ready	v0.7.0	print() builtin
+test_opcodes	done	v0.12.5	8/8 green
+test_peepholer	done	v0.12.5	130/130 green
+test_print	done	v0.12.5	9/9 green
 test_py_compile	ready	v0.10.1	py_compile module
-test_setcomps	ready	v0.5.0	set comprehension codegen
+test_setcomps	done	v0.12.5	2/2 green
 test_symtable	ready	v0.5.0	symtable module
 test_thread_local_bytecode	deferred	post-0.12	per-thread quickening
 
@@ -196,7 +196,7 @@ test_weakset	ready	v0.10.0	WeakSet on weakref
 
 # ---- Codecs / encodings --------------------------------------------
 test_charmapcodec	deferred	v0.8.0	charmap codec not shipped
-test_codeccallbacks	ready	v0.8.0	codecs error-callback registry
+test_codeccallbacks	done	v0.12.5	43/43 green
 test_codecencodings_cn	deferred	v0.8.0	CJK codecs not shipped
 test_codecencodings_hk	deferred	v0.8.0	CJK codecs not shipped
 test_codecencodings_iso2022	deferred	v0.8.0	iso2022 codecs not shipped
@@ -208,7 +208,7 @@ test_codecmaps_hk	deferred	v0.8.0	CJK codec maps
 test_codecmaps_jp	deferred	v0.8.0	CJK codec maps
 test_codecmaps_kr	deferred	v0.8.0	CJK codec maps
 test_codecmaps_tw	deferred	v0.8.0	CJK codec maps
-test_codecs	ready	v0.8.0	utf-8 / ascii / latin-1 panel
+test_codecs	done	v0.12.5	287/287 green (13 skipped)
 test_multibytecodec	deferred	v0.8.0	multibyte codec base class
 
 # ---- IO / buffer ---------------------------------------------------

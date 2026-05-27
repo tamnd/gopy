@@ -415,11 +415,26 @@ func filterSearch(category *objects.Type, text objects.Object, lineno int64, mod
 			return nil, nil, err
 		}
 
-		catType, ok := cat.(*objects.Type)
-		if !ok {
+		// CPython: Python/_warnings.c:441 PyObject_IsSubclass handles both
+		// a single class and a tuple of classes (issubclass semantics).
+		isSub := false
+		switch c := cat.(type) {
+		case *objects.Type:
+			isSub = objects.IsSubtype(category, c)
+		case *objects.Tuple:
+			for j := 0; j < c.Len(); j++ {
+				ct, ok := c.Item(j).(*objects.Type)
+				if !ok {
+					return nil, nil, fmt.Errorf("TypeError: filter category must be a class")
+				}
+				if objects.IsSubtype(category, ct) {
+					isSub = true
+					break
+				}
+			}
+		default:
 			return nil, nil, fmt.Errorf("TypeError: filter category must be a class")
 		}
-		isSub := objects.IsSubtype(category, catType)
 
 		lnInt, ok := lnObj.(*objects.Int)
 		if !ok {
