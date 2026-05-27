@@ -1073,8 +1073,20 @@ func decodeMethod() methodFn {
 				errHandler = s.Value()
 			}
 		}
+		// Trigger codec lookup so _is_text_encoding is populated for Python codecs.
+		if _, lerr := codecs.Lookup(encoding); lerr != nil {
+			return nil, lerr
+		}
+		// Reject non-text encodings (binary transforms, str→str transforms).
+		// CPython: Objects/bytesobject.c:1554 bytes_decode_impl _is_text_encoding check
+		if !codecs.IsTextEncoding(encoding) {
+			return nil, fmt.Errorf("LookupError: '%s' is not a text encoding; use codecs.decode() to handle arbitrary codecs", encoding)
+		}
 		s, _, err := codecs.Decode(v, encoding, errHandler)
 		if err != nil {
+			if FormatNoteHook != nil {
+				FormatNoteHook(fmt.Sprintf("decoding with '%s' codec failed", encoding))
+			}
 			return nil, err
 		}
 		return NewStr(s), nil

@@ -592,8 +592,20 @@ func strEncodeMethod(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		errorsName = u.Value()
 	}
+	// Trigger codec lookup so _is_text_encoding is populated for Python codecs.
+	if _, lerr := codecs.Lookup(encoding); lerr != nil {
+		return nil, lerr
+	}
+	// Reject non-text encodings (binary transforms, str→str transforms).
+	// CPython: Objects/unicodeobject.c:L13262 unicode_encode_impl _is_text_encoding check
+	if !codecs.IsTextEncoding(encoding) {
+		return nil, fmt.Errorf("LookupError: '%s' is not a text encoding; use codecs.encode() to handle arbitrary codecs", encoding)
+	}
 	out, _, encErr := codecs.Encode(s, encoding, errorsName)
 	if encErr != nil {
+		if FormatNoteHook != nil {
+			FormatNoteHook(fmt.Sprintf("encoding with '%s' codec failed", encoding))
+		}
 		return nil, encErr
 	}
 	return NewBytes(out), nil

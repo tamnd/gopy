@@ -49,6 +49,42 @@ func init() {
 		GetItem: bytesSubscript,
 	}
 	BytesType.Iter = bytesIter
+	// PEP 461: bytes % args formatting.
+	// CPython: Objects/bytesobject.c:2893 bytes_mod
+	BytesType.Number = &NumberMethods{
+		Remainder: bytesModulo,
+	}
+}
+
+// bytesModulo implements bytes % args (PEP 461).
+//
+// CPython: Objects/bytesobject.c:2893 bytes_mod
+func bytesModulo(a, b Object) (Object, error) {
+	bv, ok := a.(*Bytes)
+	if !ok {
+		return notImplemented(), nil
+	}
+	// Decode the format bytes as latin-1. For bytes formatting only ASCII
+	// format specs are meaningful, so latin-1 round-trips safely.
+	fmtStr := NewStr(string(bv.v))
+	// Delegate to the str % implementation.
+	result, err := unicodeModulo(fmtStr, b)
+	if err != nil {
+		return nil, err
+	}
+	u, ok2 := result.(*Unicode)
+	if !ok2 {
+		return result, nil
+	}
+	// Encode the result as latin-1 bytes.
+	out := make([]byte, len(u.v))
+	for i, r := range u.v {
+		if r > 0xff {
+			return nil, fmt.Errorf("ValueError: %%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
+		}
+		out[i] = byte(r)
+	}
+	return NewBytes(out), nil
 }
 
 // bytesSubscript ports bytes_subscript: integer keys return the byte
