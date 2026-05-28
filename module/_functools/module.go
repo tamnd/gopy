@@ -616,8 +616,9 @@ var LruCacheWrapperType = newLruCacheWrapperType()
 //
 // CPython: Modules/_functoolsmodule.c:1834 state->kwd_mark
 var kwdMark = func() objects.Object {
-	o := objects.NewInstance(objects.NewType("kwd_mark_t", []*objects.Type{objects.ObjectType()}))
-	return o
+	t := objects.NewType("kwd_mark_t", []*objects.Type{objects.ObjectType()})
+	t.Hash = objects.IdentityHash
+	return objects.NewInstance(t)
 }()
 
 // LruCacheWrapper is the runtime shape of an _lru_cache_wrapper. It
