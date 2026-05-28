@@ -157,8 +157,11 @@ func newSetFromIterable(o Object) (*Set, error) {
 		return nil, fmt.Errorf("TypeError: argument must be an iterable, not '%s'", typeNameOf(o))
 	}
 	for {
-		item, err := IterNext(iter)
-		if err != nil {
+		item, iterErr := IterNext(iter)
+		if iterErr != nil {
+			if !errors.Is(iterErr, ErrStopIteration) {
+				return nil, iterErr
+			}
 			break
 		}
 		if err := s.add(item); err != nil {

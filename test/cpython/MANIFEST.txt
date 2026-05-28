@@ -351,7 +351,7 @@ test_bz2	deferred	v0.10.1	bz2 not shipped
 test_configparser	deferred	v0.10.1	configparser not shipped
 test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
 test_copyreg	deferred	v0.8.0	needs pickle
-test_csv	deferred	v0.10.1	csv not shipped
+test_csv	pending	v0.12.5	82/128 passing; csv.Error typing + quoting edge cases remain
 test_dataclasses/	ready	v0.10.1	dataclasses module
 test_dbm	deferred	v0.10.1	dbm module
 test_dbm_dumb	deferred	v0.10.1	dbm.dumb
@@ -382,7 +382,7 @@ test_pprint	ready	v0.10.1	pprint module
 test_pulldom	deferred	v0.10.1	xml.dom not shipped
 test_pyexpat	deferred	v0.10.1	needs libexpat binding
 test_quopri	deferred	v0.10.1	quopri encoder
-test_re	deferred	v0.4.0	re module not shipped
+test_re	pending	v0.12.5	89/165 passing; SRE bytecode engine partial; lookahead/lookbehind gaps remain
 test_sax	deferred	v0.10.1	xml.sax not shipped
 test_shelve	deferred	v0.10.1	shelve depends on dbm
 test_shlex	ready	v0.10.1	shlex module
@@ -404,7 +404,7 @@ test_xmlrpc	deferred	v0.10.1	xmlrpc not shipped
 test_xpickle	deferred	v0.8.0	pickle cross-version
 test_zipfile/	deferred	v0.10.1	zipfile not shipped
 test_zipfile64	deferred	v0.10.1	zip64 not shipped
-test_zlib	deferred	v0.10.1	zlib not shipped
+test_zlib	pending	v0.12.5	vendored; zlib compress/decompress gaps; CI gate deferred
 test_zstd	deferred	v0.10.1	zstd new in 3.14
 
 # ---- Misc / utility -----------------------------------------------

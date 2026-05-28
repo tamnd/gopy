@@ -52,7 +52,7 @@ func patternFindall(args []objects.Object, _ map[string]objects.Object) (objects
 			item = objects.NewStr(srcStr[mStart:mEnd])
 		case 1:
 			lo, hi := st.mark[0], st.mark[1]
-			if lo < 0 {
+			if lo < 0 || hi < 0 {
 				item = objects.NewStr("")
 			} else {
 				item = objects.NewStr(srcStr[lo:hi])
@@ -61,7 +61,7 @@ func patternFindall(args []objects.Object, _ map[string]objects.Object) (objects
 			parts := make([]objects.Object, cp.groups)
 			for g := 0; g < cp.groups; g++ {
 				lo, hi := st.mark[2*g], st.mark[2*g+1]
-				if lo < 0 {
+				if lo < 0 || hi < 0 {
 					parts[g] = objects.NewStr("")
 				} else {
 					parts[g] = objects.NewStr(srcStr[lo:hi])
@@ -233,7 +233,9 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 			cur = mEnd
 		}
 	}
-	out.WriteString(srcStr[cur:endpos])
+	if cur <= endpos {
+		out.WriteString(srcStr[cur:endpos])
+	}
 	return out.String(), n, nil
 }
 
@@ -291,7 +293,7 @@ func patternSplit(args []objects.Object, _ map[string]objects.Object) (objects.O
 		out = append(out, objects.NewStr(srcStr[cur:mStart]))
 		for g := 0; g < cp.groups; g++ {
 			lo, hi := st.mark[2*g], st.mark[2*g+1]
-			if lo < 0 {
+			if lo < 0 || hi < 0 {
 				out = append(out, objects.None())
 			} else {
 				out = append(out, objects.NewStr(srcStr[lo:hi]))
@@ -304,7 +306,11 @@ func patternSplit(args []objects.Object, _ map[string]objects.Object) (objects.O
 			cur = mEnd
 		}
 	}
-	out = append(out, objects.NewStr(srcStr[cur:endpos]))
+	if cur <= endpos {
+		out = append(out, objects.NewStr(srcStr[cur:endpos]))
+	} else {
+		out = append(out, objects.NewStr(""))
+	}
 	return objects.NewList(out), nil
 }
 

@@ -12,9 +12,29 @@ import (
 	"fmt"
 	"sync"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
+
+// csvErrorType holds the _csv.Error class, set during buildModule and used
+// by csvErr to raise typed csv.Error instances.
+//
+// CPython: Modules/_csv.c:1820 csv_module_exec (error_obj)
+var csvErrorType *objects.Type
+
+// csvErr creates a csv.Error Python exception wrapped as a Go error.
+// Replaces fmt.Errorf("csv.Error: ...") so the raised type is csv.Error,
+// not a bare RuntimeError.
+//
+// CPython: Modules/_csv.c PyErr_SetString(error_obj, ...)
+func csvErr(msg string) error {
+	if csvErrorType == nil {
+		return fmt.Errorf("csv.Error: %s", msg)
+	}
+	exc := pyerrors.New(csvErrorType, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	return objects.NewRaisedError(exc, msg)
+}
 
 func init() {
 	_ = imp.AppendInittab("_csv", buildModule)
@@ -187,7 +207,7 @@ func applyFmtParams(d *Dialect, kwargs map[string]objects.Object) error {
 		}
 		q, _ := iv.Int64()
 		if q < quoteMinimal || q > quoteNotNull {
-			return fmt.Errorf("csv.Error: bad quoting style")
+			return csvErr("bad quoting style")
 		}
 		d.quoting = int(q)
 	}
@@ -242,7 +262,7 @@ func lookupDialect(name string) (*Dialect, error) {
 	d, ok := dialectRegistry[name]
 	dialectMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("csv.Error: unknown dialect %q", name)
+		return nil, csvErr(fmt.Sprintf("unknown dialect %q", name))
 	}
 	return d, nil
 }
@@ -299,7 +319,7 @@ func readerIterNext(o objects.Object) (objects.Object, error) {
 			// partial field iff we are mid-field or mid-quoted-field.
 			if len(r.parser.field) != 0 || r.parser.state == psInQuotedField {
 				if r.dialect.strict {
-					return nil, fmt.Errorf("csv.Error: unexpected end of data")
+					return nil, csvErr("unexpected end of data")
 				}
 				if err := r.parser.saveField(r.dialect); err != nil {
 					return nil, err
@@ -310,7 +330,7 @@ func readerIterNext(o objects.Object) (objects.Object, error) {
 		}
 		lineStr, ok := line.(*objects.Unicode)
 		if !ok {
-			return nil, fmt.Errorf("csv.Error: iterator should return strings, not %s (the file should be opened in text mode)", line.Type().Name)
+			return nil, csvErr(fmt.Sprintf("iterator should return strings, not %s (the file should be opened in text mode)", line.Type().Name))
 		}
 		r.lineNum++
 		for _, c := range lineStr.Value() {
@@ -416,11 +436,11 @@ func writerWriteRow(w *Writer, args []objects.Object, _ map[string]objects.Objec
 	}
 	it, err := objects.Iter(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("csv.Error: iterable expected, not %s", args[0].Type().Name)
+		return nil, csvErr(fmt.Sprintf("iterable expected, not %s", args[0].Type().Name))
 	}
 	itType := it.Type()
 	if itType.IterNext == nil {
-		return nil, fmt.Errorf("csv.Error: iterable expected, not %s", args[0].Type().Name)
+		return nil, csvErr(fmt.Sprintf("iterable expected, not %s", args[0].Type().Name))
 	}
 	d := w.dialect
 	w.state.joinReset()
@@ -458,7 +478,7 @@ func writerWriteRow(w *Writer, args []objects.Object, _ map[string]objects.Objec
 	if w.state.numFields > 0 && w.state.recLen == 0 {
 		if d.quoting == quoteNone ||
 			(nullField && (d.quoting == quoteStrings || d.quoting == quoteNotNull)) {
-			return nil, fmt.Errorf("csv.Error: single empty field record must be quoted")
+			return nil, csvErr("single empty field record must be quoted")
 		}
 		w.state.numFields--
 		if err := w.state.joinAppend(d, "", true, true); err != nil {
@@ -562,7 +582,9 @@ func buildModule() (*objects.Module, error) {
 	}
 
 	// Error class: csv.Error is a subclass of Exception.
-	csvError := objects.NewType("Error", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_csv.c:1820 csv_module_exec (PyExc_Exception base)
+	csvError := objects.NewType("Error", []*objects.Type{pyerrors.PyExc_Exception})
+	csvErrorType = csvError
 	if err := d.SetItem(objects.NewStr("Error"), csvError); err != nil {
 		return nil, err
 	}
@@ -715,7 +737,7 @@ func unregisterDialect(args []objects.Object, kwargs map[string]objects.Object) 
 	}
 	dialectMu.Unlock()
 	if !found {
-		return nil, fmt.Errorf("csv.Error: unknown dialect %q", name)
+		return nil, csvErr(fmt.Sprintf("unknown dialect %q", name))
 	}
 	return objects.None(), nil
 }

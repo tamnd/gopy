@@ -7,6 +7,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 )
@@ -314,8 +315,11 @@ func bytesLike(o Object) ([]byte, error) {
 	}
 	var out []byte
 	for {
-		item, err := IterNext(iter)
-		if err != nil {
+		item, iterErr := IterNext(iter)
+		if iterErr != nil {
+			if !errors.Is(iterErr, ErrStopIteration) {
+				return nil, iterErr
+			}
 			break
 		}
 		iv, ok := item.(*Int)
