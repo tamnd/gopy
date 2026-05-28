@@ -184,6 +184,30 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 		replIsStr = true
 	}
 
+	// For Unicode strings the engine uses code-point indices; Go string
+	// slicing is byte-based, so we must work through a rune slice.
+	//
+	// CPython: Modules/_sre/sre.c:2492 pattern_subx_impl (uses
+	// character-position cursors throughout)
+	var srcRunes []rune
+	if _, isUnicode := src.(*objects.Unicode); isUnicode {
+		srcRunes = []rune(srcStr)
+	}
+
+	// runeSlice converts a half-open [lo, hi) code-point range to a string.
+	slice := func(lo, hi int) string {
+		if srcRunes != nil {
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > len(srcRunes) {
+				hi = len(srcRunes)
+			}
+			return string(srcRunes[lo:hi])
+		}
+		return srcStr[lo:hi]
+	}
+
 	var out strings.Builder
 	cur := pos
 	n := 0
@@ -199,7 +223,7 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 			break
 		}
 		mStart, mEnd := st.start, st.ptr
-		out.WriteString(srcStr[cur:mStart])
+		out.WriteString(slice(cur, mStart))
 
 		if replIsStr {
 			m := makeMatch(cp, st, src, args[0], pos, endpos).(*objects.Instance)
@@ -224,9 +248,9 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 		n++
 
 		if mStart == mEnd {
-			// zero-width: copy one char from cur, advance past it.
+			// zero-width: copy one code-point from cur, advance past it.
 			if mEnd < endpos {
-				out.WriteString(srcStr[mEnd : mEnd+1])
+				out.WriteString(slice(mEnd, mEnd+1))
 			}
 			cur = mEnd + 1
 		} else {
@@ -234,7 +258,7 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 		}
 	}
 	if cur <= endpos {
-		out.WriteString(srcStr[cur:endpos])
+		out.WriteString(slice(cur, endpos))
 	}
 	return out.String(), n, nil
 }
