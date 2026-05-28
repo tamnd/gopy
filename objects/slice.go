@@ -42,11 +42,45 @@ func init() {
 	// CPython: Objects/sliceobject.c:576 slice_richcompare
 	SliceType.RichCmp = sliceRichCmp
 	SetTypeDescr(SliceType, "start", NewGetSetDescr("start",
-		func(o Object) (Object, error) { return o.(*Slice).Start, nil }, nil))
+		func(o Object) (Object, error) {
+			s, ok := asSlice(o)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor 'start' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			return s.Start, nil
+		}, nil))
 	SetTypeDescr(SliceType, "stop", NewGetSetDescr("stop",
-		func(o Object) (Object, error) { return o.(*Slice).Stop, nil }, nil))
+		func(o Object) (Object, error) {
+			s, ok := asSlice(o)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor 'stop' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			return s.Stop, nil
+		}, nil))
 	SetTypeDescr(SliceType, "step", NewGetSetDescr("step",
-		func(o Object) (Object, error) { return o.(*Slice).Step, nil }, nil))
+		func(o Object) (Object, error) {
+			s, ok := asSlice(o)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor 'step' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			return s.Step, nil
+		}, nil))
+	// CPython: Objects/sliceobject.c:L249 slice_getnewargs
+	SetTypeDescr(SliceType, "__getnewargs__", NewMethodDescr(SliceType, "__getnewargs__", sliceGetNewArgs))
+	// Expose __new__ so slice.__new__(slice, ...) routes to sliceTpNew
+	// instead of falling back to object.__new__ which returns *Instance.
+	// CPython: Objects/sliceobject.c:L319 slice_new via staticmethod wrapper
+	SetTypeDescr(SliceType, "__new__", NewBuiltinFunction("slice.__new__",
+		func(args []Object, kwargs map[string]Object) (Object, error) {
+			if len(args) < 1 {
+				return nil, fmt.Errorf("TypeError: slice.__new__(): not enough arguments")
+			}
+			cls, ok := args[0].(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: slice.__new__(X): X is not a type object")
+			}
+			return sliceTpNew(cls, args[1:], kwargs)
+		}))
 }
 
 // sliceTpNew implements the slice constructor: slice(stop),
@@ -130,8 +164,19 @@ func sliceRichCmp(a, b Object, op CompareOp) (Object, error) {
 	return RichCmp(t1, t2, op)
 }
 
+// asSlice extracts a *Slice from o.
+//
+// CPython: Objects/sliceobject.c PySlice_Check
+func asSlice(o Object) (*Slice, bool) {
+	s, ok := o.(*Slice)
+	return s, ok
+}
+
 func sliceRepr(o Object) (string, error) {
-	s := o.(*Slice)
+	s, ok := asSlice(o)
+	if !ok {
+		return "", fmt.Errorf("TypeError: descriptor 'repr' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
 	startR, err := Repr(s.Start)
 	if err != nil {
 		return "", err
@@ -145,4 +190,19 @@ func sliceRepr(o Object) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("slice(%s, %s, %s)", startR, stopR, stepR), nil
+}
+
+// sliceGetNewArgs implements slice.__getnewargs__(): returns (start, stop, step)
+// so that pickle/copy can reconstruct the slice via slice.__new__.
+//
+// CPython: Objects/sliceobject.c:L249 slice_getnewargs
+func sliceGetNewArgs(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	s, ok := asSlice(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return NewTuple([]Object{s.Start, s.Stop, s.Step}), nil
 }

@@ -188,7 +188,7 @@ func complexRichCmp(a, b Object, op CompareOp) (Object, error) {
 	return nil, errors.New("TypeError: no ordering relation is defined for complex numbers")
 }
 
-// asComplex coerces an int / float / complex operand to complex128.
+// asComplex coerces an int / float / complex / bool operand to complex128.
 //
 // CPython: Objects/complexobject.c:281 to_complex
 func asComplex(o Object) (complex128, bool) {
@@ -197,6 +197,8 @@ func asComplex(o Object) (complex128, bool) {
 		return x.v, true
 	case *Float:
 		return complex(x.v, 0), true
+	case *Bool:
+		return complex(intToFloat(&x.Int), 0), true
 	case *Int:
 		return complex(intToFloat(x), 0), true
 	}

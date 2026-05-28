@@ -311,6 +311,8 @@ func floatRichCmp(a, b Object, op CompareOp) (Object, error) {
 	switch x := b.(type) {
 	case *Float:
 		bv = x.v
+	case *Bool:
+		bv = intToFloat(&x.Int)
 	case *Int:
 		bv = intToFloat(x)
 	default:
@@ -498,6 +500,8 @@ func asFloat(o Object) (float64, bool) {
 	switch x := o.(type) {
 	case *Float:
 		return x.v, true
+	case *Bool:
+		return intToFloat(&x.Int), true
 	case *Int:
 		return intToFloat(x), true
 	}

@@ -1,5 +1,7 @@
 package objects
 
+import "math/big"
+
 // Bool is the Python bool. CPython makes bool a subclass of int with
 // just two singleton instances; gopy follows the same pattern.
 //
@@ -35,6 +37,41 @@ func init() {
 		return 0, nil
 	}
 	BoolType.TpFlags |= TpFlagMatchSelf
+	// bool is not subclassable. CPython: Objects/boolobject.c PyBool_Type
+	// does not set Py_TPFLAGS_BASETYPE.
+	BoolType.TpFlags &^= TpFlagBasetype
+
+	// Wire the Number bundle. IntType.Number is set in int.go's init()
+	// which may run after bool.go's init (alphabetical file order), so
+	// we reference the package-level slot functions directly rather than
+	// copying from IntType.Number.
+	//
+	// CPython: Objects/boolobject.c:L222 PyBool_Type (no tp_as_number
+	// override; inherits long's slots but And/Or/Xor return bool when
+	// both operands are bool via PyBool_FromLong wrapping).
+	BoolType.Number = &NumberMethods{
+		Add:         intAdd,
+		Subtract:    intSub,
+		Multiply:    intMul,
+		TrueDivide:  intTrueDiv,
+		FloorDivide: intFloorDiv,
+		Remainder:   intMod,
+		And:         boolAnd,
+		Or:          boolOr,
+		Xor:         boolXor,
+		Lshift:      intLshift,
+		Rshift:      intRshift,
+		Power:       intPower,
+		Divmod:      intDivmod,
+		Negative:    intNeg,
+		Positive:    intPos,
+		Absolute:    intAbs,
+		Invert:      intInvert,
+		Bool:        intBool,
+		Int:         func(o Object) (Object, error) { i, _ := asInt(o); return NewIntFromBig(new(big.Int).Set(&i.v)), nil },
+		Float:       intFloat,
+	}
+
 	trueSingleton = newBool(1)
 	falseSingleton = newBool(0)
 }

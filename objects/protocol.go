@@ -1,6 +1,41 @@
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"unsafe"
+)
+
+// reprDepth tracks objects currently being repr'd to detect cycles.
+// CPython: Objects/object.c:L514 Py_ReprEnter / Py_ReprLeave
+var reprDepth = make(map[uintptr]bool)
+
+// objectID extracts the data pointer from a Go interface value, giving
+// a stable per-object identity for cycle detection.
+func objectID(o Object) uintptr {
+	type iface struct{ _, data uintptr }
+	return (*iface)(unsafe.Pointer(&o)).data
+}
+
+// ReprEnter reports whether o is already being repr'd (cycle). If not,
+// it marks o as in-progress and returns false. The caller must call
+// ReprLeave(o) when done.
+//
+// CPython: Objects/object.c:L514 Py_ReprEnter
+func ReprEnter(o Object) bool {
+	id := objectID(o)
+	if reprDepth[id] {
+		return true
+	}
+	reprDepth[id] = true
+	return false
+}
+
+// ReprLeave removes o from the in-progress repr set.
+//
+// CPython: Objects/object.c:L533 Py_ReprLeave
+func ReprLeave(o Object) {
+	delete(reprDepth, objectID(o))
+}
 
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.

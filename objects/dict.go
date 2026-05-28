@@ -285,6 +285,24 @@ func (d *Dict) Keys() []Object {
 	return out
 }
 
+// ForEachWithHash iterates over (key, hash) pairs without recomputing
+// hashes, mirroring _PyDict_Next. Used by set construction to avoid
+// rehashing keys that the dict already has cached hash values for.
+//
+// CPython: Objects/dictobject.c:3512 _PyDict_Next
+func (d *Dict) ForEachWithHash(fn func(key Object, hash int64) error) error {
+	for _, slot := range d.order {
+		e := &d.entries[slot]
+		if !e.used {
+			continue
+		}
+		if err := fn(e.key, e.hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetItem inserts or replaces key. Mirrors PyDict_SetItem.
 //
 // CPython: Objects/dictobject.c:1985 PyDict_SetItem
@@ -645,26 +663,46 @@ func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
 
 // dictClearMethod backs dict.clear().
 //
-// CPython: Objects/dictobject.c:3783 dict_clear
+// CPython: Objects/dictobject.c:3783 dict_clear / Objects/dictobject.c:2979 PyDict_Clear
 func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
 	}
 	d := args[0].(*Dict)
-	// CPython fires a single CLEARED rather than one DELETED per
-	// entry (dictobject.c:2979 inside PyDict_Clear). Fire it before
-	// the per-key DelItem calls so a watcher that re-subscribes
-	// after CLEARED does not also see the synthetic DELETEDs.
+	// CPython's PyDict_Clear atomically swaps in a fresh empty keys
+	// table without touching __eq__ or __hash__. The iter-then-DelItem
+	// approach previously used here triggered __eq__ on each probe,
+	// allowing re-entrant clears that corrupted d.used.
+	//
+	// CPython: Objects/dictobject.c:2979 PyDict_Clear
 	notifyDictEvent(DictEventCleared, d, nil, nil)
-	had := atomic.LoadUint64(&d.watcherTag) & dictWatcherMask
-	// Suppress the per-entry DELETED events that the DelItem loop
-	// would otherwise emit, so the semantics match the C path which
-	// blows the table away in one shot.
-	atomic.AndUint64(&d.watcherTag, ^dictWatcherMask)
-	for _, k := range d.Keys() {
-		_ = d.DelItem(k)
+	if d.sharedKeys != nil {
+		// Split-table: decref all per-instance values, reset values array.
+		for i, v := range d.splitValues {
+			if v != nil {
+				Decref(v)
+				d.splitValues[i] = nil
+			}
+		}
+	} else {
+		// Combined-table: decref keys and values directly without lookup.
+		for i := range d.entries {
+			e := &d.entries[i]
+			if e.used {
+				if e.key != nil {
+					Decref(e.key)
+				}
+				if e.value != nil {
+					Decref(e.value)
+				}
+				d.entries[i] = dictEntry{}
+			}
+		}
 	}
-	atomic.OrUint64(&d.watcherTag, had)
+	d.order = d.order[:0]
+	d.used = 0
+	d.fill = 0
+	d.invalidateKeysVersion()
 	return None(), nil
 }
 
@@ -946,6 +984,18 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 		value = None()
 	}
 	out := NewDict()
+	// Set/frozenset fast path: reuse cached hashes to avoid calling __hash__
+	// on each key again.
+	//
+	// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
+	if ss, ok := args[1].(*Set); ok {
+		for _, e := range ss.Entries() {
+			if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
 	it, err := Iter(args[1])
 	if err != nil {
 		return nil, err

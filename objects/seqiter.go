@@ -42,12 +42,26 @@ func NewSeqIter(seq Object) *SeqIter {
 	return it
 }
 
+// KeyErrorFactory builds a proper Python KeyError wrapping the given key
+// object so e.args[0] is the key itself. Installed from errors/init to
+// break the import cycle between objects and errors.
+//
+// CPython: Objects/exceptions.c KeyError stores the key in args[0]
+var KeyErrorFactory func(key Object) error
+
 // IsIndexErrorHook lets the errors package teach seqIterNext to
 // recognize a Python-level IndexError. Installed from errors/init so
 // objects does not depend on errors.
 //
 // CPython: Objects/iterobject.c:78 iter_iternext PyErr_ExceptionMatches(PyExc_IndexError)
 var IsIndexErrorHook func(error) bool
+
+// IsStopIterationHook lets the errors package teach IterNext to
+// recognize a Python-level StopIteration. Installed from errors/init.
+// Mirrors PyIter_Next's _PyErr_ExceptionMatches(PyExc_StopIteration) check.
+//
+// CPython: Objects/abstract.c:2852 PyIter_Next
+var IsStopIterationHook func(error) bool
 
 // ClearCurrentExceptionHook drops the thread-state's current exception.
 // Installed from errors/init so seqIterNext can match PyErr_Clear after
@@ -66,11 +80,38 @@ func seqIterNext(o Object) (Object, error) {
 		return nil, ErrStopIteration
 	}
 	s := it.seq.Type().Sequence
-	if s == nil || s.GetItem == nil {
+	if s != nil && s.GetItem != nil {
+		v, err := s.GetItem(it.seq, it.index)
+		if err != nil {
+			if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) ||
+				(IsIndexErrorHook != nil && IsIndexErrorHook(err)) {
+				it.seq = nil
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
+				return nil, ErrStopIteration
+			}
+			return nil, err
+		}
+		it.index++
+		return v, nil
+	}
+	// Python-level __getitem__ fallback: call obj.__getitem__(index) and stop
+	// on IndexError or StopIteration.
+	//
+	// CPython: Objects/iterobject.c:73 iter_iternext — same stop conditions
+	descr, _ := LookupDescriptor(it.seq.Type(), "__getitem__")
+	if descr == nil {
 		it.seq = nil
 		return nil, ErrStopIteration
 	}
-	v, err := s.GetItem(it.seq, it.index)
+	getItem, err := bindDescriptor(descr, it.seq)
+	if err != nil {
+		it.seq = nil
+		return nil, ErrStopIteration
+	}
+	idx := NewInt(int64(it.index))
+	v, err := CallObject(getItem, NewTuple([]Object{idx}))
 	if err != nil {
 		if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) ||
 			(IsIndexErrorHook != nil && IsIndexErrorHook(err)) {

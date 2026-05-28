@@ -1252,7 +1252,7 @@ func allAlnum(s string) bool {
 
 func allSpace(s string) bool {
 	for _, r := range s {
-		if r != ' ' && r != '\t' && r != '\n' && r != '\r' && r != '\v' && r != '\f' {
+		if !IsSpaceRune(r) {
 			return false
 		}
 	}

@@ -199,6 +199,12 @@ func intSubclassSetAttr(o Object, name Object, value Object) error {
 // *Int with cls. Mirrors the SetStrTpNewBase wiring in str.go.
 func SetIntTpNewBase(fn func(args []Object, kwargs map[string]Object) (Object, error)) {
 	intTpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		// CPython 3.14: long_new rejects direct bool construction via int.__new__
+		// because bool does not set Py_TPFLAGS_BASETYPE.
+		// CPython: Objects/longobject.c:3389 long_new_impl
+		if cls == BoolType {
+			return nil, fmt.Errorf("TypeError: int.__new__(%s) is not safe, use bool.__new__()", cls.Name)
+		}
 		out, err := fn(args, kwargs)
 		if err != nil {
 			return nil, err

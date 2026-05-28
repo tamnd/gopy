@@ -64,6 +64,16 @@ func init() {
 		_ = d.SetItem(objects.NewStr("obj"), obj)
 		return &objects.RaisedError{Exc: exc, Msg: "AttributeError: " + msg}
 	}
+	// KeyErrorFactory builds a Python KeyError whose args[0] is the
+	// original key object so callers can recover `e.args[0] is key`.
+	//
+	// CPython: Objects/exceptions.c KeyError stores the key verbatim in
+	// args[0] (set_discard_key / set_remove_key path)
+	objects.KeyErrorFactory = func(key objects.Object) error {
+		repr, _ := objects.Repr(key)
+		exc := New(PyExc_KeyError, objects.NewTuple([]objects.Object{key}))
+		return &objects.RaisedError{Exc: exc, Msg: "KeyError: " + repr}
+	}
 	objects.IsIndexErrorHook = func(err error) bool {
 		if err == nil {
 			return false
@@ -73,6 +83,22 @@ func init() {
 			return true
 		}
 		const p = "IndexError:"
+		return len(msg) >= len(p) && msg[:len(p)] == p
+	}
+	// IsStopIterationHook lets IterNext convert a Python-level StopIteration
+	// exception back to ErrStopIteration, mirroring PyIter_Next's
+	// _PyErr_ExceptionMatches(PyExc_StopIteration) check.
+	//
+	// CPython: Objects/abstract.c:2856 PyIter_Next
+	objects.IsStopIterationHook = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		msg := err.Error()
+		if msg == "StopIteration" {
+			return true
+		}
+		const p = "StopIteration:"
 		return len(msg) >= len(p) && msg[:len(p)] == p
 	}
 	// StopIteration.value exposes args[0] (or None) as a member, so
