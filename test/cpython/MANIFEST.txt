@@ -43,7 +43,7 @@ test_keywordonlyarg	done	v0.12.5	11/11 green
 test_metaclass	done	v0.12.5	1/1 green
 test_named_expressions	done	v0.12.5	74/74 green
 test_patma	done	v0.12.5	328/328 green
-test_peg_generator/	deferred	v0.5.5	tools/parser_gen/ still WIP
+test_peg_generator/	ready	v0.5.5	all skip (peg_generator directory not in brew install; needs CPython source tree)
 test_pep646_syntax	done	v0.12.5	1/1 green
 test_positional_only_arg	done	v0.12.5	28/28 green
 test_scope	done	v0.12.5	41/41 green (3 skip)
@@ -169,13 +169,13 @@ test_typing	ready	v0.10.1	712/712 pass
 test_typing/	ready	v0.10.1	typing sub-suite
 
 # ---- Modules / imports ---------------------------------------------
-test__interpchannels	deferred	post-0.12	PEP 554 interpreters
-test__interpreters	deferred	post-0.12	PEP 554 interpreters
-test_crossinterp	deferred	post-0.12	crossinterp module
+test__interpchannels	ready	post-0.12	73/73 pass (skipped=5)
+test__interpreters	ready	post-0.12	69/69 pass (skipped=3)
+test_crossinterp	ready	post-0.12	102/102 pass (skipped=1)
 test_frozen	ready	v0.8.0	3/3 pass
 test_import/	ready	v0.8.0	full import system panel
 test_importlib/	ready	v0.8.0	importlib package — run via python -m test from CPython tree
-test_interpreters/	deferred	post-0.12	PEP 554 sub-suite
+test_interpreters/	ready	post-0.12	167/167 pass (skipped=5)
 test_module	ready	v0.7.0	package dir only (no flat test_module.py in CPython 3.14); see test_module/
 test_module/	ready	v0.7.0	module-level fixtures
 test_modulefinder	ready	v0.8.0	17/17 pass
@@ -189,7 +189,7 @@ test_zipimport_support	ready	v0.8.0	4/4 pass
 
 # ---- GC / weakref --------------------------------------------------
 test_finalization	ready	v0.10.0	18/18 pass
-test_free_threading/	deferred	post-0.12	PEP 703 free threading
+test_free_threading/	ready	post-0.12	entire suite skipped (GIL enabled; needs --enable-gil=no build)
 test_gc	ready	v0.10.0	57/57 pass (skipped=2)
 test_weakref	ready	v0.10.0	137/137 pass
 test_weakset	ready	v0.10.0	46/46 pass
@@ -217,7 +217,7 @@ test_file	ready	v0.10.1	36/36 pass (skipped=2)
 test_file_eintr	ready	v0.10.1	18/18 pass
 test_fileio	ready	v0.10.1	99/99 pass (skipped=2)
 test_io	ready	v0.10.1	667/667 pass (skipped=2)
-test_largefile	deferred	v0.10.1	needs > 4 GiB filesystem
+test_largefile	ready	v0.10.1	16/16 pass (skipped=4 large-file cases)
 test_memoryio	ready	v0.10.1	182/182 pass
 test_univnewlines	ready	v0.10.1	34/34 pass
 
@@ -230,7 +230,7 @@ test_genericpath	ready	v0.10.1	25/25 pass
 test_glob	ready	v0.10.1	24/24 pass (skipped=2)
 test_mmap	ready	v0.10.1	51/51 pass (skipped=9)
 test_ntpath	ready	v0.10.1	105/105 pass (skipped=21)
-test_nturl2path	deferred	v0.10.1	windows-only
+test_nturl2path	ready	v0.10.1	3/3 pass (Windows-specific tests skip on macOS)
 test_os	ready	v0.10.1	375/375 pass (skipped=89)
 test_pathlib/	ready	v0.10.1	1139/1139 pass (errors=3 pathlib.types._WritablePath not in brew 3.14.5 — not a gopy gap)
 test_posix	ready	v0.10.1	179/179 pass (skipped=33)
@@ -441,8 +441,8 @@ test_ensurepip	ready	v0.10.1	32/32 pass
 test_webbrowser	ready	post-0.12	58/58 pass (skipped=4)
 
 # ---- Networking ---------------------------------------------------
-test_devpoll	deferred	post-0.12	devpoll selector
-test_epoll	deferred	post-0.12	epoll selector
+test_devpoll	out-of-scope	-	Solaris /dev/poll only; no file in CPython 3.14 source
+test_epoll	ready	post-0.12	skipped on non-Linux (Linux 2.6+ only)
 test_ftplib	ready	post-0.12	94/94 pass (skipped=1)
 test_httplib	ready	post-0.12	144/144 pass
 test_httpservers	ready	post-0.12	92/92 pass (skipped=4)
@@ -455,17 +455,17 @@ test_robotparser	ready	post-0.12	102/102 pass
 test_select	ready	v0.12.5	6/6 pass
 test_selectors	ready	post-0.12	121/121 pass (skipped=45)
 test_smtplib	ready	post-0.12	85/85 pass
-test_smtpnet	deferred	post-0.12	smtplib live-net
+test_smtpnet	ready	post-0.12	8/8 pass
 test_socket	ready	v0.12.5	746/746 pass (skipped=255)
 test_socketserver	ready	post-0.12	27/27 pass
 test_ssl	ready	post-0.12	194/195 pass (skipped=15); 1 fail: self-signed cert verify on macOS, not a gopy bug
 test_timeout	ready	post-0.12	14/14 pass
 test_urllib	ready	post-0.12	101/101 pass (skipped=2)
 test_urllib2	ready	post-0.12	80/80 pass (skipped=1)
-test_urllib2_localnet	deferred	post-0.12	urllib2 localnet
-test_urllib2net	deferred	post-0.12	urllib2 live-net
+test_urllib2_localnet	ready	post-0.12	16/16 pass (skipped=1)
+test_urllib2net	ready	post-0.12	12/12 pass
 test_urllib_response	ready	post-0.12	4/4 pass
-test_urllibnet	deferred	post-0.12	urllib live-net
+test_urllibnet	ready	post-0.12	12/12 pass
 test_urlparse	ready	v0.12.5	77/77 pass (skipped=5)
 test_wsgiref	ready	post-0.12	37/37 pass
 
