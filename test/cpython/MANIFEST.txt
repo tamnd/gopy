@@ -241,7 +241,7 @@ test_tempfile	ready	v0.10.1	tempfile module
 
 # ---- Hash / random / crypto ----------------------------------------
 test_hash	ready	v0.4.0	hash() builtin under SipHash
-test_hashlib	deferred	v0.4.0	hashlib not shipped
+test_hashlib	pending	v0.12.5	82 tests run; sha3/shake shipped via crypto/sha3; remaining failures: str→TypeError, file_digest, GIL tests
 test_hmac	deferred	v0.4.0	hmac not shipped
 test_random	ready	v0.7.0	random module
 test_secrets	deferred	v0.7.0	secrets not shipped
@@ -452,11 +452,11 @@ test_netrc	deferred	post-0.12	netrc parser
 test_poll	deferred	post-0.12	poll selector
 test_poplib	deferred	post-0.12	poplib
 test_robotparser	deferred	post-0.12	robotparser
-test_select	deferred	post-0.12	select module
+test_select	pending	v0.12.5	module shipped; test blocked by fileno() on gopy IO objects
 test_selectors	deferred	post-0.12	selectors module
 test_smtplib	deferred	post-0.12	smtplib
 test_smtpnet	deferred	post-0.12	smtplib live-net
-test_socket	deferred	post-0.12	socket module
+test_socket	pending	v0.12.5	module shipped; test blocked by missing queue/threading imports
 test_socketserver	deferred	post-0.12	socketserver
 test_ssl	deferred	post-0.12	ssl
 test_timeout	deferred	post-0.12	socket timeout

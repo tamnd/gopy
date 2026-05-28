@@ -1721,6 +1721,14 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 
+	// Boolean module attributes.
+	//
+	// CPython: Modules/socketmodule.c PySocketModule_InsertConstants
+	// has_ipv6: always true; gopy binds AF_INET6 on all platforms.
+	if err := set("has_ipv6", objects.True()); err != nil {
+		return nil, err
+	}
+
 	return m, nil
 }
 

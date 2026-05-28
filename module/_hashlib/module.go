@@ -12,10 +12,12 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha3"
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"io"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -38,20 +40,41 @@ type algoInfo struct {
 
 // algorithms maps the canonical Python name to its Go implementation.
 var algorithms = map[string]algoInfo{
-	"md5":    {16, 64, md5.New},
-	"sha1":   {20, 64, sha1.New},
-	"sha224": {28, 64, func() hash.Hash { return sha256.New224() }},
-	"sha256": {32, 64, sha256.New},
-	"sha384": {48, 128, func() hash.Hash { return sha512.New384() }},
-	"sha512": {64, 128, sha512.New},
+	"md5":      {16, 64, md5.New},
+	"sha1":     {20, 64, sha1.New},
+	"sha224":   {28, 64, func() hash.Hash { return sha256.New224() }},
+	"sha256":   {32, 64, sha256.New},
+	"sha384":   {48, 128, func() hash.Hash { return sha512.New384() }},
+	"sha512":   {64, 128, sha512.New},
+	"sha3_224": {28, 144, func() hash.Hash { return sha3.New224() }},
+	"sha3_256": {32, 136, func() hash.Hash { return sha3.New256() }},
+	"sha3_384": {48, 104, func() hash.Hash { return sha3.New384() }},
+	"sha3_512": {64, 72, func() hash.Hash { return sha3.New512() }},
 }
 
-// algorithmNames holds the guaranteed set of names, built once at init
-// time from the algorithms map.
+// shakeAlgoInfo describes a SHAKE (XOF) algorithm.
+type shakeAlgoInfo struct {
+	blockSize int
+	newFunc   func() *sha3.SHAKE
+}
+
+// shakeAlgorithms maps SHAKE algorithm names.
+//
+// CPython: Modules/sha3module.c SHA3_sha3_224Type / shake_128 / shake_256
+var shakeAlgorithms = map[string]shakeAlgoInfo{
+	"shake_128": {168, sha3.NewSHAKE128},
+	"shake_256": {136, sha3.NewSHAKE256},
+}
+
+// algorithmNames holds the guaranteed set of names (fixed-length + XOF),
+// built once at init time.
 var algorithmNames []string
 
 func init() {
 	for name := range algorithms {
+		algorithmNames = append(algorithmNames, name)
+	}
+	for name := range shakeAlgorithms {
 		algorithmNames = append(algorithmNames, name)
 	}
 }
@@ -71,13 +94,16 @@ func init() {
 }
 
 // hashObj is the runtime shape of a _hashlib.HASH instance.
+// For XOF types (shake_128, shake_256) the xof field is non-nil and h
+// is nil; digest/hexdigest require an explicit length argument.
 //
 // CPython: Modules/_hashopenssl.c:282 EVPobject
 type hashObj struct {
 	objects.Header
 	name       string
 	h          hash.Hash
-	digestSize int
+	xof        *sha3.SHAKE // non-nil for XOF (SHAKE) hashes
+	digestSize int            // 0 for XOF hashes
 	blockSize  int
 }
 
@@ -132,10 +158,23 @@ func hashRepr(o objects.Object) (string, error) {
 }
 
 // newHash allocates a fresh hashObj for the named algorithm and feeds
-// data into it if non-empty.
+// data into it if non-empty. Handles both fixed-length and XOF types.
 //
 // CPython: Modules/_hashopenssl.c:501 newEVPobject
+// CPython: Modules/sha3module.c py_sha3_new
 func newHash(name string, data []byte) (*hashObj, error) {
+	if sinfo, ok := shakeAlgorithms[name]; ok {
+		h := &hashObj{
+			name:      name,
+			xof:       sinfo.newFunc(),
+			blockSize: sinfo.blockSize,
+		}
+		h.Init(HashType)
+		if len(data) > 0 {
+			h.xof.Write(data)
+		}
+		return h, nil
+	}
 	info, ok := algorithms[name]
 	if !ok {
 		return nil, fmt.Errorf("ValueError: unsupported hash type %s", name)
@@ -153,6 +192,17 @@ func newHash(name string, data []byte) (*hashObj, error) {
 	return h, nil
 }
 
+// Ensure io is used (needed for XOF Read calls inside digest/hexdigest).
+var _ io.Writer = (*hashObj)(nil)
+
+// Write implements io.Writer so hashObj satisfies the interface when h is nil.
+func (ho *hashObj) Write(p []byte) (int, error) {
+	if ho.xof != nil {
+		return ho.xof.Write(p)
+	}
+	return ho.h.Write(p)
+}
+
 // hashUpdate feeds bytes into the running hash. Mirrors EVP_update_impl.
 //
 // CPython: Modules/_hashopenssl.c:674 EVP_update_impl
@@ -168,14 +218,19 @@ func hashUpdate(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if err != nil {
 		return nil, err
 	}
-	h.h.Write(b)
+	if h.xof != nil {
+		h.xof.Write(b)
+	} else {
+		h.h.Write(b)
+	}
 	return objects.None(), nil
 }
 
-// hashDigest returns the current digest as a bytes object. Mirrors
-// EVP_digest_impl.
+// hashDigest returns the current digest as a bytes object. For XOF hashes
+// (shake_128, shake_256), a length argument is required.
 //
 // CPython: Modules/_hashopenssl.c:593 EVP_digest_impl
+// CPython: Modules/sha3module.c:576 py_shake_128_digest
 func hashDigest(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: descriptor 'digest' requires a '_hashlib.HASH' object")
@@ -184,15 +239,28 @@ func hashDigest(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'digest' requires a '_hashlib.HASH' object")
 	}
-	// Use Sum on a copy so the hash state is not finalized.
+	if h.xof != nil {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: digest() requires a length argument for %s", h.name)
+		}
+		length, err := xofLength(args[1])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]byte, length)
+		c := cloneShake(h)
+		c.xof.Read(out)
+		return objects.NewBytes(out), nil
+	}
 	sum := h.h.Sum(nil)
 	return objects.NewBytes(sum), nil
 }
 
 // hashHexdigest returns the current digest as a hex-encoded string.
-// Mirrors EVP_hexdigest_impl.
+// For XOF hashes (shake_128, shake_256), a length argument is required.
 //
 // CPython: Modules/_hashopenssl.c:632 EVP_hexdigest_impl
+// CPython: Modules/sha3module.c:596 py_shake_128_hexdigest
 func hashHexdigest(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: descriptor 'hexdigest' requires a '_hashlib.HASH' object")
@@ -201,14 +269,60 @@ func hashHexdigest(args []objects.Object, _ map[string]objects.Object) (objects.
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'hexdigest' requires a '_hashlib.HASH' object")
 	}
+	if h.xof != nil {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: hexdigest() requires a length argument for %s", h.name)
+		}
+		length, err := xofLength(args[1])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]byte, length)
+		c := cloneShake(h)
+		c.xof.Read(out)
+		return objects.NewStr(hex.EncodeToString(out)), nil
+	}
 	sum := h.h.Sum(nil)
 	return objects.NewStr(hex.EncodeToString(sum)), nil
 }
 
+// cloneShake creates a copy of a SHAKE hashObj by marshalling the XOF state.
+// sha3.SHAKE implements encoding.BinaryMarshaler so state transfer is lossless.
+//
+// CPython: Modules/sha3module.c py_sha3_copy
+func cloneShake(src *hashObj) *hashObj {
+	info := shakeAlgorithms[src.name]
+	newXOF := info.newFunc()
+	if state, err := src.xof.MarshalBinary(); err == nil {
+		_ = newXOF.UnmarshalBinary(state)
+	}
+	dst := &hashObj{
+		name:      src.name,
+		xof:       newXOF,
+		blockSize: src.blockSize,
+	}
+	dst.Init(HashType)
+	return dst
+}
+
+// xofLength extracts an integer byte-length from a Python int argument.
+func xofLength(o objects.Object) (int, error) {
+	i, ok := o.(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: length must be an integer, not '%T'", o)
+	}
+	n, ok2 := i.Int64()
+	if !ok2 || n < 0 {
+		return 0, fmt.Errorf("ValueError: length must be non-negative")
+	}
+	return int(n), nil
+}
+
 // hashCopy returns a copy of the hash object with the same internal state.
-// Mirrors EVP_copy_impl.
+// Mirrors EVP_copy_impl. For XOF types, *sha3.SHAKE.Clone() is used.
 //
 // CPython: Modules/_hashopenssl.c:570 EVP_copy_impl
+// CPython: Modules/sha3module.c py_sha3_copy
 func hashCopy(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: descriptor 'copy' requires a '_hashlib.HASH' object")
@@ -217,35 +331,27 @@ func hashCopy(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'copy' requires a '_hashlib.HASH' object")
 	}
-	// Clone by extracting the current digest-in-progress and creating a new
-	// hash seeded with the same bytes via the standard io.Writer path.
-	// Go's hash.Hash does not expose a Clone interface, so we copy state by
-	// summing a snapshot and replaying from scratch. This is safe for all
-	// standard-library hash types because Sum does not finalize the state.
 	dst := &hashObj{
 		name:       src.name,
 		digestSize: src.digestSize,
 		blockSize:  src.blockSize,
 	}
-	// Re-create a fresh hash and feed the in-progress bytes.
+	if src.xof != nil {
+		c := cloneShake(src)
+		dst.xof = c.xof
+		dst.Init(HashType)
+		return dst, nil
+	}
 	info := algorithms[src.name]
 	dst.h = info.newFunc()
-	// Feed the accumulated bytes via the snapshot approach: write the
-	// difference between an empty Sum and the current Sum into the new
-	// hasher. Because standard Go hash implementations accumulate state
-	// incrementally and Sum appends without altering state, we instead use
-	// a marshal/unmarshal approach when the hash implements encoding.BinaryMarshaler.
-	//
-	// Fall back: construct a new hasher and copy accumulated data through
-	// the snapshot. Go 1.26 crypto hashes implement BinaryMarshaler.
 	type marshaler interface {
 		MarshalBinary() ([]byte, error)
 		UnmarshalBinary([]byte) error
 	}
-	if m, ok := src.h.(marshaler); ok {
+	if m, ok2 := src.h.(marshaler); ok2 {
 		state, err := m.MarshalBinary()
 		if err == nil {
-			if u, ok := dst.h.(marshaler); ok {
+			if u, ok3 := dst.h.(marshaler); ok3 {
 				if err2 := u.UnmarshalBinary(state); err2 == nil {
 					dst.Init(HashType)
 					return dst, nil
@@ -253,7 +359,6 @@ func hashCopy(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 			}
 		}
 	}
-	// Fallback: return a zeroed copy (only the algorithm info is shared).
 	dst.Init(HashType)
 	return dst, nil
 }
@@ -337,6 +442,32 @@ func opensslSHA512(args []objects.Object, kwargs map[string]objects.Object) (obj
 	return constructorFor("sha512", args, kwargs)
 }
 
+// openssl_sha3_224 / sha3_256 / sha3_384 / sha3_512 convenience constructors.
+//
+// CPython: Modules/sha3module.c sha3_224_new / sha3_256_new / ...
+func opensslSHA3_224(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("sha3_224", args, kw)
+}
+func opensslSHA3_256(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("sha3_256", args, kw)
+}
+func opensslSHA3_384(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("sha3_384", args, kw)
+}
+func opensslSHA3_512(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("sha3_512", args, kw)
+}
+
+// openssl_shake_128 / openssl_shake_256 convenience constructors.
+//
+// CPython: Modules/sha3module.c shake_128_new / shake_256_new
+func opensslShake128(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("shake_128", args, kw)
+}
+func opensslShake256(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return constructorFor("shake_256", args, kw)
+}
+
 // constructorFor is the shared body for all openssl_* convenience functions.
 // It accepts an optional data positional argument and optional data/string
 // keyword arguments, exactly as the CPython clinic does.
@@ -388,6 +519,12 @@ func buildModule() (*objects.Module, error) {
 		{"openssl_sha256", objects.NewBuiltinFunction("openssl_sha256", opensslSHA256)},
 		{"openssl_sha384", objects.NewBuiltinFunction("openssl_sha384", opensslSHA384)},
 		{"openssl_sha512", objects.NewBuiltinFunction("openssl_sha512", opensslSHA512)},
+		{"openssl_sha3_224", objects.NewBuiltinFunction("openssl_sha3_224", opensslSHA3_224)},
+		{"openssl_sha3_256", objects.NewBuiltinFunction("openssl_sha3_256", opensslSHA3_256)},
+		{"openssl_sha3_384", objects.NewBuiltinFunction("openssl_sha3_384", opensslSHA3_384)},
+		{"openssl_sha3_512", objects.NewBuiltinFunction("openssl_sha3_512", opensslSHA3_512)},
+		{"openssl_shake_128", objects.NewBuiltinFunction("openssl_shake_128", opensslShake128)},
+		{"openssl_shake_256", objects.NewBuiltinFunction("openssl_shake_256", opensslShake256)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
