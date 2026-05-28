@@ -98,6 +98,8 @@ func init() {
 	}
 	emptyTuple = &Tuple{}
 	emptyTuple.init(TupleType)
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(TupleType)
 }
 
 // NewTuple builds a tuple from items. The empty tuple returns the

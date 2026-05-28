@@ -119,6 +119,9 @@ func init() {
 	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
 	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
 	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(SetType)
+	AddIterSlotWrappers(FrozensetType)
 }
 
 // setTraverse visits each element of a set or frozenset.

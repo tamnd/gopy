@@ -68,6 +68,19 @@ type Unicode struct {
 	attrs *Dict
 }
 
+// AttrDict implements AttrDictHolder so MemberDescr can store __slots__
+// values in the attrs dict for str subclasses.
+// CPython: Objects/object.c _PyObject_GetDictPtr (str-subclass path)
+func (u *Unicode) AttrDict() *Dict { return u.attrs }
+
+// EnsureAttrDict allocates the attrs dict on first use.
+func (u *Unicode) EnsureAttrDict() *Dict {
+	if u.attrs == nil {
+		u.attrs = NewDict()
+	}
+	return u.attrs
+}
+
 // strType is the type singleton for str.
 //
 // CPython: Objects/unicodeobject.c:L15188 PyUnicode_Type
@@ -274,6 +287,8 @@ func init() {
 			return strings.Contains(hs.v, ns.v), nil
 		},
 	}
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(strType)
 }
 
 // strIterator is the iterator returned by iter(str). It walks the

@@ -54,6 +54,8 @@ func init() {
 	BytesType.Number = &NumberMethods{
 		Remainder: bytesModulo,
 	}
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(BytesType)
 }
 
 // bytesModulo implements bytes % args (PEP 461).
