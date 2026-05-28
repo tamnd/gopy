@@ -13,7 +13,7 @@ description: "Port CPython 3.14's Lib/test/ behaviour suite into gopy. v0.0-v0.1
 
 Infrastructure (gates the panel work below):
 - [x] MANIFEST: `test/cpython/MANIFEST.txt` lists 447 entries
-      (248 ready, 125 deferred, 66 out-of-scope, 8 done).
+      (191 ready, 119 deferred, 67 out-of-scope, 69 done, 1 pending).
 - [x] Harness: `test/regrtest/` walks the manifest and shells out to
       the gopy binary per entry. Outcome buckets: pass / fail / skip
       / missing / timeout / error.
@@ -218,11 +218,11 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 | test_codecencodings_jp | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_kr | v0.8 | deferred | CJK codecs not shipped |
 | test_codecencodings_tw | v0.8 | deferred | CJK codecs not shipped |
-| test_codecmaps_cn | v0.8 | done | 9/9 green (9 skipped, urllib not shipped) — `0bb38b3e` |
-| test_codecmaps_hk | v0.8 | done | 3/3 green (3 skipped, urllib not shipped) — `0bb38b3e` |
-| test_codecmaps_jp | v0.8 | done | 15/15 green (15 skipped, urllib not shipped) — `0bb38b3e` |
-| test_codecmaps_kr | v0.8 | done | 9/9 green (9 skipped, urllib not shipped) — `0bb38b3e` |
-| test_codecmaps_tw | v0.8 | done | 6/6 green (6 skipped, urllib not shipped) — `0bb38b3e` |
+| test_codecmaps_cn | v0.8 | done | 9/9 green (0 skipped) — `47e799f4` |
+| test_codecmaps_hk | v0.8 | done | 3/3 green (0 skipped) — `47e799f4` |
+| test_codecmaps_jp | v0.8 | done | 15/15 green (0 skipped) — `47e799f4` |
+| test_codecmaps_kr | v0.8 | done | 9/9 green (0 skipped) — `47e799f4` |
+| test_codecmaps_tw | v0.8 | done | 6/6 green (0 skipped) — `47e799f4` |
 | test_codecs | v0.8 | done | 287/287 (13 skipped) — UTF-16/32 incremental, charmap sentinel, CodecInfo Iter, utf_8_decode final, surrogates (`1d2a89f6`) |
 | test_charmapcodec | v0.8 | deferred | charmap codec not shipped |
 | test_multibytecodec | v0.8 | done | 35/36 green (1 skipped, cpython_only) — `0bb38b3e` |

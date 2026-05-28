@@ -203,11 +203,11 @@ test_codecencodings_iso2022	deferred	v0.8.0	iso2022 codecs not shipped
 test_codecencodings_jp	deferred	v0.8.0	CJK codecs not shipped
 test_codecencodings_kr	deferred	v0.8.0	CJK codecs not shipped
 test_codecencodings_tw	deferred	v0.8.0	CJK codecs not shipped
-test_codecmaps_cn	done	v0.12.5	9/9 green (9 skipped, urllib not shipped)
-test_codecmaps_hk	done	v0.12.5	3/3 green (3 skipped, urllib not shipped)
-test_codecmaps_jp	done	v0.12.5	15/15 green (15 skipped, urllib not shipped)
-test_codecmaps_kr	done	v0.12.5	9/9 green (9 skipped, urllib not shipped)
-test_codecmaps_tw	done	v0.12.5	6/6 green (6 skipped, urllib not shipped)
+test_codecmaps_cn	done	v0.12.5	9/9 green (0 skipped)
+test_codecmaps_hk	done	v0.12.5	3/3 green (0 skipped)
+test_codecmaps_jp	done	v0.12.5	15/15 green (0 skipped)
+test_codecmaps_kr	done	v0.12.5	9/9 green (0 skipped)
+test_codecmaps_tw	done	v0.12.5	6/6 green (0 skipped)
 test_codecs	done	v0.12.5	287/287 green (13 skipped)
 test_multibytecodec	done	v0.12.5	35/36 green (1 skipped, cpython_only)
 

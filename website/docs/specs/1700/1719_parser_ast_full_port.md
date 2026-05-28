@@ -8,8 +8,11 @@ description: "Move the v0.10.2 parser panel (27 top-level test_*.py + test_ast/,
 
 ## Status
 
-Active. Branch `feat/v0.12.5-spec-1719-parser-ast`. PR #78. Spec scaffold
-landed; vendoring + gap closers proceed under follow-up commits.
+Shipped. All 27 top-level rows plus `test_ast/` and `test_future_stmt/`
+green on macOS/Linux/Windows. PR #78 (`9d0a3199`); test_asdl_parser,
+test_ast/, test_patma closed via PR #81 (`00546397`).
+`test_peg_generator/` stays deferred (PEP generator port is its own
+follow-up spec).
 
 Spec 1710 + 1718 closed the lexer panel (PR #76, squash `bd1e9cce`),
 which clears the five `Lexer / tokenizer` rows in spec 1700. The next
@@ -310,15 +313,15 @@ shows `done` for every non-deferred row.
 
 - [x] P0: write spec 1719 (this file) and mark lexer panel done in spec 1700
 - [x] P1: vendor 27 top-level tests + 3 packages, record baseline counts (`60ad2e42` + this commit)
-- [ ] P2: ASDL grammar + node-type parity (diff Python.asdl, regen nodes_gen.go)
-- [ ] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync
-- [ ] P4: `Lib/_ast_unparse.py` port; `test_unparse` green
-- [x] P5 (partial): `test_fstring` 90/90; `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 3/3; `test_string_literals` 15/20 (5 blocked on warnings.catch_warnings); `test_syntax` 45/45 (7 skipped); `test_type_comments` 17/18 (TYPE_IGNORE lexer, pegen collection, ModeFunc, _ast bridge, set tombstone)
+- [x] P2: ASDL grammar + node-type parity — test_asdl_parser 6/6 (`7db2ad9b`)
+- [x] P3: `Python/ast.c` validator port + `Lib/ast.py` byte-identical sync — test_ast/ 215/215 (`00546397`)
+- [x] P4: `Lib/_ast_unparse.py` port; `test_unparse` 79/79 green (`9d0a3199`)
+- [x] P5: `test_fstring` 90/90; `test_eof` 6/6; `test_named_expressions` 74/74; `test_tstring` 12/12; `test_unicode_identifiers` 5/5; `test_string_literals` 20/20; `test_syntax` 45/45 (7 skipped); `test_type_comments` 18/18 (1 skip)
 - [x] P6: grammar feature panel (PEP 695 generic class/alias/function codegen + _typing module shipped; PEP 646 unpack + 634 match already passing)
 - [x] P7 (grammar): `test_grammar` 75/75 — SyntaxWarning missed-comma, PEP 649 function annotations, name mangling, non-simple annotation targets, MRO isolation for class annotations, break-in-finally stackdepth
-- [ ] P7 (remaining): symtable + class-creation rows (`test_global / test_scope / test_metaclass / test_subclassinit / test_future_stmt`)
-- [ ] P8: `test_int_literal` re-run
-- [ ] P9: PEG generator follow-up spec (deferred)
+- [x] P7 (remaining): `test_global` 20/20, `test_scope` 41/41, `test_metaclass` 1/1, `test_subclassinit` 17/17, `test_future_stmt` 7/7 (`9d0a3199`)
+- [x] P8: `test_int_literal` 6/6 green (`9d0a3199`)
+- [x] P9: PEG generator deferred — `test_peg_generator/` row stays `deferred` in spec 1700 with pointer to follow-up spec
 - [x] P10: flip spec 1700 panel + #476 checklist — test_asdl_parser (skip at `00546397`, 6/6 green at `7db2ad9b`), test_patma (328/328), test_ast/ (215/215) closed (PR #81, `00546397`)
 
 ## Working notes
