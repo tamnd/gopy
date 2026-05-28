@@ -51,6 +51,8 @@ func buildModule() (*objects.Module, error) {
 		{"AbstractAsyncContextManager", abstractCMType},
 		{"ContextDecorator", contextDecoratorType},
 		{"AsyncContextDecorator", contextDecoratorType},
+		{"_GeneratorContextManager", genCMType},
+		{"_GeneratorContextManagerBase", abstractCMType},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -91,6 +93,7 @@ func newGenCMType() *objects.Type {
 	t := objects.NewType("_GeneratorContextManager", []*objects.Type{abstractCMType})
 	t.HasDict = true
 	t.Getattro = objects.GenericGetAttr
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", genCMInit))
 	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", genCMEnter))
 	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", genCMExit))
 	objects.SetTypeDescr(t, "__call__", objects.NewMethodDescr(t, "__call__", genCMCall))
@@ -102,6 +105,74 @@ func newGenCMType() *objects.Type {
 		return genCMCall(all, kwargs)
 	}
 	return t
+}
+
+// genCMInit initialises a _GeneratorContextManager instance created by
+// direct instantiation (e.g. MockContextManager(func, args, kwds)).
+// Stores func/args/kwds for _recreate_cm and drives func(*args, **kwds)
+// to obtain the generator.
+//
+// CPython: Lib/contextlib.py:105 _GeneratorContextManagerBase.__init__
+func genCMInit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 4 {
+		return nil, fmt.Errorf("TypeError: __init__() takes 3 arguments (%d given)", len(args)-1)
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __init__ self is not Instance")
+	}
+	fn := args[1]
+	posArgs := args[2]
+	kwdArg := args[3]
+
+	var callArgs *objects.Tuple
+	switch v := posArgs.(type) {
+	case *objects.Tuple:
+		callArgs = v
+	case *objects.List:
+		items := make([]objects.Object, v.Len())
+		for i := range items {
+			items[i] = v.Item(i)
+		}
+		callArgs = objects.NewTuple(items)
+	default:
+		callArgs = objects.NewTuple(nil)
+	}
+
+	var callKwargs *objects.Dict
+	if d, ok := kwdArg.(*objects.Dict); ok {
+		callKwargs = d
+	}
+
+	genObj, err := objects.Call(fn, callArgs, callKwargs)
+	if err != nil {
+		return nil, err
+	}
+
+	d := inst.EnsureDict()
+	_ = d.SetItem(objects.NewStr("gen"), genObj)
+	_ = d.SetItem(objects.NewStr("func"), fn)
+	_ = d.SetItem(objects.NewStr("args"), posArgs)
+	_ = d.SetItem(objects.NewStr("kwds"), kwdArg)
+
+	// Install _recreate_cm so __call__ works on direct subclasses too.
+	var recreateHolder [1]objects.Object
+	capturedFn := fn
+	capturedArgs := callArgs
+	capturedKwargs := callKwargs
+	recreateHolder[0] = objects.NewBuiltinFunction("_recreate_cm", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		newGen, err := objects.Call(capturedFn, capturedArgs, capturedKwargs)
+		if err != nil {
+			return nil, err
+		}
+		newInst := objects.NewInstance(inst.Type())
+		nd := newInst.EnsureDict()
+		_ = nd.SetItem(objects.NewStr("gen"), newGen)
+		_ = nd.SetItem(objects.NewStr("_recreate"), recreateHolder[0])
+		return newInst, nil
+	})
+	_ = d.SetItem(objects.NewStr("_recreate"), recreateHolder[0])
+	return objects.None(), nil
 }
 
 // contextManager implements @contextmanager. Decorating `func` returns
@@ -248,17 +319,22 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		return nil, fmt.Errorf("RuntimeError: generator didn't stop after throw()")
 	}
 	if errors.Is(thrErr, objects.ErrStopIteration) {
-		// Generator exited cleanly: exception was swallowed (truthy
-		// return) unless it was the same StopIteration we threw, which
-		// we cannot identity-compare across the boundary. Return True
-		// to suppress.
+		// Generator exited cleanly after catching (or not catching) the
+		// exception. CPython: `except StopIteration as exc: return exc is not value`
+		// — suppress if the StopIteration is not the thing we threw in.
+		// Since we threw a non-StopIteration (valArg), this is True → suppress.
 		return objects.NewBool(true), nil
 	}
-	if errors.Is(thrErr, throwErr) {
-		// Same Go-level error round-tripped. Do not suppress, the with
-		// machinery will re-raise the original.
+	// CPython: `except BaseException as exc: if exc is not value: raise; return False`
+	// Check Python-level identity: if the generator re-raised the SAME
+	// exception object we threw in, return False (don't suppress).
+	// The generator goroutine wraps the exception in *RaisedError before
+	// sending it back, preserving the Python object for this identity check.
+	var re *objects.RaisedError
+	if errors.As(thrErr, &re) && re.Exc == valArg {
 		return objects.NewBool(false), nil
 	}
+	// Different exception from the generator — re-raise.
 	return nil, thrErr
 }
 

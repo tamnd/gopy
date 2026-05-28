@@ -102,7 +102,7 @@ test_pow	ready	v0.4.0	7/7 pass
 test_richcmp	ready	v0.2.0	11/11 pass
 test_typechecks	done	v0.12.5	6/6 green
 test_unary	done	v0.12.5	6/6 green
-test_with	ready	v0.9.0	54/54 pass
+test_with	done	v0.12.5	54/54 green. _GeneratorContextManager.__init__ + frame.clear + traceback identity fix + LOAD_SPECIAL TypeError messages + PrevInstr column fix + traceback dedup guard
 
 # ---- Iterators / generators / coroutines ---------------------------
 test_asyncgen	ready	v0.9.0	85/85 pass
