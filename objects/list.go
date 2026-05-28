@@ -33,6 +33,7 @@ func init() {
 		SetItem:       listSetItem,
 		InPlaceConcat: listInPlaceConcat,
 		InPlaceRepeat: listInPlaceRepeat,
+		Contains:      listContains,
 	}
 	// Mapping protocol entries for list mirror CPython's
 	// list_subscript / list_ass_subscript, which is what handles
@@ -140,6 +141,23 @@ func (l *List) SetSlice(start, stop int, values []Object) {
 
 func listLen(o Object) (int, error) {
 	return o.(*List).Len(), nil
+}
+
+// listContains mirrors list_contains / PySequence_Contains. Identity
+// check before equality so non-reflexive values like NaN are found.
+//
+// CPython: Objects/listobject.c:L466 list_contains
+func listContains(haystack, needle Object) (bool, error) {
+	for _, item := range haystack.(*List).items {
+		eq, err := RichCmpBool(item, needle, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func listGetItem(o Object, i int) (Object, error) {

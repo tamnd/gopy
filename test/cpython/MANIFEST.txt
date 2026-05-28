@@ -86,11 +86,11 @@ test_symtable	ready	v0.5.0	32/32 pass
 test_thread_local_bytecode	ready	post-0.12	6/6 pass (all skipped — only run under --enable-gil=no build)
 
 # ---- VM / eval loop ------------------------------------------------
-test_augassign	ready	v0.5.0	7/7 pass
+test_augassign	done	v0.12.5	7/7 green. Inplace op dispatch fix + None-slot TypeError (callBinaryDunder, isOwnDescriptor, slotTpRichCompare)
 test_call	ready	v0.9.0	186/186 pass
 test_compare	ready	v0.2.0	16/16 pass
 test_contains	ready	v0.2.0	4/4 pass
-test_dynamic	ready	v0.7.0	11/11 pass
+test_dynamic	done	v0.12.5	11/11 green
 test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14; no standalone test_eval.py exists
 test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)
 test_frame	ready	v0.9.0	58/59 pass (skipped=8); 1 fail: test_basic f_builtins==__builtins__ module-vs-dict artifact when run as __main__
@@ -100,8 +100,8 @@ test_iter	ready	v0.2.0	57/57 pass
 test_iterlen	ready	v0.2.0	22/22 pass
 test_pow	ready	v0.4.0	7/7 pass
 test_richcmp	ready	v0.2.0	11/11 pass
-test_typechecks	ready	v0.2.0	6/6 pass
-test_unary	ready	v0.4.0	6/6 pass
+test_typechecks	done	v0.12.5	6/6 green
+test_unary	done	v0.12.5	6/6 green
 test_with	ready	v0.9.0	54/54 pass
 
 # ---- Iterators / generators / coroutines ---------------------------
@@ -247,7 +247,7 @@ test_random	ready	v0.7.0	114/114 pass (skipped=2)
 test_secrets	ready	v0.12.5	11/11 pass
 
 # ---- Math / numbers ------------------------------------------------
-test_binop	ready	v0.4.0	12/12 pass
+test_binop	done	v0.12.5	12/12 green. None-slot blocking (callBinaryDunder TypeError) + subtype-first RichCmp dispatch
 test_cmath	ready	v0.4.0	33/33 pass
 test_decimal	ready	v0.12.5	732/732 pass (skipped=8); vendor decimaltestdata/ alongside
 test_fractions	ready	v0.4.0	50/50 pass

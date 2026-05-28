@@ -824,12 +824,15 @@ func fixupSubscriptSlots(t *Type) {
 }
 
 // isOwnDescriptor reports whether t's namespace itself supplies the
-// named dunder via a real descriptor. Inherited descriptors come back
-// from LookupDescriptor with a different providingType; we treat those
-// as "no override" so the inherited slot stays in place.
+// named dunder. Inherited descriptors come back from LookupDescriptor
+// with a different providingType; we treat those as "no override" so
+// the inherited slot stays in place. None is also considered an own
+// descriptor when it lives directly on t (explicit slot blocker).
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot (None as blocker)
 func isOwnDescriptor(t *Type, name string) bool {
 	d, providing := LookupDescriptor(t, name)
-	if d == nil || d == None() {
+	if d == nil {
 		return false
 	}
 	return providing == t
@@ -1025,12 +1028,18 @@ func methodIsOverloaded(a, b Object, rdunder string) bool {
 
 // callBinaryDunder looks up dunder on self.Type() via the MRO and calls
 // it with (self, other). Returns (nil, nil) if the dunder is not found.
+// If the dunder is explicitly set to None (slot blocker), returns TypeError,
+// mirroring CPython's vectorcall_maybe which calls None and gets TypeError.
 //
 // CPython: Objects/typeobject.c:9960 vectorcall_maybe
+// CPython: Objects/typeobject.c:9997 SLOT1BINFULL
 func callBinaryDunder(self, other Object, dunder string) (Object, error) {
 	descr, _ := LookupDescriptor(self.Type(), dunder)
-	if descr == nil || IsNone(descr) {
+	if descr == nil {
 		return nil, nil
+	}
+	if IsNone(descr) {
+		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
 	}
 	var bound Object
 	if dg := descr.Type().DescrGet; dg != nil {
@@ -1287,13 +1296,19 @@ func slotTpFinalize(o Object) {
 
 // slotTpRichCompare looks up the dunder that matches op and calls it,
 // returning NotImplemented when the dunder is absent so the protocol
-// can try the reflected operator on the other operand.
+// can try the reflected operator on the other operand. When the dunder
+// is explicitly None (slot blocker), raises TypeError as CPython does.
 //
 // CPython: Objects/typeobject.c:8347 slot_tp_richcompare
+// CPython: Objects/typeobject.c:3037 vectorcall_maybe (None raises TypeError)
 func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	name := richCompareDunderName(op)
-	if d, _ := LookupDescriptor(a.Type(), name); d == nil {
+	d, _ := LookupDescriptor(a.Type(), name)
+	if d == nil {
 		return notImplemented(), nil
+	}
+	if IsNone(d) {
+		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
 	}
 	fn, err := lookupMethodOnSelf(a, name)
 	if err != nil {

@@ -145,7 +145,28 @@ func Hash(o Object) (int64, error) {
 // neither operand handles the comparison. Mirrors PyObject_RichCompare.
 //
 // CPython: Objects/object.c:L737 PyObject_RichCompare
+// CPython: Objects/object.c:L827 do_richcompare
 func RichCmp(a, b Object, op CompareOp) (Object, error) {
+	checkedReverse := false
+	// When b's type is a strict subtype of a's type and overrides the
+	// comparison slot, give b a chance first (with the swapped op).
+	// This mirrors do_richcompare's subtype-first check so that a
+	// subclass that blocks a comparison with None is respected before
+	// the base class's slot runs.
+	//
+	// CPython: Objects/object.c:L840 do_richcompare (subtype check)
+	if a.Type() != b.Type() && IsSubtype(b.Type(), a.Type()) {
+		if r := b.Type().RichCmp; r != nil {
+			checkedReverse = true
+			out, err := r(b, a, reflectOp(op))
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if r := a.Type().RichCmp; r != nil {
 		out, err := r(a, b, op)
 		if err != nil {
@@ -155,13 +176,15 @@ func RichCmp(a, b Object, op CompareOp) (Object, error) {
 			return out, nil
 		}
 	}
-	if r := b.Type().RichCmp; r != nil {
-		out, err := r(b, a, reflectOp(op))
-		if err != nil {
-			return nil, err
-		}
-		if !IsNotImplemented(out) {
-			return out, nil
+	if !checkedReverse {
+		if r := b.Type().RichCmp; r != nil {
+			out, err := r(b, a, reflectOp(op))
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
 		}
 	}
 	switch op {

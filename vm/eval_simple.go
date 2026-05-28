@@ -1226,10 +1226,12 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberAdd(a, b)
 	case nbInplaceAdd:
 		return objects.NumberInPlaceAdd(a, b)
-	case nbSubtract, nbInplaceSubtract:
+	case nbSubtract:
 		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Subtract
 		})
+	case nbInplaceSubtract:
+		return objects.NumberInPlaceSubtract(a, b)
 	case nbMult:
 		return objects.NumberMultiply(a, b)
 	case nbInplaceMult:
@@ -1238,40 +1240,58 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberMatrixMultiply(a, b)
 	case nbInplaceMatrixMultiply:
 		return objects.NumberInPlaceMatrixMultiply(a, b)
-	case nbTrueDivide, nbInplaceTrueDivide:
+	case nbTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide
 		})
-	case nbFloorDivide, nbInplaceFloorDivide:
+	case nbInplaceTrueDivide:
+		return objects.NumberInPlaceTrueDivide(a, b)
+	case nbFloorDivide:
 		return numericForward(a, b, "//", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.FloorDivide
 		})
-	case nbRemainder, nbInplaceRemainder:
+	case nbInplaceFloorDivide:
+		return objects.NumberInPlaceFloorDivide(a, b)
+	case nbRemainder:
 		return numericForward(a, b, "%", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Remainder
 		})
-	case nbAnd, nbInplaceAnd:
+	case nbInplaceRemainder:
+		return objects.NumberInPlaceRemainder(a, b)
+	case nbAnd:
 		return numericForward(a, b, "&", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.And
 		})
-	case nbOr, nbInplaceOr:
+	case nbInplaceAnd:
+		return objects.NumberInPlaceAnd(a, b)
+	case nbOr:
 		return numericForward(a, b, "|", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Or
 		})
-	case nbXor, nbInplaceXor:
+	case nbInplaceOr:
+		return objects.NumberInPlaceOr(a, b)
+	case nbXor:
 		return numericForward(a, b, "^", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Xor
 		})
-	case nbLshift, nbInplaceLshift:
+	case nbInplaceXor:
+		return objects.NumberInPlaceXor(a, b)
+	case nbLshift:
 		return numericForward(a, b, "<<", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Lshift
 		})
-	case nbRshift, nbInplaceRshift:
+	case nbInplaceLshift:
+		return objects.NumberInPlaceLshift(a, b)
+	case nbRshift:
 		return numericForward(a, b, ">>", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Rshift
 		})
-	case nbPower, nbInplacePower:
+	case nbInplaceRshift:
+		return objects.NumberInPlaceRshift(a, b)
+	case nbPower:
 		return powerOp(a, b, nil)
+	case nbInplacePower:
+		return objects.NumberInPlacePower(a, b, nil)
 	case nbSubscr:
 		return getItem(a, b)
 	}
@@ -1623,15 +1643,11 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 		return false, ierr
 	}
 	for _, item := range items {
-		eq, eerr := objects.RichCmp(item, needle, objects.CompareEQ)
+		eq, eerr := objects.RichCmpBool(item, needle, objects.CompareEQ)
 		if eerr != nil {
 			return false, eerr
 		}
-		truthy, terr := objects.IsTruthy(eq)
-		if terr != nil {
-			return false, terr
-		}
-		if truthy {
+		if eq {
 			return true, nil
 		}
 	}
