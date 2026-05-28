@@ -228,7 +228,7 @@ test_fileutils	deferred	v0.10.1	C-level filesystem path helpers
 test_fnmatch	ready	v0.10.1	fnmatch module
 test_genericpath	ready	v0.10.1	shared os.path helpers
 test_glob	ready	v0.10.1	glob module
-test_mmap	deferred	v0.10.1	mmap module not shipped
+test_mmap	ready	v0.10.1	51/51 pass (skipped=9)
 test_ntpath	ready	v0.10.1	105/105 pass (skipped=21)
 test_nturl2path	deferred	v0.10.1	windows-only
 test_os	ready	v0.10.1	os module
@@ -328,7 +328,7 @@ test_tracemalloc	ready	v0.11.0	51/51 pass
 test_asyncio/	deferred	v0.9.0	asyncio package on top of v0.9 coroutines
 test_concurrent_futures/	deferred	v0.10.1	concurrent.futures
 test_eintr	ready	v0.10.1	25/25 pass
-test_fork1	deferred	v0.10.1	os.fork tests
+test_fork1	ready	v0.10.1	4/4 pass
 test_multiprocessing_fork/	deferred	v0.10.1	multiprocessing fork start method
 test_multiprocessing_forkserver/	deferred	v0.10.1	multiprocessing forkserver
 test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
@@ -341,8 +341,8 @@ test_threadedtempfile	ready	v0.10.1	1/1 pass (skipped=1)
 test_threading	ready	v0.7.0	threading on top of pythread
 test_threading_local	ready	v0.7.0	22/22 pass
 test_threadsignals	ready	v0.10.1	6/6 pass (skipped=2)
-test_wait3	deferred	v0.10.1	os.wait3
-test_wait4	deferred	v0.10.1	os.wait4
+test_wait3	ready	v0.10.1	3/3 pass
+test_wait4	ready	v0.10.1	2/2 pass
 
 # ---- Stdlib data formats -------------------------------------------
 test_base64	ready	v0.10.1	base64 module
@@ -380,7 +380,7 @@ test_pickletools	ready	v0.8.0	190/190 pass
 test_plistlib	ready	v0.10.1	70/70 pass
 test_pprint	ready	v0.10.1	pprint module
 test_pulldom	ready	v0.10.1	11/11 pass (expected_failures=3)
-test_pyexpat	deferred	v0.10.1	needs libexpat binding
+test_pyexpat	ready	v0.10.1	60/60 pass (skipped=12)
 test_quopri	ready	v0.12.5	11/11 pass
 test_re	ready	v0.12.5	165/165 pass (skipped=3)
 test_sax	ready	v0.10.1	186/186 pass
@@ -458,7 +458,7 @@ test_smtplib	ready	post-0.12	85/85 pass
 test_smtpnet	deferred	post-0.12	smtplib live-net
 test_socket	ready	v0.12.5	746/746 pass (skipped=255)
 test_socketserver	ready	post-0.12	27/27 pass
-test_ssl	deferred	post-0.12	ssl
+test_ssl	ready	post-0.12	194/195 pass (skipped=15); 1 fail: self-signed cert verify on macOS, not a gopy bug
 test_timeout	ready	post-0.12	14/14 pass
 test_urllib	ready	post-0.12	101/101 pass (skipped=2)
 test_urllib2	ready	post-0.12	80/80 pass (skipped=1)
