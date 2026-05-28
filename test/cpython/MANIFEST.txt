@@ -91,7 +91,7 @@ test_call	ready	v0.9.0	186/186 pass
 test_compare	ready	v0.2.0	16/16 pass
 test_contains	ready	v0.2.0	4/4 pass
 test_dynamic	ready	v0.7.0	11/11 pass
-test_eval	ready	v0.10.1	eval() builtin
+test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14; no standalone test_eval.py exists
 test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)
 test_frame	ready	v0.9.0	58/59 pass (skipped=8); 1 fail: test_basic f_builtins==__builtins__ module-vs-dict artifact when run as __main__
 test_index	ready	v0.4.0	55/55 pass
@@ -176,7 +176,7 @@ test_frozen	ready	v0.8.0	3/3 pass
 test_import/	ready	v0.8.0	full import system panel
 test_importlib/	ready	v0.8.0	importlib package
 test_interpreters/	deferred	post-0.12	PEP 554 sub-suite
-test_module	ready	v0.7.0	module type
+test_module	ready	v0.7.0	package dir only (no flat test_module.py in CPython 3.14); see test_module/
 test_module/	ready	v0.7.0	module-level fixtures
 test_modulefinder	ready	v0.8.0	17/17 pass
 test_pkg	ready	v0.8.0	8/8 pass
@@ -307,7 +307,7 @@ test_pyrepl/	deferred	v0.10.1	pyrepl line editor
 test_readline	deferred	v0.10.1	readline integration
 test_repl	ready	v0.7.0	18/18 pass
 test_rlcompleter	deferred	v0.10.1	readline integration
-test_token	ready	v0.9.0	token module
+test_token	ready	v0.9.0	package dir only in CPython 3.14; see test_token/
 
 # ---- Profiling / tracing -------------------------------------------
 test_cprofile	deferred	v0.11.0	cProfile (C accelerator)
@@ -387,7 +387,7 @@ test_sax	deferred	v0.10.1	xml.sax not shipped
 test_shelve	deferred	v0.10.1	shelve depends on dbm
 test_shlex	ready	v0.10.1	19/19 pass
 test_sqlite3/	deferred	v0.10.1	sqlite3 not shipped
-test_string	ready	v0.10.1	string module (flat file)
+test_string	ready	v0.10.1	package dir only (no flat test_string.py in CPython 3.14); see test_string/
 test_string/	ready	v0.10.1	string sub-suite
 test_stringprep	ready	v0.10.1	1/1 pass
 test_struct	ready	v0.8.0	struct module
@@ -435,7 +435,7 @@ test_sys	ready	v0.7.0	96/97 pass (skipped=17); 1 fail: test_orig_argv — platfo
 test_sysconfig	ready	v0.10.1	35/37 pass (skipped=3); 2 fail: test_get_scheme_names + test_sysconfigdata_json — brew macOS build-env artifact, not a gopy bug
 test_timeit	ready	v0.10.1	41/41 pass
 test_tools/	out-of-scope	-	tools shipped with CPython only
-test_unittest	ready	v0.10.1	unittest module flat-file complement
+test_unittest	ready	v0.10.1	package dir only (no flat test_unittest.py in CPython 3.14); see test_unittest/
 test_venv	deferred	v0.10.1	venv depends on filesystem layout
 test_ensurepip	deferred	v0.10.1	pip bundling
 test_webbrowser	deferred	post-0.12	webbrowser module
