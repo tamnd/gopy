@@ -195,14 +195,14 @@ test_weakref	ready	v0.10.0	weakref + finalizer queue
 test_weakset	ready	v0.10.0	WeakSet on weakref
 
 # ---- Codecs / encodings --------------------------------------------
-test_charmapcodec	deferred	v0.8.0	charmap codec not shipped
+test_charmapcodec	ready	v0.12.5	4/4 pass
 test_codeccallbacks	done	v0.12.5	43/43 green
-test_codecencodings_cn	deferred	v0.8.0	CJK codecs not shipped
-test_codecencodings_hk	deferred	v0.8.0	CJK codecs not shipped
-test_codecencodings_iso2022	deferred	v0.8.0	iso2022 codecs not shipped
-test_codecencodings_jp	deferred	v0.8.0	CJK codecs not shipped
-test_codecencodings_kr	deferred	v0.8.0	CJK codecs not shipped
-test_codecencodings_tw	deferred	v0.8.0	CJK codecs not shipped
+test_codecencodings_cn	ready	v0.12.5	76/76 pass (skipped=2)
+test_codecencodings_hk	ready	v0.12.5	19/19 pass
+test_codecencodings_iso2022	ready	v0.12.5	95/95 pass (skipped=1)
+test_codecencodings_jp	ready	v0.12.5	133/133 pass
+test_codecencodings_kr	ready	v0.12.5	57/57 pass
+test_codecencodings_tw	ready	v0.12.5	19/19 pass
 test_codecmaps_cn	done	v0.12.5	9/9 green (0 skipped)
 test_codecmaps_hk	done	v0.12.5	3/3 green (0 skipped)
 test_codecmaps_jp	done	v0.12.5	15/15 green (0 skipped)
@@ -364,7 +364,7 @@ test_docxmlrpc	deferred	v0.10.1	xmlrpc not shipped
 test_email/	deferred	v0.10.1	email not shipped
 test_gzip	deferred	v0.10.1	gzip not shipped
 test_html	ready	v0.12.5	2/2 pass
-test_htmlparser	deferred	v0.12.5	_sre stack overflow on complex HTML patterns
+test_htmlparser	ready	v0.12.5	67/67 pass
 test_http_cookiejar	deferred	post-0.12	http.cookiejar
 test_http_cookies	deferred	post-0.12	http.cookies
 test_ipaddress	ready	v0.10.1	ipaddress module
@@ -452,11 +452,11 @@ test_netrc	deferred	post-0.12	netrc parser
 test_poll	deferred	post-0.12	poll selector
 test_poplib	deferred	post-0.12	poplib
 test_robotparser	deferred	post-0.12	robotparser
-test_select	pending	v0.12.5	module shipped; test blocked by fileno() on gopy IO objects
+test_select	ready	v0.12.5	6/6 pass
 test_selectors	deferred	post-0.12	selectors module
 test_smtplib	deferred	post-0.12	smtplib
 test_smtpnet	deferred	post-0.12	smtplib live-net
-test_socket	pending	v0.12.5	module shipped; test blocked by missing queue/threading imports
+test_socket	ready	v0.12.5	746/746 pass (skipped=255)
 test_socketserver	deferred	post-0.12	socketserver
 test_ssl	deferred	post-0.12	ssl
 test_timeout	deferred	post-0.12	socket timeout
