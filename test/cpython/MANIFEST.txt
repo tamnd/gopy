@@ -261,7 +261,7 @@ test_datetime	ready	v0.9.0	3606/3606 pass (skipped=32)
 test_strftime	ready	v0.9.0	4/4 pass (nonstandard %-format info lines are non-fatal)
 test_strptime	ready	v0.9.0	57/57 pass (skipped=48)
 test_time	ready	v0.9.0	63/63 pass (skipped=2)
-test_zoneinfo/	deferred	post-0.12	zoneinfo TZ database
+test_zoneinfo/	ready	post-0.12	261/261 pass (skipped=28)
 
 # ---- Collections / containers --------------------------------------
 test_array	ready	v0.10.1	890/890 pass
@@ -393,7 +393,7 @@ test_stringprep	ready	v0.10.1	1/1 pass
 test_struct	ready	v0.8.0	43/43 pass
 test_tarfile	ready	v0.10.1	740/740 pass (skipped=5)
 test_textwrap	ready	v0.10.1	68/68 pass
-test_tomllib/	deferred	v0.10.1	tomllib not shipped
+test_tomllib/	ready	v0.10.1	17/17 pass (run submodules directly; load_package_tests needs CPython runner)
 test_unittest/	ready	v0.10.1	517/518 pass (skipped=2; 1 runner-artifact: testmock/testprogram subprocess path); run via python -m test from CPython tree for full count
 test_uuid	ready	v0.10.1	120/120 pass (skipped=16)
 test_xml_dom_minicompat	ready	v0.10.1	11/11 pass
@@ -423,7 +423,7 @@ test__locale	ready	v0.7.0	6/6 pass (skipped=72)
 test_longexp	ready	v0.4.0	1/1 pass
 test_pdb	out-of-scope	-	pdb debugger
 test_platform	ready	v0.7.0	39/39 pass (skipped=3)
-test_pydoc/	deferred	v0.10.1	pydoc package
+test_pydoc/	ready	v0.10.1	106/120 pass (skipped=3; 14 fail: classmethod text_signature + doctest output format)
 test_regrtest	out-of-scope	-	regrtest is the harness itself
 test_remote_pdb	out-of-scope	-	pdb remote
 test_sched	ready	v0.10.1	11/11 pass
