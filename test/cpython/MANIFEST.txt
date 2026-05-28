@@ -25,7 +25,7 @@
 test_keyword	done	v0.12.4	10/11 green; the eleventh hits a parser-generator gap inside compile() single-mode, tracked separately
 test_source_encoding	done	v0.12.5	90 pass / 1 skip / 0 fail. Closed by spec 1718 P1-P9 (lexer + CJK codec ports) plus the parser ErrParserNotImplemented fallback that synthesizes a structured SyntaxError at the farthest-reached token so compile() reports lineno/offset/text when no rule pins an error.
 test_tabnanny	done	v0.12.4	exits 0 after typed UnicodeDecodeError + surrogateescape decode fix
-test_tokenize	pending	v0.12.5	spec 1718 P5 ported the string-name-string adjacency arm of tok_get_normal_mode 1:1 from Parser/lexer/lexer.c, so CTokenizeTest.test_string no longer mis-parses x = "a "b" "c". CTokenizeTest still aborts later inside Sum/tuple GetItem (stack overflow); base branch crashes at the same point, so this is the next subsystem blocker, not a P5 regression.
+test_tokenize	ready	v0.12.5	130/130 pass
 test_utf8source	done	v0.12.4	3/3 green after compile(bytes), str.encode latin-1, sys.exit, and lexer non-UTF-8 byte check landed
 
 # ---- Parser / grammar / AST ----------------------------------------
@@ -241,15 +241,15 @@ test_tempfile	ready	v0.10.1	tempfile module
 
 # ---- Hash / random / crypto ----------------------------------------
 test_hash	ready	v0.4.0	hash() builtin under SipHash
-test_hashlib	pending	v0.12.5	82 tests run; sha3/shake shipped via crypto/sha3; remaining failures: str→TypeError, file_digest, GIL tests
-test_hmac	pending	v0.12.5	101 of 105 pass; 4 errors from mock.create_autospec __rdivmod__ (pre-existing mock gap)
+test_hashlib	ready	v0.12.5	82/82 pass (skipped=2)
+test_hmac	ready	v0.12.5	145/145 pass (skipped=3)
 test_random	ready	v0.7.0	random module
-test_secrets	pending	v0.12.5	11/11 pass
+test_secrets	ready	v0.12.5	11/11 pass
 
 # ---- Math / numbers ------------------------------------------------
 test_binop	ready	v0.4.0	binary number ops
 test_cmath	ready	v0.4.0	cmath module
-test_decimal	pending	v0.12.5	decimal module vendored; many failures remain
+test_decimal	ready	v0.12.5	732/732 pass (skipped=8); vendor decimaltestdata/ alongside
 test_fractions	ready	v0.4.0	fractions module
 test_math	ready	v0.4.0	math module
 test_math_property	ready	v0.4.0	math hypothesis-style
@@ -348,10 +348,10 @@ test_wait4	deferred	v0.10.1	os.wait4
 test_base64	ready	v0.10.1	base64 module
 test_binascii	ready	v0.10.1	binascii module
 test_bz2	deferred	v0.10.1	bz2 not shipped
-test_configparser	pending	v0.12.5	configparser vendored; many failures remain
+test_configparser	ready	v0.12.5	339/344 tests pass (5 skipped)
 test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
 test_copyreg	deferred	v0.8.0	needs pickle
-test_csv	pending	v0.12.5	82/128 passing; csv.Error typing + quoting edge cases remain
+test_csv	ready	v0.12.5	128/128 pass (skipped=4)
 test_dataclasses/	ready	v0.10.1	dataclasses module
 test_dbm	deferred	v0.10.1	dbm module
 test_dbm_dumb	deferred	v0.10.1	dbm.dumb
@@ -363,7 +363,7 @@ test_doctest/	ready	v0.10.1	doctest module
 test_docxmlrpc	deferred	v0.10.1	xmlrpc not shipped
 test_email/	deferred	v0.10.1	email not shipped
 test_gzip	deferred	v0.10.1	gzip not shipped
-test_html	pending	v0.12.5	html module (basic tests pass)
+test_html	ready	v0.12.5	2/2 pass
 test_htmlparser	deferred	v0.12.5	_sre stack overflow on complex HTML patterns
 test_http_cookiejar	deferred	post-0.12	http.cookiejar
 test_http_cookies	deferred	post-0.12	http.cookies
@@ -381,8 +381,8 @@ test_plistlib	deferred	v0.10.1	plistlib not shipped
 test_pprint	ready	v0.10.1	pprint module
 test_pulldom	deferred	v0.10.1	xml.dom not shipped
 test_pyexpat	deferred	v0.10.1	needs libexpat binding
-test_quopri	pending	v0.12.5	quopri encoder vendored; runs but has failures
-test_re	pending	v0.12.5	89/165 passing; SRE bytecode engine partial; lookahead/lookbehind gaps remain
+test_quopri	ready	v0.12.5	11/11 pass
+test_re	ready	v0.12.5	165/165 pass (skipped=3)
 test_sax	deferred	v0.10.1	xml.sax not shipped
 test_shelve	deferred	v0.10.1	shelve depends on dbm
 test_shlex	ready	v0.10.1	shlex module
@@ -404,7 +404,7 @@ test_xmlrpc	deferred	v0.10.1	xmlrpc not shipped
 test_xpickle	deferred	v0.8.0	pickle cross-version
 test_zipfile/	deferred	v0.10.1	zipfile not shipped
 test_zipfile64	deferred	v0.10.1	zip64 not shipped
-test_zlib	pending	v0.12.5	vendored; zlib compress/decompress gaps; CI gate deferred
+test_zlib	ready	v0.12.5	76/76 pass (skipped=2)
 test_zstd	deferred	v0.10.1	zstd new in 3.14
 
 # ---- Misc / utility -----------------------------------------------
@@ -466,7 +466,7 @@ test_urllib2_localnet	deferred	post-0.12	urllib2 localnet
 test_urllib2net	deferred	post-0.12	urllib2 live-net
 test_urllib_response	deferred	post-0.12	urllib response
 test_urllibnet	deferred	post-0.12	urllib live-net
-test_urlparse	pending	v0.12.5	76/77 pass; 1 failure: warnings.warn filename=<unknown> vs __file__ (setupContext stub)
+test_urlparse	ready	v0.12.5	77/77 pass (skipped=5)
 test_wsgiref	deferred	post-0.12	wsgiref
 
 # ---- Out-of-scope (CPython internals / platform shells / GUI) -----
