@@ -595,7 +595,14 @@ func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
 	case *Instance:
 		if v.dict == nil {
-			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
+			if !v.Type().HasDict {
+				return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
+			}
+			// Lazily materialize the instance dict, matching CPython's
+			// tp_dictoffset lazy-alloc path.
+			//
+			// CPython: Objects/typeobject.c:6776 subtype_dict
+			v.dict = NewDict()
 		}
 		return v.dict, nil
 	case *Int:
