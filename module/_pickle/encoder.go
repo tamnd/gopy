@@ -120,12 +120,14 @@ func (p *pickler) commitFrame() {
 	p.frameStart = -1
 }
 
-// writeProtoHeader emits `PROTO <proto>` and (for proto >= 4) flips
-// the framing bit so the next write reserves a frame placeholder.
+// writeProtoHeader emits `PROTO <proto>` for protocol >= 2 and (for
+// proto >= 4) flips the framing bit. Protocol 0 and 1 have no header.
 //
 // CPython: Modules/_pickle.c:4655 dump (PROTO emit)
 func (p *pickler) writeProtoHeader() {
-	p.buf = append(p.buf, opProto, byte(p.proto))
+	if p.proto >= 2 {
+		p.buf = append(p.buf, opProto, byte(p.proto))
+	}
 	if p.proto >= 4 {
 		p.framing = true
 	}
@@ -496,10 +498,14 @@ func (p *pickler) save(obj objects.Object) error {
 	case *objects.Dict:
 		return p.saveDict(v)
 	case *objects.Set:
+		// CPython: Modules/_pickle.c:4471 save — exact type check, not PySet_Check.
+		// Subclasses fall through to saveViaReduce so their type and __dict__ are preserved.
+		if v.Type() == objects.SetType {
+			return p.saveSet(v)
+		}
 		if v.Type() == objects.FrozensetType {
 			return p.saveFrozenset(v)
 		}
-		return p.saveSet(v)
 	case *objects.Function:
 		return p.saveFunctionGlobal(v)
 	case *objects.Type:

@@ -241,8 +241,18 @@ func wireTypeCalls() {
 		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
 		bindCtor(objects.ComplexType, ComplexCtor)
-		bindCtor(objects.SetType, SetCtor)
-		bindCtor(objects.FrozensetType, FrozensetCtor)
+		// set/frozenset use subtype-aware TpNew so that class H(set): ...
+		// instances carry their own type (CPython: set_new passes subtype).
+		objects.SetType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			return setCtorWithType(cls, args)
+		}
+		bindCtorDescr(objects.SetType, SetCtor)
+		// frozenset uses a subtype-aware TpNew so frozenset subclass instances
+		// carry their own type (CPython: frozenset_new passes subtype).
+		objects.FrozensetType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			return frozensetCtorWithType(cls, args, kwargs)
+		}
+		bindCtorDescr(objects.FrozensetType, FrozensetCtor)
 		bindCtor(objects.BytesType, BytesCtor)
 		bindCtor(objects.ByteArrayType, ByteArrayCtor)
 		bindCtor(objects.RangeType, Range)

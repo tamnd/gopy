@@ -748,10 +748,23 @@ func fixupCallReprStr(t *Type) {
 	}
 }
 
+// unhashableTypeHash is the explicit-unhashable sentinel wired to any
+// type (or its subclass) that defines __hash__ = None.
+//
+// CPython: Objects/typeobject.c:7975 PyObject_HashNotImplemented
+func unhashableTypeHash(o Object) (int64, error) {
+	return 0, fmt.Errorf("TypeError: unhashable type: '%s'", o.Type().Name)
+}
+
 // fixupHashAndIter wires tp_hash, tp_iter, and tp_iternext.
 func fixupHashAndIter(t *Type) {
-	if lookupDunderCallable(t, "__hash__") {
+	hashDescr, _ := LookupDescriptor(t, "__hash__")
+	if hashDescr != nil && hashDescr != None() {
 		t.Hash = slotTpHash
+	} else if hashDescr == None() {
+		// __hash__ = None anywhere in MRO signals explicitly unhashable.
+		// CPython: Objects/typeobject.c:7975 PyObject_HashNotImplemented
+		t.Hash = unhashableTypeHash
 	} else if t.Hash == nil {
 		t.Hash = identityHash
 	}
@@ -1574,12 +1587,14 @@ func installSlots(t *Type, ns *Dict) error {
 	}
 	resolved := make([]string, 0, len(names))
 	seen := map[string]bool{}
+	addedDictSlot := false
 	for _, n := range names {
 		switch n {
 		case "__dict__":
-			if t.HasDict {
+			if addedDictSlot {
 				return fmt.Errorf("TypeError: __dict__ slot disallowed: we already got one")
 			}
+			addedDictSlot = true
 			t.HasDict = true
 			continue
 		case "__weakref__":

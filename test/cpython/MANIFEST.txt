@@ -139,7 +139,7 @@ test_memoryview	ready	v0.4.0	171/171 pass (skipped=18)
 test_numeric_tower	ready	v0.4.0	9/9 pass
 test_property	ready	v0.10.1	31/31 pass (skipped=2)
 test_range	ready	v0.2.0	29/29 pass
-test_set	ready	v0.4.0	630/630 pass
+test_set	done	v0.12.5	630/630 green. GC tracking for *Set/*setIterator, set_dealloc with resurrection guard, setIter Incref/Decref src, frozenset kwargs fix, set/frozenset __reduce__, iterator __reduce__, hash_collision_concurrent_add lookup restart, pickle proto<4 fallback
 test_slice	ready	v0.2.0	11/11 pass
 test_str	ready	v0.4.0	138/138 pass (skipped=4)
 test_strtod	ready	v0.4.0	9/9 pass (skipped=1)

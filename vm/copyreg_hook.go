@@ -17,6 +17,25 @@ import (
 
 func init() {
 	objects.CopyregLookup = copyregLookup
+	objects.BuiltinLookup = builtinLookup
+}
+
+// builtinLookup retrieves the named object from the builtins module.
+//
+// CPython: Python/bltinmodule.c:_PyEval_GetBuiltin
+func builtinLookup(name string) (objects.Object, error) {
+	mod, ok := imp.GetModule("builtins")
+	if !ok {
+		return nil, fmt.Errorf("AttributeError: builtins module not loaded")
+	}
+	v, err := mod.Dict().GetItem(objects.NewStr(name))
+	if err != nil {
+		return nil, fmt.Errorf("AttributeError: builtins: %q not found: %w", name, err)
+	}
+	if v == nil {
+		return nil, fmt.Errorf("AttributeError: builtins: %q", name)
+	}
+	return v, nil
 }
 
 // copyregLookup retrieves the named attribute from the copyreg module.

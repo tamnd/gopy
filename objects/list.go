@@ -603,6 +603,64 @@ func init() {
 		return v, nil
 	}
 	AddIterSlotWrappers(listIterType)
+	// __reduce__ returns (iter, (list_snapshot,), current_pos) so pickle
+	// can round-trip the iterator including its current position.
+	//
+	// CPython: Objects/listobject.c listiter_reduce
+	SetTypeDescr(listIterType, "__reduce__", NewMethodDescr(listIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*listIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			var src *List
+			pos := 0
+			if it.src != nil {
+				src = it.src
+				pos = it.pos
+			} else {
+				src = NewList(nil)
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{src}), NewInt(int64(pos))}), nil
+		},
+	))
+	// __setstate__ restores the iterator position after unpickling.
+	//
+	// CPython: Objects/listobject.c listiter_setstate
+	SetTypeDescr(listIterType, "__setstate__", NewMethodDescr(listIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*listIterator)
+			pos, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__() argument must be int")
+			}
+			p, fits := pos.Int64()
+			if !fits {
+				return nil, fmt.Errorf("OverflowError: iterator position out of range")
+			}
+			n := int64(0)
+			if it.src != nil {
+				n = int64(len(it.src.items))
+			}
+			if p < 0 {
+				p = 0
+			} else if p > n {
+				p = n
+			}
+			it.pos = int(p)
+			return None(), nil
+		},
+	))
 }
 
 func listIter(o Object) (Object, error) {
