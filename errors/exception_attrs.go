@@ -27,6 +27,7 @@ func init() {
 	objects.SetTypeDescr(t, "__notes__", objects.NewGetSetDescr("__notes__", notesGet, notesSet))
 	objects.SetTypeDescr(t, "with_traceback", objects.NewMethodDescr(t, "with_traceback", baseExceptionWithTraceback))
 	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescr(t, "__setstate__", baseExceptionSetState))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", baseExceptionReduce))
 }
 
 // baseExceptionWithTraceback writes tb into self.__traceback__ and
@@ -77,6 +78,32 @@ func baseExceptionSetState(args []objects.Object, _ map[string]objects.Object) (
 		}
 	}
 	return objects.None(), nil
+}
+
+// baseExceptionReduce implements BaseException.__reduce__: returns
+// (type, args) or (type, args, dict) when an instance dict is present.
+// This ensures pickle.loads calls cls(*args) which re-runs __init__
+// and restores Python-level attributes like .message on subclasses.
+//
+// CPython: Objects/exceptions.c:220 BaseException___reduce___impl
+func baseExceptionReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, errors.New("TypeError: __reduce__() requires a self argument")
+	}
+	e, ok := args[0].(*Exception)
+	if !ok {
+		return nil, errors.New("TypeError: __reduce__() requires a BaseException")
+	}
+	tp := objects.Object(e.Type())
+	eArgs := objects.Object(objects.NewTuple(nil))
+	if e.Args != nil {
+		eArgs = e.Args
+	}
+	d := e.AttrDict()
+	if d != nil && d.Len() > 0 {
+		return objects.NewTuple([]objects.Object{tp, eArgs, d}), nil
+	}
+	return objects.NewTuple([]objects.Object{tp, eArgs}), nil
 }
 
 // baseExceptionAddNote appends a string note to self.__notes__,
