@@ -78,6 +78,10 @@ func init() {
 	PatternType.Getattro = objects.GenericGetAttr
 	MatchType.Getattro = objects.GenericGetAttr
 	ScannerType.Getattro = objects.GenericGetAttr
+	// Compiled patterns and match objects are hashable by identity in CPython.
+	// CPython: Modules/_sre.c SRE_Pattern_Type (tp_hash not overridden)
+	PatternType.Hash = objects.IdentityHash
+	MatchType.Hash = objects.IdentityHash
 
 	bindP := func(name string, fn func([]objects.Object, map[string]objects.Object) (objects.Object, error)) {
 		objects.SetTypeDescr(PatternType, name, objects.NewMethodDescr(PatternType, name, fn))

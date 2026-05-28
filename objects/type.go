@@ -434,6 +434,24 @@ func (t *Type) AddCachedKey(name string) {
 // CPython: Include/cpython/typeobject.h ht_cached_keys
 func (t *Type) SharedKeys() *SharedKeys { return t.sharedKeys }
 
+// FullyQualifiedName returns the display name used in error messages.
+// For built-in types it is just Name. For user-defined (heap) types it
+// follows CPython's _PyType_GetFullyQualifiedName: prepend the module
+// unless the module is "", "builtins", or "__main__".
+//
+// CPython: Objects/typeobject.c:1589 _PyType_GetFullyQualifiedName
+func (t *Type) FullyQualifiedName() string {
+	qualname := t.Qualname
+	if qualname == "" {
+		qualname = t.Name
+	}
+	mod := t.Module
+	if mod == "" || mod == "builtins" || mod == "__main__" {
+		return qualname
+	}
+	return mod + "." + qualname
+}
+
 // typeType is the type of Type itself. Lazily initialized on first
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
 //

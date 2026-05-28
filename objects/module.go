@@ -35,6 +35,9 @@ func init() {
 	ModuleType.Setattro = moduleSetattr
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
+	// Modules are hashable by identity in CPython (tp_hash = PyObject_GenericHash).
+	// CPython: Objects/moduleobject.c:766 PyModule_Type (tp_hash not overridden → id-based)
+	ModuleType.Hash = IdentityHash
 
 	// tp_new: allocate an empty module with an empty __dict__. The name
 	// and optional doc are populated by __init__ below, matching CPython's

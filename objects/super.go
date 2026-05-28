@@ -249,6 +249,17 @@ func superInitNoArgs() (*Type, Object, error) {
 	if self == nil {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
 	}
+	// When self is captured by a nested function (lambda/comprehension), slot 0
+	// holds the *Cell wrapper rather than the value itself. Unwrap it.
+	//
+	// CPython: Objects/typeobject.c:12054 super_init_without_args
+	// reads PyUnstable_InterpreterFrame_GetLocals which dereferences cells.
+	if cell, ok := self.(*Cell); ok {
+		self = cell.Contents
+	}
+	if self == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
+	}
 	// __class__ lives in the free-var slot of the same name. CPython
 	// walks co_freevars; gopy keeps the free-var names on Code.Freevars
 	// and the corresponding cells in FrameFreeLocal(i).

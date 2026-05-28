@@ -258,7 +258,7 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 	if AttributeErrorFactory != nil {
 		return nil, AttributeErrorFactory(o, attrNameStr(name))
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 }
 
 // instanceSetAttr is the tp_setattro slot for user-defined types. A
@@ -286,7 +286,7 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 			// __slots__ class without __dict__: any name not covered by
 			// a type-level descriptor is rejected, mirroring CPython's
 			// PyObject_GenericSetAttr when tp_dictoffset == 0.
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 		}
 		if value == nil {
 			// LAZY_DICT shape with a still-null managed dict: nothing to
@@ -294,7 +294,7 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 			//
 			// CPython: Objects/object.c PyObject_GenericSetAttr (NULL dict,
 			// delete branch)
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 		}
 		// LAZY_DICT shape: first store materializes the managed dict.
 		// CPython does this in _PyObject_StoreInstanceAttribute via
@@ -305,7 +305,7 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 	}
 	if value == nil {
 		if _, err := inst.dict.GetItem(name); err != nil {
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 		}
 		// Deleting an instance attribute materializes the dict in
 		// CPython (clears PyDictValues.valid). gopy already keeps a

@@ -61,6 +61,9 @@ func matchSlice(md *matchData, lo, hi int) objects.Object {
 	if lo < 0 {
 		lo = 0
 	}
+	if hi < 0 {
+		hi = 0
+	}
 	if hi > len(md.runes) {
 		hi = len(md.runes)
 	}

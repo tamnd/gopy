@@ -52,7 +52,7 @@ func patternFindall(args []objects.Object, _ map[string]objects.Object) (objects
 			item = objects.NewStr(srcStr[mStart:mEnd])
 		case 1:
 			lo, hi := st.mark[0], st.mark[1]
-			if lo < 0 {
+			if lo < 0 || hi < 0 {
 				item = objects.NewStr("")
 			} else {
 				item = objects.NewStr(srcStr[lo:hi])
@@ -61,7 +61,7 @@ func patternFindall(args []objects.Object, _ map[string]objects.Object) (objects
 			parts := make([]objects.Object, cp.groups)
 			for g := 0; g < cp.groups; g++ {
 				lo, hi := st.mark[2*g], st.mark[2*g+1]
-				if lo < 0 {
+				if lo < 0 || hi < 0 {
 					parts[g] = objects.NewStr("")
 				} else {
 					parts[g] = objects.NewStr(srcStr[lo:hi])
@@ -184,6 +184,30 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 		replIsStr = true
 	}
 
+	// For Unicode strings the engine uses code-point indices; Go string
+	// slicing is byte-based, so we must work through a rune slice.
+	//
+	// CPython: Modules/_sre/sre.c:2492 pattern_subx_impl (uses
+	// character-position cursors throughout)
+	var srcRunes []rune
+	if _, isUnicode := src.(*objects.Unicode); isUnicode {
+		srcRunes = []rune(srcStr)
+	}
+
+	// runeSlice converts a half-open [lo, hi) code-point range to a string.
+	slice := func(lo, hi int) string {
+		if srcRunes != nil {
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > len(srcRunes) {
+				hi = len(srcRunes)
+			}
+			return string(srcRunes[lo:hi])
+		}
+		return srcStr[lo:hi]
+	}
+
 	var out strings.Builder
 	cur := pos
 	n := 0
@@ -199,7 +223,7 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 			break
 		}
 		mStart, mEnd := st.start, st.ptr
-		out.WriteString(srcStr[cur:mStart])
+		out.WriteString(slice(cur, mStart))
 
 		if replIsStr {
 			m := makeMatch(cp, st, src, args[0], pos, endpos).(*objects.Instance)
@@ -224,16 +248,18 @@ func patternSubCommon(args []objects.Object, name string) (string, int, error) {
 		n++
 
 		if mStart == mEnd {
-			// zero-width: copy one char from cur, advance past it.
+			// zero-width: copy one code-point from cur, advance past it.
 			if mEnd < endpos {
-				out.WriteString(srcStr[mEnd : mEnd+1])
+				out.WriteString(slice(mEnd, mEnd+1))
 			}
 			cur = mEnd + 1
 		} else {
 			cur = mEnd
 		}
 	}
-	out.WriteString(srcStr[cur:endpos])
+	if cur <= endpos {
+		out.WriteString(slice(cur, endpos))
+	}
 	return out.String(), n, nil
 }
 
@@ -291,7 +317,7 @@ func patternSplit(args []objects.Object, _ map[string]objects.Object) (objects.O
 		out = append(out, objects.NewStr(srcStr[cur:mStart]))
 		for g := 0; g < cp.groups; g++ {
 			lo, hi := st.mark[2*g], st.mark[2*g+1]
-			if lo < 0 {
+			if lo < 0 || hi < 0 {
 				out = append(out, objects.None())
 			} else {
 				out = append(out, objects.NewStr(srcStr[lo:hi]))
@@ -304,7 +330,11 @@ func patternSplit(args []objects.Object, _ map[string]objects.Object) (objects.O
 			cur = mEnd
 		}
 	}
-	out = append(out, objects.NewStr(srcStr[cur:endpos]))
+	if cur <= endpos {
+		out = append(out, objects.NewStr(srcStr[cur:endpos]))
+	} else {
+		out = append(out, objects.NewStr(""))
+	}
 	return objects.NewList(out), nil
 }
 

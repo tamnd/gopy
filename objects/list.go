@@ -58,6 +58,8 @@ func init() {
 		l.init(cls)
 		return l, nil
 	}
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(ListType)
 }
 
 // listTraverse visits every item. Mirrors list_traverse.

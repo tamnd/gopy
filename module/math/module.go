@@ -69,6 +69,7 @@ func buildModule() (*objects.Module, error) {
 		{"ceil", mathCeil},
 		{"floor", mathFloor},
 		{"trunc", mathTrunc},
+		{"isqrt", mathIsqrt},
 		{"factorial", mathFactorial},
 		{"gcd", mathGcd},
 		{"lcm", mathLcm},
@@ -731,6 +732,24 @@ func mathTrunc(args []objects.Object, kwargs map[string]objects.Object) (objects
 		return nil, err
 	}
 	return objects.NewInt(int64(gomath.Trunc(x))), nil
+}
+
+// mathIsqrt implements math.isqrt(n). Integer square root: floor(sqrt(n)).
+// CPython: Modules/mathmodule.c:1693 math_isqrt
+func mathIsqrt(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: isqrt() takes exactly 1 argument (%d given)", len(args))
+	}
+	n, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: 'isqrt' object cannot be interpreted as an integer")
+	}
+	bi := n.BigInt()
+	if bi.Sign() < 0 {
+		return nil, fmt.Errorf("ValueError: isqrt() argument must be nonnegative")
+	}
+	result := new(big.Int).Sqrt(bi)
+	return objects.NewIntFromBig(result), nil
 }
 
 // mathFactorial implements math.factorial(n).

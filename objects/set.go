@@ -119,6 +119,9 @@ func init() {
 	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
 	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
 	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
+	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
+	AddIterSlotWrappers(SetType)
+	AddIterSlotWrappers(FrozensetType)
 }
 
 // setTraverse visits each element of a set or frozenset.
@@ -157,8 +160,11 @@ func newSetFromIterable(o Object) (*Set, error) {
 		return nil, fmt.Errorf("TypeError: argument must be an iterable, not '%s'", typeNameOf(o))
 	}
 	for {
-		item, err := IterNext(iter)
-		if err != nil {
+		item, iterErr := IterNext(iter)
+		if iterErr != nil {
+			if !errors.Is(iterErr, ErrStopIteration) {
+				return nil, iterErr
+			}
 			break
 		}
 		if err := s.add(item); err != nil {
@@ -957,7 +963,13 @@ func setUnionMethod(args []Object, _ map[string]Object) (Object, error) {
 	for _, other := range args[1:] {
 		os, ok := toSet(other)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: union() argument must be a set")
+			// Accept any iterable: convert it to a set first.
+			// CPython: Objects/setobject.c:1952 set_union (accepts any iterable)
+			os2 := NewSet()
+			if err := setUpdateFrom(os2, other); err != nil {
+				return nil, err
+			}
+			os = os2
 		}
 		result = setUnion(result, os)
 	}

@@ -68,7 +68,7 @@ func (s *readerState) resetParser() {
 // CPython: Modules/_csv.c:714 parse_add_char
 func (s *readerState) addChar(c rune) error {
 	if len(s.field) >= fieldSizeLimit {
-		return fmt.Errorf("csv.Error: field larger than field limit (%d)", fieldSizeLimit)
+		return csvErr(fmt.Sprintf("field larger than field limit (%d)", fieldSizeLimit))
 	}
 	s.field = append(s.field, c)
 	return nil
@@ -92,7 +92,7 @@ func (s *readerState) saveField(d *Dialect) error {
 		(q == quoteNonNumeric || q == quoteStrings) {
 		f, err := strconv.ParseFloat(str, 64)
 		if err != nil {
-			return fmt.Errorf("csv.Error: bad value for QUOTE_NONNUMERIC field %q", str)
+			return csvErr(fmt.Sprintf("bad value for QUOTE_NONNUMERIC field %q", str))
 		}
 		s.fields = append(s.fields, objects.NewFloat(f))
 		return nil

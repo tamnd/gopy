@@ -322,6 +322,7 @@ func asIntFd(o objects.Object) (int64, bool) {
 }
 
 // fileIONameArg extracts a file-path string from the name argument.
+// Accepts str, bytes, or any object implementing __fspath__ (os.PathLike).
 //
 // CPython: Modules/_io/fileio.c:303 PyUnicode_FSDecoder / PyUnicode_FSConverter
 func fileIONameArg(o objects.Object) (string, error) {
@@ -330,6 +331,17 @@ func fileIONameArg(o objects.Object) (string, error) {
 		return v.Value(), nil
 	case *objects.Bytes:
 		return string(v.Bytes()), nil
+	}
+	// os.PathLike: call __fspath__() and recurse.
+	//
+	// CPython: Modules/_io/fileio.c:303 PyUnicode_FSConverter calls
+	// PyOS_FSPath which invokes __fspath__.
+	if fspath, err := objects.GetAttr(o, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return fileIONameArg(result)
 	}
 	return "", fmt.Errorf("TypeError: invalid file: %s", o.Type().Name)
 }
