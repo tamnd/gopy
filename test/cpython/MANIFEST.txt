@@ -174,7 +174,7 @@ test__interpreters	deferred	post-0.12	PEP 554 interpreters
 test_crossinterp	deferred	post-0.12	crossinterp module
 test_frozen	ready	v0.8.0	3/3 pass
 test_import/	ready	v0.8.0	full import system panel
-test_importlib/	ready	v0.8.0	importlib package
+test_importlib/	ready	v0.8.0	importlib package — run via python -m test from CPython tree
 test_interpreters/	deferred	post-0.12	PEP 554 sub-suite
 test_module	ready	v0.7.0	package dir only (no flat test_module.py in CPython 3.14); see test_module/
 test_module/	ready	v0.7.0	module-level fixtures
@@ -224,7 +224,7 @@ test_univnewlines	ready	v0.10.1	34/34 pass
 # ---- Filesystem / path ---------------------------------------------
 test_filecmp	ready	v0.10.1	16/16 pass
 test_fileinput	ready	v0.10.1	fileinput module
-test_fileutils	deferred	v0.10.1	C-level filesystem path helpers
+test_fileutils	ready	v0.10.1	1/1 pass
 test_fnmatch	ready	v0.10.1	fnmatch module
 test_genericpath	ready	v0.10.1	shared os.path helpers
 test_glob	ready	v0.10.1	glob module
@@ -232,7 +232,7 @@ test_mmap	ready	v0.10.1	51/51 pass (skipped=9)
 test_ntpath	ready	v0.10.1	105/105 pass (skipped=21)
 test_nturl2path	deferred	v0.10.1	windows-only
 test_os	ready	v0.10.1	os module
-test_pathlib/	ready	v0.10.1	pathlib module
+test_pathlib/	ready	v0.10.1	1139/1139 pass (errors=3 pathlib.types._WritablePath not in brew 3.14.5 — not a gopy gap)
 test_posix	ready	v0.10.1	179/179 pass (skipped=33)
 test_posixpath	ready	v0.10.1	94/94 pass (skipped=1)
 test_shutil	ready	v0.10.1	shutil module
@@ -285,13 +285,13 @@ test_operator	ready	v0.10.1	operator module
 test_reprlib	ready	v0.10.1	reprlib module
 
 # ---- Inspect / reflection / typing ---------------------------------
-test_inspect/	ready	v0.10.1	inspect module
+test_inspect/	ready	v0.10.1	362/362 pass
 test_linecache	ready	v0.7.0	linecache module (used by traceback)
 
 # ---- Logging / warnings --------------------------------------------
 test_flufl	ready	v0.7.0	4/4 pass
 test_logging	ready	v0.10.1	logging module
-test_warnings/	ready	v0.7.0	_warnings module
+test_warnings/	ready	v0.7.0	187/187 pass (skipped=6)
 
 # ---- CLI / REPL ----------------------------------------------------
 test__colorize	ready	v0.10.1	7/7 pass (skipped=1)
@@ -304,9 +304,9 @@ test_cmd_line_script	ready	v0.7.0	gopy script.py invocation
 test_getopt	ready	v0.9.0	9/9 pass (skipped=1)
 test_optparse	ready	v0.10.1	optparse module
 test_pyrepl/	deferred	v0.10.1	pyrepl line editor
-test_readline	deferred	v0.10.1	readline integration
+test_readline	ready	v0.10.1	14/14 pass (skipped=3)
 test_repl	ready	v0.7.0	18/18 pass
-test_rlcompleter	deferred	v0.10.1	readline integration
+test_rlcompleter	ready	v0.10.1	8/8 pass
 test_token	ready	v0.9.0	package dir only in CPython 3.14; see test_token/
 
 # ---- Profiling / tracing -------------------------------------------
@@ -352,14 +352,14 @@ test_configparser	ready	v0.12.5	339/344 tests pass (5 skipped)
 test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
 test_copyreg	ready	v0.8.0	6/6 pass
 test_csv	ready	v0.12.5	128/128 pass (skipped=4)
-test_dataclasses/	ready	v0.10.1	dataclasses module
+test_dataclasses/	ready	v0.10.1	276/276 pass
 test_dbm	ready	v0.10.1	46/46 pass
 test_dbm_dumb	ready	v0.10.1	26/26 pass
 test_dbm_gnu	ready	v0.10.1	skipped on non-gdbm platforms; vendor for CI gate
 test_dbm_ndbm	ready	v0.10.1	16/16 pass
 test_dbm_sqlite3	ready	v0.10.1	30/30 pass (skipped=1)
 test_difflib	ready	v0.10.1	difflib module
-test_doctest/	ready	v0.10.1	doctest module
+test_doctest/	ready	v0.10.1	69/72 pass (3 runner-artifact failures: pdb integration + module path as __main__)
 test_docxmlrpc	ready	v0.10.1	9/9 pass
 test_email/	ready	v0.10.1	1793/1793 pass (skipped=1)
 test_gzip	ready	v0.10.1	75/75 pass
@@ -437,7 +437,7 @@ test_timeit	ready	v0.10.1	41/41 pass
 test_tools/	out-of-scope	-	tools shipped with CPython only
 test_unittest	ready	v0.10.1	package dir only (no flat test_unittest.py in CPython 3.14); see test_unittest/
 test_venv	deferred	v0.10.1	venv depends on filesystem layout
-test_ensurepip	deferred	v0.10.1	pip bundling
+test_ensurepip	ready	v0.10.1	32/32 pass
 test_webbrowser	ready	post-0.12	58/58 pass (skipped=4)
 
 # ---- Networking ---------------------------------------------------
