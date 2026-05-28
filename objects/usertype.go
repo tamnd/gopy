@@ -759,13 +759,14 @@ func unhashableTypeHash(o Object) (int64, error) {
 // fixupHashAndIter wires tp_hash, tp_iter, and tp_iternext.
 func fixupHashAndIter(t *Type) {
 	hashDescr, _ := LookupDescriptor(t, "__hash__")
-	if hashDescr != nil && hashDescr != None() {
+	switch {
+	case hashDescr != nil && hashDescr != None():
 		t.Hash = slotTpHash
-	} else if hashDescr == None() {
+	case hashDescr == None():
 		// __hash__ = None anywhere in MRO signals explicitly unhashable.
 		// CPython: Objects/typeobject.c:7975 PyObject_HashNotImplemented
 		t.Hash = unhashableTypeHash
-	} else if t.Hash == nil {
+	case t.Hash == nil:
 		t.Hash = identityHash
 	}
 	if lookupDunderCallable(t, "__iter__") {

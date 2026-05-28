@@ -813,9 +813,9 @@ func setsEqual(a, b *Set) (bool, error) {
 // CPython: Objects/setobject.c:L958 setiter_iternext
 type setIterator struct {
 	Header
-	src       *Set       // live set, needed for size-change detection
-	usedAt    int        // used count at iterator creation; -1 means exhausted/errored
-	remaining int        // number of items yet to yield; mirrors si_len
+	src       *Set // live set, needed for size-change detection
+	usedAt    int  // used count at iterator creation; -1 means exhausted/errored
+	remaining int  // number of items yet to yield; mirrors si_len
 	entries   []setEntry
 	pos       int
 }
@@ -1220,7 +1220,6 @@ func setInitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s.version++
 	return None(), setUpdateFrom(s, args[1])
 }
-
 
 func setDiscardMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
@@ -1641,7 +1640,8 @@ func setCopy(s *Set) *Set {
 	out := newEmptyLike(s)
 	for _, e := range s.entries {
 		if e.used {
-			out.insert(e.hash, e.key)
+			// Keys already in the set are guaranteed hashable; ignore error.
+			_ = out.insert(e.hash, e.key)
 		}
 	}
 	return out
@@ -1665,7 +1665,7 @@ func setReduceMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	lst := NewList(elems)
 	// state: per-instance dict (or None for subclasses without custom attrs).
-	var state Object = None()
+	state := None()
 	if d := s.AttrDict(); d != nil && d.Len() > 0 {
 		state = d
 	}

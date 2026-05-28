@@ -107,7 +107,7 @@ func newGenCMType() *objects.Type {
 	return t
 }
 
-// genCMInit initialises a _GeneratorContextManager instance created by
+// genCMInit initializes a _GeneratorContextManager instance created by
 // direct instantiation (e.g. MockContextManager(func, args, kwds)).
 // Stores func/args/kwds for _recreate_cm and drives func(*args, **kwds)
 // to obtain the generator.

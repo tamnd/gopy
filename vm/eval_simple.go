@@ -144,8 +144,6 @@ func liftConst(v any) any {
 //
 // CPython: Python/bytecodes.c:LOAD_CONST (CPython stores PyObject*
 // directly so this conversion is a no-op there).
-//
-//nolint:gocyclo // mirrors CPython's constant-kind switch; arms added as constant types land
 func wrapConst(v any) (objects.Object, error) {
 	switch x := v.(type) {
 	case nil:
@@ -214,8 +212,6 @@ func wrapConst(v any) (objects.Object, error) {
 // panel. Frame termination uses the errFrameReturn sentinel via
 // e.retVal; arms set those fields and return errFrameReturn just like
 // CPython's goto exit_frame.
-//
-//nolint:gocognit,gocyclo // hand-written opcode switch; the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	switch op {
 	case compile.CACHE, compile.RESERVED:

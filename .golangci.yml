@@ -606,6 +606,19 @@ linters:
         linters:
           - gocritic
           - revive
+      # set.go's init() wires every set/frozenset descriptor in one block,
+      # matching Objects/setobject.c's tp_methods / tp_getset table layout.
+      # The complexity is the surface, not algorithmic branching.
+      - path: objects/set\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # binaryOp and trySimple mirror ceval.c's BINARY_OP dispatch and the
+      # hand-written opcode switch; branch tree is the parity unit with CPython.
+      - path: vm/eval_simple\.go
+        linters:
+          - gocyclo
+          - gocognit
 
 formatters:
   enable:

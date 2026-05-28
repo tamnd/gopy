@@ -656,7 +656,7 @@ func (e *evalState) execWithExceptStart() (genResult, error) {
 
 	// Call exit_fn(type, val, traceback).
 	excType := objects.None()
-	excTB := objects.Object(objects.None())
+	excTB := objects.None()
 	if excVal != objects.None() {
 		excType = excVal.Type()
 		if exc, ok := excVal.(*pyerrors.Exception); ok && exc.TB != nil {
