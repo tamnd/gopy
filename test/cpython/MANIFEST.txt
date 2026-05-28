@@ -122,7 +122,7 @@ test_raise	done	v0.12.7	37/37 green
 test_traceback	done	v0.12.7	370/370 green
 
 # ---- Builtins / types ----------------------------------------------
-test_abstract_numbers	ready	v0.4.0	numbers module
+test_abstract_numbers	ready	v0.4.0	7/7 pass
 test_bool	ready	v0.2.0	31/31 pass
 test_buffer	out-of-scope	-	C-level buffer protocol API
 test_builtin	ready	v0.7.0	147/147 pass (skipped=6)
@@ -145,7 +145,7 @@ test_str	ready	v0.4.0	138/138 pass (skipped=4)
 test_strtod	ready	v0.4.0	9/9 pass (skipped=1)
 test_structseq	ready	v0.7.0	25/25 pass
 test_tuple	ready	v0.2.0	38/38 pass
-test_types	ready	v0.2.0	types module
+test_types	ready	v0.2.0	129/129 pass (skipped=1)
 test_ucn	ready	v0.4.0	18/18 pass (skipped=1)
 test_unicode_file	ready	v0.10.1	2/2 pass
 test_unicode_file_functions	ready	v0.10.1	30/30 pass (skipped=10)
@@ -155,12 +155,12 @@ test_userlist	ready	v0.10.1	54/54 pass
 test_userstring	ready	v0.10.1	71/71 pass (skipped=1)
 
 # ---- Classes / descriptors / methods -------------------------------
-test_abc	ready	v0.10.1	abc module + ABCMeta
+test_abc	ready	v0.10.1	72/72 pass
 test_class	ready	v0.10.1	37/37 pass
 test_descr	ready	v0.12.5	162/162 pass (skipped=2; 1 test_slots failure is test.test_descr module-prefix artifact, passes via runner)
-test_descrtut	ready	v0.10.1	descriptor tutorial doctest
+test_descrtut	ready	v0.10.1	8/8 pass
 test_dynamicclassattribute	ready	v0.10.1	12/12 pass (skipped=1)
-test_enum	ready	v0.10.1	enum module
+test_enum	ready	v0.10.1	1081/1081 pass (skipped=4)
 test_genericalias	ready	v0.10.1	36/36 pass
 test_genericclass	ready	v0.10.1	22/22 pass
 test_super	ready	v0.10.1	40/40 pass
@@ -191,7 +191,7 @@ test_zipimport_support	ready	v0.8.0	4/4 pass
 test_finalization	ready	v0.10.0	18/18 pass
 test_free_threading/	deferred	post-0.12	PEP 703 free threading
 test_gc	ready	v0.10.0	57/57 pass (skipped=2)
-test_weakref	ready	v0.10.0	weakref + finalizer queue
+test_weakref	ready	v0.10.0	137/137 pass
 test_weakset	ready	v0.10.0	46/46 pass
 
 # ---- Codecs / encodings --------------------------------------------
@@ -216,93 +216,93 @@ test_bufio	ready	v0.10.1	4/4 pass
 test_file	ready	v0.10.1	36/36 pass (skipped=2)
 test_file_eintr	ready	v0.10.1	18/18 pass
 test_fileio	ready	v0.10.1	99/99 pass (skipped=2)
-test_io	ready	v0.10.1	io module on top of objects.File
+test_io	ready	v0.10.1	667/667 pass (skipped=2)
 test_largefile	deferred	v0.10.1	needs > 4 GiB filesystem
 test_memoryio	ready	v0.10.1	182/182 pass
 test_univnewlines	ready	v0.10.1	34/34 pass
 
 # ---- Filesystem / path ---------------------------------------------
 test_filecmp	ready	v0.10.1	16/16 pass
-test_fileinput	ready	v0.10.1	fileinput module
+test_fileinput	ready	v0.10.1	24/24 pass
 test_fileutils	ready	v0.10.1	1/1 pass
-test_fnmatch	ready	v0.10.1	fnmatch module
-test_genericpath	ready	v0.10.1	shared os.path helpers
-test_glob	ready	v0.10.1	glob module
+test_fnmatch	ready	v0.10.1	25/25 pass
+test_genericpath	ready	v0.10.1	25/25 pass
+test_glob	ready	v0.10.1	24/24 pass (skipped=2)
 test_mmap	ready	v0.10.1	51/51 pass (skipped=9)
 test_ntpath	ready	v0.10.1	105/105 pass (skipped=21)
 test_nturl2path	deferred	v0.10.1	windows-only
-test_os	ready	v0.10.1	os module
+test_os	ready	v0.10.1	375/375 pass (skipped=89)
 test_pathlib/	ready	v0.10.1	1139/1139 pass (errors=3 pathlib.types._WritablePath not in brew 3.14.5 — not a gopy gap)
 test_posix	ready	v0.10.1	179/179 pass (skipped=33)
 test_posixpath	ready	v0.10.1	94/94 pass (skipped=1)
-test_shutil	ready	v0.10.1	shutil module
+test_shutil	ready	v0.10.1	223/223 pass (skipped=74)
 test_stat	ready	v0.10.1	22/22 pass (skipped=2)
-test_tempfile	ready	v0.10.1	tempfile module
+test_tempfile	ready	v0.10.1	118/118 pass (skipped=4)
 
 # ---- Hash / random / crypto ----------------------------------------
 test_hash	ready	v0.4.0	30/30 pass
 test_hashlib	ready	v0.12.5	82/82 pass (skipped=2)
 test_hmac	ready	v0.12.5	145/145 pass (skipped=3)
-test_random	ready	v0.7.0	random module
+test_random	ready	v0.7.0	114/114 pass (skipped=2)
 test_secrets	ready	v0.12.5	11/11 pass
 
 # ---- Math / numbers ------------------------------------------------
 test_binop	ready	v0.4.0	12/12 pass
-test_cmath	ready	v0.4.0	cmath module
+test_cmath	ready	v0.4.0	33/33 pass
 test_decimal	ready	v0.12.5	732/732 pass (skipped=8); vendor decimaltestdata/ alongside
 test_fractions	ready	v0.4.0	50/50 pass
-test_math	ready	v0.4.0	math module
+test_math	ready	v0.4.0	89/89 pass
 test_math_property	ready	v0.4.0	passes silently (runs via test framework, no output when invoked directly)
-test_statistics	ready	v0.4.0	statistics module
+test_statistics	ready	v0.4.0	400/400 pass
 
 # ---- Datetime / time -----------------------------------------------
-test_calendar	ready	v0.9.0	calendar module
-test_datetime	ready	v0.9.0	datetime module on top of pytime
+test_calendar	ready	v0.9.0	79/79 pass
+test_datetime	ready	v0.9.0	3606/3606 pass (skipped=32)
 test_strftime	ready	v0.9.0	4/4 pass (nonstandard %-format info lines are non-fatal)
 test_strptime	ready	v0.9.0	57/57 pass (skipped=48)
 test_time	ready	v0.9.0	63/63 pass (skipped=2)
 test_zoneinfo/	deferred	post-0.12	zoneinfo TZ database
 
 # ---- Collections / containers --------------------------------------
-test_array	ready	v0.10.1	array module
-test_bisect	ready	v0.10.1	bisect module
-test_collections	ready	v0.10.1	collections module
+test_array	ready	v0.10.1	890/890 pass
+test_bisect	ready	v0.10.1	46/46 pass
+test_collections	ready	v0.10.1	116/116 pass
 test_defaultdict	ready	v0.10.1	13/13 pass
 test_deque	ready	v0.10.1	81/81 pass (skipped=1)
 test_enumerate	ready	v0.7.0	92/92 pass
 test_graphlib	ready	v0.10.1	17/17 pass
-test_heapq	ready	v0.10.1	heapq module
+test_heapq	ready	v0.10.1	69/69 pass
 test_ordered_dict	ready	v0.2.0	295/295 pass
-test_queue	ready	v0.10.1	queue module
+test_queue	ready	v0.10.1	162/162 pass (skipped=6)
 test_sort	ready	v0.2.0	21/21 pass
 
 # ---- Itertools / functools / operator ------------------------------
-test_contextlib	ready	v0.10.1	contextlib module
+test_contextlib	ready	v0.10.1	91/91 pass
 test_contextlib_async	ready	v0.10.1	58/58 pass
-test_functools	ready	v0.10.1	functools module
-test_itertools	ready	v0.10.1	itertools module
-test_operator	ready	v0.10.1	operator module
-test_reprlib	ready	v0.10.1	reprlib module
+test_functools	ready	v0.10.1	325/325 pass
+test_itertools	ready	v0.10.1	137/137 pass (skipped=4)
+test_operator	ready	v0.10.1	110/110 pass
+test_reprlib	ready	v0.10.1	33/33 pass (skipped=2)
 
 # ---- Inspect / reflection / typing ---------------------------------
 test_inspect/	ready	v0.10.1	362/362 pass
-test_linecache	ready	v0.7.0	linecache module (used by traceback)
+test_linecache	ready	v0.7.0	29/29 pass
 
 # ---- Logging / warnings --------------------------------------------
 test_flufl	ready	v0.7.0	4/4 pass
-test_logging	ready	v0.10.1	logging module
+test_logging	ready	v0.10.1	272/272 pass (skipped=3)
 test_warnings/	ready	v0.7.0	187/187 pass (skipped=6)
 
 # ---- CLI / REPL ----------------------------------------------------
 test__colorize	ready	v0.10.1	7/7 pass (skipped=1)
-test_argparse	ready	v0.10.1	argparse module
+test_argparse	ready	v0.10.1	1893/1893 pass (skipped=1)
 test_atexit	ready	v0.7.0	8/8 pass (skipped=1)
 test_audit	ready	v0.7.0	30/30 pass (skipped=3)
-test_cmd	ready	v0.7.0	cmd module (REPL framework)
+test_cmd	ready	v0.7.0	7/7 pass
 test_cmd_line	ready	v0.7.0	cmd-line argument panel
 test_cmd_line_script	ready	v0.7.0	gopy script.py invocation
 test_getopt	ready	v0.9.0	9/9 pass (skipped=1)
-test_optparse	ready	v0.10.1	optparse module
+test_optparse	ready	v0.10.1	154/154 pass (skipped=1)
 test_pyrepl/	deferred	v0.10.1	pyrepl line editor
 test_readline	ready	v0.10.1	14/14 pass (skipped=3)
 test_repl	ready	v0.7.0	18/18 pass
@@ -334,22 +334,22 @@ test_multiprocessing_forkserver/	deferred	v0.10.1	multiprocessing forkserver
 test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
 test_multiprocessing_spawn/	deferred	v0.10.1	multiprocessing spawn
 test_popen	ready	v0.10.1	5/5 pass
-test_signal	ready	v0.10.1	signal module
+test_signal	ready	v0.10.1	pass (skipped=11; 1 runner-artifact: test_interprocess_signal uses subprocess without PYTHONPATH)
 test_subprocess	ready	v0.10.1	353/353 pass (skipped=46)
 test_thread	ready	v0.7.0	35/35 pass
 test_threadedtempfile	ready	v0.10.1	1/1 pass (skipped=1)
-test_threading	ready	v0.7.0	threading on top of pythread
+test_threading	ready	v0.7.0	228/228 pass
 test_threading_local	ready	v0.7.0	22/22 pass
 test_threadsignals	ready	v0.10.1	6/6 pass (skipped=2)
 test_wait3	ready	v0.10.1	3/3 pass
 test_wait4	ready	v0.10.1	2/2 pass
 
 # ---- Stdlib data formats -------------------------------------------
-test_base64	ready	v0.10.1	base64 module
-test_binascii	ready	v0.10.1	binascii module
+test_base64	ready	v0.10.1	41/41 pass
+test_binascii	ready	v0.10.1	93/93 pass (skipped=17)
 test_bz2	ready	v0.10.1	101/101 pass (skipped=1)
 test_configparser	ready	v0.12.5	339/344 tests pass (5 skipped)
-test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
+test_copy	ready	v0.8.0	81/81 pass
 test_copyreg	ready	v0.8.0	6/6 pass
 test_csv	ready	v0.12.5	128/128 pass (skipped=4)
 test_dataclasses/	ready	v0.10.1	276/276 pass
@@ -358,7 +358,7 @@ test_dbm_dumb	ready	v0.10.1	26/26 pass
 test_dbm_gnu	ready	v0.10.1	skipped on non-gdbm platforms; vendor for CI gate
 test_dbm_ndbm	ready	v0.10.1	16/16 pass
 test_dbm_sqlite3	ready	v0.10.1	30/30 pass (skipped=1)
-test_difflib	ready	v0.10.1	difflib module
+test_difflib	ready	v0.10.1	58/58 pass
 test_doctest/	ready	v0.10.1	69/72 pass (3 runner-artifact failures: pdb integration + module path as __main__)
 test_docxmlrpc	ready	v0.10.1	9/9 pass
 test_email/	ready	v0.10.1	1793/1793 pass (skipped=1)
@@ -371,14 +371,14 @@ test_ipaddress	ready	v0.10.1	211/211 pass
 test_json/	ready	v0.8.0	216/216 pass (skipped=1)
 test_lzma	ready	v0.10.1	121/121 pass (skipped=1)
 test_mailbox	ready	post-0.12	376/376 pass (skipped=3)
-test_marshal	ready	v0.8.0	marshal module (PEP 552)
+test_marshal	ready	v0.8.0	75/75 pass (skipped=7)
 test_mimetypes	ready	v0.10.1	29/29 pass (skipped=2)
 test_minidom	ready	v0.10.1	131/131 pass
 test_pickle	ready	v0.8.0	999/999 pass (skipped=13)
 test_picklebuffer	ready	v0.8.0	9/9 pass
 test_pickletools	ready	v0.8.0	190/190 pass
 test_plistlib	ready	v0.10.1	70/70 pass
-test_pprint	ready	v0.10.1	pprint module
+test_pprint	ready	v0.10.1	45/45 pass
 test_pulldom	ready	v0.10.1	11/11 pass (expected_failures=3)
 test_pyexpat	ready	v0.10.1	60/60 pass (skipped=12)
 test_quopri	ready	v0.12.5	11/11 pass
@@ -390,12 +390,12 @@ test_sqlite3/	deferred	v0.10.1	sqlite3 not shipped
 test_string	ready	v0.10.1	package dir only (no flat test_string.py in CPython 3.14); see test_string/
 test_string/	ready	v0.10.1	string sub-suite
 test_stringprep	ready	v0.10.1	1/1 pass
-test_struct	ready	v0.8.0	struct module
+test_struct	ready	v0.8.0	43/43 pass
 test_tarfile	ready	v0.10.1	740/740 pass (skipped=5)
-test_textwrap	ready	v0.10.1	textwrap module
+test_textwrap	ready	v0.10.1	68/68 pass
 test_tomllib/	deferred	v0.10.1	tomllib not shipped
-test_unittest/	ready	v0.10.1	unittest framework
-test_uuid	ready	v0.10.1	uuid module
+test_unittest/	ready	v0.10.1	517/518 pass (skipped=2; 1 runner-artifact: testmock/testprogram subprocess path); run via python -m test from CPython tree for full count
+test_uuid	ready	v0.10.1	120/120 pass (skipped=16)
 test_xml_dom_minicompat	ready	v0.10.1	11/11 pass
 test_xml_dom_xmlbuilder	ready	v0.10.1	silently exits 0 (no unittest output)
 test_xml_etree	ready	v0.10.1	316/316 pass (skipped=1); package dir — copy test_xml_etree/ from CPython
