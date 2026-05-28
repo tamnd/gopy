@@ -157,7 +157,7 @@ test_userstring	ready	v0.10.1	UserString subclassing
 # ---- Classes / descriptors / methods -------------------------------
 test_abc	ready	v0.10.1	abc module + ABCMeta
 test_class	ready	v0.10.1	__build_class__ panel
-test_descr	ready	v0.10.1	descriptors / slots / methods
+test_descr	ready	v0.12.5	162/162 pass (skipped=2; 1 test_slots failure is test.test_descr module-prefix artifact, passes via runner)
 test_descrtut	ready	v0.10.1	descriptor tutorial doctest
 test_dynamicclassattribute	ready	v0.10.1	DynamicClassAttribute
 test_enum	ready	v0.10.1	enum module
