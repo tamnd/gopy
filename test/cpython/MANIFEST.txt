@@ -183,9 +183,9 @@ test_pkg	ready	v0.8.0	8/8 pass
 test_pkgutil	ready	v0.8.0	21/21 pass; requires test_import/data/package3+4 fixtures (vendored alongside)
 test_pyclbr	ready	v0.8.0	6/6 pass
 test_runpy	ready	v0.10.1	40/40 pass
-test_zipapp	deferred	v0.10.1	zipapp not shipped
-test_zipimport	deferred	v0.8.0	zipimport not shipped
-test_zipimport_support	deferred	v0.8.0	zipimport not shipped
+test_zipapp	ready	v0.10.1	35/35 pass
+test_zipimport	ready	v0.8.0	91/91 pass (skipped=2)
+test_zipimport_support	ready	v0.8.0	4/4 pass
 
 # ---- GC / weakref --------------------------------------------------
 test_finalization	ready	v0.10.0	18/18 pass
@@ -347,62 +347,62 @@ test_wait4	deferred	v0.10.1	os.wait4
 # ---- Stdlib data formats -------------------------------------------
 test_base64	ready	v0.10.1	base64 module
 test_binascii	ready	v0.10.1	binascii module
-test_bz2	deferred	v0.10.1	bz2 not shipped
+test_bz2	ready	v0.10.1	101/101 pass (skipped=1)
 test_configparser	ready	v0.12.5	339/344 tests pass (5 skipped)
 test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
-test_copyreg	deferred	v0.8.0	needs pickle
+test_copyreg	ready	v0.8.0	6/6 pass
 test_csv	ready	v0.12.5	128/128 pass (skipped=4)
 test_dataclasses/	ready	v0.10.1	dataclasses module
-test_dbm	deferred	v0.10.1	dbm module
-test_dbm_dumb	deferred	v0.10.1	dbm.dumb
+test_dbm	ready	v0.10.1	46/46 pass
+test_dbm_dumb	ready	v0.10.1	26/26 pass
 test_dbm_gnu	deferred	v0.10.1	dbm.gnu
-test_dbm_ndbm	deferred	v0.10.1	dbm.ndbm
-test_dbm_sqlite3	deferred	v0.10.1	sqlite3-backed dbm
+test_dbm_ndbm	ready	v0.10.1	16/16 pass
+test_dbm_sqlite3	ready	v0.10.1	30/30 pass (skipped=1)
 test_difflib	ready	v0.10.1	difflib module
 test_doctest/	ready	v0.10.1	doctest module
 test_docxmlrpc	deferred	v0.10.1	xmlrpc not shipped
-test_email/	deferred	v0.10.1	email not shipped
-test_gzip	deferred	v0.10.1	gzip not shipped
+test_email/	ready	v0.10.1	1793/1793 pass (skipped=1)
+test_gzip	ready	v0.10.1	75/75 pass
 test_html	ready	v0.12.5	2/2 pass
 test_htmlparser	ready	v0.12.5	67/67 pass
-test_http_cookiejar	deferred	post-0.12	http.cookiejar
-test_http_cookies	deferred	post-0.12	http.cookies
+test_http_cookiejar	ready	post-0.12	77/77 pass
+test_http_cookies	ready	post-0.12	33/33 pass
 test_ipaddress	ready	v0.10.1	211/211 pass
-test_json/	deferred	v0.8.0	json not shipped
-test_lzma	deferred	v0.10.1	lzma not shipped
-test_mailbox	deferred	post-0.12	mailbox module
+test_json/	ready	v0.8.0	216/216 pass (skipped=1)
+test_lzma	ready	v0.10.1	121/121 pass (skipped=1)
+test_mailbox	ready	post-0.12	376/376 pass (skipped=3)
 test_marshal	ready	v0.8.0	marshal module (PEP 552)
 test_mimetypes	ready	v0.10.1	29/29 pass (skipped=2)
-test_minidom	deferred	v0.10.1	xml.dom not shipped
-test_pickle	deferred	v0.8.0	pickle not shipped
+test_minidom	ready	v0.10.1	131/131 pass
+test_pickle	ready	v0.8.0	999/999 pass (skipped=13)
 test_picklebuffer	deferred	v0.8.0	pickle not shipped
-test_pickletools	deferred	v0.8.0	pickle not shipped
-test_plistlib	deferred	v0.10.1	plistlib not shipped
+test_pickletools	ready	v0.8.0	190/190 pass
+test_plistlib	ready	v0.10.1	70/70 pass
 test_pprint	ready	v0.10.1	pprint module
-test_pulldom	deferred	v0.10.1	xml.dom not shipped
+test_pulldom	ready	v0.10.1	11/11 pass (expected_failures=3)
 test_pyexpat	deferred	v0.10.1	needs libexpat binding
 test_quopri	ready	v0.12.5	11/11 pass
 test_re	ready	v0.12.5	165/165 pass (skipped=3)
-test_sax	deferred	v0.10.1	xml.sax not shipped
-test_shelve	deferred	v0.10.1	shelve depends on dbm
+test_sax	ready	v0.10.1	186/186 pass
+test_shelve	ready	v0.10.1	350/350 pass
 test_shlex	ready	v0.10.1	19/19 pass
 test_sqlite3/	deferred	v0.10.1	sqlite3 not shipped
 test_string	ready	v0.10.1	package dir only (no flat test_string.py in CPython 3.14); see test_string/
 test_string/	ready	v0.10.1	string sub-suite
 test_stringprep	ready	v0.10.1	1/1 pass
 test_struct	ready	v0.8.0	struct module
-test_tarfile	deferred	v0.10.1	tarfile not shipped
+test_tarfile	ready	v0.10.1	740/740 pass (skipped=5)
 test_textwrap	ready	v0.10.1	textwrap module
 test_tomllib/	deferred	v0.10.1	tomllib not shipped
 test_unittest/	ready	v0.10.1	unittest framework
 test_uuid	ready	v0.10.1	uuid module
 test_xml_dom_minicompat	deferred	v0.10.1	xml.dom not shipped
 test_xml_dom_xmlbuilder	deferred	v0.10.1	xml.dom not shipped
-test_xml_etree	deferred	v0.10.1	xml.etree not shipped
-test_xml_etree_c	deferred	v0.10.1	xml.etree.cElementTree
-test_xmlrpc	deferred	v0.10.1	xmlrpc not shipped
+test_xml_etree	ready	v0.10.1	316/316 pass (skipped=1); package dir — copy test_xml_etree/ from CPython
+test_xml_etree_c	ready	v0.10.1	238/238 pass (skipped=7)
+test_xmlrpc	ready	v0.10.1	93/93 pass
 test_xpickle	deferred	v0.8.0	pickle cross-version
-test_zipfile/	deferred	v0.10.1	zipfile not shipped
+test_zipfile/	ready	v0.10.1	package — run via python -m test from CPython tree
 test_zipfile64	deferred	v0.10.1	zip64 not shipped
 test_zlib	ready	v0.12.5	76/76 pass (skipped=2)
 test_zstd	deferred	v0.10.1	zstd new in 3.14
@@ -418,8 +418,8 @@ test_context	ready	v0.9.0	56/56 pass
 test_errno	ready	v0.7.0	3/3 pass
 test_getpass	deferred	v0.10.1	getpass module
 test_getpath	out-of-scope	-	C-level getpath
-test_locale	deferred	v0.7.0	locale module
-test__locale	deferred	v0.7.0	_locale module
+test_locale	ready	v0.7.0	66/66 pass (skipped=1)
+test__locale	ready	v0.7.0	6/6 pass (skipped=72)
 test_longexp	ready	v0.4.0	1/1 pass
 test_pdb	out-of-scope	-	pdb debugger
 test_platform	ready	v0.7.0	39/39 pass (skipped=3)
@@ -443,9 +443,9 @@ test_webbrowser	deferred	post-0.12	webbrowser module
 # ---- Networking ---------------------------------------------------
 test_devpoll	deferred	post-0.12	devpoll selector
 test_epoll	deferred	post-0.12	epoll selector
-test_ftplib	deferred	post-0.12	ftplib
+test_ftplib	ready	post-0.12	94/94 pass (skipped=1)
 test_httplib	deferred	post-0.12	http.client
-test_httpservers	deferred	post-0.12	http.server
+test_httpservers	ready	post-0.12	92/92 pass (skipped=4)
 test_imaplib	deferred	post-0.12	imaplib
 test_kqueue	deferred	post-0.12	kqueue selector
 test_netrc	deferred	post-0.12	netrc parser
