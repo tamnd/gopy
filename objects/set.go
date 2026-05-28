@@ -365,26 +365,6 @@ func NewFrozensetOfType(tp *Type, items []Object) (*Set, error) {
 // CPython: Objects/setobject.c:L2201 PySet_Size
 func (s *Set) Len() int { return s.used }
 
-// SetEntry carries a (key, hash) pair from Entries().
-type SetEntry struct {
-	Key  Object
-	Hash int64
-}
-
-// Entries returns all live entries as (Key, Hash) pairs. Used by
-// dict.fromkeys to reuse cached hashes without recomputing them.
-//
-// CPython: Objects/setobject.c tp_iter (implicit per-entry walk)
-func (s *Set) Entries() []SetEntry {
-	out := make([]SetEntry, 0, s.used)
-	for _, e := range s.entries {
-		if e.used {
-			out = append(out, SetEntry{Key: e.key, Hash: int64(e.hash)})
-		}
-	}
-	return out
-}
-
 // Add inserts key into the set. Returns an error if key is unhashable
 // or if the set is frozen.
 //
