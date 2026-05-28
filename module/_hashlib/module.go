@@ -9,19 +9,28 @@
 package _hashlib
 
 import (
+	cryptohmac "crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha3"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"hash"
 	"io"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
+
+// UnsupportedDigestmodError is raised when a digestmod is not available.
+// It subclasses ValueError, mirroring CPython.
+//
+// CPython: Modules/_hashopenssl.c:2338 UnsupportedDigestmodError
+var unsupportedDigestmodError = pyerrors.NewExcType("_hashlib.UnsupportedDigestmodError", []*objects.Type{pyerrors.PyExc_ValueError})
 
 func init() {
 	_ = imp.AppendInittab("_hashlib", buildModule)
@@ -140,6 +149,236 @@ func newHashType() *objects.Type {
 		nil,
 	))
 	return t
+}
+
+// ---------------------------------------------------------------------------
+// HMAC object type.
+// ---------------------------------------------------------------------------
+
+// HMACType is the Python type for HMAC objects returned by hmac_new.
+//
+// CPython: Modules/_hashopenssl.c:1907 HMACType
+var HMACType *objects.Type
+
+func init() {
+	HMACType = newHMACType()
+}
+
+// hmacObjGoType holds the Go hash constructor (for copy/replay).
+type hmacObjGoType struct {
+	newFunc func() hash.Hash
+}
+
+// hmacObjState carries the per-instance HMAC state.
+//
+// CPython: Modules/_hashopenssl.c:288 HMACobject
+type hmacObjState struct {
+	objects.Header
+	name       string
+	key        []byte
+	data       []byte // all bytes fed via update() – used by copy()
+	h          hash.Hash
+	goType     hmacObjGoType
+	digestSize int
+	blockSize  int
+}
+
+func newHMACType() *objects.Type {
+	t := objects.NewType("_hashlib.HMAC", []*objects.Type{objects.ObjectType()})
+	t.Getattro = func(o objects.Object, name objects.Object) (objects.Object, error) {
+		return objects.GenericGetAttr(o, name)
+	}
+	t.Repr = func(o objects.Object) (string, error) {
+		s := o.(*hmacObjState)
+		// CPython: Modules/_hashopenssl.c:1766 _hashlib_HMAC_get_digest_name
+		return fmt.Sprintf("<%s HMAC object @ %p>", s.name, s), nil
+	}
+	// Block direct instantiation: _hashlib.HMAC instances must be created
+	// via hmac_new(). CPython marks this type as immutable/no-instantiation.
+	//
+	// CPython: Modules/_hashopenssl.c:1907 HMACType (tp_new = NULL)
+	t.TpNew = func(cls *objects.Type, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, fmt.Errorf("TypeError: cannot create '_hashlib.HMAC' instances")
+	}
+	objects.SetTypeDescr(t, "__new__", objects.NewBuiltinFunction("__new__", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return nil, fmt.Errorf("TypeError: cannot create '_hashlib.HMAC' instances")
+	}))
+
+	objects.SetTypeDescr(t, "update", objects.NewMethodDescr(t, "update", hmacUpdate))
+	objects.SetTypeDescr(t, "digest", objects.NewMethodDescr(t, "digest", hmacDigest))
+	objects.SetTypeDescr(t, "hexdigest", objects.NewMethodDescr(t, "hexdigest", hmacHexdigest))
+	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", hmacCopy))
+
+	objects.SetTypeDescr(t, "digest_size", objects.NewGetSetDescr(
+		"digest_size",
+		func(o objects.Object) (objects.Object, error) {
+			return objects.NewInt(int64(o.(*hmacObjState).digestSize)), nil
+		},
+		nil,
+	))
+	objects.SetTypeDescr(t, "block_size", objects.NewGetSetDescr(
+		"block_size",
+		func(o objects.Object) (objects.Object, error) {
+			return objects.NewInt(int64(o.(*hmacObjState).blockSize)), nil
+		},
+		nil,
+	))
+	objects.SetTypeDescr(t, "name", objects.NewGetSetDescr(
+		"name",
+		func(o objects.Object) (objects.Object, error) {
+			return objects.NewStr("hmac-" + o.(*hmacObjState).name), nil
+		},
+		nil,
+	))
+	return t
+}
+
+// newHMACObj creates an hmacObjState for the named algorithm, initialised with key and optional msg.
+//
+// CPython: Modules/_hashopenssl.c:1577 _hashlib_hmac_new_impl
+func newHMACObj(algoName string, key, msg []byte) (*hmacObjState, error) {
+	info, ok := algorithms[algoName]
+	if !ok {
+		return nil, fmt.Errorf("ValueError: unsupported hash type %s", algoName)
+	}
+	goType := hmacObjGoType{newFunc: info.newFunc}
+	h := cryptohmac.New(info.newFunc, key)
+	s := &hmacObjState{
+		name:       algoName,
+		key:        append([]byte(nil), key...),
+		h:          h,
+		goType:     goType,
+		digestSize: info.digestSize,
+		blockSize:  info.blockSize,
+	}
+	s.Init(HMACType)
+	if len(msg) > 0 {
+		h.Write(msg)
+		s.data = append(s.data, msg...)
+	}
+	return s, nil
+}
+
+// resolveAlgoName resolves a Python digestmod (str or callable openssl_xxx) to an algorithm name.
+// Returns unsupportedDigestmodError for unknown digestmods.
+//
+// CPython: Modules/_hashopenssl.c:1577 _hashlib_hmac_new_impl
+func resolveAlgoName(digestmod objects.Object) (string, error) {
+	if digestmod == nil {
+		// CPython: Modules/_hashopenssl.c:1605 - raises TypeError for missing digestmod
+		return "", fmt.Errorf("TypeError: Missing required parameter 'digestmod'.")
+	}
+	if digestmod == objects.None() {
+		msg := "unsupported digestmod: None"
+		exc := pyerrors.New(unsupportedDigestmodError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		return "", objects.NewRaisedError(exc, msg)
+	}
+	switch v := digestmod.(type) {
+	case *objects.Unicode:
+		name, _ := objects.Str(v)
+		// Normalize aliases like "SHA256" -> "sha256", "SHA-256" -> "sha256"
+		name = normalizeAlgoName(name)
+		if _, ok := algorithms[name]; ok {
+			return name, nil
+		}
+		msg := fmt.Sprintf("unsupported digestmod: %s", name)
+		exc := pyerrors.New(unsupportedDigestmodError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		return "", objects.NewRaisedError(exc, msg)
+	case *objects.BuiltinFunction:
+		// openssl_sha256 -> "sha256", openssl_md5 -> "md5"
+		fname := v.Name
+		const prefix = "openssl_"
+		if len(fname) > len(prefix) && fname[:len(prefix)] == prefix {
+			name := fname[len(prefix):]
+			if _, ok := algorithms[name]; ok {
+				return name, nil
+			}
+		}
+		msg := fmt.Sprintf("unsupported digestmod function: %s", fname)
+		exc := pyerrors.New(unsupportedDigestmodError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		return "", objects.NewRaisedError(exc, msg)
+	default:
+		msg := fmt.Sprintf("unsupported digestmod type: %T", digestmod)
+		exc := pyerrors.New(unsupportedDigestmodError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+		return "", objects.NewRaisedError(exc, msg)
+	}
+}
+
+// normalizeAlgoName downcases and strips common prefixes/dashes.
+func normalizeAlgoName(name string) string {
+	// lowercase
+	out := make([]byte, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out[i] = c
+	}
+	s := string(out)
+	// strip dashes: "sha-256" -> "sha256"
+	result := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '-' {
+			result = append(result, s[i])
+		}
+	}
+	return string(result)
+}
+
+func hmacUpdate(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: update() requires a msg argument")
+	}
+	s, ok := args[0].(*hmacObjState)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'update' requires a '_hashlib.HMAC' object")
+	}
+	data, ok2 := bytesLike(args[1])
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: argument must be a bytes-like object, not '%T'", args[1])
+	}
+	s.h.Write(data)
+	s.data = append(s.data, data...)
+	return objects.None(), nil
+}
+
+func hmacDigest(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, ok := args[0].(*hmacObjState)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'digest' requires a '_hashlib.HMAC' object")
+	}
+	return objects.NewBytes(s.h.Sum(nil)), nil
+}
+
+func hmacHexdigest(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, ok := args[0].(*hmacObjState)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'hexdigest' requires a '_hashlib.HMAC' object")
+	}
+	return objects.NewStr(hex.EncodeToString(s.h.Sum(nil))), nil
+}
+
+func hmacCopy(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, ok := args[0].(*hmacObjState)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'copy' requires a '_hashlib.HMAC' object")
+	}
+	// CPython: Modules/_hashopenssl.c:1708 _hashlib_HMAC_copy_impl
+	// Replay key + data into a fresh HMAC to clone state.
+	h2 := cryptohmac.New(s.goType.newFunc, s.key)
+	h2.Write(s.data)
+	c := &hmacObjState{
+		name:       s.name,
+		key:        append([]byte(nil), s.key...),
+		data:       append([]byte(nil), s.data...),
+		h:          h2,
+		goType:     s.goType,
+		digestSize: s.digestSize,
+		blockSize:  s.blockSize,
+	}
+	c.Init(HMACType)
+	return c, nil
 }
 
 // hashGetattr routes attribute lookups: check the type's descriptor table
@@ -495,6 +734,140 @@ func constructorFor(name string, args []objects.Object, kwargs map[string]object
 	return newHash(name, data)
 }
 
+// hmacDigestSingleShot computes a single-shot HMAC and returns raw bytes.
+//
+// CPython: Modules/_hashopenssl.c:1504 _hashlib_hmac_singleshot_impl
+func hmacDigestSingleShot(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: hmac_digest() requires key and msg arguments")
+	}
+	key, ok2 := bytesLike(args[0])
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: key must be a bytes-like object, not '%T'", args[0])
+	}
+	msg, ok3 := bytesLike(args[1])
+	if !ok3 {
+		return nil, fmt.Errorf("TypeError: msg must be a bytes-like object, not '%T'", args[1])
+	}
+	var digestmod objects.Object
+	if len(args) >= 3 {
+		digestmod = args[2]
+	} else if v, ok := kwargs["digest"]; ok {
+		digestmod = v
+	}
+	algoName, err := resolveAlgoName(digestmod)
+	if err != nil {
+		return nil, err
+	}
+	info, ok := algorithms[algoName]
+	if !ok {
+		return nil, fmt.Errorf("ValueError: unsupported hash type %s", algoName)
+	}
+	h := cryptohmac.New(info.newFunc, key)
+	h.Write(msg)
+	return objects.NewBytes(h.Sum(nil)), nil
+}
+
+// hmacNew creates an _hashlib.HMAC object. Mirrors CPython's _hashlib_hmac_new_impl.
+//
+// CPython: Modules/_hashopenssl.c:1577 _hashlib_hmac_new_impl
+func hmacNew(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// Positional: key, [msg]. Keyword: digestmod=, msg=
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: hmac_new() missing required argument 'key'")
+	}
+	key, ok2 := bytesLike(args[0])
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: key must be a bytes-like object, not '%T'", args[0])
+	}
+
+	var msg []byte
+	if len(args) >= 2 && args[1] != objects.None() {
+		data, ok3 := bytesLike(args[1])
+		if !ok3 {
+			return nil, fmt.Errorf("TypeError: msg must be a bytes-like object, not '%T'", args[1])
+		}
+		msg = data
+	} else if v, ok := kwargs["msg"]; ok && v != objects.None() {
+		data, ok3 := bytesLike(v)
+		if !ok3 {
+			return nil, fmt.Errorf("TypeError: msg must be a bytes-like object, not '%T'", v)
+		}
+		msg = data
+	}
+
+	var digestmod objects.Object
+	if v, ok := kwargs["digestmod"]; ok {
+		digestmod = v
+	} else if len(args) >= 3 {
+		digestmod = args[2]
+	}
+
+	algoName, err := resolveAlgoName(digestmod)
+	if err != nil {
+		return nil, err
+	}
+	return newHMACObj(algoName, key, msg)
+}
+
+// compareDigest implements constant-time equality for str or bytes arguments.
+// It is a Go port of _hashlib_compare_digest_impl and the _tscmp helper.
+//
+// CPython: Modules/_hashopenssl.c:2042 _tscmp
+// CPython: Modules/_hashopenssl.c:2086 _hashlib_compare_digest_impl
+func compareDigest(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: compare_digest() takes exactly 2 arguments (%d given)", len(args))
+	}
+	a, b := args[0], args[1]
+
+	switch av := a.(type) {
+	case *objects.Unicode:
+		bv, ok := b.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: unsupported operand types or combination of types: 'str' and '%T'", b)
+		}
+		sa, _ := objects.Str(av)
+		sb, _ := objects.Str(bv)
+		for _, r := range sa {
+			if r > 127 {
+				return nil, fmt.Errorf("TypeError: comparing strings with non-ASCII characters is not supported")
+			}
+		}
+		for _, r := range sb {
+			if r > 127 {
+				return nil, fmt.Errorf("TypeError: comparing strings with non-ASCII characters is not supported")
+			}
+		}
+		eq := subtle.ConstantTimeCompare([]byte(sa), []byte(sb))
+		return objects.NewBool(eq == 1), nil
+
+	case *objects.Bytes:
+		bBytes, ok := bytesLike(b)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: unsupported operand types or combination of types: 'bytes' and '%T'", b)
+		}
+		eq := subtle.ConstantTimeCompare(av.Bytes(), bBytes)
+		return objects.NewBool(eq == 1), nil
+
+	case *objects.ByteArray:
+		bBytes, ok := bytesLike(b)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: unsupported operand types or combination of types: 'bytearray' and '%T'", b)
+		}
+		eq := subtle.ConstantTimeCompare(av.Bytes(), bBytes)
+		return objects.NewBool(eq == 1), nil
+
+	default:
+		return nil, fmt.Errorf("TypeError: unsupported operand types or combination of types: '%T' and '%T'", a, b)
+	}
+}
+
+// bytesLike extracts a []byte from a bytes-like object (bytes, bytearray, memoryview).
+func bytesLike(o objects.Object) ([]byte, bool) {
+	return objects.AsBytesLike(o)
+}
+
 // ---------------------------------------------------------------------------
 // Module builder.
 // ---------------------------------------------------------------------------
@@ -525,6 +898,12 @@ func buildModule() (*objects.Module, error) {
 		{"openssl_sha3_512", objects.NewBuiltinFunction("openssl_sha3_512", opensslSHA3_512)},
 		{"openssl_shake_128", objects.NewBuiltinFunction("openssl_shake_128", opensslShake128)},
 		{"openssl_shake_256", objects.NewBuiltinFunction("openssl_shake_256", opensslShake256)},
+		{"compare_digest", objects.NewBuiltinFunction("compare_digest", compareDigest)},
+		{"hmac_new", objects.NewBuiltinFunction("hmac_new", hmacNew)},
+		{"hmac_digest", objects.NewBuiltinFunction("hmac_digest", hmacDigestSingleShot)},
+		{"UnsupportedDigestmodError", unsupportedDigestmodError},
+		{"HMAC", HMACType},
+		{"_GIL_MINSIZE", objects.NewInt(2048)},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
