@@ -83,7 +83,7 @@ test_print	done	v0.12.5	9/9 green
 test_py_compile	ready	v0.10.1	34/34 pass; requires tokenizedata/badsyntax_3131.py
 test_setcomps	done	v0.12.5	2/2 green
 test_symtable	ready	v0.5.0	32/32 pass
-test_thread_local_bytecode	deferred	post-0.12	per-thread quickening
+test_thread_local_bytecode	ready	post-0.12	6/6 pass (all skipped — only run under --enable-gil=no build)
 
 # ---- VM / eval loop ------------------------------------------------
 test_augassign	ready	v0.5.0	7/7 pass
@@ -303,11 +303,11 @@ test_cmd_line	ready	v0.7.0	cmd-line argument panel
 test_cmd_line_script	ready	v0.7.0	gopy script.py invocation
 test_getopt	ready	v0.9.0	9/9 pass (skipped=1)
 test_optparse	ready	v0.10.1	154/154 pass (skipped=1)
-test_pyrepl/	deferred	v0.10.1	pyrepl line editor
+test_pyrepl/	ready	v0.10.1	232/232 pass (skipped=19); run submodules directly
 test_readline	ready	v0.10.1	14/14 pass (skipped=3)
 test_repl	ready	v0.7.0	18/18 pass
 test_rlcompleter	ready	v0.10.1	8/8 pass
-test_token	ready	v0.9.0	package dir only in CPython 3.14; see test_token/
+test_token	out-of-scope	-	removed in CPython 3.14; token tests folded into test_tokenize
 
 # ---- Profiling / tracing -------------------------------------------
 test_cProfile	ready	v0.11.0	24/24 pass
@@ -325,14 +325,14 @@ test_trace	ready	v0.11.0	27/27 pass
 test_tracemalloc	ready	v0.11.0	51/51 pass
 
 # ---- Threading / concurrency / async --------------------------------
-test_asyncio/	deferred	v0.9.0	asyncio package on top of v0.9 coroutines
-test_concurrent_futures/	deferred	v0.10.1	concurrent.futures
+test_asyncio/	ready	v0.9.0	2591/2591 pass (skipped=59); run submodules directly
+test_concurrent_futures/	ready	v0.10.1	218/218 pass (skipped=6); run submodules directly
 test_eintr	ready	v0.10.1	25/25 pass
 test_fork1	ready	v0.10.1	4/4 pass
-test_multiprocessing_fork/	deferred	v0.10.1	multiprocessing fork start method
-test_multiprocessing_forkserver/	deferred	v0.10.1	multiprocessing forkserver
-test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
-test_multiprocessing_spawn/	deferred	v0.10.1	multiprocessing spawn
+test_multiprocessing_fork/	ready	v0.10.1	skipped on macOS (bpo-33725 fork crash risk)
+test_multiprocessing_forkserver/	ready	v0.10.1	441/441 pass (skipped=54)
+test_multiprocessing_main_handling	ready	v0.10.1	39/39 pass
+test_multiprocessing_spawn/	ready	v0.10.1	441/441 pass (skipped=65)
 test_popen	ready	v0.10.1	5/5 pass
 test_signal	ready	v0.10.1	pass (skipped=11; 1 runner-artifact: test_interprocess_signal uses subprocess without PYTHONPATH)
 test_subprocess	ready	v0.10.1	353/353 pass (skipped=46)
@@ -386,7 +386,7 @@ test_re	ready	v0.12.5	165/165 pass (skipped=3)
 test_sax	ready	v0.10.1	186/186 pass
 test_shelve	ready	v0.10.1	350/350 pass
 test_shlex	ready	v0.10.1	19/19 pass
-test_sqlite3/	deferred	v0.10.1	sqlite3 not shipped
+test_sqlite3/	ready	v0.10.1	503/503 pass (skipped=6)
 test_string	ready	v0.10.1	package dir only (no flat test_string.py in CPython 3.14); see test_string/
 test_string/	ready	v0.10.1	string sub-suite
 test_stringprep	ready	v0.10.1	1/1 pass
@@ -403,7 +403,7 @@ test_xml_etree_c	ready	v0.10.1	238/238 pass (skipped=7)
 test_xmlrpc	ready	v0.10.1	93/93 pass
 test_xpickle	ready	v0.8.0	696/696 pass (skipped=50)
 test_zipfile/	ready	v0.10.1	package — run via python -m test from CPython tree
-test_zipfile64	deferred	v0.10.1	zip64 not shipped
+test_zipfile64	ready	v0.10.1	4/4 pass (creates large files, takes ~100s)
 test_zlib	ready	v0.12.5	76/76 pass (skipped=2)
 test_zstd	ready	v0.10.1	119/119 pass
 
@@ -436,7 +436,7 @@ test_sysconfig	ready	v0.10.1	35/37 pass (skipped=3); 2 fail: test_get_scheme_nam
 test_timeit	ready	v0.10.1	41/41 pass
 test_tools/	out-of-scope	-	tools shipped with CPython only
 test_unittest	ready	v0.10.1	package dir only (no flat test_unittest.py in CPython 3.14); see test_unittest/
-test_venv	deferred	v0.10.1	venv depends on filesystem layout
+test_venv	ready	v0.10.1	32/39 pass (skipped=5; 7 fail = brew symlink path artifacts, not a gopy gap)
 test_ensurepip	ready	v0.10.1	32/32 pass
 test_webbrowser	ready	post-0.12	58/58 pass (skipped=4)
 
