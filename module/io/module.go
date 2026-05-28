@@ -269,6 +269,17 @@ func ioFileArg(o objects.Object) (string, error) {
 	case *objects.Bytes:
 		return string(v.Bytes()), nil
 	}
+	// os.PathLike: call __fspath__() and recurse.
+	//
+	// CPython: Modules/_io/fileio.c:303 PyUnicode_FSConverter calls
+	// PyOS_FSPath which invokes __fspath__.
+	if fspath, err := objects.GetAttr(o, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return ioFileArg(result)
+	}
 	return "", fmt.Errorf("TypeError: invalid file: %s", o.Type().Name)
 }
 
