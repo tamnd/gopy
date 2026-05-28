@@ -528,26 +528,20 @@ func abcSubclasscheck(args []objects.Object, _ map[string]objects.Object) (objec
 // callSubclasshook fires cls.__subclasshook__(subclass). Returns
 // NotImplemented when the class did not define one (the default in
 // abc.ABC).
+//
+// CPython: Modules/_abc.c:589 _call_subclasshook uses
+// _PyObject_GetAttrWithoutError(cls, "__subclasshook__") which resolves
+// the classmethod descriptor via cls's MRO, not the metaclass's MRO.
 func callSubclasshook(self, subclass objects.Object) (objects.Object, error) {
-	descr, owner := objects.LookupDescriptor(self.Type(), "__subclasshook__")
-	if descr == nil {
-		if cls, ok := self.(*objects.Type); ok {
-			d, _ := objects.LookupDescriptor(cls, "__subclasshook__")
-			if d != nil {
-				bound, err := bindDescriptor(d, self, cls)
-				if err != nil {
-					return nil, err
-				}
-				return objects.CallOneArg(bound, subclass)
-			}
-		}
-		return objects.NotImplemented(), nil
+	checker, err := objects.GetAttr(self, objects.NewStr("__subclasshook__"))
+	if err != nil || checker == nil {
+		return objects.NotImplemented(), nil //nolint:nilerr // AttributeError → NotImplemented
 	}
-	bound, err := bindDescriptor(descr, self, owner)
+	result, err := objects.CallOneArg(checker, subclass)
 	if err != nil {
 		return nil, err
 	}
-	return objects.CallOneArg(bound, subclass)
+	return result, nil
 }
 
 // checkRegistry implements the fast path plus the recursive walk over
