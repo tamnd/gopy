@@ -89,7 +89,7 @@ test_thread_local_bytecode	ready	post-0.12	6/6 pass (all skipped — only run un
 test_augassign	done	v0.12.5	7/7 green. Inplace op dispatch fix + None-slot TypeError (callBinaryDunder, isOwnDescriptor, slotTpRichCompare)
 test_call	ready	v0.9.0	186/186 pass
 test_compare	ready	v0.2.0	16/16 pass
-test_contains	ready	v0.2.0	4/4 pass
+test_contains	done	v0.12.5	4/4 green. Legacy __getitem__ iteration in containsItem + NaN identity via listContains + None-slot block for __contains__ = None
 test_dynamic	done	v0.12.5	11/11 green
 test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14; no standalone test_eval.py exists
 test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)

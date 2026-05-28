@@ -1623,9 +1623,11 @@ func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object,
 }
 
 // containsItem mirrors PySequence_Contains. Falls back to walking the
-// iterator when the type provides no Contains slot.
+// iterator when the type provides no Contains slot. The legacy path via
+// __getitem__ (sq_item) is covered by objects.Iter's fallback.
 //
-// CPython: Objects/abstract.c PySequence_Contains
+// CPython: Objects/abstract.c:2130 PySequence_Contains
+// CPython: Objects/abstract.c:2093 _PySequence_IterSearch
 func containsItem(haystack, needle objects.Object) (bool, error) {
 	t := haystack.Type()
 	if t.Sequence != nil && t.Sequence.Contains != nil {
@@ -1635,14 +1637,19 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 		v, _ := d.GetItem(needle)
 		return v != nil, nil
 	}
-	if t.Iter == nil {
-		return false, fmt.Errorf("TypeError: argument of type '%s' is not iterable", t.Name)
-	}
-	items, ierr := iterToSlice(haystack)
+	it, ierr := objects.Iter(haystack)
 	if ierr != nil {
-		return false, ierr
+		return false, fmt.Errorf("TypeError: argument of type '%s' is not a container or iterable", t.Name)
 	}
-	for _, item := range items {
+	itType := it.Type()
+	for {
+		item, nerr := itType.IterNext(it)
+		if nerr != nil {
+			if errors.Is(nerr, objects.ErrStopIteration) {
+				return false, nil
+			}
+			return false, nerr
+		}
 		eq, eerr := objects.RichCmpBool(item, needle, objects.CompareEQ)
 		if eerr != nil {
 			return false, eerr
@@ -1651,7 +1658,6 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 			return true, nil
 		}
 	}
-	return false, nil
 }
 
 // setItem mirrors PyObject_SetItem against the v0.6 container surface.
