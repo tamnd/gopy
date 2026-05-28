@@ -333,7 +333,7 @@ test_multiprocessing_fork/	deferred	v0.10.1	multiprocessing fork start method
 test_multiprocessing_forkserver/	deferred	v0.10.1	multiprocessing forkserver
 test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
 test_multiprocessing_spawn/	deferred	v0.10.1	multiprocessing spawn
-test_popen	deferred	v0.10.1	os.popen
+test_popen	ready	v0.10.1	5/5 pass
 test_signal	ready	v0.10.1	signal module
 test_subprocess	ready	v0.10.1	353/353 pass (skipped=46)
 test_thread	ready	v0.7.0	35/35 pass
@@ -401,7 +401,7 @@ test_xml_dom_xmlbuilder	ready	v0.10.1	silently exits 0 (no unittest output)
 test_xml_etree	ready	v0.10.1	316/316 pass (skipped=1); package dir — copy test_xml_etree/ from CPython
 test_xml_etree_c	ready	v0.10.1	238/238 pass (skipped=7)
 test_xmlrpc	ready	v0.10.1	93/93 pass
-test_xpickle	deferred	v0.8.0	pickle cross-version
+test_xpickle	ready	v0.8.0	696/696 pass (skipped=50)
 test_zipfile/	ready	v0.10.1	package — run via python -m test from CPython tree
 test_zipfile64	deferred	v0.10.1	zip64 not shipped
 test_zlib	ready	v0.12.5	76/76 pass (skipped=2)
@@ -416,7 +416,7 @@ test_build_details	out-of-scope	-	CPython build manifest
 test_colorsys	ready	v0.10.1	7/7 pass
 test_context	ready	v0.9.0	56/56 pass
 test_errno	ready	v0.7.0	3/3 pass
-test_getpass	deferred	v0.10.1	getpass module
+test_getpass	ready	v0.10.1	24/24 pass
 test_getpath	out-of-scope	-	C-level getpath
 test_locale	ready	v0.7.0	66/66 pass (skipped=1)
 test__locale	ready	v0.7.0	6/6 pass (skipped=72)
@@ -438,36 +438,36 @@ test_tools/	out-of-scope	-	tools shipped with CPython only
 test_unittest	ready	v0.10.1	package dir only (no flat test_unittest.py in CPython 3.14); see test_unittest/
 test_venv	deferred	v0.10.1	venv depends on filesystem layout
 test_ensurepip	deferred	v0.10.1	pip bundling
-test_webbrowser	deferred	post-0.12	webbrowser module
+test_webbrowser	ready	post-0.12	58/58 pass (skipped=4)
 
 # ---- Networking ---------------------------------------------------
 test_devpoll	deferred	post-0.12	devpoll selector
 test_epoll	deferred	post-0.12	epoll selector
 test_ftplib	ready	post-0.12	94/94 pass (skipped=1)
-test_httplib	deferred	post-0.12	http.client
+test_httplib	ready	post-0.12	144/144 pass
 test_httpservers	ready	post-0.12	92/92 pass (skipped=4)
-test_imaplib	deferred	post-0.12	imaplib
-test_kqueue	deferred	post-0.12	kqueue selector
-test_netrc	deferred	post-0.12	netrc parser
-test_poll	deferred	post-0.12	poll selector
-test_poplib	deferred	post-0.12	poplib
-test_robotparser	deferred	post-0.12	robotparser
+test_imaplib	ready	post-0.12	110/110 pass
+test_kqueue	ready	post-0.12	8/8 pass
+test_netrc	ready	post-0.12	23/23 pass (skipped=1)
+test_poll	ready	post-0.12	7/7 pass
+test_poplib	ready	post-0.12	71/71 pass
+test_robotparser	ready	post-0.12	102/102 pass
 test_select	ready	v0.12.5	6/6 pass
-test_selectors	deferred	post-0.12	selectors module
-test_smtplib	deferred	post-0.12	smtplib
+test_selectors	ready	post-0.12	121/121 pass (skipped=45)
+test_smtplib	ready	post-0.12	85/85 pass
 test_smtpnet	deferred	post-0.12	smtplib live-net
 test_socket	ready	v0.12.5	746/746 pass (skipped=255)
-test_socketserver	deferred	post-0.12	socketserver
+test_socketserver	ready	post-0.12	27/27 pass
 test_ssl	deferred	post-0.12	ssl
-test_timeout	deferred	post-0.12	socket timeout
-test_urllib	deferred	post-0.12	urllib
-test_urllib2	deferred	post-0.12	urllib2
+test_timeout	ready	post-0.12	14/14 pass
+test_urllib	ready	post-0.12	101/101 pass (skipped=2)
+test_urllib2	ready	post-0.12	80/80 pass (skipped=1)
 test_urllib2_localnet	deferred	post-0.12	urllib2 localnet
 test_urllib2net	deferred	post-0.12	urllib2 live-net
-test_urllib_response	deferred	post-0.12	urllib response
+test_urllib_response	ready	post-0.12	4/4 pass
 test_urllibnet	deferred	post-0.12	urllib live-net
 test_urlparse	ready	v0.12.5	77/77 pass (skipped=5)
-test_wsgiref	deferred	post-0.12	wsgiref
+test_wsgiref	ready	post-0.12	37/37 pass
 
 # ---- Out-of-scope (CPython internals / platform shells / GUI) -----
 test__osx_support	out-of-scope	-	apple-only
