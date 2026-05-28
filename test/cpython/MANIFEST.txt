@@ -310,14 +310,14 @@ test_rlcompleter	deferred	v0.10.1	readline integration
 test_token	ready	v0.9.0	package dir only in CPython 3.14; see test_token/
 
 # ---- Profiling / tracing -------------------------------------------
-test_cprofile	deferred	v0.11.0	cProfile (C accelerator)
+test_cProfile	ready	v0.11.0	24/24 pass
 test_external_inspection	out-of-scope	-	gdb-based
 test_monitoring	done	v0.11.0	gated indirectly via v012test/
 test_opcache	done	v0.11.0	gated via v012test/
 test_optimizer	done	v0.12.0	gated via v012test/
 test_perf_profiler	out-of-scope	-	perf integration not portable
 test_perfmaps	out-of-scope	-	perf integration not portable
-test_profile	ready	v0.11.0	profile module
+test_profile	ready	v0.11.0	7/7 pass
 test_pstats	ready	v0.11.0	13/13 pass
 test_sys_setprofile	ready	v0.11.0	29/29 pass
 test_sys_settrace	ready	v0.11.0	448/448 pass
