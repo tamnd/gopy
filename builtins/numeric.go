@@ -79,15 +79,32 @@ func Ord(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: ord() takes exactly one argument (%d given)", len(args))
 	}
-	if args[0].Type() != objects.StrType() {
-		return nil, fmt.Errorf("TypeError: ord() expected string of length 1, but %s found", args[0].Type().Name)
+	// CPython: Python/bltinmodule.c:1507 builtin_ord_impl
+	// Accepts str (length-1), bytes (length-1), or bytearray (length-1).
+	// CPython: Python/bltinmodule.c:1507 builtin_ord_impl
+	// Accepts str (length-1), bytes (length-1), or bytearray (length-1).
+	switch v := args[0].(type) {
+	case *objects.Unicode:
+		s := v.Value()
+		if utf8.RuneCountInString(s) != 1 {
+			return nil, fmt.Errorf("TypeError: ord() expected a character, but string of length %d found", utf8.RuneCountInString(s))
+		}
+		r, _ := utf8.DecodeRuneInString(s)
+		return objects.NewInt(int64(r)), nil
+	case *objects.Bytes:
+		b := v.Bytes()
+		if len(b) != 1 {
+			return nil, fmt.Errorf("TypeError: ord() expected a character, but bytes of length %d found", len(b))
+		}
+		return objects.NewInt(int64(b[0])), nil
+	case *objects.ByteArray:
+		b := v.Bytes()
+		if len(b) != 1 {
+			return nil, fmt.Errorf("TypeError: ord() expected a character, but bytearray of length %d found", len(b))
+		}
+		return objects.NewInt(int64(b[0])), nil
 	}
-	s, _ := objects.Str(args[0])
-	if utf8.RuneCountInString(s) != 1 {
-		return nil, fmt.Errorf("TypeError: ord() expected a character, but string of length %d found", utf8.RuneCountInString(s))
-	}
-	r, _ := utf8.DecodeRuneInString(s)
-	return objects.NewInt(int64(r)), nil
+	return nil, fmt.Errorf("TypeError: ord() expected string of length 1, but %s found", args[0].Type().Name)
 }
 
 // Bin ports builtin_bin: PyNumber_ToBase(x, 2) with the "0b" prefix
