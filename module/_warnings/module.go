@@ -773,17 +773,16 @@ func warnExplicit(category objects.Object, message objects.Object, filename obje
 	}
 	if stopShort {
 		if actStr == "error" {
-			msgText, _ := objects.Str(text)
 			// CPython: Python/_warnings.c:870 warn_explicit action=='error'
-			// sets SyntaxWarning via PyErr_SetObject(category, message).
-			// Callers (_PyTokenizer_parser_warn, _PyCompile_Warn) then
-			// convert the SyntaxWarning exception to a SyntaxError for a
-			// more precise error report. Emit "SyntaxError:" so the VM
-			// prefix table maps this to PyExc_SyntaxError.
+			// PyErr_SetObject(category, message) — raises the warning type itself.
+			// Parser/compiler callers (warnAt, FlushLexerWarnings) catch a non-nil
+			// error and promote it to SyntaxError; they do not rely on this error's
+			// string prefix.
 			//
-			// CPython: Parser/tokenizer/helpers.c:174 _PyTokenizer_parser_warn
-			// CPython: Python/codegen.c:237 _PyCompile_Warn
-			return nil, fmt.Errorf("SyntaxError: %s", msgText)
+			// CPython: Python/_warnings.c:869 warn_explicit
+			msgText, _ := objects.Str(text)
+			exc := errors.New(catType, objects.NewTuple([]objects.Object{text}))
+			return nil, objects.NewRaisedError(exc, msgText)
 		}
 		return objects.None(), nil
 	}
