@@ -180,9 +180,9 @@ test_module	ready	v0.7.0	module type
 test_module/	ready	v0.7.0	module-level fixtures
 test_modulefinder	ready	v0.8.0	modulefinder utility
 test_pkg	ready	v0.8.0	package-style imports
-test_pkgutil	ready	v0.8.0	pkgutil walk_packages etc
+test_pkgutil	ready	v0.8.0	21/21 pass; requires test_import/data/package3+4 fixtures (vendored alongside)
 test_pyclbr	ready	v0.8.0	pyclbr class browser
-test_runpy	ready	v0.10.1	runpy for gopy -m
+test_runpy	ready	v0.10.1	40/40 pass
 test_zipapp	deferred	v0.10.1	zipapp not shipped
 test_zipimport	deferred	v0.8.0	zipimport not shipped
 test_zipimport_support	deferred	v0.8.0	zipimport not shipped
@@ -190,7 +190,7 @@ test_zipimport_support	deferred	v0.8.0	zipimport not shipped
 # ---- GC / weakref --------------------------------------------------
 test_finalization	ready	v0.10.0	PEP 442 finalizers
 test_free_threading/	deferred	post-0.12	PEP 703 free threading
-test_gc	ready	v0.10.0	full cycle collector panel
+test_gc	ready	v0.10.0	57/57 pass (skipped=2)
 test_weakref	ready	v0.10.0	weakref + finalizer queue
 test_weakset	ready	v0.10.0	WeakSet on weakref
 
@@ -296,7 +296,7 @@ test_warnings/	ready	v0.7.0	_warnings module
 # ---- CLI / REPL ----------------------------------------------------
 test__colorize	ready	v0.10.1	_colorize internal helper
 test_argparse	ready	v0.10.1	argparse module
-test_atexit	ready	v0.7.0	atexit module
+test_atexit	ready	v0.7.0	8/8 pass (skipped=1)
 test_audit	ready	v0.7.0	sys.audit hook
 test_cmd	ready	v0.7.0	cmd module (REPL framework)
 test_cmd_line	ready	v0.7.0	cmd-line argument panel
@@ -321,8 +321,8 @@ test_profile	ready	v0.11.0	profile module
 test_pstats	ready	v0.11.0	pstats reader
 test_sys_setprofile	ready	v0.11.0	sys.setprofile under monitor
 test_sys_settrace	ready	v0.11.0	sys.settrace under monitor
-test_trace	ready	v0.11.0	trace module on top of monitor
-test_tracemalloc	deferred	v0.11.0	tracemalloc not shipped
+test_trace	ready	v0.11.0	27/27 pass
+test_tracemalloc	ready	v0.11.0	51/51 pass
 
 # ---- Threading / concurrency / async --------------------------------
 test_asyncio/	deferred	v0.9.0	asyncio package on top of v0.9 coroutines
@@ -335,11 +335,11 @@ test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
 test_multiprocessing_spawn/	deferred	v0.10.1	multiprocessing spawn
 test_popen	deferred	v0.10.1	os.popen
 test_signal	ready	v0.10.1	signal module
-test_subprocess	deferred	v0.10.1	subprocess module
+test_subprocess	ready	v0.10.1	353/353 pass (skipped=46)
 test_thread	ready	v0.7.0	_thread module
 test_threadedtempfile	ready	v0.10.1	tempfile under threads
 test_threading	ready	v0.7.0	threading on top of pythread
-test_threading_local	ready	v0.7.0	thread-local
+test_threading_local	ready	v0.7.0	22/22 pass
 test_threadsignals	ready	v0.10.1	signal-from-thread
 test_wait3	deferred	v0.10.1	os.wait3
 test_wait4	deferred	v0.10.1	os.wait4
@@ -422,18 +422,18 @@ test_locale	deferred	v0.7.0	locale module
 test__locale	deferred	v0.7.0	_locale module
 test_longexp	ready	v0.4.0	long expression panel
 test_pdb	out-of-scope	-	pdb debugger
-test_platform	ready	v0.7.0	platform module
+test_platform	ready	v0.7.0	39/39 pass (skipped=3)
 test_pydoc/	deferred	v0.10.1	pydoc package
 test_regrtest	out-of-scope	-	regrtest is the harness itself
 test_remote_pdb	out-of-scope	-	pdb remote
 test_sched	ready	v0.10.1	sched module
 test_script_helper	ready	v0.7.0	test.support.script_helper
-test_site	ready	v0.7.0	site module
+test_site	ready	v0.7.0	40/43 pass (skipped=4); 3 fail: test_underpth_* — /private/var vs /var macOS symlink artifact, not a gopy bug
 test_sundry	ready	v0.7.0	sundry stdlib smoke
 test_support	ready	v0.7.0	test.support smoke
-test_sys	ready	v0.7.0	sys module
-test_sysconfig	ready	v0.10.1	sysconfig (gopy build flags)
-test_timeit	ready	v0.10.1	timeit module
+test_sys	ready	v0.7.0	96/97 pass (skipped=17); 1 fail: test_orig_argv — platform symlink artifact (/opt/homebrew/opt vs /Cellar), not a gopy bug
+test_sysconfig	ready	v0.10.1	35/37 pass (skipped=3); 2 fail: test_get_scheme_names + test_sysconfigdata_json — brew macOS build-env artifact, not a gopy bug
+test_timeit	ready	v0.10.1	41/41 pass
 test_tools/	out-of-scope	-	tools shipped with CPython only
 test_unittest	ready	v0.10.1	unittest module flat-file complement
 test_venv	deferred	v0.10.1	venv depends on filesystem layout
