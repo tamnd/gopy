@@ -364,8 +364,8 @@ func NewStr(s string) Object {
 //
 // CPython: Objects/unicodeobject.c:1696 find_maxchar_surrogates
 // CPython: Objects/unicodeobject.c:1731 _PyUnicode_Ready (slab fill)
-func (s *Unicode) classify() {
-	runes := strLenientRunes(s.v)
+func (u *Unicode) classify() {
+	runes := strLenientRunes(u.v)
 	n := len(runes)
 	maxr := rune(0)
 	for _, r := range runes {
@@ -373,22 +373,22 @@ func (s *Unicode) classify() {
 			maxr = r
 		}
 	}
-	s.length = n
+	u.length = n
 	switch {
 	case maxr < 0x80:
-		s.kind = StrKind1Byte
-		s.ascii = true
+		u.kind = StrKind1Byte
+		u.ascii = true
 	case maxr < 0x100:
-		s.kind = StrKind1Byte
-		s.data1 = encodeUCS1Runes(runes)
+		u.kind = StrKind1Byte
+		u.data1 = encodeUCS1Runes(runes)
 	case maxr < 0x10000:
-		s.kind = StrKind2Byte
-		s.data2 = encodeUCS2Runes(runes)
+		u.kind = StrKind2Byte
+		u.data2 = encodeUCS2Runes(runes)
 	default:
-		s.kind = StrKind4Byte
-		s.data4 = encodeUCS4Runes(runes)
+		u.kind = StrKind4Byte
+		u.data4 = encodeUCS4Runes(runes)
 	}
-	s.ready = true
+	u.ready = true
 }
 
 // strLenientRunes decodes a Go string to runes, accepting lone surrogates
@@ -465,57 +465,57 @@ func runeToStr(r rune) string {
 
 // Value returns the canonical Go string. Same-package callers may
 // also read s.v directly; this getter exists for cross-package use.
-func (s *Unicode) Value() string { return s.v }
+func (u *Unicode) Value() string { return u.v }
 
 // Kind returns the PEP 393 kind tag.
-func (s *Unicode) Kind() byte { return s.kind }
+func (u *Unicode) Kind() byte { return u.kind }
 
 // Length returns the number of code points.
-func (s *Unicode) Length() int { return s.length }
+func (u *Unicode) Length() int { return u.length }
 
 // IsASCII reports whether every code point is < 0x80.
-func (s *Unicode) IsASCII() bool { return s.ascii }
+func (u *Unicode) IsASCII() bool { return u.ascii }
 
 // IsReady reports whether the canonical layout is built. Always true
 // for strings created via NewStr.
-func (s *Unicode) IsReady() bool { return s.ready }
+func (u *Unicode) IsReady() bool { return u.ready }
 
 // Data1 returns the pre-encoded UCS-1 (latin1) slab. Non-nil only for
 // non-ASCII kind-1 strings (max codepoint in 0x80..0xFF). ASCII
-// callers should use s.Value() directly since byte index equals
+// callers should use u.Value() directly since byte index equals
 // codepoint index.
 //
 // CPython: Include/cpython/unicodeobject.h:135 PyUnicode_1BYTE_DATA
-func (s *Unicode) Data1() []uint8 { return s.data1 }
+func (u *Unicode) Data1() []uint8 { return u.data1 }
 
 // Data2 returns the pre-encoded UCS-2 (BMP) slab. Non-nil only for
 // kind-2 strings (max codepoint in 0x100..0xFFFF).
 //
 // CPython: Include/cpython/unicodeobject.h:138 PyUnicode_2BYTE_DATA
-func (s *Unicode) Data2() []uint16 { return s.data2 }
+func (u *Unicode) Data2() []uint16 { return u.data2 }
 
 // Data4 returns the pre-encoded UCS-4 (full unicode) slab. Non-nil
 // only for kind-4 strings (max codepoint >= 0x10000).
 //
 // CPython: Include/cpython/unicodeobject.h:141 PyUnicode_4BYTE_DATA
-func (s *Unicode) Data4() []uint32 { return s.data4 }
+func (u *Unicode) Data4() []uint32 { return u.data4 }
 
-// RuneAt returns the i-th codepoint of s as a Go rune, using the
+// RuneAt returns the i-th codepoint of u as a Go rune, using the
 // pre-encoded slab so no UTF-8 walk is needed. Caller is responsible
-// for clamping i to [0, s.length).
+// for clamping i to [0, u.length).
 //
 // CPython: Include/cpython/unicodeobject.h:151 PyUnicode_READ
-func (s *Unicode) RuneAt(i int) rune {
-	if s.ascii {
-		return rune(s.v[i])
+func (u *Unicode) RuneAt(i int) rune {
+	if u.ascii {
+		return rune(u.v[i])
 	}
-	switch s.kind {
+	switch u.kind {
 	case StrKind1Byte:
-		return rune(s.data1[i])
+		return rune(u.data1[i])
 	case StrKind2Byte:
-		return rune(s.data2[i])
+		return rune(u.data2[i])
 	case StrKind4Byte:
-		return rune(s.data4[i])
+		return rune(u.data4[i])
 	}
 	return 0
 }
@@ -608,12 +608,12 @@ func unicodeHash(o Object) (int64, error) {
 // CPython: Objects/unicodeobject.c:L11532 unicode_hash (the cached
 // branch is the same; PyUnicode's _PyObject_HashFast inlines the
 // cached-hash read directly into the dict lookup).
-func (s *Unicode) HashCached() int64 {
-	if s.hash != -1 {
-		return s.hash
+func (u *Unicode) HashCached() int64 {
+	if u.hash != -1 {
+		return u.hash
 	}
-	h := HashString(s.v)
-	s.hash = h
+	h := HashString(u.v)
+	u.hash = h
 	return h
 }
 
