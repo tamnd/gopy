@@ -155,7 +155,7 @@ func newSocketType() *objects.Type {
 	// TpNew allocates a bare sockObj so TpNew + __init__ work together.
 	// CPython: Modules/socketmodule.c:3390 sock_new
 	t.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		s := &sockObj{fd: -1}
+		s := &sockObj{fd: invalidFd}
 		s.Init(cls)
 		return s, nil
 	}
@@ -820,7 +820,7 @@ func sockDup(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return nil, fmt.Errorf("TypeError: descriptor 'dup' requires a 'socket' object")
 	}
 	s.mu.Lock()
-	newfd, err := syscall.Dup(s.fd)
+	newfd, err := dupFd(s.fd)
 	s.mu.Unlock()
 	if err != nil {
 		return nil, osError(err)
@@ -1665,17 +1665,17 @@ func buildModule() (*objects.Module, error) {
 		{"SHUT_WR", syscall.SHUT_WR},
 		{"SHUT_RDWR", syscall.SHUT_RDWR},
 
-		{"SO_ERROR", syscall.SO_ERROR},
-		{"SO_TYPE", syscall.SO_TYPE},
-		{"SO_SNDBUF", syscall.SO_SNDBUF},
-		{"SO_RCVBUF", syscall.SO_RCVBUF},
-		{"SO_BROADCAST", syscall.SO_BROADCAST},
-		{"SO_OOBINLINE", syscall.SO_OOBINLINE},
-		{"SO_LINGER", syscall.SO_LINGER},
-		{"SO_RCVLOWAT", syscall.SO_RCVLOWAT},
-		{"SO_SNDLOWAT", syscall.SO_SNDLOWAT},
-		{"SO_RCVTIMEO", syscall.SO_RCVTIMEO},
-		{"SO_SNDTIMEO", syscall.SO_SNDTIMEO},
+		{"SO_ERROR", so_error},
+		{"SO_TYPE", so_type},
+		{"SO_SNDBUF", int(syscall.SO_SNDBUF)},
+		{"SO_RCVBUF", int(syscall.SO_RCVBUF)},
+		{"SO_BROADCAST", int(syscall.SO_BROADCAST)},
+		{"SO_OOBINLINE", so_oobinline},
+		{"SO_LINGER", int(syscall.SO_LINGER)},
+		{"SO_RCVLOWAT", so_rcvlowat},
+		{"SO_SNDLOWAT", so_sndlowat},
+		{"SO_RCVTIMEO", so_rcvtimeo},
+		{"SO_SNDTIMEO", so_sndtimeo},
 
 		{"IP_TOS", syscall.IP_TOS},
 		{"IP_TTL", syscall.IP_TTL},
@@ -1709,9 +1709,9 @@ func buildModule() (*objects.Module, error) {
 		{"NI_NUMERICSERV", ni_numericserv},
 		{"NI_DGRAM", ni_dgram},
 
-		{"MSG_OOB", syscall.MSG_OOB},
-		{"MSG_PEEK", syscall.MSG_PEEK},
-		{"MSG_DONTROUTE", syscall.MSG_DONTROUTE},
+		{"MSG_OOB", msg_oob},
+		{"MSG_PEEK", msg_peek},
+		{"MSG_DONTROUTE", msg_dontroute},
 		{"MSG_WAITALL", msg_waitall},
 		{"MSG_DONTWAIT", msg_dontwait},
 	}

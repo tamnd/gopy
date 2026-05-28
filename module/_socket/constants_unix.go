@@ -39,6 +39,18 @@ const (
 	ni_dgram       = 0x00000010
 
 	// MSG_* send/recv flags
-	msg_waitall  = int(syscall.MSG_WAITALL)
-	msg_dontwait = int(syscall.MSG_DONTWAIT)
+	msg_oob       = int(syscall.MSG_OOB)
+	msg_peek      = int(syscall.MSG_PEEK)
+	msg_dontroute = int(syscall.MSG_DONTROUTE)
+	msg_waitall   = int(syscall.MSG_WAITALL)
+	msg_dontwait  = int(syscall.MSG_DONTWAIT)
+
+	// SO_* socket options not universally exported by syscall on all OSes
+	so_error    = int(syscall.SO_ERROR)
+	so_type     = int(syscall.SO_TYPE)
+	so_oobinline = int(syscall.SO_OOBINLINE)
+	so_rcvlowat = int(syscall.SO_RCVLOWAT)
+	so_sndlowat = int(syscall.SO_SNDLOWAT)
+	so_rcvtimeo = int(syscall.SO_RCVTIMEO)
+	so_sndtimeo = int(syscall.SO_SNDTIMEO)
 )

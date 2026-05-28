@@ -75,6 +75,21 @@ func setsockoptBytes(fd socketFd, level, opt int, buf []byte) error {
 	return syscall.Setsockopt(fd, int32(level), int32(opt), &buf[0], int32(len(buf)))
 }
 
+// dupFd duplicates a socket handle via DuplicateHandle.
+//
+// CPython: Modules/socketmodule.c:3226 sock_dup_impl
+func dupFd(s socketFd) (socketFd, error) {
+	proc, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return invalidFd, err
+	}
+	var out syscall.Handle
+	if err := syscall.DuplicateHandle(proc, s, proc, &out, 0, false, syscall.DUPLICATE_SAME_ACCESS); err != nil {
+		return invalidFd, err
+	}
+	return out, nil
+}
+
 // getsockoptBytes calls getsockopt and returns the optval bytes.
 //
 // CPython: Modules/socketmodule.c:3412 sock_getsockopt (bytes branch)

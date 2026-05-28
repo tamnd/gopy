@@ -38,6 +38,11 @@ func readFd(s socketFd, p []byte) (int, error) { return syscall.Read(s, p) }
 // writeFd writes to the socket using write(2).
 func writeFd(s socketFd, p []byte) (int, error) { return syscall.Write(s, p) }
 
+// dupFd duplicates a socket fd via dup(2).
+//
+// CPython: Modules/socketmodule.c:3226 sock_dup_impl
+func dupFd(s socketFd) (socketFd, error) { return syscall.Dup(s) }
+
 // setsockoptBytes calls setsockopt(2) with an arbitrary byte slice.
 //
 // CPython: Modules/socketmodule.c:3370 sock_setsockopt (bytes branch)
