@@ -37,6 +37,19 @@ func init() {
 		Length:  rangeLen,
 		GetItem: rangeSubscript,
 	}
+	// CPython: Objects/rangeobject.c:939 range_reduce
+	SetTypeDescr(RangeType, "__reduce__", NewMethodDescr(RangeType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			r := args[0].(*Range)
+			return NewTuple([]Object{
+				RangeType,
+				NewTuple([]Object{r.Start, r.Stop, r.Step}),
+			}), nil
+		},
+	))
 }
 
 // NewRange builds a range. Step must be non-zero.
@@ -183,24 +196,24 @@ func rangeItem(o Object, i int) (Object, error) {
 	return NewIntFromBig(computeRangeItem(r, bi)), nil
 }
 
-// computeRangeSlice builds a fresh range covering self[slice]. Ports
-// compute_slice: the new start/stop are computed via compute_item and
-// the new step is r.step * slice.step.
+// computeRangeSlice builds a fresh range covering self[slice]. Uses
+// sliceGetLongIndices so that ranges with lengths beyond sys.maxsize
+// (e.g., range(2**100)) are handled with arbitrary-precision arithmetic.
 //
 // CPython: Objects/rangeobject.c:404 compute_slice
 func computeRangeSlice(r *Range, s *Slice) (*Range, error) {
 	lenBig := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
-	if !lenBig.IsInt64() {
-		return nil, fmt.Errorf("OverflowError: Python int too large to convert to C ssize_t")
-	}
-	length := int(lenBig.Int64())
-	start, stop, step, _, err := s.GetIndices(length)
+	lenObj := NewIntFromBig(lenBig)
+	startObj, stopObj, stepObj, err := sliceGetLongIndices(s, lenObj)
 	if err != nil {
 		return nil, err
 	}
-	substep := new(big.Int).Mul(&r.Step.v, big.NewInt(int64(step)))
-	substart := computeRangeItem(r, big.NewInt(int64(start)))
-	substop := computeRangeItem(r, big.NewInt(int64(stop)))
+	startBig := startObj.(*Int).BigInt()
+	stopBig := stopObj.(*Int).BigInt()
+	stepInt := stepObj.(*Int).BigInt()
+	substep := new(big.Int).Mul(&r.Step.v, stepInt)
+	substart := computeRangeItem(r, startBig)
+	substop := computeRangeItem(r, stopBig)
 	out := &Range{
 		Start: NewIntFromBig(substart),
 		Stop:  NewIntFromBig(substop),

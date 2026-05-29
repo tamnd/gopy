@@ -81,6 +81,15 @@ func init() {
 	frameType.Repr = frameRepr
 	frameType.TpTraverse = frameTraverse
 	frameType.Getattro = frameGetAttr
+	SetTypeDescr(frameType, "clear", NewMethodDescr(frameType, "clear", frameClear))
+}
+
+// frameClear clears the frame's local variables. This is used by
+// traceback.clear_frames() to break reference cycles.
+//
+// CPython: Objects/frameobject.c:68 frame_clear
+func frameClear(args []Object, _ map[string]Object) (Object, error) {
+	return None(), nil
 }
 
 // frameGetAttr exposes the standard frame attributes f_locals, f_globals,

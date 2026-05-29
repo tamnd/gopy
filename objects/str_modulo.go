@@ -12,8 +12,9 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"strconv"
 	"strings"
+
+	"github.com/tamnd/gopy/pystrconv"
 )
 
 func init() {
@@ -79,8 +80,10 @@ func unicodeModulo(a, b Object) (Object, error) {
 			ctx.argTuple[i] = t.Item(i)
 		}
 		ctx.argLen = t.Len()
+		ctx.argIdx = 0
 	default:
 		ctx.argLen = -1
+		ctx.argIdx = -2 // CPython sentinel: -2 < -1 means unconsumed; -1 < -1 means consumed
 	}
 	if d, ok := b.(*Dict); ok {
 		ctx.dict = d
@@ -288,19 +291,18 @@ func readNumOrStar(ctx *fmtCtx, dst *int) error {
 //
 // CPython: Objects/unicodeobject.c:14665 unicode_format_getnextarg
 func nextArg(ctx *fmtCtx) (Object, error) {
-	if ctx.argLen < 0 {
-		if ctx.argIdx > 0 {
-			return nil, fmt.Errorf("TypeError: not enough arguments for format string")
-		}
+	// CPython: Objects/unicodeobject.c:14665 unicode_format_getnextarg
+	// For non-tuple: argLen=-1, argIdx starts at -2 (sentinel).
+	// -2 < -1 means unconsumed; after consume argIdx=-1, -1 < -1 is False.
+	// For tuple: argLen=N, argIdx starts at 0.
+	if ctx.argIdx < ctx.argLen || (ctx.argLen < 0 && ctx.argIdx < -1) {
 		ctx.argIdx++
-		return ctx.args, nil
+		if ctx.argLen < 0 {
+			return ctx.args, nil
+		}
+		return ctx.argTuple[ctx.argIdx-1], nil
 	}
-	if ctx.argIdx >= ctx.argLen {
-		return nil, fmt.Errorf("TypeError: not enough arguments for format string")
-	}
-	v := ctx.argTuple[ctx.argIdx]
-	ctx.argIdx++
-	return v, nil
+	return nil, fmt.Errorf("TypeError: not enough arguments for format string")
 }
 
 // formatBody renders v according to arg.ch. The returned body has no
@@ -403,7 +405,8 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 		}
 		return big.NewInt(0), nil
 	case *Float:
-		if ch == 'o' || ch == 'x' || ch == 'X' {
+		switch ch {
+		case 'o', 'x', 'X':
 			return nil, fmt.Errorf(
 				"TypeError: %%%c format: an integer is required, not %s",
 				ch, v.Type().Name)
@@ -415,12 +418,35 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 		f, _ := new(big.Float).SetFloat64(x.v).Int(nil)
 		return f, nil
 	}
+	// CPython: Objects/unicodeobject.c:14872 mainformatlong
+	// %x/%X/%o use __index__; %d/%i/%u use __int__ (PyNumber_Long).
+	// Non-TypeError errors (RuntimeError etc.) propagate immediately.
+	switch ch {
+	case 'o', 'x', 'X':
+		idx, ierr := NumberIndex(v)
+		if ierr != nil {
+			if !isTypeError(ierr) {
+				return nil, ierr
+			}
+		} else if i, ok := idx.(*Int); ok {
+			return new(big.Int).Set(&i.v), nil
+		}
+	case 'd', 'i', 'u':
+		lv, ierr := NumberLong(v)
+		if ierr != nil {
+			if !isTypeError(ierr) {
+				return nil, ierr
+			}
+		} else if i, ok := lv.(*Int); ok {
+			return new(big.Int).Set(&i.v), nil
+		}
+	}
 	tag := "an integer is required"
 	if ch == 'd' || ch == 'i' || ch == 'u' {
 		tag = "a real number is required"
 	}
 	return nil, fmt.Errorf("TypeError: %%%c format: %s, not %s",
-		ch, tag, v.Type().Name)
+		ch, tag, typeNameOf(v))
 }
 
 // formatFloat renders v in the given conversion (e/E/f/F/g/G) at the
@@ -440,41 +466,21 @@ func formatFloat(v Object, arg *fmtArg) (string, error) {
 	if prec < 0 {
 		prec = 6
 	}
-	upper := arg.ch >= 'A' && arg.ch <= 'Z'
-	if math.IsNaN(f) {
-		if upper {
-			return "NAN", nil
-		}
-		return "nan", nil
+	// CPython: Objects/unicodeobject.c:14799 prec==0 for g/G means 1 sig fig
+	if (arg.ch == 'g' || arg.ch == 'G') && prec == 0 {
+		prec = 1
 	}
-	if math.IsInf(f, 0) {
-		s := "inf"
-		if upper {
-			s = "INF"
-		}
-		switch {
-		case f < 0:
-			return "-" + s, nil
-		case arg.flags&fmtSign != 0:
-			return "+" + s, nil
-		case arg.flags&fmtBlank != 0:
-			return " " + s, nil
-		}
-		return s, nil
+	var flags pystrconv.FloatFormatFlag
+	if arg.flags&fmtSign != 0 {
+		flags |= pystrconv.FlagAlwaysSign
 	}
-	verb := byte(arg.ch)
-	out := strconv.FormatFloat(f, verb, prec, 64)
-	// Go's 'g'/'G' already match CPython for trailing-zero stripping
-	// and bare-int presentation, so no post-processing is needed here.
-	if f >= 0 {
-		switch {
-		case arg.flags&fmtSign != 0:
-			out = "+" + out
-		case arg.flags&fmtBlank != 0:
-			out = " " + out
-		}
+	if arg.flags&fmtBlank != 0 {
+		flags |= pystrconv.FlagSpaceSign
 	}
-	return out, nil
+	if arg.flags&fmtAlt != 0 {
+		flags |= pystrconv.FlagAlternate
+	}
+	return pystrconv.FormatFloat(f, byte(arg.ch), prec, flags), nil
 }
 
 // formatChar renders %c. Accepts a single-char str or an int-valued
@@ -504,9 +510,24 @@ func formatChar(v Object) (string, error) {
 		}
 		return string(rune(n)), nil
 	}
+	// Try __index__ for objects like PseudoInt.
+	idx, ierr := NumberIndex(v)
+	if ierr == nil {
+		if i, ok := idx.(*Int); ok {
+			n, fits := i.Int64()
+			if !fits || n < 0 || n > 0x10FFFF {
+				return "", fmt.Errorf("OverflowError: %%c arg not in range(0x110000)")
+			}
+			return string(rune(n)), nil
+		}
+	}
 	return "", fmt.Errorf(
 		"TypeError: %%c requires an int or a unicode character, not %s",
-		v.Type().Name)
+		typeFullNameOf(v))
+}
+
+func isTypeError(err error) bool {
+	return strings.HasPrefix(err.Error(), "TypeError:")
 }
 
 // truncatePrec slices s to at most prec runes (s/r/a precision is

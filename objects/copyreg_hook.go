@@ -13,3 +13,10 @@ package objects
 //
 // CPython: Objects/typeobject.c:7747 _common_reduce (import_copyreg)
 var CopyregLookup func(name string) (Object, error)
+
+// BuiltinLookup retrieves a named object from the builtins module.
+// Wired by vm.init() so set iterator __reduce__ can reference iter()
+// without importing builtins directly.
+//
+// CPython: Python/bltinmodule.c:_PyEval_GetBuiltin
+var BuiltinLookup func(name string) (Object, error)

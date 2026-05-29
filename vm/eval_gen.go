@@ -66,17 +66,66 @@ func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (genResult, error) {
 	return genResult{}, nil
 }
 
-// specialMethodNames maps the LOAD_SPECIAL oparg to the dunder name to
-// look up on the owner's type. Order matches CPython's _PySpecialMethod
-// enum (SPECIAL___ENTER__, SPECIAL___EXIT__, SPECIAL___AENTER__,
-// SPECIAL___AEXIT__).
+// specialMethod carries the dunder name and TypeError messages for LOAD_SPECIAL.
+// error is used when the object does not have the required dunder.
+// errorSuggestion is used when the object has the peer protocol instead
+// (sync object used in async with, or vice versa).
+//
+// CPython: Python/ceval.c:663 _Py_SpecialMethods
+type specialMethod struct {
+	name            string
+	error           string
+	errorSuggestion string
+}
+
+// specialMethods maps the LOAD_SPECIAL oparg to method info. Order matches
+// CPython's _PySpecialMethod enum.
 //
 // CPython: Include/internal/pycore_ceval.h:380 _PySpecialMethod
-var specialMethodNames = [...]string{
-	"__enter__",
-	"__exit__",
-	"__aenter__",
-	"__aexit__",
+var specialMethods = [...]specialMethod{
+	{
+		"__enter__",
+		"object does not support the context manager protocol (missed __enter__ method)",
+		"object does not support the context manager protocol (missed __enter__ method) " +
+			"but it supports the asynchronous context manager protocol. Did you mean to use 'async with'?",
+	},
+	{
+		"__exit__",
+		"object does not support the context manager protocol (missed __exit__ method)",
+		"object does not support the context manager protocol (missed __exit__ method) " +
+			"but it supports the asynchronous context manager protocol. Did you mean to use 'async with'?",
+	},
+	{
+		"__aenter__",
+		"object does not support the asynchronous context manager protocol (missed __aenter__ method)",
+		"object does not support the asynchronous context manager protocol (missed __aenter__ method) " +
+			"but it supports the context manager protocol. Did you mean to use 'with'?",
+	},
+	{
+		"__aexit__",
+		"object does not support the asynchronous context manager protocol (missed __aexit__ method)",
+		"object does not support the asynchronous context manager protocol (missed __aexit__ method) " +
+			"but it supports the context manager protocol. Did you mean to use 'with'?",
+	},
+}
+
+// canSuggest returns true when the object's type has the peer protocol:
+// sync __enter__/__exit__ for async ops, async __aenter__/__aexit__ for sync.
+//
+// CPython: Python/ceval.c:3708 _PyEval_SpecialMethodCanSuggest
+func canSuggest(t *objects.Type, oparg uint32) bool {
+	var peer1, peer2 string
+	switch oparg {
+	case 0, 1: // __enter__, __exit__ — suggest if async peer exists
+		peer1, peer2 = "__aenter__", "__aexit__"
+	case 2, 3: // __aenter__, __aexit__ — suggest if sync peer exists
+		peer1, peer2 = "__enter__", "__exit__"
+	default:
+		return false
+	}
+	d1, _ := objects.LookupDescriptor(t, peer1)
+	d2, _ := objects.LookupDescriptor(t, peer2)
+	return d1 != nil && d2 != nil
 }
 
 // execLoadSpecial ports LOAD_SPECIAL: pop owner, look the named dunder
@@ -88,16 +137,22 @@ var specialMethodNames = [...]string{
 // CPython: Python/bytecodes.c LOAD_SPECIAL
 // CPython: Include/internal/pycore_object.h _PyObject_LookupSpecialMethod
 func (e *evalState) execLoadSpecial(oparg uint32) (genResult, error) {
-	if int(oparg) >= len(specialMethodNames) {
+	if int(oparg) >= len(specialMethods) {
 		return genResult{ok: true}, fmt.Errorf("vm: LOAD_SPECIAL: oparg %d out of range", oparg)
 	}
-	name := specialMethodNames[oparg]
+	sm := specialMethods[oparg]
 	owner := e.popObject()
 	t := owner.Type()
-	descr, _ := objects.LookupDescriptor(t, name)
+	descr, _ := objects.LookupDescriptor(t, sm.name)
 	if descr == nil {
-		return genResult{ok: true}, fmt.Errorf(
-			"AttributeError: '%s' object has no attribute '%s'", t.Name, name)
+		// CPython: Python/bytecodes.c:3502 _LOAD_SPECIAL — raise TypeError,
+		// with a suggestion when the peer protocol is available.
+		// CPython: Python/ceval.c:3708 _PyEval_SpecialMethodCanSuggest
+		errMsg := sm.error
+		if canSuggest(t, oparg) {
+			errMsg = sm.errorSuggestion
+		}
+		return genResult{ok: true}, fmt.Errorf("TypeError: '%s' %s", t.Name, errMsg)
 	}
 	// If the descriptor implements __get__, bind it through the
 	// descriptor protocol and push (bound, NULL). Otherwise push the
@@ -217,6 +272,17 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		retVal, runErr := ge.run()
 		switch {
 		case runErr != nil && !errors.Is(runErr, objects.ErrStopIteration):
+			// Preserve Python exception identity so callers can check
+			// `exc is value` (e.g. _GeneratorContextManager.__exit__).
+			// RERAISE returns excSentinel (a plain fmt.Errorf) that loses
+			// the Python object; wrap it in RaisedError when the exception
+			// is still on the thread state.
+			if exc := pyerrors.Occurred(savedTS); exc != nil {
+				var re *objects.RaisedError
+				if !errors.As(runErr, &re) {
+					runErr = objects.NewRaisedError(exc, runErr.Error())
+				}
+			}
 			yieldCh <- objects.GenMsg{Err: runErr}
 		case retVal != nil && retVal != objects.None():
 			// Body returned a value (PEP 380, PEP 492). CPython wraps
@@ -588,17 +654,20 @@ func (e *evalState) execWithExceptStart() (genResult, error) {
 		exitSelf = exitSelfRef.AsObject()
 	}
 
-	// Call exit_fn(type, val, traceback). v0.9 passes (type(exc), exc, None)
-	// because we don't have traceback objects yet.
+	// Call exit_fn(type, val, traceback).
 	excType := objects.None()
+	excTB := objects.None()
 	if excVal != objects.None() {
 		excType = excVal.Type()
+		if exc, ok := excVal.(*pyerrors.Exception); ok && exc.TB != nil {
+			excTB = exc.TB
+		}
 	}
 	var callArgs []objects.Object
 	if exitSelf != nil {
-		callArgs = []objects.Object{exitSelf, excType, excVal, objects.None()}
+		callArgs = []objects.Object{exitSelf, excType, excVal, excTB}
 	} else {
-		callArgs = []objects.Object{excType, excVal, objects.None()}
+		callArgs = []objects.Object{excType, excVal, excTB}
 	}
 	result, cerr := objects.Call(exitFn, objects.NewTuple(callArgs), nil)
 	if cerr != nil {

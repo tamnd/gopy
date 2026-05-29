@@ -352,6 +352,13 @@ func (e *evalState) run() (objects.Object, error) {
 			}
 			continue
 		}
+		// Record the current instruction before dispatch so that if
+		// dispatch raises, PrevInstr points to the failing instruction
+		// and attachFrameTraceback picks up its column range.
+		//
+		// CPython: Python/ceval.c exception_unwind uses frame->f_lasti
+		// which is the instruction that raised, not the previous one.
+		e.f.PrevInstr = e.f.InstrPtr
 		next, err := e.dispatch(op, oparg)
 		if err != nil {
 			if errors.Is(err, errFrameReturn) {
@@ -362,7 +369,6 @@ func (e *evalState) run() (objects.Object, error) {
 			}
 			return nil, err
 		}
-		e.f.PrevInstr = e.f.InstrPtr
 		e.f.InstrPtr = next
 	}
 }

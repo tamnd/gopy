@@ -15,6 +15,7 @@ package builtins
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/tamnd/gopy/abstract"
@@ -78,7 +79,15 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 	case *objects.Int:
 		return v, nil
 	case *objects.Float:
-		out, _ := new(big.Float).SetFloat64(v.Float64()).Int(nil)
+		// CPython: Objects/longobject.c:456 PyLong_FromDouble
+		f := v.Float64()
+		if math.IsInf(f, 0) {
+			return nil, fmt.Errorf("OverflowError: cannot convert float infinity to integer")
+		}
+		if math.IsNaN(f) {
+			return nil, fmt.Errorf("ValueError: cannot convert float NaN to integer")
+		}
+		out, _ := new(big.Float).SetFloat64(f).Int(nil)
 		return objects.NewIntFromBig(out), nil
 	case *objects.Bytes:
 		return parseIntString(string(v.Bytes()), 10)
@@ -169,7 +178,10 @@ func trimSpace(s string) string {
 // strings.
 //
 // CPython: Objects/floatobject.c float_new_impl
-func FloatCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: float() takes no keyword arguments")
+	}
 	if len(args) == 0 {
 		return objects.NewFloat(0), nil
 	}
@@ -178,44 +190,122 @@ func FloatCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	}
 	switch v := args[0].(type) {
 	case *objects.Float:
-		return v, nil
+		// CPython: Objects/floatobject.c:1595 float_new_impl
+		// For exact float, return self. For subclasses, call __float__
+		// if user-defined; otherwise extract value and return a new
+		// plain float.
+		if v.Type() == objects.FloatType {
+			return v, nil
+		}
+		// Only dispatch through __float__ when the subclass defines it.
+		// If not user-defined, the inherited slot returns self (a subclass
+		// instance), which would produce a spurious DeprecationWarning.
+		if objects.IsOwnDescriptor(v.Type(), "__float__") {
+			if n := v.Type().Number; n != nil && n.Float != nil {
+				res, err := n.Float(v)
+				if err != nil {
+					return nil, err
+				}
+				// __float__ must return a float.
+				rf, isFloat := res.(*objects.Float)
+				if !isFloat {
+					return nil, fmt.Errorf("TypeError: __float__ returned non-float (type %s)", res.Type().Name)
+				}
+				if rf.Type() == objects.FloatType {
+					return rf, nil
+				}
+				// __float__ returned a float subclass: emit DeprecationWarning
+				// and unwrap to a plain float.
+				// CPython: Objects/floatobject.c _PyFloat_FromNumberWithBase
+				msg := fmt.Sprintf("__float__ returned non-float (type %s). "+
+					"The ability to return an instance of a strict subclass of float "+
+					"is deprecated, and may be removed in a future version of Python.",
+					rf.Type().Name)
+				if objects.DeprecWarnHook != nil {
+					if werr := objects.DeprecWarnHook(msg); werr != nil {
+						return nil, werr
+					}
+				}
+				return objects.NewFloat(rf.Float64()), nil
+			}
+		}
+		return objects.NewFloat(v.Float64()), nil
 	case *objects.Int:
 		f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
 		return objects.NewFloat(f), nil
-	case *objects.Bytes:
-		s := string(v.Bytes())
-		f, err := pystrconv.ParseFloat(trimSpace(s))
-		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+	}
+	// CPython: Objects/abstract.c:1592 PyNumber_Float — try nb_float first
+	if n := args[0].Type().Number; n != nil {
+		if n.Float != nil {
+			res, err := n.Float(args[0])
+			if err != nil {
+				return nil, err
+			}
+			// If __float__ returned a non-exact float subclass, emit
+			// DeprecationWarning and unwrap.
+			// CPython: Objects/abstract.c:1614 PyNumber_Float
+			if rf, ok := res.(*objects.Float); ok && rf.Type() != objects.FloatType {
+				msg := fmt.Sprintf("__float__ returned non-float (type %s). "+
+					"The ability to return an instance of a strict subclass of float "+
+					"is deprecated, and may be removed in a future version of Python.",
+					rf.Type().Name)
+				if objects.DeprecWarnHook != nil {
+					if werr := objects.DeprecWarnHook(msg); werr != nil {
+						return nil, werr
+					}
+				}
+				return objects.NewFloat(rf.Float64()), nil
+			}
+			return res, nil
 		}
-		return objects.NewFloat(f), nil
-	case *objects.ByteArray:
-		s := string(v.Bytes())
-		f, err := pystrconv.ParseFloat(trimSpace(s))
+		// CPython: Objects/abstract.c:1630 PyNumber_Float — nb_index fallback
+		if n.Index != nil {
+			idx, err := n.Index(args[0])
+			if err != nil {
+				return nil, err
+			}
+			i, ok := idx.(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+			}
+			f, _ := new(big.Float).SetInt(i.BigInt()).Float64()
+			if math.IsInf(f, 0) {
+				return nil, fmt.Errorf("OverflowError: int too large to convert to float")
+			}
+			return objects.NewFloat(f), nil
+		}
+	}
+	// CPython: Objects/floatobject.c:190 PyFloat_FromString
+	// Bytes, ByteArray, MemoryView, and buffer-protocol objects (array.array).
+	if buf, ok := objects.AsBytesLike(args[0]); ok {
+		f, err := pystrconv.ParseFloat(trimSpace(string(buf)))
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+			r, _ := objects.Repr(args[0])
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
 		return objects.NewFloat(f), nil
 	}
-	if args[0].Type() == objects.StrType() {
+	// CPython: Objects/floatobject.c:205 PyFloat_FromString — Unicode (str and subclasses)
+	if objects.IsSubtype(args[0].Type(), objects.StrType()) {
 		s, _ := objects.Str(args[0])
 		f, err := pystrconv.ParseFloat(trimSpace(s))
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+			r, _ := objects.Repr(args[0])
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
 		return objects.NewFloat(f), nil
 	}
-	if n := args[0].Type().Number; n != nil && n.Float != nil {
-		return n.Float(args[0])
-	}
-	return nil, fmt.Errorf("TypeError: float() argument must be a string or a number, not '%s'", args[0].Type().Name)
+	return nil, fmt.Errorf("TypeError: float() argument must be a string or a real number, not '%s'", args[0].Type().Name)
 }
 
 // BoolCtor ports bool_new. 0 args returns False; one positional runs
-// through PyObject_IsTrue.
+// through PyObject_IsTrue. Keyword arguments are rejected.
 //
 // CPython: Objects/boolobject.c bool_new
-func BoolCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func BoolCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) > 0 {
+		return nil, fmt.Errorf("TypeError: bool() takes no keyword arguments")
+	}
 	if len(args) == 0 {
 		return objects.False(), nil
 	}
@@ -300,47 +390,80 @@ func TupleCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	return objects.NewTuple(items), nil
 }
 
-// SetCtor ports set_init. 0 args returns an empty set; one positional
-// drains the iterable into a fresh set.
+// SetCtor ports set_new. Allocates an empty set of the correct subtype.
+// Population is deferred to set_init (__init__) so single-pass iterables
+// (map, filter, generator) are consumed only once.
 //
-// CPython: Objects/setobject.c:2284 set_init
+// CPython: Objects/setobject.c:2436 set_new (allocate only, no iterable drain)
 func SetCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return setCtorWithType(objects.SetType, args)
+}
+
+func setCtorWithType(cls *objects.Type, args []objects.Object) (objects.Object, error) {
 	if len(args) > 1 {
 		return nil, fmt.Errorf("TypeError: set expected at most 1 argument, got %d", len(args))
 	}
-	out := objects.NewSet()
-	if len(args) == 0 {
-		return out, nil
-	}
-	items, err := drainIterable(args[0])
-	if err != nil {
-		return nil, err
-	}
-	for _, item := range items {
-		if err := out.Add(item); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return objects.NewSetOfType(cls), nil
 }
 
-// FrozensetCtor ports frozenset_new. 0 args returns the singleton
-// empty frozenset (gopy materializes a fresh one each call); one
-// positional drains the iterable into a frozenset.
+// FrozensetCtor ports frozenset_new. 0 args returns an empty frozenset; one
+// positional arg that is already an exact frozenset is returned as-is
+// (CPython optimization: immutable object, no copy needed). cls is the
+// concrete type to allocate so frozenset subclasses carry their own type.
 //
-// CPython: Objects/setobject.c:2362 frozenset_new
-func FrozensetCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+// CPython: Objects/setobject.c:1195 frozenset_new
+func FrozensetCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return frozensetCtorWithType(objects.FrozensetType, args, kwargs)
+}
+
+// frozensetCtorWithType is the TpNew body for frozenset and its subclasses.
+// Keyword arguments are rejected when cls is exact frozenset or when cls
+// has not overridden __init__ (tp_init == NULL), matching CPython's
+// frozenset_new guard:
+//
+//	if (type == &PyFrozenSet_Type || type->tp_init == PyFrozenSet_Type.tp_init)
+//
+// CPython: Objects/setobject.c:1195 frozenset_new
+func frozensetCtorWithType(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) > 0 {
+		// Reject kwargs unless the subclass has a user-defined __init__.
+		// CPython: Objects/setobject.c:1198-1201 frozenset_new kwds guard:
+		//   (type == &PyFrozenSet_Type || type->tp_init == PyFrozenSet_Type.tp_init)
+		// PyFrozenSet_Type.tp_init is NULL; the equivalent in gopy is that
+		// no __init__ defined in the class's own MRO between the subclass
+		// and object/frozenset. If __init__ is found only on object or not at
+		// all, it counts as tp_init == NULL → reject kwargs.
+		rejectKwargs := true
+		if cls != objects.FrozensetType {
+			if _, owner := objects.LookupDescriptor(cls, "__init__"); owner != nil &&
+				owner != objects.FrozensetType && owner != objects.ObjectType() {
+				rejectKwargs = false
+			}
+		}
+		if rejectKwargs {
+			return nil, fmt.Errorf("TypeError: frozenset() does not support keyword arguments")
+		}
+	}
 	if len(args) > 1 {
 		return nil, fmt.Errorf("TypeError: frozenset expected at most 1 argument, got %d", len(args))
 	}
 	if len(args) == 0 {
-		return objects.NewFrozenset(nil)
+		return objects.NewFrozensetOfType(cls, nil)
 	}
-	items, err := drainIterable(args[0])
+	// CPython: Objects/setobject.c:2375 frozenset_new — if the argument is
+	// already an exact frozenset of the same type, return it unchanged.
+	if fs, ok := args[0].(*objects.Set); ok && fs.Type() == cls && cls == objects.FrozensetType {
+		return fs, nil
+	}
+	// Use SetUpdateFrom for dict/set fast path (no rehashing of cached hashes).
+	fs, err := objects.NewFrozensetOfType(cls, nil)
 	if err != nil {
 		return nil, err
 	}
-	return objects.NewFrozenset(items)
+	if err := objects.SetUpdateFrom(fs, args[0]); err != nil {
+		return nil, err
+	}
+	return fs, nil
 }
 
 // DictCtor ports dict_init. Accepts a mapping or an iterable of

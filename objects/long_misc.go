@@ -22,13 +22,17 @@ func intRepr(o Object) (string, error) {
 // generic error sentinel.
 //
 // CPython: Objects/longobject.c:3551 long_hash
+// intHash ports long_hash: compute |n| mod (2^61-1), negate if n < 0.
+//
+// CPython: Objects/longobject.c:3397 long_hash
 func intHash(o Object) (int64, error) {
 	const modulus int64 = (1 << 61) - 1
-	v := new(big.Int).Set(&o.(*Int).v)
-	m := big.NewInt(modulus)
-	v.Mod(v, m)
-	h := v.Int64()
-	if o.(*Int).v.Sign() < 0 {
+	n := &o.(*Int).v
+	sign := n.Sign()
+	abs := new(big.Int).Abs(n)
+	abs.Mod(abs, big.NewInt(modulus))
+	h := abs.Int64()
+	if sign < 0 {
 		h = -h
 	}
 	if h == -1 {
@@ -73,13 +77,16 @@ func intRichCmp(a, b Object, op CompareOp) (Object, error) {
 	return False(), nil
 }
 
-// intNeg / intAbs / intPos cover -x, abs(x), +x. Pos returns the
-// same object for plain int; CPython hands back a fresh PyLong for
-// subclasses, but the v0.6 panel does not yet support int subclasses.
+// intNeg / intAbs / intPos cover -x, abs(x), +x. For plain int, Pos
+// returns self. For subclasses (including bool), all three return a
+// fresh plain int so that e.g. +True → int(1), -True → int(-1).
 //
 // CPython: Objects/longobject.c long_neg / long_abs / long_long
 func intNeg(o Object) (Object, error) {
-	i := o.(*Int)
+	i, ok := asInt(o)
+	if !ok {
+		return notImplemented(), nil
+	}
 	if x, ok := compactInt(i); ok {
 		if r, over := negOverflow(x); !over {
 			return NewInt(r), nil
@@ -89,7 +96,10 @@ func intNeg(o Object) (Object, error) {
 }
 
 func intAbs(o Object) (Object, error) {
-	i := o.(*Int)
+	i, ok := asInt(o)
+	if !ok {
+		return notImplemented(), nil
+	}
 	if x, ok := compactInt(i); ok {
 		if r, over := absOverflow(x); !over {
 			return NewInt(r), nil
@@ -98,14 +108,34 @@ func intAbs(o Object) (Object, error) {
 	return NewIntFromBig(new(big.Int).Abs(&i.v)), nil
 }
 
-func intPos(o Object) (Object, error) { return o, nil }
+// intPos returns self for plain int; for subclasses (bool included)
+// returns a fresh int copy. CPython: Objects/longobject.c long_long
+// (PyLong_CheckExact branch returns self, else _PyLong_Copy).
+func intPos(o Object) (Object, error) {
+	i, ok := asInt(o)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if o.Type() == IntType {
+		return o, nil
+	}
+	return NewIntFromBig(new(big.Int).Set(&i.v)), nil
+}
 
 func intBool(o Object) (bool, error) {
-	return o.(*Int).v.Sign() != 0, nil
+	i, ok := asInt(o)
+	if !ok {
+		return false, fmt.Errorf("TypeError: not an int-like object")
+	}
+	return i.v.Sign() != 0, nil
 }
 
 func intFloat(o Object) (Object, error) {
-	f, _ := new(big.Float).SetInt(&o.(*Int).v).Float64()
+	i, ok := asInt(o)
+	if !ok {
+		return notImplemented(), nil
+	}
+	f, _ := new(big.Float).SetInt(&i.v).Float64()
 	return NewFloat(f), nil
 }
 

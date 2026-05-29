@@ -14,6 +14,9 @@ coverage.html
 __pycache__/
 *.pyc
 
+# Temp files created by CPython test_tempfile and similar tests
+@test_*
+
 # Editor / OS
 .DS_Store
 .idea/

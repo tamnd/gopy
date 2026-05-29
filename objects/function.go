@@ -623,7 +623,7 @@ func funcSetDict(o Object, v Object) error {
 //
 // CPython: Objects/funcobject.c:687 func_getattro
 func funcGetAttr(o Object, name Object) (Object, error) {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -651,7 +651,7 @@ func funcGetAttr(o Object, name Object) (Object, error) {
 //
 // CPython: Objects/funcobject.c:714 func_setattro
 func funcSetAttr(o Object, name Object, value Object) error {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -767,6 +767,11 @@ func newFunction(name string, code *Code, globals Object, qualname string) (*Fun
 			f.Module = mod
 		}
 		if b, err := d.GetItem(NewStr("__builtins__")); err == nil {
+			// CPython: Python/ceval.c:1849 _PyEval_BuildFrame — unwrap a
+			// module to its __dict__ so fn.Builtins is always a dict.
+			if m, ok := b.(*Module); ok {
+				b = m.Dict()
+			}
 			f.Builtins = b
 		}
 	}

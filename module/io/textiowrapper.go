@@ -12,6 +12,7 @@
 package io
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -1082,7 +1083,7 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			}
 			return objects.NewInt(int64(n)), nil
 		})
-	// CPython: Modules/_io/textio.c (writelines via IOBase)
+	// CPython: Modules/_io/textio.c:2618 textiowrapper_writelines
 	case "writelines":
 		return objects.NewBuiltinFunction("writelines", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if err := t.checkUsable(); err != nil {
@@ -1091,18 +1092,24 @@ func textIOWrapperMethod(t *TextIOWrapper, name string) objects.Object {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: writelines() takes exactly 1 argument (%d given)", len(args))
 			}
-			lst, ok := args[0].(*objects.List)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: writelines() argument must be list")
+			it, err := objects.Iter(args[0])
+			if err != nil {
+				return nil, err
 			}
-			for i := 0; i < lst.Len(); i++ {
-				item := lst.Item(i)
+			for {
+				item, nerr := objects.IterNext(it)
+				if nerr != nil {
+					if errors.Is(nerr, objects.ErrStopIteration) {
+						break
+					}
+					return nil, nerr
+				}
 				s, ok := item.(*objects.Unicode)
 				if !ok {
 					return nil, fmt.Errorf("TypeError: write() argument must be str, not %s", item.Type().Name)
 				}
-				if _, err := t.Write(s.Value()); err != nil {
-					return nil, err
+				if _, werr := t.Write(s.Value()); werr != nil {
+					return nil, werr
 				}
 			}
 			return objects.None(), nil

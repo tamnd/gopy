@@ -12,6 +12,8 @@ import (
 	"math"
 	"math/cmplx"
 	"strings"
+
+	"github.com/tamnd/gopy/format"
 )
 
 // Complex is the Python complex number.
@@ -30,6 +32,7 @@ var ComplexType = NewType("complex", []*Type{objectType})
 func init() {
 	ComplexType.Repr = complexRepr
 	ComplexType.Str = complexRepr
+	ComplexType.Format = complexFormat
 	ComplexType.Hash = complexHash
 	ComplexType.RichCmp = complexRichCmp
 	ComplexType.Number = &NumberMethods{
@@ -144,6 +147,41 @@ func complexFormatPart(v float64) string {
 	return s
 }
 
+// complexFormat implements complex.__format__. An empty spec returns str(self).
+// A spec with fill/align/width and no type specifier formats the complex repr
+// and pads it. '0' fill and '=' align are not allowed.
+//
+// CPython: Python/formatter_unicode.c:1691 _PyComplex_FormatAdvancedWriter
+func complexFormat(o Object, spec string) (string, error) {
+	if spec == "" {
+		return complexRepr(o)
+	}
+	s, err := format.ParseSpec(spec)
+	if err != nil {
+		return "", fmt.Errorf("ValueError: invalid format spec for complex")
+	}
+	if s.Fill == '0' {
+		return "", fmt.Errorf("ValueError: Zero padding is not allowed in complex format specifier")
+	}
+	if s.Align == '=' {
+		return "", fmt.Errorf("ValueError: '=' alignment flag is not allowed in complex format specifier")
+	}
+	switch s.Type {
+	case 0:
+		body, reprErr := complexRepr(o)
+		if reprErr != nil {
+			return "", reprErr
+		}
+		s.Type = 's'
+		s.Precision = -1
+		return format.FormatString(body, s)
+	case 'e', 'E', 'f', 'F', 'g', 'G', 'n':
+		return "", fmt.Errorf("TypeError: unsupported format string passed to complex.__format__")
+	default:
+		return "", fmt.Errorf("ValueError: Unknown format code '%c' for object of type 'complex'", s.Type)
+	}
+}
+
 // complexHash xors the real and imag hashes after multiplying the
 // imaginary part by a fixed multiplier, matching CPython.
 //
@@ -185,10 +223,12 @@ func complexRichCmp(a, b Object, op CompareOp) (Object, error) {
 	case CompareNE:
 		return NewBool(av != bv), nil
 	}
-	return nil, errors.New("TypeError: no ordering relation is defined for complex numbers")
+	// CPython: Objects/complexobject.c:853 complex_richcompare — ordering
+	// ops return NotImplemented, letting RichCmp raise the generic TypeError.
+	return notImplemented(), nil
 }
 
-// asComplex coerces an int / float / complex operand to complex128.
+// asComplex coerces an int / float / complex / bool operand to complex128.
 //
 // CPython: Objects/complexobject.c:281 to_complex
 func asComplex(o Object) (complex128, bool) {
@@ -197,6 +237,8 @@ func asComplex(o Object) (complex128, bool) {
 		return x.v, true
 	case *Float:
 		return complex(x.v, 0), true
+	case *Bool:
+		return complex(intToFloat(&x.Int), 0), true
 	case *Int:
 		return complex(intToFloat(x), 0), true
 	}

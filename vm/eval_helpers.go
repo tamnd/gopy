@@ -237,7 +237,10 @@ func (e *evalState) loadName(name objects.Object) objects.Object {
 	if v, ok := lookupIn(e.f.Globals, name); ok {
 		return v
 	}
-	if v, ok := lookupIn(e.f.Builtins, name); ok {
+	if v, found, err := objects.MappingGetOptionalItem(e.f.Builtins, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
 		return v
 	}
 	if s, ok := name.(*objects.Unicode); ok {
@@ -660,6 +663,9 @@ func sliceContainer(container, start, stop objects.Object) (objects.Object, erro
 			out = append(out, c.Item(i))
 		}
 		return objects.NewTuple(out), nil
+	case *objects.Unicode:
+		sl := objects.NewSlice(start, stop, nil)
+		return objects.StrGetSlice(c, sl)
 	}
 	return nil, errors.New("TypeError: BINARY_SLICE: unsupported container type '" + container.Type().Name + "'")
 }
@@ -921,7 +927,13 @@ func (e *kwargsNotMappingErr) Error() string {
 //
 // CPython: Objects/dictobject.c:3247 dict_merge (override == 2)
 func dictMergeKwargs(d *objects.Dict, b objects.Object) error {
-	if bd, ok := b.(*objects.Dict); ok {
+	// Fast path for exact dict instances: iterate internal order directly.
+	// Dict subclasses (e.g. OrderedDict) may override keys() to return a
+	// different order than the underlying storage; fall through to the slow
+	// path so their Python-level keys() is called.
+	//
+	// CPython: Objects/dictobject.c:3207 dict_merge (exact-dict fast path)
+	if bd, ok := b.(*objects.Dict); ok && bd.Type() == objects.DictType {
 		for _, k := range bd.Keys() {
 			if existing, _ := d.GetItem(k); existing != nil {
 				return &kwargsDuplicateErr{key: k}

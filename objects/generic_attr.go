@@ -48,7 +48,7 @@ type AttrDictHolder interface {
 //
 // CPython: Objects/object.c:1932 PyObject_GenericGetAttr
 func GenericGetAttr(o Object, name Object) (Object, error) {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -92,7 +92,7 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 //
 // CPython: Objects/object.c:2040 PyObject_GenericSetAttr
 func GenericSetAttr(o Object, name Object, value Object) error {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()

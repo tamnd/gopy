@@ -60,6 +60,66 @@ func init() {
 	AddIterSlotWrappers(dictKeyIterType)
 	AddIterSlotWrappers(dictValueIterType)
 	AddIterSlotWrappers(dictItemIterType)
+
+	dictReduceFn := func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+		}
+		it := args[0].(*dictIterObj)
+		if BuiltinLookup == nil {
+			return nil, fmt.Errorf("PicklingError: builtins not loaded")
+		}
+		iterFn, err := BuiltinLookup("iter")
+		if err != nil {
+			return nil, err
+		}
+		// CPython: Objects/dictobject.c:5310 dictiter_reduce — drain
+		// remaining items into a list, then pickle as (iter, (list,)).
+		// The unpickled iterator will be a list_iterator, not a dict
+		// iterator — this matches CPython's documented behavior.
+		items := []Object{}
+		tmp := &dictIterObj{src: it.src, pos: it.pos, snapUsed: it.snapUsed, kind: it.kind}
+		tmp.init(it.Type())
+		for {
+			var v Object
+			switch it.kind {
+			case dictIterKeys:
+				k, _, e := tmp.advance()
+				if errors.Is(e, ErrStopIteration) {
+					goto done
+				}
+				if e != nil {
+					return nil, e
+				}
+				v = k
+			case dictIterValues:
+				_, val, e := tmp.advance()
+				if errors.Is(e, ErrStopIteration) {
+					goto done
+				}
+				if e != nil {
+					return nil, e
+				}
+				v = val
+			case dictIterItems:
+				k, val, e := tmp.advance()
+				if errors.Is(e, ErrStopIteration) {
+					goto done
+				}
+				if e != nil {
+					return nil, e
+				}
+				v = NewTuple([]Object{k, val})
+			}
+			items = append(items, v)
+		}
+	done:
+		return NewTuple([]Object{iterFn, NewTuple([]Object{NewList(items)})}), nil
+	}
+	// CPython: Objects/dictobject.c:5310 dictiter_reduce
+	SetTypeDescr(dictKeyIterType, "__reduce__", NewMethodDescr(dictKeyIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictValueIterType, "__reduce__", NewMethodDescr(dictValueIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictItemIterType, "__reduce__", NewMethodDescr(dictItemIterType, "__reduce__", dictReduceFn))
 }
 
 // dictIter is the type-level Iter slot that DictType registers in

@@ -175,7 +175,9 @@ func dictDelete(d *Dict, key Object) error {
 		if d.entries[idx].key != nil {
 			Decref(d.entries[idx].key)
 		}
-		Decref(d.entries[idx].value)
+		if d.entries[idx].value != nil {
+			Decref(d.entries[idx].value)
+		}
 		d.entries[idx] = dictEntry{dummy: true}
 	}
 	for i, slot := range d.order {

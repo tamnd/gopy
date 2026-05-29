@@ -21,16 +21,16 @@ func TestParseSpec(t *testing.T) {
 		in   string
 		want format.Spec
 	}{
-		{"", format.Spec{Width: -1, Precision: -1}},
-		{"d", format.Spec{Width: -1, Precision: -1, Type: 'd'}},
-		{"5d", format.Spec{Width: 5, Precision: -1, Type: 'd'}},
+		{"", format.Spec{Fill: -1, Width: -1, Precision: -1}},
+		{"d", format.Spec{Fill: -1, Width: -1, Precision: -1, Type: 'd'}},
+		{"5d", format.Spec{Fill: -1, Width: 5, Precision: -1, Type: 'd'}},
 		{"05d", format.Spec{Width: 5, Precision: -1, Type: 'd', Zero: true, Fill: '0', Align: '='}},
-		{",d", format.Spec{Width: -1, Precision: -1, Type: 'd', Thousands: ','}},
-		{".2f", format.Spec{Width: -1, Precision: 2, Type: 'f'}},
-		{"+.2f", format.Spec{Width: -1, Precision: 2, Type: 'f', Sign: '+'}},
-		{"#x", format.Spec{Width: -1, Precision: -1, Type: 'x', Alt: true}},
+		{",d", format.Spec{Fill: -1, Width: -1, Precision: -1, Type: 'd', Thousands: ','}},
+		{".2f", format.Spec{Fill: -1, Width: -1, Precision: 2, Type: 'f'}},
+		{"+.2f", format.Spec{Fill: -1, Width: -1, Precision: 2, Type: 'f', Sign: '+'}},
+		{"#x", format.Spec{Fill: -1, Width: -1, Precision: -1, Type: 'x', Alt: true}},
 		{"*<6", format.Spec{Width: 6, Precision: -1, Fill: '*', Align: '<'}},
-		{"^10.2f", format.Spec{Width: 10, Precision: 2, Type: 'f', Align: '^'}},
+		{"^10.2f", format.Spec{Fill: -1, Width: 10, Precision: 2, Type: 'f', Align: '^'}},
 	}
 	for _, c := range cases {
 		got, err := format.ParseSpec(c.in)

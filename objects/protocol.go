@@ -1,6 +1,41 @@
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"unsafe"
+)
+
+// reprDepth tracks objects currently being repr'd to detect cycles.
+// CPython: Objects/object.c:L514 Py_ReprEnter / Py_ReprLeave
+var reprDepth = make(map[uintptr]bool)
+
+// objectID extracts the data pointer from a Go interface value, giving
+// a stable per-object identity for cycle detection.
+func objectID(o Object) uintptr {
+	type iface struct{ _, data uintptr }
+	return (*iface)(unsafe.Pointer(&o)).data
+}
+
+// ReprEnter reports whether o is already being repr'd (cycle). If not,
+// it marks o as in-progress and returns false. The caller must call
+// ReprLeave(o) when done.
+//
+// CPython: Objects/object.c:L514 Py_ReprEnter
+func ReprEnter(o Object) bool {
+	id := objectID(o)
+	if reprDepth[id] {
+		return true
+	}
+	reprDepth[id] = true
+	return false
+}
+
+// ReprLeave removes o from the in-progress repr set.
+//
+// CPython: Objects/object.c:L533 Py_ReprLeave
+func ReprLeave(o Object) {
+	delete(reprDepth, objectID(o))
+}
 
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.
@@ -14,6 +49,70 @@ func Repr(o Object) (string, error) {
 		return r(o)
 	}
 	return fmt.Sprintf("<%s object at %p>", o.Type().Name, o), nil
+}
+
+// ReprObject returns the result of repr(o) as an Object, preserving
+// str subclass types. Mirrors PyObject_Repr's return-value semantics.
+//
+// CPython: Objects/object.c:L518 PyObject_Repr
+func ReprObject(o Object) (Object, error) {
+	if o == nil {
+		return NewStr("<nil>"), nil
+	}
+	// For user-defined types, call __repr__ directly and return the Object.
+	if o.Type().IsUser {
+		meth, err := lookupSpecial(o, "__repr__")
+		if err != nil {
+			return nil, err
+		}
+		if meth != nil {
+			result, err := Call(meth, NewTuple(nil), nil)
+			if err != nil {
+				return nil, err
+			}
+			if !IsSubtype(result.Type(), strType) {
+				return nil, fmt.Errorf("TypeError: __repr__ returned non-string (type %s)", result.Type().Name)
+			}
+			return result, nil
+		}
+	}
+	s, err := Repr(o)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
+}
+
+// StrObject returns the result of str(o) as an Object, preserving
+// str subclass types. Mirrors PyObject_Str's return-value semantics.
+//
+// CPython: Objects/object.c:L463 PyObject_Str
+func StrObject(o Object) (Object, error) {
+	if o == nil {
+		return NewStr("<nil>"), nil
+	}
+	// For user-defined types, call __str__ directly and return the Object.
+	if o.Type().IsUser {
+		meth, err := lookupSpecial(o, "__str__")
+		if err != nil {
+			return nil, err
+		}
+		if meth != nil {
+			result, err := Call(meth, NewTuple(nil), nil)
+			if err != nil {
+				return nil, err
+			}
+			if !IsSubtype(result.Type(), strType) {
+				return nil, fmt.Errorf("TypeError: __str__ returned non-string (type %s)", result.Type().Name)
+			}
+			return result, nil
+		}
+	}
+	s, err := Str(o)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 // Str returns the Python str of o. Falls back to Repr.
@@ -37,10 +136,35 @@ func Str(o Object) (string, error) {
 // PyObject_Format calls _PyObject_LookupSpecial for every type that is
 // not PyUnicode_CheckExact or PyLong_CheckExact.
 //
+// When a user type explicitly defines __format__ (or inherits it from
+// another user type in the MRO), that override must take priority over
+// any inherited Go-level Format slot.  This mirrors CPython's
+// _PyObject_LookupSpecial-first ordering in PyObject_Format.
+//
 // CPython: Objects/abstract.c:843 PyObject_Format
 func Format(o Object, spec string) (string, error) {
 	if o == nil {
 		return "<nil>", nil
+	}
+	// User-defined __format__ overrides an inherited Go-level Format slot.
+	//
+	// CPython: Objects/abstract.c:876 _PyObject_LookupSpecial (always called first)
+	if o.Type().IsUser && userTypeHasFormatOverride(o.Type()) {
+		meth, err := lookupSpecial(o, "__format__")
+		if err != nil {
+			return "", err
+		}
+		if meth != nil {
+			result, callErr := Call(meth, NewTuple([]Object{NewStr(spec)}), nil)
+			if callErr != nil {
+				return "", callErr
+			}
+			s, ok := result.(*Unicode)
+			if !ok {
+				return "", fmt.Errorf("TypeError: __format__ must return a str, not %s", result.Type().Name)
+			}
+			return s.v, nil
+		}
 	}
 	if f := o.Type().Format; f != nil {
 		if spec == "" {
@@ -77,6 +201,26 @@ func Format(o Object, spec string) (string, error) {
 	return s.v, nil
 }
 
+// userTypeHasFormatOverride reports whether t or any user-defined ancestor
+// in the MRO explicitly defines __format__.  The walk stops at the first
+// built-in (non-user) type so that classes like class C(int) without an
+// override correctly fall back to int's Go-level Format slot.
+//
+// CPython: Objects/typeobject.c:5063 type_getattro (tp_dict check per base)
+func userTypeHasFormatOverride(t *Type) bool {
+	for _, base := range t.MRO {
+		if base == nil || !base.IsUser {
+			return false
+		}
+		if descrs, ok := typeDescrTable[base]; ok {
+			if _, ok := descrs["__format__"]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // lookupSpecial mirrors CPython's _PyObject_LookupSpecial: it walks
 // the TYPE's MRO for the named dunder method, then binds the descriptor
 // to the instance via DescrGet. Unlike GetAttr / LookupAttrString this
@@ -110,7 +254,28 @@ func Hash(o Object) (int64, error) {
 // neither operand handles the comparison. Mirrors PyObject_RichCompare.
 //
 // CPython: Objects/object.c:L737 PyObject_RichCompare
+// CPython: Objects/object.c:L827 do_richcompare
 func RichCmp(a, b Object, op CompareOp) (Object, error) {
+	checkedReverse := false
+	// When b's type is a strict subtype of a's type and overrides the
+	// comparison slot, give b a chance first (with the swapped op).
+	// This mirrors do_richcompare's subtype-first check so that a
+	// subclass that blocks a comparison with None is respected before
+	// the base class's slot runs.
+	//
+	// CPython: Objects/object.c:L840 do_richcompare (subtype check)
+	if a.Type() != b.Type() && IsSubtype(b.Type(), a.Type()) {
+		if r := b.Type().RichCmp; r != nil {
+			checkedReverse = true
+			out, err := r(b, a, reflectOp(op))
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if r := a.Type().RichCmp; r != nil {
 		out, err := r(a, b, op)
 		if err != nil {
@@ -120,13 +285,15 @@ func RichCmp(a, b Object, op CompareOp) (Object, error) {
 			return out, nil
 		}
 	}
-	if r := b.Type().RichCmp; r != nil {
-		out, err := r(b, a, reflectOp(op))
-		if err != nil {
-			return nil, err
-		}
-		if !IsNotImplemented(out) {
-			return out, nil
+	if !checkedReverse {
+		if r := b.Type().RichCmp; r != nil {
+			out, err := r(b, a, reflectOp(op))
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
 		}
 	}
 	switch op {
@@ -208,7 +375,7 @@ func IsTruthy(o Object) (bool, error) {
 //
 // CPython: Objects/object.c:1290 PyObject_GetAttr
 func GetAttr(o Object, name Object) (Object, error) {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -229,7 +396,7 @@ func GetAttr(o Object, name Object) (Object, error) {
 //
 // CPython: Objects/object.c:1440 PyObject_SetAttr
 func SetAttr(o Object, name Object, value Object) error {
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -271,6 +438,24 @@ func typeNameOf(o Object) string {
 		return "<nil>"
 	}
 	return o.Type().Name
+}
+
+// typeFullNameOf returns module.qualname for user-defined types (always
+// includes the module, even for __main__), and just the type name for
+// built-in types. Mirrors CPython's _PyType_GetFullyQualifiedName.
+func typeFullNameOf(o Object) string {
+	if o == nil {
+		return "<nil>"
+	}
+	t := o.Type()
+	if !t.IsUser {
+		return t.Name
+	}
+	qual := unicodeOf(TypeGetQualName(t))
+	if t.Module != "" {
+		return t.Module + "." + qual
+	}
+	return qual
 }
 
 // reflectOp returns the operator that swaps the operands. < becomes

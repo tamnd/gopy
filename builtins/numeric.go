@@ -148,17 +148,26 @@ func formatIntBase(args []objects.Object, name string, base int, prefix string) 
 
 // Ascii ports builtin_ascii: PyObject_ASCII. Returns repr(o) with any
 // non-ASCII code points replaced by \xHH / \uHHHH / \UHHHHHHHH escapes.
+// When repr is already all-ASCII, returns the repr Object directly so
+// str subclass types are preserved.
 //
 // CPython: Python/bltinmodule.c:540 builtin_ascii
 func ASCII(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: ascii() takes exactly one argument (%d given)", len(args))
 	}
-	s, err := objects.Repr(args[0])
+	reprObj, err := objects.ReprObject(args[0])
 	if err != nil {
 		return nil, err
 	}
-	return objects.NewStr(asciiEscape(s)), nil
+	reprStr := reprObj.(*objects.Unicode).Value()
+	escaped := asciiEscape(reprStr)
+	if escaped == reprStr {
+		// All-ASCII: return repr object as-is, preserving any str subclass.
+		// CPython: Python/bltinmodule.c:555 PyUnicode_IS_ASCII fast path
+		return reprObj, nil
+	}
+	return objects.NewStr(escaped), nil
 }
 
 func asciiEscape(s string) string {

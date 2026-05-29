@@ -73,16 +73,17 @@ func validateThousands(thousands, t byte) error {
 //
 // CPython: Python/formatter_unicode.c:L18 InternalFormatSpec
 type Spec struct {
-	Fill      rune
-	Align     byte // '<', '>', '=', '^', or 0 if default
-	Sign      byte // '+', '-', ' ', or 0
-	NoNegZero bool
-	Alt       bool
-	Zero      bool
-	Width     int  // -1 if unspecified
-	Thousands byte // ',', '_', or 0
-	Precision int  // -1 if unspecified
-	Type      byte // 0 if unspecified
+	Fill          rune // -1 means unspecified (allows '\x00' as a real fill char)
+	Align         byte // '<', '>', '=', '^', or 0 if default
+	Sign          byte // '+', '-', ' ', or 0
+	NoNegZero     bool
+	Alt           bool
+	Zero          bool
+	Width         int  // -1 if unspecified
+	Thousands     byte // ',', '_', or 0
+	FracThousands byte // ',', '_', or 0 (CPython 3.14 frac_thousands_separator)
+	Precision     int  // -1 if unspecified
+	Type          byte // 0 if unspecified
 }
 
 func isAlignToken(c byte) bool {
@@ -97,7 +98,7 @@ func isSignToken(c byte) bool {
 //
 // CPython: Python/formatter_unicode.c:L150 parse_internal_render_format_spec
 func ParseSpec(s string) (Spec, error) {
-	spec := Spec{Width: -1, Precision: -1}
+	spec := Spec{Fill: -1, Width: -1, Precision: -1}
 
 	i := 0
 	// [[fill]align]
@@ -129,10 +130,14 @@ func ParseSpec(s string) (Spec, error) {
 	}
 
 	// [0] zero-pad shortcut
-	if i < len(s) && s[i] == '0' && spec.Align == 0 {
-		spec.Zero = true
+	// CPython: Python/formatter_unicode.c:213 !fill_char_specified
+	// Always sets fill='0'; only sets align='=' if align was not explicit.
+	if i < len(s) && s[i] == '0' && spec.Fill == -1 {
 		spec.Fill = '0'
-		spec.Align = '='
+		if spec.Align == 0 {
+			spec.Zero = true
+			spec.Align = '='
+		}
 		i++
 	}
 
@@ -171,15 +176,45 @@ func ParseSpec(s string) (Spec, error) {
 		// "Cannot specify ',' with ','." message.
 	}
 
-	// [.precision]
+	// [.precision][frac_thousands]
+	// CPython: Python/formatter_unicode.c:257 Parse field precision
+	// CPython 3.14: Python/formatter_unicode.c:265 frac_thousands_separator
 	if i < len(s) && s[i] == '.' {
 		i++
 		prec, consumed, err := parseInt(s, i)
-		if err != nil || consumed == 0 {
+		if err != nil {
+			return spec, err
+		}
+		if consumed > 0 {
+			spec.Precision = prec
+			i += consumed
+		}
+		// Optional frac thousands separator after the (optional) precision.
+		if i < len(s) && s[i] == ',' {
+			if consumed == 0 {
+				spec.Precision = -1
+			}
+			spec.FracThousands = ','
+			i++
+			consumed++
+		} else if i < len(s) && s[i] == '_' {
+			if spec.FracThousands != 0 {
+				return spec, errCommaAndUnderscore
+			}
+			if consumed == 0 {
+				spec.Precision = -1
+			}
+			spec.FracThousands = '_'
+			i++
+			consumed++
+		}
+		// Trailing comma after underscore → error
+		if i < len(s) && s[i] == ',' && spec.FracThousands == '_' {
+			return spec, errCommaAndUnderscore
+		}
+		if consumed == 0 {
 			return spec, ErrInvalidSpec
 		}
-		spec.Precision = prec
-		i += consumed
 	}
 
 	// [type]
@@ -195,6 +230,10 @@ func ParseSpec(s string) (Spec, error) {
 		if err := validateThousands(spec.Thousands, spec.Type); err != nil {
 			return spec, err
 		}
+	}
+	// CPython: Python/formatter_unicode.c:362 frac_thousands with 'n' is invalid
+	if spec.FracThousands != 0 && spec.Type == 'n' {
+		return spec, invalidThousandsSeparator(spec.FracThousands, spec.Type)
 	}
 	return spec, nil
 }
@@ -225,22 +264,38 @@ func FormatString(s string, spec Spec) (string, error) {
 	if err := validateThousands(spec.Thousands, t); err != nil {
 		return "", err
 	}
-	if spec.Sign != 0 || spec.Alt || spec.Zero {
-		return "", ErrInvalidSpec
+	if spec.Sign == ' ' {
+		return "", fmt.Errorf("ValueError: Space not allowed in string format specifier")
+	}
+	if spec.Sign != 0 {
+		return "", fmt.Errorf("ValueError: Sign not allowed in string format specifier")
+	}
+	if spec.Alt {
+		return "", fmt.Errorf("ValueError: Alternate form (#) not allowed in string format specifier")
 	}
 	if spec.Type != 0 && spec.Type != 's' {
 		return "", ErrInvalidSpec
+	}
+	if spec.Align == '=' && !spec.Zero {
+		return "", fmt.Errorf("ValueError: '=' alignment not allowed in string format specification")
 	}
 	body := s
 	if spec.Precision >= 0 && spec.Precision < utf8.RuneCountInString(body) {
 		body = truncateRunes(body, spec.Precision)
 	}
 	align := spec.Align
-	if align == 0 {
+	// The '0' shortcut sets align='=' (numeric zero-fill convention), but
+	// for strings the default alignment is '<'. If the caller wrote just
+	// "0Ns" without an explicit align character, the '=' here was
+	// synthetic; treat it as left-align so "08s" on "result" gives
+	// "result00" not "00result".
+	//
+	// CPython: Python/formatter_unicode.c:862 format_string_internal (align default)
+	if align == 0 || (spec.Zero && align == '=') {
 		align = '<'
 	}
 	fill := spec.Fill
-	if fill == 0 {
+	if fill < 0 {
 		fill = ' '
 	}
 	return pad(body, spec.Width, align, fill), nil
@@ -382,7 +437,7 @@ func defaultNumericAlign(a byte) byte {
 }
 
 func defaultFill(f rune, dflt rune) rune {
-	if f == 0 {
+	if f < 0 {
 		return dflt
 	}
 	return f
@@ -503,8 +558,15 @@ func FormatFloat(v float64, spec Spec) (string, error) {
 			precision = 6
 		}
 	case 'r':
-		// repr: AddDotZero, precision unused.
+		// CPython: Python/formatter_unicode.c:1176 format_float_internal
+		// ADD_DOT_0 is always set for type=='\0', regardless of precision.
 		flags |= pystrconv.FlagAddDotZero
+		if precision >= 0 {
+			t = 'g'
+			if precision == 0 {
+				precision = 1
+			}
+		}
 	default:
 		return "", ErrInvalidSpec
 	}
@@ -514,6 +576,11 @@ func FormatFloat(v float64, spec Spec) (string, error) {
 	// Grouping for the integer part of finite numbers.
 	if spec.Thousands != 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
 		body = applyFloatGrouping(body, spec.Thousands)
+	}
+
+	// Grouping for the fractional part (CPython 3.14 frac_thousands_separator).
+	if spec.FracThousands != 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
+		body = applyFracGrouping(body, spec.FracThousands)
 	}
 
 	if spec.Zero && spec.Align == '=' && spec.Width > len(body) {
@@ -539,6 +606,51 @@ func applyFloatGrouping(body string, sep byte) string {
 	rest := body[i:]
 	grouped := insertGrouping(intPart, sep, 3)
 	return body[:start] + grouped + rest
+}
+
+// insertFracGrouping inserts sep every 3 fractional digits, left-to-right.
+// Fractional grouping goes left-to-right so the trailing group is the
+// residual (unlike integer grouping where the leading group is residual).
+//
+// CPython: Python/formatter_unicode.c:686 _PyUnicode_InsertThousandsGrouping
+// (frac_thousands_separator path, 3.14+)
+func insertFracGrouping(fracPart string, sep byte) string {
+	if len(fracPart) <= 3 {
+		return fracPart
+	}
+	var b strings.Builder
+	b.Grow(len(fracPart) + (len(fracPart)-1)/3)
+	for i := 0; i < len(fracPart); i += 3 {
+		if i > 0 {
+			b.WriteByte(sep)
+		}
+		b.WriteString(fracPart[i:min(i+3, len(fracPart))])
+	}
+	return b.String()
+}
+
+// applyFracGrouping applies insertFracGrouping to the fractional portion of
+// body. Handles sign prefix, integer part, dot, fractional digits, and an
+// optional exponent or trailing '%'.
+//
+// CPython: Python/formatter_unicode.c:1308 format_float_internal
+// (frac_thousands_separator application, 3.14+)
+func applyFracGrouping(body string, sep byte) string {
+	dotIdx := strings.IndexByte(body, '.')
+	if dotIdx < 0 {
+		return body
+	}
+	fracStart := dotIdx + 1
+	fracEnd := fracStart
+	for fracEnd < len(body) && body[fracEnd] >= '0' && body[fracEnd] <= '9' {
+		fracEnd++
+	}
+	fracPart := body[fracStart:fracEnd]
+	if len(fracPart) <= 3 {
+		return body
+	}
+	grouped := insertFracGrouping(fracPart, sep)
+	return body[:fracStart] + grouped + body[fracEnd:]
 }
 
 func zeroPadFloat(body string, width int, sep byte) string {

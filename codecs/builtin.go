@@ -146,27 +146,152 @@ func encodeUTF8(input, errors string) (out []byte, n int, err error) {
 // decodeUTF8 decodes UTF-8 bytes to a string, invoking the error
 // handler for invalid sequences.
 //
-// CPython: Objects/unicodeobject.c:L4756 PyUnicode_DecodeUTF8Stateful
+// decodeUTF8 decodes a UTF-8 encoded byte slice with CPython-compatible
+// error recovery. Each invalid byte or invalid sequence is replaced by one
+// error handler call, grouping a start byte with its valid continuation
+// bytes into a single error per Unicode TR3-8 Table 3-8 Row 2.
+//
+// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
 func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 	var b strings.Builder
 	i := 0
 	for i < len(input) {
-		r, size := utf8.DecodeRune(input[i:])
-		if r == utf8.RuneError && size == 1 {
-			handler, herr := LookupError(errors)
-			if herr != nil {
-				return "", i, herr
-			}
-			rep, newpos, herr := handler("utf-8", "invalid start byte", input, i, i+1)
-			if herr != nil {
-				return "", i, herr
-			}
-			b.WriteString(rep)
-			i = newpos
+		c := input[i]
+
+		// ASCII fast path.
+		if c < 0x80 {
+			b.WriteByte(c)
+			i++
 			continue
 		}
-		b.WriteRune(r)
-		i += size
+
+		// Determine the error region and reason using the CPython algorithm.
+		// For valid start bytes (0xC2-0xF4), consume as many valid continuation
+		// bytes as possible and treat the whole group as one error if the
+		// sequence is incomplete or invalid.
+		errStart := i
+		errEnd := i + 1
+		var reason string
+
+		switch {
+		case c < 0xC2:
+			// 0x80-0xBF: orphan continuation byte.
+			// 0xC0-0xC1: overlong 2-byte sequence (always invalid).
+			// Single-byte error.
+			reason = "invalid start byte"
+
+		case c < 0xE0:
+			// 0xC2-0xDF: 2-byte sequence. Consume one continuation byte if present.
+			if i+1 < len(input) && input[i+1] >= 0x80 && input[i+1] < 0xC0 {
+				cp := rune(c&0x1F)<<6 | rune(input[i+1]&0x3F)
+				b.WriteRune(cp)
+				i += 2
+				continue
+			}
+			// Truncated: just the start byte is the error.
+			if i+1 >= len(input) {
+				reason = "unexpected end of data"
+			} else {
+				reason = "invalid continuation byte"
+			}
+
+		case c < 0xF0:
+			// 0xE0-0xEF: 3-byte sequence.
+			// Some start bytes have restricted valid ranges for the first
+			// continuation byte (to prevent overlong sequences or surrogates):
+			// 0xE0: first cb must be 0xA0-0xBF (0x80-0x9F would be overlong).
+			// 0xED: first cb must be 0x80-0x9F (0xA0-0xBF would be a surrogate).
+			// CPython: Objects/unicodeobject.c:4756 (utf8_decode inner loop)
+			var cb1Lo, cb1Hi byte = 0x80, 0xBF
+			switch c {
+			case 0xE0:
+				cb1Lo = 0xA0
+			case 0xED:
+				cb1Hi = 0x9F
+			}
+			if i+1 >= len(input) {
+				reason = "unexpected end of data"
+				break
+			}
+			if input[i+1] < cb1Lo || input[i+1] > cb1Hi {
+				// First cb is out of valid sub-range; only the start byte is
+				// in the error region. The first cb is re-processed separately.
+				reason = "invalid continuation byte"
+				break
+			}
+			// First cb is valid; try to consume second cb.
+			if i+2 < len(input) && input[i+2] >= 0x80 && input[i+2] < 0xC0 {
+				// All 3 bytes present and valid.
+				cp := rune(c&0x0F)<<12 | rune(input[i+1]&0x3F)<<6 | rune(input[i+2]&0x3F)
+				b.WriteRune(cp)
+				i += 3
+				continue
+			}
+			// Second cb missing or invalid; error covers start + first cb.
+			errEnd = i + 2
+			if i+2 >= len(input) {
+				reason = "unexpected end of data"
+			} else {
+				reason = "invalid continuation byte"
+			}
+
+		case c < 0xF5:
+			// 0xF0-0xF4: 4-byte sequence.
+			// Restricted first-cb ranges:
+			// 0xF0: first cb must be 0x90-0xBF (0x80-0x8F would be overlong).
+			// 0xF4: first cb must be 0x80-0x8F (0x90-0xBF would exceed U+10FFFF).
+			// CPython: Objects/unicodeobject.c:4756 (utf8_decode inner loop)
+			var cb1Lo4, cb1Hi4 byte = 0x80, 0xBF
+			switch c {
+			case 0xF0:
+				cb1Lo4 = 0x90
+			case 0xF4:
+				cb1Hi4 = 0x8F
+			}
+			if i+1 >= len(input) {
+				reason = "unexpected end of data"
+				break
+			}
+			if input[i+1] < cb1Lo4 || input[i+1] > cb1Hi4 {
+				reason = "invalid continuation byte"
+				break
+			}
+			// First cb is valid; consume additional continuation bytes.
+			j := i + 2
+			for j < len(input) && j < i+4 && input[j] >= 0x80 && input[j] < 0xC0 {
+				j++
+			}
+			if j == i+4 {
+				cp := rune(c&0x07)<<18 | rune(input[i+1]&0x3F)<<12 |
+					rune(input[i+2]&0x3F)<<6 | rune(input[i+3]&0x3F)
+				if cp >= 0x10000 && cp <= 0x10FFFF {
+					b.WriteRune(cp)
+					i += 4
+					continue
+				}
+			}
+			errEnd = j
+			if j >= len(input) {
+				reason = "unexpected end of data"
+			} else {
+				reason = "invalid continuation byte"
+			}
+
+		default:
+			// 0xF5-0xFF: always single-byte error.
+			reason = "invalid start byte"
+		}
+
+		handler, herr := LookupError(errors)
+		if herr != nil {
+			return "", i, herr
+		}
+		rep, newpos, herr := handler("utf-8", reason, input, errStart, errEnd)
+		if herr != nil {
+			return "", i, herr
+		}
+		b.WriteString(rep)
+		i = newpos
 	}
 	s := b.String()
 	return s, len(s), nil

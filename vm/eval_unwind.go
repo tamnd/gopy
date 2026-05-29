@@ -421,6 +421,20 @@ func (e *evalState) attachFrameTraceback() {
 	if co == nil {
 		return
 	}
+	// Do not add a duplicate entry if this frame's traceback was already
+	// prepended for this exception. CPython calls PyTraceBack_Here only
+	// once per exception per frame entry; gopy's handleException is called
+	// once per exception-table entry lookup, so we must guard here.
+	//
+	// CPython: Python/traceback.c:154 PyTraceBack_Here (called once per
+	// frame, not per exception-table entry).
+	if exc.TB != nil && exc.TB.TbFrame != nil {
+		if tbFrame, ok := exc.TB.TbFrame.(*objects.Frame); ok {
+			if tbFrame.Code() == co {
+				return
+			}
+		}
+	}
 	// CPython resolves the traceback line from the *previous* dispatched
 	// instruction's offset, since InstrPtr already points at whatever
 	// follows the raising op.

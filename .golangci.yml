@@ -606,6 +606,52 @@ linters:
         linters:
           - gocritic
           - revive
+      # set.go's init() wires every set/frozenset descriptor in one block,
+      # matching Objects/setobject.c's tp_methods / tp_getset table layout.
+      # The complexity is the surface, not algorithmic branching.
+      - path: objects/set\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # binaryOp and trySimple mirror ceval.c's BINARY_OP dispatch and the
+      # hand-written opcode switch; branch tree is the parity unit with CPython.
+      - path: vm/eval_simple\.go
+        linters:
+          - gocyclo
+          - gocognit
+      # floatPower mirrors float_pow from Objects/floatobject.c: the
+      # special-case table for (0,0), inf, nan, negative base is the
+      # parity unit. floatFromNumber mirrors float_from_number_impl's
+      # type-dispatch branch tree.
+      - path: objects/float.*\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # StrOf mirrors unicode_new's encoding/errors/object dispatch
+      # branch-for-branch; the complexity is the parity surface.
+      - path: builtins/reflect\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # decodeUTF8 mirrors CPython's utf8_decode inner loop with per-byte
+      # state tracking; the branch tree is the parity unit.
+      - path: codecs/builtin\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # dict_iter init() wires every dict iterator descriptor in one block,
+      # matching Objects/dictobject.c's tp_methods table layout.
+      - path: objects/dict_iter\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # sliceGetLongIndices mirrors PySlice_GetIndicesEx and the extended
+      # long-index variant; naked returns are the parity-faithful shape.
+      - path: objects/slice_indices\.go
+        linters:
+          - gocognit
+          - gocyclo
+          - nakedret
 
 formatters:
   enable:

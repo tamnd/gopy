@@ -144,8 +144,6 @@ func liftConst(v any) any {
 //
 // CPython: Python/bytecodes.c:LOAD_CONST (CPython stores PyObject*
 // directly so this conversion is a no-op there).
-//
-//nolint:gocyclo // mirrors CPython's constant-kind switch; arms added as constant types land
 func wrapConst(v any) (objects.Object, error) {
 	switch x := v.(type) {
 	case nil:
@@ -214,8 +212,6 @@ func wrapConst(v any) (objects.Object, error) {
 // panel. Frame termination uses the errFrameReturn sentinel via
 // e.retVal; arms set those fields and return errFrameReturn just like
 // CPython's goto exit_frame.
-//
-//nolint:gocognit,gocyclo // hand-written opcode switch; the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	switch op {
 	case compile.CACHE, compile.RESERVED:
@@ -1137,10 +1133,20 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		var v objects.Object
 		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
 			v = w
-		} else if w, ok := lookupIn(e.f.Builtins, keyObj); ok {
-			v = w
 		} else {
-			return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+			// CPython: Python/bytecodes.c LOAD_GLOBAL — when builtins is not
+			// an exact dict, PyObject_GetItem is used and its TypeError
+			// propagates (e.g. exec(code, {'__builtins__': 123}) raises
+			// TypeError, not NameError).
+			w, found, err := objects.MappingGetOptionalItem(e.f.Builtins, keyObj)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				v = w
+			} else {
+				return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+			}
 		}
 		e.pushObject(v)
 		if pushNull {
@@ -1226,10 +1232,12 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberAdd(a, b)
 	case nbInplaceAdd:
 		return objects.NumberInPlaceAdd(a, b)
-	case nbSubtract, nbInplaceSubtract:
+	case nbSubtract:
 		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Subtract
 		})
+	case nbInplaceSubtract:
+		return objects.NumberInPlaceSubtract(a, b)
 	case nbMult:
 		return objects.NumberMultiply(a, b)
 	case nbInplaceMult:
@@ -1238,40 +1246,58 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return objects.NumberMatrixMultiply(a, b)
 	case nbInplaceMatrixMultiply:
 		return objects.NumberInPlaceMatrixMultiply(a, b)
-	case nbTrueDivide, nbInplaceTrueDivide:
+	case nbTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide
 		})
-	case nbFloorDivide, nbInplaceFloorDivide:
+	case nbInplaceTrueDivide:
+		return objects.NumberInPlaceTrueDivide(a, b)
+	case nbFloorDivide:
 		return numericForward(a, b, "//", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.FloorDivide
 		})
-	case nbRemainder, nbInplaceRemainder:
+	case nbInplaceFloorDivide:
+		return objects.NumberInPlaceFloorDivide(a, b)
+	case nbRemainder:
 		return numericForward(a, b, "%", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Remainder
 		})
-	case nbAnd, nbInplaceAnd:
+	case nbInplaceRemainder:
+		return objects.NumberInPlaceRemainder(a, b)
+	case nbAnd:
 		return numericForward(a, b, "&", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.And
 		})
-	case nbOr, nbInplaceOr:
+	case nbInplaceAnd:
+		return objects.NumberInPlaceAnd(a, b)
+	case nbOr:
 		return numericForward(a, b, "|", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Or
 		})
-	case nbXor, nbInplaceXor:
+	case nbInplaceOr:
+		return objects.NumberInPlaceOr(a, b)
+	case nbXor:
 		return numericForward(a, b, "^", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Xor
 		})
-	case nbLshift, nbInplaceLshift:
+	case nbInplaceXor:
+		return objects.NumberInPlaceXor(a, b)
+	case nbLshift:
 		return numericForward(a, b, "<<", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Lshift
 		})
-	case nbRshift, nbInplaceRshift:
+	case nbInplaceLshift:
+		return objects.NumberInPlaceLshift(a, b)
+	case nbRshift:
 		return numericForward(a, b, ">>", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Rshift
 		})
-	case nbPower, nbInplacePower:
+	case nbInplaceRshift:
+		return objects.NumberInPlaceRshift(a, b)
+	case nbPower:
 		return powerOp(a, b, nil)
+	case nbInplacePower:
+		return objects.NumberInPlacePower(a, b, nil)
 	case nbSubscr:
 		return getItem(a, b)
 	}
@@ -1320,6 +1346,21 @@ func powerOp(a, b, mod objects.Object) (objects.Object, error) {
 //
 // CPython: Objects/abstract.c binary_op1
 func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) (objects.Object, error) {
+	// When b's type is a strict subtype of a's type and b defines a reverse
+	// dunder that is not inherited from a's type, give b's reverse op priority.
+	// Mirrors the subtype-first block in CPython's binary_op1.
+	//
+	// CPython: Objects/abstract.c:986 binary_op1 (subtype-first block)
+	if a.Type() != b.Type() && objects.IsSubtype(b.Type(), a.Type()) {
+		if out, ok, err := objects.DunderBinaryReverse(b, a, sym); ok {
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if fn := mroNumberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
 		if err != nil {
@@ -1434,13 +1475,12 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		return nil, ierr
 	}
-	itType := it.Type()
-	if itType.IterNext == nil {
-		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", itType.Name)
+	if it.Type().IterNext == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", it.Type().Name)
 	}
 	out := make([]objects.Object, 0, n)
 	for i := 0; i < n; i++ {
-		v, nerr := itType.IterNext(it)
+		v, nerr := objects.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
 			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
 		}
@@ -1449,7 +1489,7 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		out = append(out, v)
 	}
-	extra, nerr := itType.IterNext(it)
+	extra, nerr := objects.IterNext(it)
 	if nerr != nil && !errors.Is(nerr, objects.ErrStopIteration) {
 		return nil, nerr
 	}
@@ -1603,9 +1643,11 @@ func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object,
 }
 
 // containsItem mirrors PySequence_Contains. Falls back to walking the
-// iterator when the type provides no Contains slot.
+// iterator when the type provides no Contains slot. The legacy path via
+// __getitem__ (sq_item) is covered by objects.Iter's fallback.
 //
-// CPython: Objects/abstract.c PySequence_Contains
+// CPython: Objects/abstract.c:2130 PySequence_Contains
+// CPython: Objects/abstract.c:2093 _PySequence_IterSearch
 func containsItem(haystack, needle objects.Object) (bool, error) {
 	t := haystack.Type()
 	if t.Sequence != nil && t.Sequence.Contains != nil {
@@ -1615,27 +1657,26 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 		v, _ := d.GetItem(needle)
 		return v != nil, nil
 	}
-	if t.Iter == nil {
-		return false, fmt.Errorf("TypeError: argument of type '%s' is not iterable", t.Name)
-	}
-	items, ierr := iterToSlice(haystack)
+	it, ierr := objects.Iter(haystack)
 	if ierr != nil {
-		return false, ierr
+		return false, fmt.Errorf("TypeError: argument of type '%s' is not a container or iterable", t.Name)
 	}
-	for _, item := range items {
-		eq, eerr := objects.RichCmp(item, needle, objects.CompareEQ)
+	for {
+		item, nerr := objects.IterNext(it)
+		if nerr != nil {
+			if errors.Is(nerr, objects.ErrStopIteration) {
+				return false, nil
+			}
+			return false, nerr
+		}
+		eq, eerr := objects.RichCmpBool(item, needle, objects.CompareEQ)
 		if eerr != nil {
 			return false, eerr
 		}
-		truthy, terr := objects.IsTruthy(eq)
-		if terr != nil {
-			return false, terr
-		}
-		if truthy {
+		if eq {
 			return true, nil
 		}
 	}
-	return false, nil
 }
 
 // setItem mirrors PyObject_SetItem against the v0.6 container surface.
@@ -1837,8 +1878,14 @@ func convertValue(v objects.Object, oparg uint32) (objects.Object, error) {
 			return nil, err
 		}
 		return objects.NewStr(s), nil
-	case 2, 3: // FVC_REPR / FVC_ASCII
+	case 2: // FVC_REPR
 		s, err := objects.Repr(v)
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	case 3: // FVC_ASCII
+		s, err := objects.ASCII(v)
 		if err != nil {
 			return nil, err
 		}

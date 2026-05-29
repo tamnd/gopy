@@ -155,20 +155,21 @@ func shortestDigits(f float64, code byte, precision int) (digits string, decpt i
 		mantissa, exp := splitScientific(buf)
 		return mantissa, exp + 1
 	case 'f':
-		buf := strconv.AppendFloat(nil, abs, 'e', -1, 64)
-		mantissa, exp := splitScientific(buf)
-		// Pad to precision digits after the implicit decimal point at exp+1.
-		need := precision + exp + 1
-		if need > len(mantissa) {
-			mantissa += strings.Repeat("0", need-len(mantissa))
-		} else if need >= 0 && need < len(mantissa) {
-			mantissa = roundHalfEven(mantissa, need)
-			// roundHalfEven may bump exponent when mantissa overflows.
-			if len(mantissa) > need+countCarry(mantissa, need) {
-				exp++
-			}
+		// CPython: Python/pystrtod.c:969 format_float_short mode=3
+		// Go's strconv 'f' uses the same IEEE 754 round-half-even as CPython.
+		if precision < 0 {
+			precision = 6
 		}
-		return mantissa, exp + 1
+		buf := strconv.AppendFloat(nil, abs, 'f', precision, 64)
+		s := string(buf)
+		dotIdx := strings.IndexByte(s, '.')
+		if dotIdx < 0 {
+			// e.g. "0" or "123" — no fractional part (precision==0)
+			return s, len(s)
+		}
+		intPart := s[:dotIdx]
+		fracPart := s[dotIdx+1:]
+		return intPart + fracPart, dotIdx
 	}
 	return "", 0
 }
@@ -189,60 +190,6 @@ func splitScientific(buf []byte) (mantissa string, exp int) {
 	}
 	exp, _ = strconv.Atoi(expStr)
 	return mantissa, exp
-}
-
-// roundHalfEven rounds digits to keep digits[:keep] using
-// banker's rounding when the discarded tail is exactly half.
-func roundHalfEven(digits string, keep int) string {
-	if keep <= 0 {
-		return "0"
-	}
-	if keep >= len(digits) {
-		return digits
-	}
-	head := digits[:keep]
-	tail := digits[keep:]
-	roundUp := false
-	switch {
-	case tail[0] > '5':
-		roundUp = true
-	case tail[0] < '5':
-		roundUp = false
-	default:
-		// Tail starts with '5'; check rest for any non-zero.
-		anyNonZero := false
-		for i := 1; i < len(tail); i++ {
-			if tail[i] != '0' {
-				anyNonZero = true
-				break
-			}
-		}
-		if anyNonZero {
-			roundUp = true
-		} else {
-			// Exactly half. Round to even on the last kept digit.
-			roundUp = (head[keep-1]-'0')%2 == 1
-		}
-	}
-	if !roundUp {
-		return head
-	}
-	out := []byte(head)
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i] < '9' {
-			out[i]++
-			return string(out)
-		}
-		out[i] = '0'
-	}
-	return "1" + string(out)
-}
-
-func countCarry(mantissa string, keep int) int {
-	if len(mantissa) > keep {
-		return len(mantissa) - keep
-	}
-	return 0
 }
 
 // layoutFloat assembles the body of the formatted float (no sign and

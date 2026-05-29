@@ -29,21 +29,75 @@ func init() {
 	seqIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	seqIterType.IterNext = func(o objects.Object) (objects.Object, error) {
 		it := o.(*seqIter)
-		seq := it.o.Type().Sequence
-		n, err := seq.Length(it.o)
-		if err != nil {
-			return nil, err
-		}
-		if it.idx >= n {
+		if it.o == nil {
 			return nil, objects.ErrStopIteration
 		}
-		v, err := seq.GetItem(it.o, it.idx)
+		// CPython: Objects/iterobject.c:62 iter_iternext — never uses
+		// sq_length; always calls sq_item and stops on IndexError or
+		// StopIteration. Length is not a bound; objects may lie about it.
+		v, err := it.o.Type().Sequence.GetItem(it.o, it.idx)
 		if err != nil {
+			if errors.Is(err, objects.ErrStopIteration) ||
+				errors.Is(err, objects.ErrIndexOutOfRange) ||
+				(objects.IsStopIterationHook != nil && objects.IsStopIterationHook(err)) ||
+				(objects.IsIndexErrorHook != nil && objects.IsIndexErrorHook(err)) {
+				it.o = nil
+				if objects.ClearCurrentExceptionHook != nil {
+					objects.ClearCurrentExceptionHook()
+				}
+				return nil, objects.ErrStopIteration
+			}
 			return nil, err
 		}
 		it.idx++
 		return v, nil
 	}
+	// CPython: Objects/iterobject.c:133 iter_reduce
+	objects.SetTypeDescr(seqIterType, "__reduce__", objects.NewMethodDescr(seqIterType, "__reduce__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*seqIter)
+			if objects.BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := objects.BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.o == nil {
+				// CPython: Objects/iterobject.c:133 iter_reduce exhausted branch
+				// uses "N(())" which gives iter(()) — an empty tuple, not list.
+				return objects.NewTuple([]objects.Object{iterFn, objects.NewTuple([]objects.Object{objects.NewTuple(nil)})}), nil
+			}
+			return objects.NewTuple([]objects.Object{
+				iterFn,
+				objects.NewTuple([]objects.Object{it.o}),
+				objects.NewInt(int64(it.idx)),
+			}), nil
+		},
+	))
+	// CPython: Objects/iterobject.c:152 iter_setstate
+	objects.SetTypeDescr(seqIterType, "__setstate__", objects.NewMethodDescr(seqIterType, "__setstate__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*seqIter)
+			idx, ok := args[1].(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			v, _ := idx.Int64()
+			if v < 0 {
+				v = 0
+			}
+			it.idx = int(v)
+			return objects.None(), nil
+		},
+	))
+	objects.AddIterSlotWrappers(seqIterType)
 }
 
 func newSeqIter(o objects.Object) *seqIter {
@@ -74,7 +128,22 @@ func init() {
 		}
 		v, err := objects.Vectorcall(it.callable, nil, 0, nil)
 		if err != nil {
+			// CPython: Objects/iterobject.c:208 calliter_iternext — if the
+			// callable raises StopIteration, exhaust the iterator silently.
+			if errors.Is(err, objects.ErrStopIteration) ||
+				(objects.IsStopIterationHook != nil && objects.IsStopIterationHook(err)) {
+				it.done = true
+				if objects.ClearCurrentExceptionHook != nil {
+					objects.ClearCurrentExceptionHook()
+				}
+				return nil, objects.ErrStopIteration
+			}
 			return nil, err
+		}
+		// CPython: Objects/iterobject.c:215 calliter_iternext — re-check
+		// after the call because a reentrant call may have set done=true.
+		if it.done {
+			return nil, objects.ErrStopIteration
 		}
 		eq, err := objects.RichCmpBool(v, it.sentinel, objects.CompareEQ)
 		if err != nil {
@@ -86,6 +155,34 @@ func init() {
 		}
 		return v, nil
 	}
+	// CPython: Objects/iterobject.c:237 calliter_reduce
+	objects.SetTypeDescr(callIterType, "__reduce__", objects.NewMethodDescr(callIterType, "__reduce__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*callIter)
+			if objects.BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := objects.BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.done {
+				// CPython: Objects/iterobject.c:237 calliter_reduce uses "N(())" — empty tuple.
+				return objects.NewTuple([]objects.Object{
+					iterFn,
+					objects.NewTuple([]objects.Object{objects.NewTuple(nil)}),
+				}), nil
+			}
+			return objects.NewTuple([]objects.Object{
+				iterFn,
+				objects.NewTuple([]objects.Object{it.callable, it.sentinel}),
+			}), nil
+		},
+	))
+	objects.AddIterSlotWrappers(callIterType)
 }
 
 func newCallIter(callable, sentinel objects.Object) *callIter {
@@ -120,6 +217,61 @@ func init() {
 		it.idx--
 		return v, nil
 	}
+	// CPython: Objects/enumobject.c:757 reversed_reduce
+	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescr(reversedIterType, "__reduce__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*reversedIter)
+			if objects.BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			revFn, err := objects.BuiltinLookup("reversed")
+			if err != nil {
+				return nil, err
+			}
+			if it.idx < 0 {
+				return objects.NewTuple([]objects.Object{
+					revFn,
+					objects.NewTuple([]objects.Object{objects.NewList(nil)}),
+				}), nil
+			}
+			return objects.NewTuple([]objects.Object{
+				revFn,
+				objects.NewTuple([]objects.Object{it.o}),
+				objects.NewInt(int64(it.idx)),
+			}), nil
+		},
+	))
+	// CPython: Objects/enumobject.c:779 reversed_setstate
+	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescr(reversedIterType, "__setstate__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*reversedIter)
+			idx, ok := args[1].(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			v, _ := idx.Int64()
+			n := int64(-1)
+			if it.o != nil && it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
+				if ln, lerr := it.o.Type().Sequence.Length(it.o); lerr == nil {
+					n = int64(ln) - 1
+				}
+			}
+			if v < -1 {
+				v = -1
+			} else if v > n {
+				v = n
+			}
+			it.idx = int(v)
+			return objects.None(), nil
+		},
+	))
+	objects.AddIterSlotWrappers(reversedIterType)
 }
 
 func newReversedIter(o objects.Object, n int) *reversedIter {
@@ -181,7 +333,10 @@ var ZipType = objects.NewType("zip", []*objects.Type{objects.ObjectType()})
 func init() {
 	ZipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	ZipType.IterNext = func(o objects.Object) (objects.Object, error) {
-		z := o.(*zipIter)
+		z, ok := o.(*zipIter)
+		if !ok {
+			return nil, objects.ErrStopIteration
+		}
 		if z.done || len(z.iters) == 0 {
 			return nil, objects.ErrStopIteration
 		}
@@ -204,6 +359,22 @@ func init() {
 		}
 		return objects.NewTuple(out), nil
 	}
+	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescr(ZipType, "__reduce__", zipReduce))
+}
+
+// zipReduce returns (type(self), (iter1, iter2, ...)) so pickle can
+// reconstruct the zip at the right iterator position.
+//
+// CPython: Objects/enumobject.c:1142 zip_reduce
+func zipReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	z, ok := args[0].(*zipIter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' for 'zip' objects doesn't apply to a '%s' object", args[0].Type().Name)
+	}
+	return objects.NewTuple([]objects.Object{ZipType, objects.NewTuple(z.iters)}), nil
 }
 
 func newZip(iters []objects.Object, strict bool) *zipIter {

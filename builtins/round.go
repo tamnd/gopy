@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -111,8 +112,12 @@ func divmodNear(a, b *big.Int) (q, r *big.Int) {
 // CPython: Objects/floatobject.c:1034 float___round___impl
 func roundFloat(x float64, ndigits objects.Object) (objects.Object, error) {
 	if objects.IsNone(ndigits) {
-		if !isFinite(x) {
-			return nil, fmt.Errorf("ValueError: cannot convert float %v to integer", x)
+		// CPython: Objects/longobject.c:458 PyLong_FromDouble
+		if math.IsInf(x, 0) {
+			return nil, fmt.Errorf("OverflowError: cannot convert float infinity to integer")
+		}
+		if math.IsNaN(x) {
+			return nil, fmt.Errorf("ValueError: cannot convert float NaN to integer")
 		}
 		rounded := math.Round(x)
 		if math.Abs(x-rounded) == 0.5 {
@@ -155,40 +160,34 @@ func roundFloat(x float64, ndigits objects.Object) (objects.Object, error) {
 	return objects.NewFloat(z), nil
 }
 
-// doubleRound mirrors the fallback double_round in floatobject.c (the
-// non-dtoa branch). Splits ndigits into two factors so the
-// intermediate product cannot overflow.
+// doubleRound mirrors CPython's double_round_double (the dtoa path).
+// It formats x to ndigits decimal places using the same dtoa-based
+// conversion that CPython uses, then parses the result back to float64.
+// This avoids the floating-point precision loss of the fallback
+// multiplication approach.
 //
-// CPython: Objects/floatobject.c:974 double_round (fallback path)
+// CPython: Objects/floatobject.c:874 double_round_double
 func doubleRound(x float64, ndigits int) (float64, bool) {
-	var pow1, pow2, y float64
-	if ndigits >= 0 {
-		if ndigits > 22 {
-			pow1 = math.Pow(10, float64(ndigits-22))
-			pow2 = 1e22
-		} else {
-			pow1 = math.Pow(10, float64(ndigits))
-			pow2 = 1
+	if ndigits < 0 {
+		// Negative ndigits: round to a power of 10.
+		// Equivalent to round(x * 10^ndigits) * 10^(-ndigits) in decimal.
+		pow1 := math.Pow(10, float64(-ndigits))
+		y := x / pow1
+		z := math.Round(y)
+		if math.Abs(y-z) == 0.5 {
+			z = 2 * math.Round(y/2)
 		}
-		y = (x * pow1) * pow2
-		if !isFinite(y) {
-			return x, true
+		result := z * pow1
+		if !isFinite(result) {
+			return 0, false
 		}
-	} else {
-		pow1 = math.Pow(10, float64(-ndigits))
-		pow2 = 1
-		y = x / pow1
+		return result, true
 	}
-	z := math.Round(y)
-	if math.Abs(y-z) == 0.5 {
-		z = 2 * math.Round(y/2)
-	}
-	if ndigits >= 0 {
-		z = (z / pow2) / pow1
-	} else {
-		z *= pow1
-	}
-	if !isFinite(z) {
+	// Non-negative ndigits: use strconv for correct decimal rounding,
+	// matching CPython's _Py_dg_dtoa-based conversion.
+	s := strconv.FormatFloat(x, 'f', ndigits, 64)
+	z, err := strconv.ParseFloat(s, 64)
+	if err != nil || !isFinite(z) {
 		return 0, false
 	}
 	return z, true

@@ -366,7 +366,8 @@ var tupleIterType = NewType("tuple_iterator", []*Type{objectType})
 func init() {
 	tupleIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*tupleIterator)
-		if it.pos >= len(it.src.items) {
+		if it.src == nil || it.pos >= len(it.src.items) {
+			it.src = nil
 			return nil, ErrStopIteration
 		}
 		v := it.src.items[it.pos]
@@ -375,6 +376,51 @@ func init() {
 	}
 	tupleIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	AddIterSlotWrappers(tupleIterType)
+	// CPython: Objects/tupleobject.c:1132 tupleiter_reduce
+	SetTypeDescr(tupleIterType, "__reduce__", NewMethodDescr(tupleIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*tupleIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.src == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewTuple(nil)})}), nil
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{it.src}), NewInt(int64(it.pos))}), nil
+		},
+	))
+	// CPython: Objects/tupleobject.c:1148 tupleiter_setstate
+	SetTypeDescr(tupleIterType, "__setstate__", NewMethodDescr(tupleIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*tupleIterator)
+			idx, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			n := int64(0)
+			if it.src != nil {
+				n = int64(len(it.src.items))
+			}
+			v, _ := idx.Int64()
+			if v < 0 {
+				v = 0
+			} else if v > n {
+				v = n
+			}
+			it.pos = int(v)
+			return None(), nil
+		},
+	))
 }
 
 func tupleIter(o Object) (Object, error) {

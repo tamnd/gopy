@@ -113,27 +113,112 @@ func Repr(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: repr() takes exactly one argument (%d given)", len(args))
 	}
-	s, err := objects.Repr(args[0])
-	if err != nil {
-		return nil, err
-	}
-	return objects.NewStr(s), nil
+	return objects.ReprObject(args[0])
 }
 
-// StrOf ports the str(obj) factory shape. Single-argument form
-// returns PyObject_Str; multi-argument form str(buffer, encoding,
-// errors) decodes a bytes-like buffer through the codec registry,
-// the way Objects/unicodeobject.c routes bytes inputs.
+// StrOf ports the str() builtin factory. Follows CPython's unicode_new.
+// str() or str(object) returns PyObject_Str of the argument.
+// str(object, encoding) and str(object, encoding, errors) decode a bytes-like
+// buffer through the codec registry. The 'object' positional argument may also
+// be passed by keyword. When only 'errors' is given and the object is
+// bytes-like, utf-8 is used as the encoding.
 //
 // CPython: Objects/unicodeobject.c:14112 unicode_new
 func StrOf(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(args) == 0 && len(kwargs) == 0 {
+	// Validate keyword argument names.
+	for k := range kwargs {
+		if k != "object" && k != "encoding" && k != "errors" {
+			return nil, fmt.Errorf("TypeError: str() got an unexpected keyword argument '%s'", k)
+		}
+	}
+
+	// Check argument counts. Pure positional overflow uses a different message
+	// than positional+keyword overflow (both patterns from Argument Clinic).
+	// CPython: Objects/unicodeobject.c:14112 unicode_new
+	if len(args) > 3 && len(kwargs) == 0 {
+		return nil, fmt.Errorf("TypeError: str expected at most 3 arguments, got %d", len(args))
+	}
+	if len(args)+len(kwargs) > 3 && len(kwargs) > 0 {
+		return nil, fmt.Errorf("TypeError: str() takes at most 3 arguments (%d given)", len(args)+len(kwargs))
+	}
+
+	// Extract 'object' from positional or keyword args.
+	var objArg objects.Object
+	hasObj := false
+	if len(args) >= 1 {
+		objArg = args[0]
+		hasObj = true
+		if _, ok := kwargs["object"]; ok {
+			return nil, fmt.Errorf("TypeError: argument for str() given by name ('object') and position (1)")
+		}
+	} else if v, ok := kwargs["object"]; ok {
+		objArg = v
+		hasObj = true
+	}
+
+	// Extract encoding and errors.
+	var encodingArg, errorsArg objects.Object
+	if len(args) >= 2 {
+		encodingArg = args[1]
+		if _, ok := kwargs["encoding"]; ok {
+			return nil, fmt.Errorf("TypeError: argument for str() given by name ('encoding') and position (2)")
+		}
+	} else if v, ok := kwargs["encoding"]; ok {
+		encodingArg = v
+	}
+	if len(args) >= 3 {
+		errorsArg = args[2]
+		if _, ok := kwargs["errors"]; ok {
+			return nil, fmt.Errorf("TypeError: argument for str() given by name ('errors') and position (3)")
+		}
+	} else if v, ok := kwargs["errors"]; ok {
+		errorsArg = v
+	}
+	// str() with no object and no encoding: return ''.
+	// CPython: Objects/unicodeobject.c:14150 unicode_new_impl (x==NULL early return)
+	if !hasObj && encodingArg == nil {
 		return objects.NewStr(""), nil
 	}
-	if len(args) > 1 || len(kwargs) > 0 {
-		buf, encoding, errs, err := strOfDecodeArgs(args, kwargs)
-		if err != nil {
-			return nil, err
+
+	// If encoding or errors is given (or object is bytes-like with errors),
+	// enter decoding mode.
+	hasEncoding := encodingArg != nil
+	hasErrors := errorsArg != nil
+
+	// Validate encoding and errors types early (CPython checks these before
+	// deciding the call mode, so type errors always take priority).
+	encoding := "utf-8"
+	errs := "strict"
+	if encodingArg != nil {
+		s, ok := encodingArg.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: str() argument 'encoding' must be str, not %s", encodingArg.Type().Name)
+		}
+		encoding = s.Value()
+	}
+	if errorsArg != nil {
+		s, ok := errorsArg.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: str() argument 'errors' must be str, not %s", errorsArg.Type().Name)
+		}
+		errs = s.Value()
+	}
+
+	// Any of encoding, errors, or (errors without encoding but with obj) triggers decode mode.
+	// CPython: Objects/unicodeobject.c:14150 (encoding != NULL || errors != NULL path)
+	decodeMode := hasEncoding || hasErrors
+
+	if decodeMode {
+		if !hasObj {
+			return objects.NewStr(""), nil
+		}
+		// Check for str object in decode mode.
+		if _, ok := objArg.(*objects.Unicode); ok {
+			return nil, fmt.Errorf("TypeError: decoding str is not supported")
+		}
+		buf, ok := bytesLike(objArg)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: decoding to str: need a bytes-like object, %s found", objArg.Type().Name)
 		}
 		out, _, derr := codecs.Decode(buf, encoding, errs)
 		if derr != nil {
@@ -141,55 +226,12 @@ func StrOf(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 		}
 		return objects.NewStr(out), nil
 	}
-	s, err := objects.Str(args[0])
-	if err != nil {
-		return nil, err
-	}
-	return objects.NewStr(s), nil
-}
 
-// strOfDecodeArgs pulls the (object, encoding, errors) triple out of
-// str()'s call signature. encoding defaults to "utf-8", errors to
-// "strict", matching Objects/unicodeobject.c:unicode_new.
-func strOfDecodeArgs(args []objects.Object, kwargs map[string]objects.Object) ([]byte, string, string, error) {
-	if len(args) == 0 {
-		return nil, "", "", fmt.Errorf("TypeError: str() missing positional argument")
+	// errors given without encoding and non-bytes object: return '' if no obj, else str(obj).
+	if !hasObj {
+		return objects.NewStr(""), nil
 	}
-	encoding := "utf-8"
-	errs := "strict"
-	if len(args) >= 2 {
-		s, ok := args[1].(*objects.Unicode)
-		if !ok {
-			return nil, "", "", fmt.Errorf("TypeError: str() argument 'encoding' must be str")
-		}
-		encoding = s.Value()
-	}
-	if len(args) >= 3 {
-		s, ok := args[2].(*objects.Unicode)
-		if !ok {
-			return nil, "", "", fmt.Errorf("TypeError: str() argument 'errors' must be str")
-		}
-		errs = s.Value()
-	}
-	if v, ok := kwargs["encoding"]; ok {
-		s, ok := v.(*objects.Unicode)
-		if !ok {
-			return nil, "", "", fmt.Errorf("TypeError: str() argument 'encoding' must be str")
-		}
-		encoding = s.Value()
-	}
-	if v, ok := kwargs["errors"]; ok {
-		s, ok := v.(*objects.Unicode)
-		if !ok {
-			return nil, "", "", fmt.Errorf("TypeError: str() argument 'errors' must be str")
-		}
-		errs = s.Value()
-	}
-	buf, ok := bytesLike(args[0])
-	if !ok {
-		return nil, "", "", fmt.Errorf("TypeError: decoding to str: need a bytes-like object, %s found", args[0].Type().Name)
-	}
-	return buf, encoding, errs, nil
+	return objects.StrObject(objArg)
 }
 
 func bytesLike(o objects.Object) ([]byte, bool) {
@@ -197,6 +239,8 @@ func bytesLike(o objects.Object) ([]byte, bool) {
 	case *objects.Bytes:
 		return x.Bytes(), true
 	case *objects.ByteArray:
+		return x.Bytes(), true
+	case *objects.MemoryView:
 		return x.Bytes(), true
 	}
 	return nil, false

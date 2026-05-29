@@ -33,29 +33,25 @@ func asUnicode(o Object) (string, bool) {
 	return u.v, true
 }
 
-// clampStrSlice mirrors clampBytesSlice but in code-point space. start
-// and end are negative-aware; they are clamped to [0, n] where n is
-// the rune count of the string.
+// adjustFindIndices matches CPython's _adjust_indices used by find/count/
+// startswith/endswith: clamps end to [0,n], adjusts negative start, but
+// does NOT clamp start above n so that start > n produces an empty range.
 //
-// CPython: Objects/unicodeobject.c:L11949 ADJUST_INDICES (unicode flavor)
-func clampStrSlice(n, start, end int) (int, int) {
-	if start < 0 {
-		start += n
-		if start < 0 {
-			start = 0
-		}
-	}
-	if end < 0 {
+// CPython: Objects/stringlib/find.h:_adjust_indices
+func adjustFindIndices(n, start, end int) (int, int) {
+	if end > n {
+		end = n
+	} else if end < 0 {
 		end += n
 		if end < 0 {
 			end = 0
 		}
 	}
-	if start > n {
-		start = n
-	}
-	if end > n {
-		end = n
+	if start < 0 {
+		start += n
+		if start < 0 {
+			start = 0
+		}
 	}
 	return start, end
 }
@@ -71,8 +67,12 @@ func runeSlice(s string) []rune { return []rune(s) }
 func StrFind(s, needle string, start, end int) int {
 	rs := runeSlice(s)
 	n := len(rs)
-	start, end = clampStrSlice(n, start, end)
-	if end-start < len([]rune(needle)) {
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return -1
+	}
+	needleRunes := []rune(needle)
+	if end-start < len(needleRunes) {
 		return -1
 	}
 	view := string(rs[start:end])
@@ -91,8 +91,12 @@ func StrFind(s, needle string, start, end int) int {
 func StrRFind(s, needle string, start, end int) int {
 	rs := runeSlice(s)
 	n := len(rs)
-	start, end = clampStrSlice(n, start, end)
-	if end-start < len([]rune(needle)) {
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return -1
+	}
+	needleRunes := []rune(needle)
+	if end-start < len(needleRunes) {
 		return -1
 	}
 	view := string(rs[start:end])
@@ -133,7 +137,13 @@ func StrRIndex(s, needle string, start, end int) (int, error) {
 func StrCount(s, needle string, start, end int) int {
 	rs := runeSlice(s)
 	n := len(rs)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		if needle == "" {
+			return 1
+		}
+		return 0
+	}
 	view := string(rs[start:end])
 	if needle == "" {
 		return utf8.RuneCountInString(view) + 1
@@ -147,7 +157,10 @@ func StrCount(s, needle string, start, end int) int {
 func StrStartsWith(s, prefix string, start, end int) bool {
 	rs := runeSlice(s)
 	n := len(rs)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return false
+	}
 	view := string(rs[start:end])
 	return strings.HasPrefix(view, prefix)
 }
@@ -158,7 +171,10 @@ func StrStartsWith(s, prefix string, start, end int) bool {
 func StrEndsWith(s, suffix string, start, end int) bool {
 	rs := runeSlice(s)
 	n := len(rs)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return false
+	}
 	view := string(rs[start:end])
 	return strings.HasSuffix(view, suffix)
 }
@@ -177,27 +193,27 @@ func StrSplit(s, sep string, maxsplit int) ([]string, error) {
 	return strings.SplitN(s, sep, maxsplit+1), nil
 }
 
-// StrRSplit ports str.rsplit.
+// StrRSplit ports str.rsplit. Unlike split, rsplit scans from the right,
+// so overlapping separators give different results.
 //
 // CPython: Objects/unicodeobject.c:L13190 unicode_rsplit_impl
 func StrRSplit(s, sep string, maxsplit int) ([]string, error) {
 	if sep == "" {
 		return strSplitWhitespace(s, maxsplit, true), nil
 	}
-	if maxsplit < 0 {
-		return strings.Split(s, sep), nil
-	}
-	// Right-anchored split: walk the source from the right, peeling
-	// off up to maxsplit pieces, then prepend the remainder.
+	// Right-anchored split: walk from the right, peeling off pieces.
+	// When maxsplit < 0, split at every occurrence (no limit).
 	parts := []string{}
 	rest := s
-	for i := 0; i < maxsplit; i++ {
+	n := 0
+	for maxsplit < 0 || n < maxsplit {
 		idx := strings.LastIndex(rest, sep)
 		if idx < 0 {
 			break
 		}
 		parts = append([]string{rest[idx+len(sep):]}, parts...)
 		rest = rest[:idx]
+		n++
 	}
 	return append([]string{rest}, parts...), nil
 }

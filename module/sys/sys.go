@@ -83,6 +83,9 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "float_info", floatInfo()); err != nil {
 		return nil, err
 	}
+	if err := setItem(d, "int_info", intInfo()); err != nil {
+		return nil, err
+	}
 	if err := setItem(d, "_jit", jitInfo()); err != nil {
 		return nil, err
 	}
@@ -287,6 +290,19 @@ func floatInfo() *objects.Namespace {
 	_ = d.SetItem(objects.NewStr("epsilon"), objects.NewFloat(2.220446049250313e-16))
 	_ = d.SetItem(objects.NewStr("radix"), objects.NewInt(2))
 	_ = d.SetItem(objects.NewStr("rounds"), objects.NewInt(1))
+	return n
+}
+
+// intInfo returns sys.int_info as a SimpleNamespace.
+//
+// CPython: Objects/longobject.c:6609 PyLong_GetInfo
+func intInfo() *objects.Namespace {
+	n := objects.NewNamespace()
+	d := n.Dict()
+	_ = d.SetItem(objects.NewStr("bits_per_digit"), objects.NewInt(30))
+	_ = d.SetItem(objects.NewStr("sizeof_digit"), objects.NewInt(4))
+	_ = d.SetItem(objects.NewStr("default_max_str_digits"), objects.NewInt(4300))
+	_ = d.SetItem(objects.NewStr("str_digits_check_threshold"), objects.NewInt(640))
 	return n
 }
 

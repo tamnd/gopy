@@ -26,6 +26,14 @@ import "fmt"
 // CPython: Include/internal/pycore_object.h:225 _PyObject_GC_TRACK
 var GCTrackHook func(Object)
 
+// GCUntrackHook is the inverse of GCTrackHook. It removes o from the
+// cycle collector's candidate set. Called from tp_dealloc paths for
+// built-in container types (set, frozenset) so the collector does not
+// visit an already-freed object after dealloc runs via Decref.
+//
+// CPython: Include/internal/pycore_object.h:248 _PyObject_GC_UNTRACK
+var GCUntrackHook func(Object)
+
 // Instance backs a Python-level object whose type is a user-defined
 // class. Header.typ is the class; dict holds per-instance attributes
 // (nil when the class declared __slots__ without __dict__); slots
@@ -217,7 +225,7 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 	if !ok {
 		return GenericGetAttr(o, name)
 	}
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := inst.Type()
@@ -271,7 +279,7 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 	if !ok {
 		return GenericSetAttr(o, name, value)
 	}
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := inst.Type()

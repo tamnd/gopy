@@ -202,6 +202,10 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
+	// CPython: Python/ceval.c:748 _Py_EnterRecursiveCallTstate
+	if stack.Depth() >= sys.RecursionLimit() {
+		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
+	}
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
@@ -425,10 +429,12 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 		qualname = fn.Name
 	}
 
-	// Build a map[string]Object for callPyFunction from the kwnames tuple.
-	// Simultaneously collect non-string-keyed entries that go directly into
-	// **kwargs as original objects (not via Str() conversion).
+	// Build a map[string]Object from the kwnames tuple for fast varname
+	// lookup, plus an ordered key list so **kwargs insertion preserves
+	// the caller's kwarg order.  Non-string-keyed entries go into
+	// rawKwEntries; they are stored as original objects in **kwargs.
 	var kwargs map[string]objects.Object
+	var kwOrder []string          // str keys in kwnames insertion order
 	var rawKwEntries []rawKwEntry // original-object keys for **kwargs
 	if kwnames != nil && kwnames.Len() > 0 {
 		nkw := kwnames.Len()
@@ -442,7 +448,9 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 			val := args[nposArgs+i]
 			// Fast path: plain Python str — use its string value directly.
 			if u, ok := kwname.(*objects.Unicode); ok {
-				kwargs[u.Value()] = val
+				k := u.Value()
+				kwargs[k] = val
+				kwOrder = append(kwOrder, k)
 				continue
 			}
 			// Slow path: non-str key — scan varnames via Python equality
@@ -470,6 +478,7 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 			}
 			if matched != "" {
 				kwargs[matched] = val
+				kwOrder = append(kwOrder, matched)
 			} else {
 				// No varname match: route to **kwargs as original object, or
 				// surface as unexpected-keyword if there's no **kwargs.
@@ -483,20 +492,11 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 		}
 	}
 
-	// Delegate standard binding + frame push + eval to callPyFunction.
-	// Then stitch the raw-object entries into **kwargs afterwards only
-	// when there actually are raw entries (the common case pays zero cost).
-	if len(rawKwEntries) == 0 {
-		return callPyFunction(o, posArgs, kwargs)
-	}
-
-	// When there are raw-object kwarg entries, we need to inject them into
-	// the **kwargs dict that callPyFunction allocated inside its frame.
-	// The only way to reach that dict is to call callPyFunction first and
-	// then retroactively fix it — but the frame is already unwound by then.
+	// Always route through callPyFunctionRaw so kwOrder preserves the
+	// caller's kwarg insertion order in the **kwargs dict.
 	//
-	// Instead, replicate callPyFunction's binding inline with raw support.
-	return callPyFunctionRaw(fn, co, posArgs, kwargs, rawKwEntries, qualname)
+	// CPython: Objects/call.c:_PyEval_Vector (binding loop)
+	return callPyFunctionRaw(fn, co, posArgs, kwargs, kwOrder, rawKwEntries, qualname)
 }
 
 // rawKwEntry carries one original-object kwarg key+value for **kwargs.
@@ -505,15 +505,16 @@ type rawKwEntry struct {
 	val objects.Object
 }
 
-// callPyFunctionRaw is the slow path used only when pyFunctionVectorcall
-// detected non-string kwarg keys that must be stored in **kwargs as their
-// original Python objects. It mirrors callPyFunction's binding logic but
-// injects the raw entries into kwDict before running the eval loop.
+// callPyFunctionRaw is the canonical kwargs binding path for Python functions.
+// kwOrder, when non-nil, gives the insertion order for kwargs keys; it is used
+// to populate the **kwargs dict in caller order so fn(**od) preserves the
+// mapping's iteration order (bpo-34320). rawEntries carries non-string kwarg
+// keys that must be stored in **kwargs as original Python objects.
 //
 // CPython: Objects/call.c:_PyEval_Vector (same binding sequence)
 //
 //nolint:gocognit,gocyclo // same linear bind flow as callPyFunction; splitting loses clarity.
-func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects.Object, kwargs map[string]objects.Object, rawEntries []rawKwEntry, qualname string) (objects.Object, error) {
+func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects.Object, kwargs map[string]objects.Object, kwOrder []string, rawEntries []rawKwEntry, qualname string) (objects.Object, error) {
 	npos := co.Argcount
 	nkwonly := co.KwonlyArgcount
 	nposonly := co.PosonlyArgcount
@@ -524,6 +525,11 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
+	// CPython: Python/ceval.c:748 _Py_EnterRecursiveCallTstate
+	// py_recursion_remaining counts down; gopy counts up via FrameStack.Depth.
+	if stack.Depth() >= sys.RecursionLimit() {
+		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
+	}
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
@@ -532,7 +538,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		bound = npos
 	}
 	for i := 0; i < bound; i++ {
-		f.SetLocal(i, stackref.FromObject(posArgs[i]))
+		f.SetLocal(i, stackref.FromObjectNew(posArgs[i]))
 	}
 	if hasVarargs {
 		extra := posArgs[bound:]
@@ -554,8 +560,23 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 	if hasVarargs {
 		kwWindow++
 	}
+	// Iterate kwargs in kwOrder (preserving caller insertion order) when
+	// available, otherwise fall back to Go map iteration. kwOrder is
+	// always non-nil when called from pyFunctionVectorcall.
+	//
+	// CPython: Objects/call.c:_PyEval_BindArguments (keyword loop)
+	var iterKeys []string
+	if kwOrder != nil {
+		iterKeys = kwOrder
+	} else {
+		iterKeys = make([]string, 0, len(kwargs))
+		for k := range kwargs {
+			iterKeys = append(iterKeys, k)
+		}
+	}
 	var posonlyAsKw []string
-	for k, v := range kwargs {
+	for _, k := range iterKeys {
+		v := kwargs[k]
 		idx := -1
 		for i := 0; i < kwWindow; i++ {
 			if i < nposonly {

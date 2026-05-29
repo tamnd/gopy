@@ -23,6 +23,7 @@ func init() {
 	// gc, but gc can register a callback into objects.
 	// CPython: Objects/typeobject.c type_call _PyObject_GC_TRACK path
 	objects.GCTrackHook = Track
+	objects.GCUntrackHook = Untrack
 	// Wire weakref registration hooks so the Python cycle GC's handle_weakrefs
 	// pass can clear weakrefs whose referents are in the unreachable set.
 	// CPython: Objects/weakrefobject.c:271 PyWeakref_NewRef (tp_weaklistoffset)

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"unsafe"
 )
 
 // List is the Python list, a mutable ordered sequence.
@@ -33,6 +35,7 @@ func init() {
 		SetItem:       listSetItem,
 		InPlaceConcat: listInPlaceConcat,
 		InPlaceRepeat: listInPlaceRepeat,
+		Contains:      listContains,
 	}
 	// Mapping protocol entries for list mirror CPython's
 	// list_subscript / list_ass_subscript, which is what handles
@@ -140,6 +143,23 @@ func (l *List) SetSlice(start, stop int, values []Object) {
 
 func listLen(o Object) (int, error) {
 	return o.(*List).Len(), nil
+}
+
+// listContains mirrors list_contains / PySequence_Contains. Identity
+// check before equality so non-reflexive values like NaN are found.
+//
+// CPython: Objects/listobject.c:L466 list_contains
+func listContains(haystack, needle Object) (bool, error) {
+	for _, item := range haystack.(*List).items {
+		eq, err := RichCmpBool(item, needle, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func listGetItem(o Object, i int) (Object, error) {
@@ -544,8 +564,19 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 	}
 }
 
+// listReprInProgress guards against recursive list repr: [[...]].
+//
+// CPython: Objects/object.c:2256 Py_ReprEnter
+var listReprInProgress sync.Map
+
 func listRepr(o Object) (string, error) {
 	l := o.(*List)
+	ptr := uintptr(unsafe.Pointer(l))
+	if _, loaded := listReprInProgress.LoadOrStore(ptr, struct{}{}); loaded {
+		return "[...]", nil
+	}
+	defer listReprInProgress.Delete(ptr)
+
 	var b strings.Builder
 	b.WriteByte('[')
 	for i, it := range l.items {
@@ -577,7 +608,14 @@ func init() {
 	listIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	listIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listIterator)
+		if it.src == nil {
+			return nil, ErrStopIteration
+		}
 		if it.pos >= len(it.src.items) {
+			// CPython: Objects/listobject.c:3573 listiter_next — clears
+			// it_seq on exhaustion so the iterator is a sink state:
+			// appending to the list after exhaustion does not resume it.
+			it.src = nil
 			return nil, ErrStopIteration
 		}
 		v := it.src.items[it.pos]
@@ -585,6 +623,59 @@ func init() {
 		return v, nil
 	}
 	AddIterSlotWrappers(listIterType)
+	// __reduce__ returns (iter, (list_snapshot,), current_pos) so pickle
+	// can round-trip the iterator including its current position.
+	//
+	// CPython: Objects/listobject.c listiter_reduce
+	SetTypeDescr(listIterType, "__reduce__", NewMethodDescr(listIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*listIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.src == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewList(nil)})}), nil
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{it.src}), NewInt(int64(it.pos))}), nil
+		},
+	))
+	// __setstate__ restores the iterator position after unpickling.
+	//
+	// CPython: Objects/listobject.c listiter_setstate
+	SetTypeDescr(listIterType, "__setstate__", NewMethodDescr(listIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*listIterator)
+			pos, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__() argument must be int")
+			}
+			p, fits := pos.Int64()
+			if !fits {
+				return nil, fmt.Errorf("OverflowError: iterator position out of range")
+			}
+			n := int64(0)
+			if it.src != nil {
+				n = int64(len(it.src.items))
+			}
+			if p < 0 {
+				p = 0
+			} else if p > n {
+				p = n
+			}
+			it.pos = int(p)
+			return None(), nil
+		},
+	))
 }
 
 func listIter(o Object) (Object, error) {

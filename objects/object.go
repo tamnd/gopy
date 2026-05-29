@@ -269,15 +269,31 @@ func objectReprDescr(args []Object, _ map[string]Object) (Object, error) {
 	return NewStr(s), nil
 }
 
-// objectStrDescr is the slot wrapper for object.__str__. Same
-// recursion concern as objectReprDescr: go straight to objectStr.
+// objectStrDescr is the slot wrapper for object.__str__. It calls
+// tp_repr to match CPython's object_str behavior. For user-defined
+// types, it calls ReprObject to preserve any str subclass returned by
+// __repr__.
 //
 // CPython: Objects/typeobject.c:6938 object_str
 func objectStrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	s, err := objectStr(args[0])
+	o := args[0]
+	t := o.Type()
+	// For user-defined types, preserve any str subclass returned by __repr__.
+	if t.IsUser {
+		return ReprObject(o)
+	}
+	// For built-in types, call the repr slot and wrap normally.
+	if t.Repr != nil {
+		s, err := t.Repr(o)
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}
+	s, err := objectRepr(o)
 	if err != nil {
 		return nil, err
 	}
@@ -348,12 +364,17 @@ func richCompareDescr(op CompareOp) func(args []Object, kwargs map[string]Object
 			}
 			return notImplemented(), nil
 		case CompareNE:
-			// CPython object.__ne__ delegates to __eq__ and inverts.
-			// CPython: Objects/typeobject.c:6975 object_richcompare NE
+			// Call tp_richcompare directly, not PyObject_RichCompare, so
+			// that reflected __eq__ is never invoked from inside object.__ne__.
+			// CPython: Objects/typeobject.c:6963 object_richcompare NE
 			if args[0] == args[1] {
 				return False(), nil
 			}
-			eq, err := RichCmp(args[0], args[1], CompareEQ)
+			rcmp := args[0].Type().RichCmp
+			if rcmp == nil {
+				return notImplemented(), nil
+			}
+			eq, err := rcmp(args[0], args[1], CompareEQ)
 			if err != nil {
 				return nil, err
 			}
@@ -387,11 +408,7 @@ func objectFormatDescr(args []Object, _ map[string]Object) (Object, error) {
 	if spec.v != "" {
 		return nil, fmt.Errorf("TypeError: unsupported format string passed to %s.__format__", args[0].Type().Name)
 	}
-	s, err := Str(args[0])
-	if err != nil {
-		return nil, err
-	}
-	return NewStr(s), nil
+	return StrObject(args[0])
 }
 
 // objectSizeofDescr returns the basic byte footprint of self. gopy

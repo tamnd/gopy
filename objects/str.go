@@ -242,10 +242,14 @@ func init() {
 			return s.length, nil
 		},
 		GetItem: unicodeGetItem,
+		// CPython: Objects/unicodeobject.c:11556 unicode_repeat
 		Repeat: func(o Object, n int) (Object, error) {
 			s := o.(*Unicode)
 			if n <= 0 {
 				return NewStr(""), nil
+			}
+			if n == 1 && s.Type() == strType {
+				return s, nil
 			}
 			b := make([]byte, 0, len(s.v)*n)
 			for range n {
@@ -287,6 +291,29 @@ func init() {
 			return strings.Contains(hs.v, ns.v), nil
 		},
 	}
+	// Mapping.GetItem handles both integer and slice subscript on str,
+	// mirroring unicode_subscript which routes to unicode_getitem for
+	// integers and PyUnicode_Substring for slices.
+	//
+	// CPython: Objects/unicodeobject.c:15232 unicode_subscript
+	strType.Mapping = &MappingMethods{
+		GetItem: func(o, key Object) (Object, error) {
+			u := o.(*Unicode)
+			if sl, ok := key.(*Slice); ok {
+				return StrGetSlice(u, sl)
+			}
+			n, err := NumberIndex(key)
+			if err != nil {
+				return nil, fmt.Errorf("TypeError: string indices must be integers, not '%s'", typeNameOf(key))
+			}
+			i, ok := n.(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: string indices must be integers, not '%s'", typeNameOf(key))
+			}
+			v, _ := i.Int64()
+			return unicodeGetItemKind(u, int(v))
+		},
+	}
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(strType)
 }
@@ -309,7 +336,8 @@ func init() {
 	strIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	strIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*strIterator)
-		if it.pos >= it.src.length {
+		if it.src == nil || it.pos >= it.src.length {
+			it.src = nil
 			return nil, ErrStopIteration
 		}
 		r := it.src.RuneAt(it.pos)
@@ -320,6 +348,51 @@ func init() {
 		return NewStr(string(r)), nil
 	}
 	AddIterSlotWrappers(strIterType)
+	// CPython: Objects/unicodeobject.c:15178 unicodeiter_reduce
+	SetTypeDescr(strIterType, "__reduce__", NewMethodDescr(strIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*strIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.src == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewStr("")})}), nil
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{it.src}), NewInt(int64(it.pos))}), nil
+		},
+	))
+	// CPython: Objects/unicodeobject.c:15195 unicodeiter_setstate
+	SetTypeDescr(strIterType, "__setstate__", NewMethodDescr(strIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*strIterator)
+			idx, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			n := int64(0)
+			if it.src != nil {
+				n = int64(it.src.length)
+			}
+			v, _ := idx.Int64()
+			if v < 0 {
+				v = 0
+			} else if v > n {
+				v = n
+			}
+			it.pos = int(v)
+			return None(), nil
+		},
+	))
 }
 
 // strIter returns an iterator over the code points of a string.

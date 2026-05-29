@@ -91,14 +91,20 @@ func (c *Compiler) visitFor(s *ast.For) error {
 	if err := c.visitExpr(s.Iter); err != nil {
 		return err
 	}
-	c.addOp(GET_ITER, loc(s))
+	// CPython: Python/codegen.c:2084 codegen_for uses LOC(s->v.For.iter)
+	// so that GET_ITER and FOR_ITER carry the iterator expression's span,
+	// not the full for-statement span. traceback._get_code_position then
+	// resolves to the iterator expression's line/col, which is what
+	// test_exception_locations expects.
+	iterLoc := loc(s.Iter)
+	c.addOp(GET_ITER, iterLoc)
 
 	c.useLabel(start)
 	c.pushFblock(fblockForLoop, start, end, s)
 
-	c.addOpJump(FOR_ITER, cleanup, loc(s))
+	c.addOpJump(FOR_ITER, cleanup, iterLoc)
 	c.useLabel(body)
-	if err := c.assignTo(s.Target, loc(s)); err != nil {
+	if err := c.assignTo(s.Target, loc(s.Target)); err != nil {
 		return err
 	}
 	if err := c.visitStmts(s.Body); err != nil {

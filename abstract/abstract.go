@@ -169,20 +169,14 @@ func Power(a, b, mod objects.Object) (objects.Object, error) {
 //
 // CPython: Objects/abstract.c:L2895 PyIter_Next
 func IterNext(it objects.Object) (objects.Object, error) {
-	if it.Type().IterNext == nil {
-		return nil, fmt.Errorf("%w: %q is not an iterator", ErrTypeError, it.Type().Name)
-	}
-	return it.Type().IterNext(it)
+	return objects.IterNext(it)
 }
 
 // Iter returns an iterator for o.
 //
 // CPython: Objects/abstract.c:L2873 PyObject_GetIter
 func Iter(o objects.Object) (objects.Object, error) {
-	if o.Type().Iter == nil {
-		return nil, fmt.Errorf("%w: %q is not iterable", ErrTypeError, o.Type().Name)
-	}
-	return o.Type().Iter(o)
+	return objects.Iter(o)
 }
 
 func binaryOp(a, b objects.Object, sym string,

@@ -175,16 +175,45 @@ func Iter(o Object) (Object, error) {
 	if s := tp.Sequence; s != nil && s.GetItem != nil {
 		return NewSeqIter(o), nil
 	}
+	// Python-level __getitem__ without __iter__: create a SeqIter that will
+	// call __getitem__(0), __getitem__(1), ... until IndexError.
+	//
+	// CPython: Objects/abstract.c:2830 PyObject_GetIter — sq_item fallback
+	if descr, _ := LookupDescriptor(tp, "__getitem__"); descr != nil {
+		return NewSeqIter(o), nil
+	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
 }
 
 // IterNext advances o by one. Equivalent to next(o), and propagates
 // ErrStopIteration when the iterator is exhausted.
 //
-// CPython: Objects/abstract.c:2842 PyIter_Next
+// Mirrors PyIter_Next: if the tp_iternext call sets a Python-level
+// StopIteration, that exception is cleared and ErrStopIteration is
+// returned so Go-level iteration loops can use errors.Is uniformly.
+//
+// CPython: Objects/abstract.c:2852 PyIter_Next
 func IterNext(o Object) (Object, error) {
 	if next := o.Type().IterNext; next != nil {
-		return next(o)
+		v, err := next(o)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				// CPython: Objects/abstract.c:2856 PyIter_Next clears
+				// StopIteration from the thread state so the caller sees
+				// only the NULL return value, not a pending exception.
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
+				return nil, ErrStopIteration
+			}
+			if IsStopIterationHook != nil && IsStopIterationHook(err) {
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
+				return nil, ErrStopIteration
+			}
+		}
+		return v, err
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", o.Type().Name)
 }

@@ -12,18 +12,33 @@ package objects
 
 import "fmt"
 
+// isInstanceMaxDepth mirrors _Py_GUARD_RECURSION / Py_GUARD_RECURSION_ENTER
+// threshold used by object_recursive_isinstance: CPython allows up to
+// Py_DEFAULT_RECURSION_LIMIT levels of tuple nesting in the cls argument.
+// We use 500 (half the default) to leave room for the Python call stack.
+//
+// CPython: Objects/abstract.c:2634 Py_GUARD_RECURSION_ENTER
+const isInstanceMaxDepth = 500
+
 // ObjectIsInstance ports PyObject_IsInstance. Supports a single type,
 // a tuple of types, and metaclass __instancecheck__ overrides
 // (ABCMeta's virtual-subclass registry).
 //
 // CPython: Objects/abstract.c:2632 object_recursive_isinstance
 func ObjectIsInstance(inst, cls Object) (bool, error) {
+	return objectIsInstance(inst, cls, 0)
+}
+
+func objectIsInstance(inst, cls Object, depth int) (bool, error) {
+	if depth > isInstanceMaxDepth {
+		return false, fmt.Errorf("RecursionError: maximum recursion depth exceeded in __instancecheck__")
+	}
 	if t, ok := cls.(*Type); ok && inst.Type() == t {
 		return true, nil
 	}
 	if tup, ok := cls.(*Tuple); ok {
 		for i := 0; i < tup.Len(); i++ {
-			ok, err := ObjectIsInstance(inst, tup.Item(i))
+			ok, err := objectIsInstance(inst, tup.Item(i), depth+1)
 			if err != nil {
 				return false, err
 			}
@@ -54,9 +69,16 @@ func ObjectIsInstance(inst, cls Object) (bool, error) {
 //
 // CPython: Objects/abstract.c:2742 object_issubclass
 func ObjectIsSubclass(sub *Type, cls Object) (bool, error) {
+	return objectIsSubclass(sub, cls, 0)
+}
+
+func objectIsSubclass(sub *Type, cls Object, depth int) (bool, error) {
+	if depth > isInstanceMaxDepth {
+		return false, fmt.Errorf("RecursionError: maximum recursion depth exceeded in __subclasscheck__")
+	}
 	if tup, ok := cls.(*Tuple); ok {
 		for i := 0; i < tup.Len(); i++ {
-			ok, err := ObjectIsSubclass(sub, tup.Item(i))
+			ok, err := objectIsSubclass(sub, tup.Item(i), depth+1)
 			if err != nil {
 				return false, err
 			}

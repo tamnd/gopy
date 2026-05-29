@@ -12,7 +12,7 @@
 package _pickle
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -179,15 +179,35 @@ func (p *pickler) batchDictExact(d *objects.Dict) error {
 	return nil
 }
 
+// callReduce calls __reduce__ on obj and returns the resulting tuple.
+func (p *pickler) callReduce(obj objects.Object) (*objects.Tuple, error) {
+	fn, err := objects.GetAttr(obj, objects.NewStr("__reduce__"))
+	if err != nil {
+		return nil, fmt.Errorf("PicklingError: cannot find __reduce__: %w", err)
+	}
+	result, err := objects.CallNoArgs(fn)
+	if err != nil {
+		return nil, fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+	}
+	rv, ok := result.(*objects.Tuple)
+	if !ok {
+		return nil, fmt.Errorf("PicklingError: __reduce__ must return a tuple, not %s", result.Type().Name)
+	}
+	return rv, nil
+}
+
 // saveSet emits EMPTY_SET + MEMOIZE + MARK + items + ADDITEMS for
-// proto >= 4. Earlier protocols would route through save_reduce
-// with the set() constructor and a list of items, which Phase 3
-// does not need yet (the gate fixes proto=5).
+// proto >= 4. For proto < 4, falls through to save_reduce using the
+// set.__reduce__ 3-tuple (set, ([list],), state).
 //
 // CPython: Modules/_pickle.c:3495 save_set
 func (p *pickler) saveSet(s *objects.Set) error {
 	if p.proto < 4 {
-		return errors.New("PicklingError: set pickling for proto < 4 not implemented")
+		rv, err := p.callReduce(s)
+		if err != nil {
+			return err
+		}
+		return p.saveReduceTuple(rv, s)
 	}
 	p.writeByte(opEmptySet)
 	if err := p.memoPut(s); err != nil {
@@ -216,19 +236,17 @@ func (p *pickler) saveSet(s *objects.Set) error {
 	return nil
 }
 
-// saveFrozenset emits MARK + items + FROZENSET + MEMOIZE.
-//
-// CPython's save_frozenset also re-checks the memo after items go in
-// to detect recursive frozensets. Frozensets are immutable so a
-// self-reference would require an enclosing mutable container that
-// later gets memoized as a parent, that path is exotic and not on
-// the proto-5 byte-equality gate, so we defer the POP_MARK + memoGet
-// branch.
+// saveFrozenset emits MARK + items + FROZENSET + MEMOIZE for proto >= 4.
+// For proto < 4, falls through to save_reduce using frozenset.__reduce__.
 //
 // CPython: Modules/_pickle.c:3650 save_frozenset
 func (p *pickler) saveFrozenset(s *objects.Set) error {
 	if p.proto < 4 {
-		return errors.New("PicklingError: frozenset pickling for proto < 4 not implemented")
+		rv, err := p.callReduce(s)
+		if err != nil {
+			return err
+		}
+		return p.saveReduceTuple(rv, s)
 	}
 	p.writeByte(opMark)
 	for _, item := range s.Items() {

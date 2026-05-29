@@ -78,6 +78,8 @@ func osWrite(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		data = v.Bytes()
 	case *objects.ByteArray:
 		data = v.Bytes()
+	case *objects.MemoryView:
+		data = v.Bytes()
 	default:
 		return nil, fmt.Errorf("TypeError: a bytes-like object is required, not %s", args[1].Type().Name)
 	}

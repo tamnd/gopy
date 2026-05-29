@@ -24,6 +24,13 @@ type setEntry struct {
 	dummy bool // tombstone: deleted but probe chain continues
 }
 
+// SetEntry is the public view of a live set slot. Used by dict.fromkeys
+// to access cached hash values without rehashing.
+type SetEntry struct {
+	Hash int64
+	Key  Object
+}
+
 // Set is the mutable Python set type.
 //
 // CPython: Objects/setobject.c:L544 PySetObject
@@ -32,9 +39,22 @@ type Set struct {
 	entries    []setEntry
 	used       int // live entries only
 	fill       int // live + tombstone entries (CPython: so->fill)
+	version    uint64
 	frozen     bool
 	cachedHash int64 // only valid for frozenset when hashValid is true
 	hashValid  bool
+	attrs      *Dict // per-instance dict for set/frozenset subclasses
+}
+
+// AttrDict returns the per-instance attribute dict or nil.
+func (s *Set) AttrDict() *Dict { return s.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first use.
+func (s *Set) EnsureAttrDict() *Dict {
+	if s.attrs == nil {
+		s.attrs = NewDict()
+	}
+	return s.attrs
 }
 
 // SetType is the type singleton for set.
@@ -53,6 +73,9 @@ func init() {
 	SetType.Repr = setRepr
 	SetType.Str = setRepr
 	SetType.Hash = nil // sets are not hashable
+	// CPython: Objects/setobject.c:2497 set.__hash__ = None signals
+	// explicitly unhashable so subclasses inherit that property.
+	SetTypeDescr(SetType, "__hash__", None())
 	SetType.RichCmp = setRichCmp
 	SetType.TpFlags |= TpFlagMatchSelf
 	FrozensetType.TpFlags |= TpFlagMatchSelf
@@ -62,7 +85,12 @@ func init() {
 		Contains: setContains,
 	}
 	SetType.TpTraverse = setTraverse
+	SetType.Dealloc = setDealloc
 	SetType.Getattro = GenericGetAttr
+	SetType.Setattro = GenericSetAttr
+	// HasDict enables per-instance attribute storage for set subclasses.
+	// CPython: Objects/setobject.c:2567 PySet_Type (tp_dictoffset != 0)
+	SetType.HasDict = true
 	SetType.Number = &NumberMethods{
 		And:        setAnd,
 		Or:         setOr,
@@ -72,6 +100,7 @@ func init() {
 		InPlaceOr:  setIOr,
 		InPlaceXor: setIXor,
 	}
+	SetTypeDescr(SetType, "__init__", NewMethodDescr(SetType, "__init__", setInitMethod))
 	SetTypeDescr(SetType, "__contains__", NewMethodDescr(SetType, "__contains__", setContainsMethod))
 	SetTypeDescr(SetType, "add", NewMethodDescr(SetType, "add", setAddMethod))
 	SetTypeDescr(SetType, "discard", NewMethodDescr(SetType, "discard", setDiscardMethod))
@@ -91,10 +120,49 @@ func init() {
 	SetTypeDescr(SetType, "symmetric_difference_update", NewMethodDescr(SetType, "symmetric_difference_update", setSymmetricDifferenceUpdateMethod))
 	SetTypeDescr(SetType, "copy", NewMethodDescr(SetType, "copy", setCopyMethod))
 	SetTypeDescr(SetType, "__len__", NewMethodDescr(SetType, "__len__", setLenMethod))
+	// __repr__ and __str__ descriptors so set subclasses inherit them via MRO
+	// and fixupCallReprStr installs slotTpRepr (not generic object repr).
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr row)
+	SetTypeDescr(SetType, "__repr__", NewMethodDescr(SetType, "__repr__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, errors.New("TypeError: __repr__ expected 1 argument")
+		}
+		s, err := setRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}))
+	SetTypeDescr(SetType, "__str__", NewMethodDescr(SetType, "__str__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, errors.New("TypeError: __str__ expected 1 argument")
+		}
+		s, err := setRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}))
 
 	FrozensetType.Repr = frozensetRepr
 	FrozensetType.Str = frozensetRepr
 	FrozensetType.Hash = frozensetHash
+	// Install __hash__ descriptor so frozenset subclasses inherit it through
+	// fixupHashAndIter's LookupDescriptor(t, "__hash__") scan, getting
+	// slotTpHash which delegates to this descriptor.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_hash row)
+	SetTypeDescr(FrozensetType, "__hash__", NewMethodDescr(FrozensetType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, errors.New("TypeError: __hash__ expected 1 argument")
+		}
+		h, err := frozensetHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	FrozensetType.RichCmp = setRichCmp
 	FrozensetType.Iter = setIter
 	FrozensetType.Sequence = &SequenceMethods{
@@ -102,15 +170,49 @@ func init() {
 		Contains: setContains,
 	}
 	FrozensetType.TpTraverse = setTraverse
+	FrozensetType.Dealloc = setDealloc
 	FrozensetType.Getattro = GenericGetAttr
+	FrozensetType.Setattro = GenericSetAttr
+	// HasDict enables per-instance attribute storage for frozenset subclasses.
+	// CPython: Objects/setobject.c:2658 PyFrozenSet_Type (tp_dictoffset != 0)
+	FrozensetType.HasDict = true
 	FrozensetType.Number = &NumberMethods{
 		And:      setAnd,
 		Or:       setOr,
 		Subtract: setSubtract,
 		Xor:      setXor,
 	}
+	// CPython: Objects/setobject.c:2697 PyFrozenSet_Type.tp_init = 0
+	// frozenset has no tp_init; type_call never invokes it. We omit the
+	// descriptor so subclasses that define their own __new__ (but not
+	// __init__) don't have their kwargs rejected by an inherited
+	// frozenset __init__. Keyword-arg rejection for exact frozenset()
+	// calls is handled in frozensetCtorWithType (TpNew).
 	SetTypeDescr(FrozensetType, "__contains__", NewMethodDescr(FrozensetType, "__contains__", setContainsMethod))
 	SetTypeDescr(FrozensetType, "__len__", NewMethodDescr(FrozensetType, "__len__", setLenMethod))
+	// __repr__ and __str__ descriptors so frozenset subclasses inherit them via MRO.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr row)
+	SetTypeDescr(FrozensetType, "__repr__", NewMethodDescr(FrozensetType, "__repr__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, errors.New("TypeError: __repr__ expected 1 argument")
+		}
+		s, err := frozensetRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}))
+	SetTypeDescr(FrozensetType, "__str__", NewMethodDescr(FrozensetType, "__str__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, errors.New("TypeError: __str__ expected 1 argument")
+		}
+		s, err := frozensetRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}))
 	SetTypeDescr(FrozensetType, "intersection", NewMethodDescr(FrozensetType, "intersection", setIntersectionMethod))
 	SetTypeDescr(FrozensetType, "union", NewMethodDescr(FrozensetType, "union", setUnionMethod))
 	SetTypeDescr(FrozensetType, "issubset", NewMethodDescr(FrozensetType, "issubset", setIsSubsetMethod))
@@ -119,9 +221,41 @@ func init() {
 	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
 	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
 	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
+	// __reduce__ returns (type, ([list_of_elements],), state) so pickle
+	// and copy.deepcopy can reconstruct the set.
+	//
+	// CPython: Objects/setobject.c:2397 set___reduce___impl
+	SetTypeDescr(SetType, "__reduce__", NewMethodDescr(SetType, "__reduce__", setReduceMethod))
+	SetTypeDescr(FrozensetType, "__reduce__", NewMethodDescr(FrozensetType, "__reduce__", setReduceMethod))
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(SetType)
 	AddIterSlotWrappers(FrozensetType)
+}
+
+// setDealloc fires when the set's Python refcount reaches zero. For
+// subclasses that define __del__ (tp_finalize), the finalizer runs
+// first. The refcount is temporarily bumped to 1 ("resurrection guard")
+// so that when the __del__ frame's local-close Decrefs self, the count
+// lands on 0 rather than -1, and Dealloc does not re-enter. After the
+// finalizer returns the refcount is decremented back; if it is now > 0,
+// __del__ resurrected the object and we return early.
+//
+// CPython: Objects/object.c:489 PyObject_CallFinalizerFromDealloc
+// CPython: Objects/setobject.c:L539 set_dealloc
+func setDealloc(o Object) {
+	if fn := o.Type().Finalize; fn != nil {
+		h := o.Hdr()
+		h.refcnt = 1
+		fn(o)
+		h.refcnt--
+		if h.refcnt != 0 {
+			return
+		}
+	}
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
 }
 
 // setTraverse visits each element of a set or frozenset.
@@ -146,6 +280,46 @@ func setTraverse(o Object, visit Visitor) error {
 func NewSet() *Set {
 	s := &Set{entries: make([]setEntry, setMinSize)}
 	s.init(SetType)
+	if h := GCTrackHook; h != nil {
+		h(s)
+	}
+	return s
+}
+
+// NewSetOfType allocates a new set whose ob_type is tp. Used by the
+// subtype-aware TpNew so that class H(set): ... instances carry type H.
+//
+// CPython: Objects/setobject.c:2267 set_new (subtype allocation)
+func NewSetOfType(tp *Type) *Set {
+	s := &Set{entries: make([]setEntry, setMinSize)}
+	s.init(tp)
+	if h := GCTrackHook; h != nil {
+		h(s)
+	}
+	return s
+}
+
+// newEmptyLike creates an empty set or frozenset matching the frozen flag of
+// src. Subclass instances always produce the canonical base type (set or
+// frozenset), matching CPython's make_new_set(Py_TYPE(so)) with the base
+// concrete type for set operations.
+//
+// CPython: Objects/setobject.c:2267 make_new_set (type is the receiver type,
+// which for subclasses is the direct C type not the Python subclass)
+func newEmptyLike(src *Set) *Set {
+	if src.frozen {
+		s := &Set{entries: make([]setEntry, setMinSize), frozen: true}
+		s.init(FrozensetType)
+		if h := GCTrackHook; h != nil {
+			h(s)
+		}
+		return s
+	}
+	s := &Set{entries: make([]setEntry, setMinSize)}
+	s.init(SetType)
+	if h := GCTrackHook; h != nil {
+		h(s)
+	}
 	return s
 }
 
@@ -155,21 +329,8 @@ func NewSet() *Set {
 // CPython: Objects/setobject.c:2267 PySet_New (iterable case)
 func newSetFromIterable(o Object) (*Set, error) {
 	s := NewSet()
-	iter, err := Iter(o)
-	if err != nil {
-		return nil, fmt.Errorf("TypeError: argument must be an iterable, not '%s'", typeNameOf(o))
-	}
-	for {
-		item, iterErr := IterNext(iter)
-		if iterErr != nil {
-			if !errors.Is(iterErr, ErrStopIteration) {
-				return nil, iterErr
-			}
-			break
-		}
-		if err := s.add(item); err != nil {
-			return nil, err
-		}
+	if err := setUpdateFrom(s, o); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -178,12 +339,23 @@ func newSetFromIterable(o Object) (*Set, error) {
 //
 // CPython: Objects/setobject.c:L2300 PyFrozenSet_New
 func NewFrozenset(items []Object) (*Set, error) {
+	return NewFrozensetOfType(FrozensetType, items)
+}
+
+// NewFrozensetOfType creates a frozenset of the given type. Used by the
+// subtype-aware TpNew so frozenset subclass instances carry the subclass type.
+//
+// CPython: Objects/setobject.c:2361 frozenset_new (subtype)
+func NewFrozensetOfType(tp *Type, items []Object) (*Set, error) {
 	s := &Set{entries: make([]setEntry, setMinSize), frozen: true}
-	s.init(FrozensetType)
+	s.init(tp)
 	for _, item := range items {
 		if err := s.add(item); err != nil {
 			return nil, err
 		}
+	}
+	if h := GCTrackHook; h != nil {
+		h(s)
 	}
 	return s, nil
 }
@@ -206,12 +378,36 @@ func (s *Set) Add(key Object) error {
 
 // add is the internal insert that bypasses the frozen check.
 func (s *Set) add(key Object) error {
-	h, err := Hash(key)
+	h, err := hashKey(key)
 	if err != nil {
 		return err
 	}
-	s.insert(h, key)
-	return nil
+	return s.insert(h, key)
+}
+
+// hashKey computes the hash of key for use in set operations. Mutable
+// set keys fall back to the frozenset hash algorithm. Other unhashable
+// types produce the CPython "cannot use 'X' as a set element" message.
+//
+// CPython: Objects/setobject.c:228 set_unhashable_type + 2233 set_contains_lock_held
+func hashKey(key Object) (int64, error) {
+	h, err := Hash(key)
+	if err == nil {
+		return h, nil
+	}
+	// Mutable sets: fall back to frozenset hash (allows set(x) in {frozenset(x)}).
+	if ks, ok := key.(*Set); ok {
+		return frozensetHash(ks)
+	}
+	// Wrap TypeError into CPython's "cannot use ... as a set element" format.
+	msg := err.Error()
+	const typeErrPfx = "TypeError: "
+	if len(msg) > len(typeErrPfx) && msg[:len(typeErrPfx)] == typeErrPfx {
+		inner := msg[len(typeErrPfx):]
+		return 0, fmt.Errorf("TypeError: cannot use '%s' as a set element (%s)",
+			key.Type().Name, inner)
+	}
+	return 0, err
 }
 
 // Discard removes key if present. Does nothing on miss. Errors if frozen.
@@ -221,7 +417,7 @@ func (s *Set) Discard(key Object) error {
 	if s.frozen {
 		return fmt.Errorf("AttributeError: 'frozenset' object has no attribute 'discard'")
 	}
-	h, err := Hash(key)
+	h, err := hashKey(key)
 	if err != nil {
 		return err
 	}
@@ -234,6 +430,7 @@ func (s *Set) Discard(key Object) error {
 	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
 	s.entries[idx] = setEntry{dummy: true}
 	s.used--
+	s.version++
 	return nil
 }
 
@@ -241,10 +438,20 @@ func (s *Set) Discard(key Object) error {
 //
 // CPython: Objects/setobject.c:L1777 set_contains_key
 func (s *Set) Contains(key Object) (bool, error) {
-	h, err := Hash(key)
+	h, err := hashKey(key)
 	if err != nil {
 		return false, err
 	}
+	_, ok, err := s.lookup(h, key)
+	return ok, err
+}
+
+// containsWithHash is like Contains but uses a pre-computed hash to avoid
+// rehashing. Used by set_difference and similar operations that already
+// hold the entry hash from iterating another set.
+//
+// CPython: Objects/setobject.c:L349 set_contains_entry
+func (s *Set) containsWithHash(h int64, key Object) (bool, error) {
 	_, ok, err := s.lookup(h, key)
 	return ok, err
 }
@@ -262,7 +469,20 @@ func (s *Set) Items() []Object {
 	return out
 }
 
+// Entries returns a snapshot of live (key, hash) pairs. Used by
+// dict.fromkeys to reuse cached hashes without rehashing.
+func (s *Set) Entries() []SetEntry {
+	out := make([]SetEntry, 0, s.used)
+	for _, e := range s.entries {
+		if e.used {
+			out = append(out, SetEntry{Hash: e.hash, Key: e.key})
+		}
+	}
+	return out
+}
+
 func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
+	startVersion := s.version
 	mask := uint64(len(s.entries) - 1)
 	i := uint64(h) & mask
 	perturb := uint64(h)
@@ -289,6 +509,14 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 			if err != nil {
 				return 0, false, err
 			}
+			// If __eq__ mutated the set (resize or removal), restart
+			// the probe from scratch, mirroring CPython's recursive
+			// set_lookkey call.
+			//
+			// CPython: Objects/setobject.c:L115 table != so->table guard
+			if s.version != startVersion {
+				return s.lookup(h, key)
+			}
 			if eq {
 				return int(i), true, nil
 			}
@@ -304,23 +532,31 @@ func (s *Set) lookup(h int64, key Object) (idx int, found bool, err error) {
 // set_add_entry which resizes on fill*5 > (mask+1)*3.
 //
 // CPython: Objects/setobject.c:220 set_add_entry
-func (s *Set) insert(h int64, key Object) {
+func (s *Set) insert(h int64, key Object) error {
 	// Resize when fill (used+tombstones) exceeds 60% of capacity.
 	// CPython: Objects/setobject.c:391 (so->fill+1)*5 > (so->mask+1)*3
 	if (s.fill+1)*5 >= len(s.entries)*3 {
 		s.grow()
 	}
-	idx, ok, _ := s.lookup(h, key)
-	wasTombstone := !s.entries[idx].used && s.entries[idx].dummy
-	s.entries[idx] = setEntry{hash: h, key: key, used: true}
-	if !ok {
-		s.used++
-		// Only increment fill when replacing a genuinely empty slot.
-		// Tombstone → live does not change fill (tombstone was already counted).
-		if !wasTombstone {
-			s.fill++
-		}
+	idx, ok, err := s.lookup(h, key)
+	if err != nil {
+		return err
 	}
+	if ok {
+		// Key already present; CPython keeps the first-inserted key, not the new one.
+		// CPython: Objects/setobject.c:246 set_add_entry (existing key → return 0)
+		return nil
+	}
+	wasTombstone := s.entries[idx].dummy
+	s.entries[idx] = setEntry{hash: h, key: key, used: true}
+	s.used++
+	s.version++
+	// Only increment fill when replacing a genuinely empty slot.
+	// Tombstone → live does not change fill (tombstone was already counted).
+	if !wasTombstone {
+		s.fill++
+	}
+	return nil
 }
 
 // insertClean places (h, key) without checking fill ratio. Only used
@@ -343,6 +579,7 @@ func (s *Set) grow() {
 	for newSize < s.used*4 {
 		newSize <<= 1
 	}
+	s.version++
 	s.entries = make([]setEntry, newSize)
 	s.used = 0
 	s.fill = 0
@@ -373,25 +610,47 @@ func setContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewBool(ok), nil
 }
 
+// setRepr mirrors CPython's set_repr_lock_held. Exact set uses {elems};
+// all other types (set subclasses, frozenset, frozenset subclasses) use
+// TypeName({elems}).
+//
+// CPython: Objects/setobject.c:566 set_repr_lock_held
 func setRepr(o Object) (string, error) {
 	s := o.(*Set)
-	if s.used == 0 {
-		return "set()", nil
-	}
-	return setReprInner(s, "{", "}")
+	return setReprLockHeld(s)
 }
 
 func frozensetRepr(o Object) (string, error) {
 	s := o.(*Set)
-	if s.used == 0 {
-		return "frozenset()", nil
-	}
-	return setReprInner(s, "frozenset({", "})")
+	return setReprLockHeld(s)
 }
 
-func setReprInner(s *Set, open, suffix string) (string, error) {
+func setReprLockHeld(s *Set) (string, error) {
+	name := s.Type().Name
+	// Cycle guard: return "TypeName(...)"
+	// CPython: Objects/setobject.c:574
+	if ReprEnter(s) {
+		return name + "(...)", nil
+	}
+	defer ReprLeave(s)
+	// Empty set: "TypeName()"
+	// CPython: Objects/setobject.c:580
+	if s.used == 0 {
+		if s.Type() == SetType {
+			return "set()", nil
+		}
+		return name + "()", nil
+	}
+	// Non-empty: exact set uses "{elems}", others use "TypeName({elems})"
+	// CPython: Objects/setobject.c:606
+	exactSet := s.Type() == SetType
 	var b strings.Builder
-	b.WriteString(open)
+	if !exactSet {
+		b.WriteString(name)
+		b.WriteString("({")
+	} else {
+		b.WriteString("{")
+	}
 	first := true
 	for _, e := range s.entries {
 		if !e.used {
@@ -407,7 +666,11 @@ func setReprInner(s *Set, open, suffix string) (string, error) {
 		}
 		b.WriteString(r)
 	}
-	b.WriteString(suffix)
+	if !exactSet {
+		b.WriteString("})")
+	} else {
+		b.WriteString("}")
+	}
 	return b.String(), nil
 }
 
@@ -521,7 +784,7 @@ func setIsSubset(a, b *Set) (bool, error) {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil || !ok {
 			return false, err
 		}
@@ -537,7 +800,7 @@ func setsEqual(a, b *Set) (bool, error) {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil || !ok {
 			return false, err
 		}
@@ -550,122 +813,248 @@ func setsEqual(a, b *Set) (bool, error) {
 // CPython: Objects/setobject.c:L958 setiter_iternext
 type setIterator struct {
 	Header
-	entries []setEntry
-	pos     int
+	src       *Set // live set, needed for size-change detection
+	usedAt    int  // used count at iterator creation; -1 means exhausted/errored
+	remaining int  // number of items yet to yield; mirrors si_len
+	entries   []setEntry
+	pos       int
 }
 
 var setIterType = NewType("set_iterator", []*Type{objectType})
 
+func setIterDealloc(o Object) {
+	it := o.(*setIterator)
+	if it.src != nil {
+		Decref(it.src)
+		it.src = nil
+	}
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+}
+
 func init() {
+	setIterType.Dealloc = setIterDealloc
 	setIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	setIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*setIterator)
+		if it.usedAt < 0 {
+			return nil, ErrStopIteration
+		}
+		// Detect concurrent modification: if the live set's used count
+		// changed since the iterator was created, raise RuntimeError.
+		//
+		// CPython: Objects/setobject.c:958 setiter_iternext si_used check
+		if it.src != nil && it.src.used != it.usedAt {
+			it.usedAt = -1
+			Decref(it.src)
+			it.src = nil
+			return nil, fmt.Errorf("RuntimeError: Set changed size during iteration")
+		}
 		for it.pos < len(it.entries) {
 			e := it.entries[it.pos]
 			it.pos++
 			if e.used {
+				it.remaining--
 				return e.key, nil
 			}
 		}
+		it.usedAt = -1
+		it.remaining = 0
+		// Release the source set reference once iteration is exhausted.
+		// CPython: Objects/setobject.c:1007 setiter_iternext Py_CLEAR(si->si_set)
+		if it.src != nil {
+			Decref(it.src)
+			it.src = nil
+		}
 		return nil, ErrStopIteration
 	}
+	// TpTraverse visits the source set and all snapshot entry keys so the
+	// cyclic GC can collect cycles through a set iterator.
+	//
+	// CPython: Objects/setobject.c setiter_traverse
+	setIterType.TpTraverse = func(o Object, visit Visitor) error {
+		it := o.(*setIterator)
+		if it.src != nil {
+			if err := visit(it.src); err != nil {
+				return err
+			}
+		}
+		for _, e := range it.entries {
+			if e.used && e.key != nil {
+				if err := visit(e.key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	AddIterSlotWrappers(setIterType)
+	// __reduce__ returns (iter, ([remaining_items],)) so pickle can round-trip
+	// the iterator as a list iterator (undefined order, so list is used).
+	//
+	// CPython: Objects/setobject.c:876 setiter_reduce
+	SetTypeDescr(setIterType, "__reduce__", NewMethodDescr(setIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*setIterator)
+			// Collect remaining items by iterating a clone of the state.
+			var items []Object
+			if it.usedAt >= 0 {
+				for i := it.pos; i < len(it.entries); i++ {
+					if it.entries[i].used {
+						items = append(items, it.entries[i].key)
+					}
+				}
+			}
+			lst := NewList(items)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{lst})}), nil
+		},
+	))
+	// __length_hint__ returns the number of items remaining.
+	// CPython: Objects/setobject.c:L966 setiter_len
+	SetTypeDescr(setIterType, "__length_hint__", NewMethodDescr(setIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*setIterator)
+			if it.usedAt < 0 {
+				return NewInt(0), nil
+			}
+			if it.src != nil && it.src.used != it.usedAt {
+				return NewInt(0), nil
+			}
+			return NewInt(int64(it.remaining)), nil
+		},
+	))
 }
 
 func setIter(o Object) (Object, error) {
 	s := o.(*Set)
 	snap := make([]setEntry, len(s.entries))
 	copy(snap, s.entries)
-	it := &setIterator{entries: snap}
+	// Incref the source set so it stays alive for the iterator's lifetime.
+	// CPython: Objects/setobject.c:883 set_iter (Py_INCREF(so))
+	Incref(s)
+	it := &setIterator{src: s, usedAt: s.used, remaining: s.used, entries: snap}
 	it.init(setIterType)
+	if h := GCTrackHook; h != nil {
+		h(it)
+	}
 	return it, nil
 }
 
 // setIntersect returns a new set containing elements common to a and b.
+// The output type mirrors proto (frozenset if proto is frozen).
 //
 // CPython: Objects/setobject.c:1315 set_intersection
-func setIntersect(a, b *Set) (*Set, error) {
-	out := NewSet()
+func setIntersect(proto, a, b *Set) (*Set, error) {
+	out := newEmptyLike(proto)
 	for _, e := range a.entries {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
 }
 
 // setUnion returns a new set containing all elements from a and b.
+// The output type mirrors proto (frozenset if proto is frozen).
 //
 // CPython: Objects/setobject.c:1505 set_union
-func setUnion(a, b *Set) *Set {
-	out := NewSet()
+func setUnion(proto, a, b *Set) (*Set, error) {
+	out := newEmptyLike(proto)
 	for _, e := range a.entries {
 		if e.used {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, e := range b.entries {
 		if e.used {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // setDiff returns a new set with elements in a but not b.
+// The output type mirrors proto (frozenset if proto is frozen).
 //
 // CPython: Objects/setobject.c:1416 set_difference
-func setDiff(a, b *Set) (*Set, error) {
-	out := NewSet()
+func setDiff(proto, a, b *Set) (*Set, error) {
+	out := newEmptyLike(proto)
 	for _, e := range a.entries {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
 }
 
 // setSymDiff returns a new set with elements in exactly one of a or b.
+// The output type mirrors proto (frozenset if proto is frozen).
 //
 // CPython: Objects/setobject.c:1459 set_symmetric_difference
-func setSymDiff(a, b *Set) (*Set, error) {
-	out := NewSet()
+func setSymDiff(proto, a, b *Set) (*Set, error) {
+	out := newEmptyLike(proto)
 	for _, e := range a.entries {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, e := range b.entries {
 		if !e.used {
 			continue
 		}
-		ok, err := a.Contains(e.key)
+		ok, err := a.containsWithHash(e.hash, e.key)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
-			out.insert(e.hash, e.key)
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
@@ -688,7 +1077,7 @@ func setAnd(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	return setIntersect(as, bs)
+	return setIntersect(as, as, bs)
 }
 
 func setOr(a, b Object) (Object, error) {
@@ -700,7 +1089,7 @@ func setOr(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	return setUnion(as, bs), nil
+	return setUnion(as, as, bs)
 }
 
 func setSubtract(a, b Object) (Object, error) {
@@ -712,7 +1101,7 @@ func setSubtract(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	return setDiff(as, bs)
+	return setDiff(as, as, bs)
 }
 
 func setXor(a, b Object) (Object, error) {
@@ -724,7 +1113,7 @@ func setXor(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	return setSymDiff(as, bs)
+	return setSymDiff(as, as, bs)
 }
 
 func setIAnd(a, b Object) (Object, error) {
@@ -736,7 +1125,7 @@ func setIAnd(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	result, err := setIntersect(as, bs)
+	result, err := setIntersect(as, as, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -756,7 +1145,9 @@ func setIOr(a, b Object) (Object, error) {
 	}
 	for _, e := range bs.entries {
 		if e.used {
-			as.insert(e.hash, e.key)
+			if err := as.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return as, nil
@@ -771,7 +1162,7 @@ func setIXor(a, b Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	result, err := setSymDiff(as, bs)
+	result, err := setSymDiff(as, as, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -794,12 +1185,40 @@ func setAddMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: add() takes exactly one argument")
 	}
 	s := args[0].(*Set)
-	h, err := Hash(args[1])
+	h, err := hashKey(args[1])
 	if err != nil {
 		return nil, err
 	}
-	s.insert(h, args[1])
+	if err := s.insert(h, args[1]); err != nil {
+		return nil, err
+	}
 	return None(), nil
+}
+
+// setInitMethod ports set_init: clear and repopulate from iterable.
+// Keyword arguments are rejected. Called by set().__init__(iterable).
+//
+// CPython: Objects/setobject.c:2439 set_init
+func setInitMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) > 0 {
+		return nil, fmt.Errorf("TypeError: set() does not support keyword arguments")
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' of 'set' object needs an argument")
+	}
+	s := args[0].(*Set)
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: set expected at most 1 argument, got %d", len(args)-1)
+	}
+	if len(args) == 1 {
+		return None(), nil
+	}
+	// Clear and repopulate.
+	s.entries = make([]setEntry, setMinSize)
+	s.fill = 0
+	s.used = 0
+	s.version++
+	return None(), setUpdateFrom(s, args[1])
 }
 
 func setDiscardMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -814,7 +1233,7 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: remove() takes exactly one argument")
 	}
 	s := args[0].(*Set)
-	h, err := Hash(args[1])
+	h, err := hashKey(args[1])
 	if err != nil {
 		return nil, err
 	}
@@ -823,6 +1242,9 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, err
 	}
 	if !ok {
+		if KeyErrorFactory != nil {
+			return nil, KeyErrorFactory(args[1])
+		}
 		r, err2 := Repr(args[1])
 		if err2 != nil {
 			r = "?"
@@ -833,6 +1255,7 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
 	s.entries[idx] = setEntry{dummy: true}
 	s.used--
+	s.version++
 	return None(), nil
 }
 
@@ -845,6 +1268,7 @@ func setPopMethod(args []Object, _ map[string]Object) (Object, error) {
 		if e.used {
 			s.entries[i] = setEntry{dummy: true}
 			s.used--
+			s.version++
 			return e.key, nil
 		}
 	}
@@ -856,6 +1280,7 @@ func setClearMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments")
 	}
 	s := args[0].(*Set)
+	s.version++
 	s.entries = make([]setEntry, setMinSize)
 	s.used = 0
 	s.fill = 0
@@ -875,21 +1300,34 @@ func setUpdateMethod(args []Object, _ map[string]Object) (Object, error) {
 	return None(), nil
 }
 
+// SetUpdateFrom is the exported entry point for setUpdateFrom, used by
+// the builtins set constructor to avoid rehashing dict keys.
+func SetUpdateFrom(dst *Set, src Object) error { return setUpdateFrom(dst, src) }
+
 func setUpdateFrom(dst *Set, src Object) error {
 	if ss, ok := src.(*Set); ok {
 		for _, e := range ss.entries {
 			if e.used {
-				dst.insert(e.hash, e.key)
+				if err := dst.insert(e.hash, e.key); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	}
-	it, err := src.Type().Iter(src)
+	// Dict fast path: reuse cached hash values to avoid rehashing.
+	// CPython: Objects/setobject.c:1983 set_update_internal (PyDict_CheckExact)
+	if dd, ok := src.(*Dict); ok {
+		return dd.ForEachWithHash(func(key Object, hash int64) error {
+			return dst.insert(hash, key)
+		})
+	}
+	it, err := Iter(src)
 	if err != nil {
 		return err
 	}
 	for {
-		v, err := it.Type().IterNext(it)
+		v, err := IterNext(it)
 		if err != nil {
 			if isStopIteration(err) {
 				return nil
@@ -900,7 +1338,9 @@ func setUpdateFrom(dst *Set, src Object) error {
 		if err != nil {
 			return err
 		}
-		dst.insert(h, v)
+		if err := dst.insert(h, v); err != nil {
+			return err
+		}
 	}
 }
 
@@ -909,17 +1349,20 @@ func isStopIteration(err error) bool {
 }
 
 func setIntersectionMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: intersection() requires at least one argument")
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: intersection() requires the set")
 	}
 	s := args[0].(*Set)
+	if len(args) == 1 {
+		return setCopy(s), nil
+	}
 	result := s
 	for _, other := range args[1:] {
 		var err error
 		if os, ok := toSet(other); ok {
-			result, err = setIntersect(result, os)
+			result, err = setIntersect(s, result, os)
 		} else {
-			result, err = setIntersectIterable(result, other)
+			result, err = setIntersectIterable(s, result, other)
 		}
 		if err != nil {
 			return nil, err
@@ -932,12 +1375,12 @@ func setIntersectionMethod(args []Object, _ map[string]Object) (Object, error) {
 // mirroring CPython's set_intersection fast path for non-set iterables.
 //
 // CPython: Objects/setobject.c:1350 set_intersection
-func setIntersectIterable(a *Set, other Object) (*Set, error) {
+func setIntersectIterable(proto, a *Set, other Object) (*Set, error) {
 	items, err := IterToSlice(other)
 	if err != nil {
 		return nil, err
 	}
-	out := NewSet()
+	out := newEmptyLike(proto)
 	for _, item := range items {
 		ok, err := a.Contains(item)
 		if err != nil {
@@ -948,7 +1391,9 @@ func setIntersectIterable(a *Set, other Object) (*Set, error) {
 			if err != nil {
 				return nil, err
 			}
-			out.insert(h, item)
+			if err := out.insert(h, item); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
@@ -971,24 +1416,37 @@ func setUnionMethod(args []Object, _ map[string]Object) (Object, error) {
 			}
 			os = os2
 		}
-		result = setUnion(result, os)
+		var err error
+		result, err = setUnion(s, result, os)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
 
 func setDifferenceMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: difference() requires at least one argument")
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: difference() requires the set")
 	}
 	s := args[0].(*Set)
+	// difference() with no args returns a shallow copy.
+	// CPython: Objects/setobject.c set_difference (n==0 path)
+	if len(args) == 1 {
+		return setCopy(s), nil
+	}
 	result := s
 	for _, other := range args[1:] {
 		os, ok := toSet(other)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: difference() argument must be a set")
+			var err error
+			os, err = newSetFromIterable(other)
+			if err != nil {
+				return nil, err
+			}
 		}
 		var err error
-		result, err = setDiff(result, os)
+		result, err = setDiff(s, result, os)
 		if err != nil {
 			return nil, err
 		}
@@ -1018,7 +1476,7 @@ func setIsSubsetMethod(args []Object, _ map[string]Object) (Object, error) {
 		if !e.used {
 			continue
 		}
-		ok, err := b.Contains(e.key)
+		ok, err := b.containsWithHash(e.hash, e.key)
 		if err != nil {
 			return nil, err
 		}
@@ -1066,7 +1524,7 @@ func setIsDisjointMethod(args []Object, _ map[string]Object) (Object, error) {
 			if !e.used {
 				continue
 			}
-			ok, err := b.Contains(e.key)
+			ok, err := b.containsWithHash(e.hash, e.key)
 			if err != nil {
 				return nil, err
 			}
@@ -1095,16 +1553,18 @@ func setIsDisjointMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func setIntersectionUpdateMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: intersection_update() requires at least one argument")
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: intersection_update() requires the set")
 	}
 	s := args[0].(*Set)
 	for _, other := range args[1:] {
-		os, ok := toSet(other)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: intersection_update() argument must be a set")
+		var result *Set
+		var err error
+		if os, ok := toSet(other); ok {
+			result, err = setIntersect(s, s, os)
+		} else {
+			result, err = setIntersectIterable(s, s, other)
 		}
-		result, err := setIntersect(s, os)
 		if err != nil {
 			return nil, err
 		}
@@ -1115,16 +1575,20 @@ func setIntersectionUpdateMethod(args []Object, _ map[string]Object) (Object, er
 }
 
 func setDifferenceUpdateMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: difference_update() requires at least one argument")
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: difference_update() requires the set")
 	}
 	s := args[0].(*Set)
 	for _, other := range args[1:] {
 		os, ok := toSet(other)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: difference_update() argument must be a set")
+			var err error
+			os, err = newSetFromIterable(other)
+			if err != nil {
+				return nil, err
+			}
 		}
-		result, err := setDiff(s, os)
+		result, err := setDiff(s, s, os)
 		if err != nil {
 			return nil, err
 		}
@@ -1138,16 +1602,32 @@ func setSymmetricDifferenceMethod(args []Object, _ map[string]Object) (Object, e
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: symmetric_difference() takes exactly one argument")
 	}
-	a, b := args[0].(*Set), args[1].(*Set)
-	return setSymDiff(a, b)
+	a := args[0].(*Set)
+	b, ok := toSet(args[1])
+	if !ok {
+		var err error
+		b, err = newSetFromIterable(args[1])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return setSymDiff(a, a, b)
 }
 
 func setSymmetricDifferenceUpdateMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: symmetric_difference_update() takes exactly one argument")
 	}
-	s, other := args[0].(*Set), args[1].(*Set)
-	result, err := setSymDiff(s, other)
+	s := args[0].(*Set)
+	other, ok := toSet(args[1])
+	if !ok {
+		var err error
+		other, err = newSetFromIterable(args[1])
+		if err != nil {
+			return nil, err
+		}
+	}
+	result, err := setSymDiff(s, s, other)
 	if err != nil {
 		return nil, err
 	}
@@ -1156,16 +1636,52 @@ func setSymmetricDifferenceUpdateMethod(args []Object, _ map[string]Object) (Obj
 	return None(), nil
 }
 
+func setCopy(s *Set) *Set {
+	out := newEmptyLike(s)
+	for _, e := range s.entries {
+		if e.used {
+			// Keys already in the set are guaranteed hashable; ignore error.
+			_ = out.insert(e.hash, e.key)
+		}
+	}
+	return out
+}
+
+// setReduceMethod ports set___reduce___impl: returns (type, ([elements],), state).
+// Both set and frozenset use this so pickle and copy.deepcopy work correctly.
+//
+// CPython: Objects/setobject.c:2397 set___reduce___impl
+func setReduceMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+	}
+	s := args[0].(*Set)
+	// Collect elements as a list.
+	elems := make([]Object, 0, s.used)
+	for _, e := range s.entries {
+		if e.used {
+			elems = append(elems, e.key)
+		}
+	}
+	lst := NewList(elems)
+	// state: per-instance dict (or None for subclasses without custom attrs).
+	state := None()
+	if d := s.AttrDict(); d != nil && d.Len() > 0 {
+		state = d
+	}
+	// (type, ([elements],), state)
+	return NewTuple([]Object{s.Type(), NewTuple([]Object{lst}), state}), nil
+}
+
 func setCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: copy() takes no arguments")
 	}
 	s := args[0].(*Set)
-	out := NewSet()
-	for _, e := range s.entries {
-		if e.used {
-			out.insert(e.hash, e.key)
-		}
+	// CPython: Objects/setobject.c:1982 set_copy_impl — frozensets are
+	// immutable so copy() returns self unchanged.
+	if s.frozen && s.Type() == FrozensetType {
+		return s, nil
 	}
-	return out, nil
+	return setCopy(s), nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/cmplx"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -14,7 +15,20 @@ import (
 // CPython: Include/cpython/floatobject.h:L7 PyFloatObject
 type Float struct {
 	Header
-	v float64
+	v     float64
+	attrs *Dict // per-instance dict for float subclasses (CPython: tp_dictoffset)
+}
+
+// AttrDict returns the per-instance attribute dict or nil.
+func (f *Float) AttrDict() *Dict { return f.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first use.
+// CPython: Objects/typeobject.c subtype_setdict
+func (f *Float) EnsureAttrDict() *Dict {
+	if f.attrs == nil {
+		f.attrs = NewDict()
+	}
+	return f.attrs
 }
 
 // FloatType is the type singleton for float. Mirrors PyFloat_Type.
@@ -71,6 +85,23 @@ func init() {
 	SetTypeDescr(FloatType, "real", NewGetSetDescr("real", floatRealGetter, nil))
 	SetTypeDescr(FloatType, "imag", NewGetSetDescr("imag", floatImagGetter, nil))
 	SetTypeDescr(FloatType, "conjugate", NewMethodDescr(FloatType, "conjugate", floatConjugateMethod))
+	// Install float.__hash__ as a descriptor so that subclasses that also
+	// inherit from a mixin with __hash__ resolve float's tp_hash first in
+	// the MRO. fixupHashAndIter uses LookupDescriptor(t, "__hash__") to
+	// pick which hash to install; without this entry H.__hash__ beats
+	// float.__hash__ when float comes after H in the MRO.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	SetTypeDescr(FloatType, "__hash__", NewMethodDescr(FloatType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+		}
+		h, err := floatHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 }
 
 // floatRealGetter backs float.real: returns self.
@@ -176,6 +207,51 @@ func NewFloat(x float64) *Float {
 // Float64 returns the underlying double.
 func (f *Float) Float64() float64 {
 	return f.v
+}
+
+// newFloatAs builds a float tagged with t instead of FloatType.
+// Used by the float subtype path so a class like `class F(float): pass`
+// yields instances whose Type() is F.
+//
+// CPython: Objects/floatobject.c:1596 float_subtype_new
+func newFloatAs(x float64, t *Type) *Float {
+	o := &Float{v: x}
+	o.init(t)
+	return o
+}
+
+// SetFloatTpNewBase wires the value-side constructor (float(value)) and
+// makes it subtype-aware: when cls != FloatType the result is re-tagged.
+// Mirrors SetIntTpNewBase.
+//
+// CPython: Objects/floatobject.c:1575 float_new_impl (subtype branch)
+func SetFloatTpNewBase(fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+	FloatType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		ctorKwargs := kwargs
+		if cls != nil && cls != FloatType {
+			// CPython: Objects/floatobject.c:1575 float_new_impl
+			// float.__new__'s "x" parameter is positional-only, so passing
+			// x as a keyword is always a TypeError even for subtypes.
+			// Other unknown kwargs belong to __init__ and must not be
+			// rejected here.
+			if _, hasX := kwargs["x"]; hasX {
+				return nil, fmt.Errorf("TypeError: float() takes no keyword arguments")
+			}
+			ctorKwargs = nil
+		}
+		out, err := fn(args, ctorKwargs)
+		if err != nil {
+			return nil, err
+		}
+		if cls == nil || cls == FloatType {
+			return out, nil
+		}
+		f, ok := out.(*Float)
+		if !ok {
+			return out, nil
+		}
+		return newFloatAs(f.v, cls), nil
+	}
 }
 
 func floatRepr(o Object) (string, error) {
@@ -285,21 +361,68 @@ func formatFloatFixed(neg bool, digits string, decpt int) string {
 // variant good enough for the gate. Real floats land in v0.4.
 //
 // CPython: Python/pyhash.c:L83 _Py_HashDouble
+// hashINF is the hash sentinel for positive infinity.
+// CPython: Python/pyhash.c _PyHASH_INF
+const hashINF = 314159
+
+// floatHash ports _Py_HashDouble. Integral floats share the same hash
+// as the equivalent int. Inf maps to the dedicated sentinel. NaN uses
+// the identity hash (CPython 3.14 change: gh-93883).
+//
+// CPython: Python/pyhash.c:87 _Py_HashDouble
 func floatHash(o Object) (int64, error) {
 	v := o.(*Float).v
 	if math.IsNaN(v) {
-		return 0, nil
+		// CPython 3.14: NaN hashes via PyObject_GenericHash (identity hash).
+		// CPython: Python/pyhash.c:87 _Py_HashDouble (NaN branch)
+		return identityHash(o)
 	}
-	if v == math.Trunc(v) && !math.IsInf(v, 0) {
-		return intHash(NewInt(int64(v)))
+	if math.IsInf(v, 1) {
+		return hashINF, nil
 	}
-	const modulus int64 = (1 << 61) - 1
-	bits := math.Float64bits(v)
-	h := int64(bits) % modulus
-	if h == -1 {
-		h = -2
+	if math.IsInf(v, -1) {
+		return -hashINF, nil
 	}
-	return h, nil
+
+	// Decompose v = m * 2**e (0.5 <= |m| < 1.0)
+	m, e := math.Frexp(v)
+	sign := int64(1)
+	if m < 0 {
+		sign = -1
+		m = -m
+	}
+
+	// Process 28 bits at a time, accumulating into x modulo _PyHASH_MODULUS (2^61-1)
+	const (
+		pyHashBits    = 61
+		pyHashModulus = (int64(1) << pyHashBits) - 1
+	)
+	var x int64
+	for m != 0 {
+		x = ((x << 28) & pyHashModulus) | (x >> (pyHashBits - 28))
+		m *= 268435456.0 // 2**28
+		e -= 28
+		y := int64(m)
+		m -= float64(y)
+		x += y
+		if x >= pyHashModulus {
+			x -= pyHashModulus
+		}
+	}
+
+	// Adjust for the exponent (reduce e mod pyHashBits first)
+	if e >= 0 {
+		e %= pyHashBits
+	} else {
+		e = pyHashBits - 1 - ((-1 - e) % pyHashBits)
+	}
+	x = ((x << e) & pyHashModulus) | (x >> (pyHashBits - e))
+
+	x *= sign
+	if x == -1 {
+		x = -2
+	}
+	return x, nil
 }
 
 func floatRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -311,6 +434,8 @@ func floatRichCmp(a, b Object, op CompareOp) (Object, error) {
 	switch x := b.(type) {
 	case *Float:
 		bv = x.v
+	case *Bool:
+		bv = intToFloat(&x.Int)
 	case *Int:
 		bv = intToFloat(x)
 	default:
@@ -439,8 +564,13 @@ func floatMod(a, b Object) (Object, error) {
 		return nil, errors.New("ZeroDivisionError: float modulo")
 	}
 	r := math.Mod(af, bf)
-	if r != 0 && (r < 0) != (bf < 0) {
-		r += bf
+	if r != 0 {
+		if (r < 0) != (bf < 0) {
+			r += bf
+		}
+	} else {
+		// CPython: Objects/floatobject.c:620 ensure zero has sign of divisor
+		r = math.Copysign(0.0, bf)
 	}
 	return NewFloat(r), nil
 }
@@ -450,26 +580,105 @@ func floatBool(o Object) (bool, error) {
 }
 
 // floatPower implements `pow(a, b)` and `pow(a, b, mod)` for floats.
-// CPython rejects the three-argument form with a TypeError.
+// Ports CPython's float_pow special-case ordering exactly so that
+// IEEE-754 edge cases (NaN, Inf) return the C99 F.9.4.4 mandated values.
 //
-// CPython: Objects/floatobject.c float_pow
+// CPython: Objects/floatobject.c:697 float_pow
 func floatPower(a, b, mod Object) (Object, error) {
 	if mod != nil && mod != None() {
 		return nil, errors.New("TypeError: pow() 3rd argument not allowed unless all arguments are integers")
 	}
-	af, bf, ok := floatPair(a, b)
+	iv, iw, ok := floatPair(a, b)
 	if !ok {
 		return notImplemented(), nil
 	}
-	if af == 0 && bf < 0 {
-		return nil, errors.New("ZeroDivisionError: 0.0 cannot be raised to a negative power")
+	// v**0 == 1, even 0**0
+	if iw == 0 {
+		return NewFloat(1.0), nil
 	}
-	if af < 0 && bf != math.Trunc(bf) {
-		// CPython returns a complex here only via complex.__pow__.
-		// At the float-slot level it raises ValueError (math domain).
-		return nil, errors.New("ValueError: negative number cannot be raised to a fractional power")
+	// nan**w == nan
+	if math.IsNaN(iv) {
+		return NewFloat(iv), nil
 	}
-	return NewFloat(math.Pow(af, bf)), nil
+	// v**nan == nan, except 1**nan == 1
+	if math.IsNaN(iw) {
+		if iv == 1.0 {
+			return NewFloat(1.0), nil
+		}
+		return NewFloat(iw), nil
+	}
+	// v**±inf — depends on |v| vs 1
+	if math.IsInf(iw, 0) {
+		absv := math.Abs(iv)
+		if absv == 1.0 {
+			return NewFloat(1.0), nil
+		}
+		if (iw > 0) == (absv > 1.0) {
+			return NewFloat(math.Abs(iw)), nil // inf
+		}
+		return NewFloat(0.0), nil
+	}
+	// ±inf**w
+	if math.IsInf(iv, 0) {
+		iwIsOdd := isOddInteger(iw)
+		if iw > 0 {
+			if iwIsOdd {
+				return NewFloat(iv), nil
+			}
+			return NewFloat(math.Abs(iv)), nil
+		}
+		if iwIsOdd {
+			return NewFloat(math.Copysign(0.0, iv)), nil
+		}
+		return NewFloat(0.0), nil
+	}
+	// 0**w
+	if iv == 0.0 {
+		if iw < 0 {
+			return nil, errors.New("ZeroDivisionError: zero to a negative power")
+		}
+		if isOddInteger(iw) {
+			return NewFloat(iv), nil
+		}
+		return NewFloat(0.0), nil
+	}
+	// negative base with fractional exponent
+	negateResult := false
+	if iv < 0.0 {
+		if iw != math.Floor(iw) {
+			// CPython: Objects/floatobject.c:765 — delegates to complex.__pow__
+			base := complex(iv, 0)
+			exp := complex(iw, 0)
+			result := cmplx.Pow(base, exp)
+			return NewComplex(real(result), imag(result)), nil
+		}
+		iv = -iv
+		negateResult = isOddInteger(iw)
+	}
+	if iv == 1.0 {
+		if negateResult {
+			return NewFloat(-1.0), nil
+		}
+		return NewFloat(1.0), nil
+	}
+	ix := math.Pow(iv, iw)
+	if math.IsInf(ix, 0) && !math.IsInf(iv, 0) && !math.IsInf(iw, 0) {
+		return nil, errors.New("OverflowError: math range error")
+	}
+	if negateResult {
+		ix = -ix
+	}
+	return NewFloat(ix), nil
+}
+
+// isOddInteger reports whether x is a finite odd integer.
+// CPython: Objects/floatobject.c DOUBLE_IS_ODD_INTEGER macro.
+func isOddInteger(x float64) bool {
+	if math.IsInf(x, 0) || math.IsNaN(x) {
+		return false
+	}
+	t := math.Trunc(x)
+	return t == x && math.Mod(t, 2) != 0
 }
 
 // intToFloat promotes an Int operand to float64. Loses precision for
@@ -498,6 +707,8 @@ func asFloat(o Object) (float64, bool) {
 	switch x := o.(type) {
 	case *Float:
 		return x.v, true
+	case *Bool:
+		return intToFloat(&x.Int), true
 	case *Int:
 		return intToFloat(x), true
 	}

@@ -49,12 +49,12 @@ func init() {
 //
 // CPython: Objects/longobject.c:6195 long_long
 func intRealGetter(owner Object) (Object, error) {
-	i, ok := owner.(*Int)
+	i, ok := asInt(owner)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'real' for 'int' objects doesn't apply to a '%s' object", typeNameOf(owner))
 	}
-	if i.Type() == IntType {
-		return i, nil
+	if owner.Type() == IntType {
+		return owner, nil
 	}
 	return NewIntFromBig(i.BigInt()), nil
 }
@@ -256,6 +256,9 @@ func intFromBytesMethod(args []Object, kwargs map[string]Object) (Object, error)
 	val := intFromByteArray(data, littleEndian, signed)
 	if typ == IntType {
 		return NewIntFromBig(val), nil
+	}
+	if typ == BoolType {
+		return NewBool(val.Sign() != 0), nil
 	}
 	return newIntAs(val, typ), nil
 }
