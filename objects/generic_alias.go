@@ -404,17 +404,64 @@ func gaNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
 	return NewGenericAlias(args[0], args[1]), nil
 }
 
-// gaIter implements iter(alias). Each call yields a starred copy of
-// the alias once, then raises StopIteration. CPython uses a separate
-// gaiterobject for this; gopy collapses to a one-shot iterator built
-// from the existing seqiter helper.
+// gaIterObject is the gopy port of CPython's gaiterobject. It yields the
+// alias once (as a starred copy) then exhausts. obj is set to nil after
+// the single item is returned, matching CPython's sentinel pattern.
+//
+// CPython: Objects/genericaliasobject.c:27 gaiterobject
+type gaIterObject struct {
+	Header
+	obj *GenericAlias // set to nil once exhausted
+}
+
+var gaIterType = NewType("generic_alias_iterator", []*Type{objectType})
+
+func init() {
+	gaIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	// CPython: Objects/genericaliasobject.c:922 ga_iternext
+	gaIterType.IterNext = func(o Object) (Object, error) {
+		gi := o.(*gaIterObject)
+		if gi.obj == nil {
+			return nil, ErrStopIteration
+		}
+		ga := gi.obj
+		starred := NewGenericAlias(ga.origin, ga.args)
+		starred.starred = true
+		gi.obj = nil
+		return starred, nil
+	}
+	// CPython: Objects/genericaliasobject.c:965 ga_iter_reduce
+	SetTypeDescr(gaIterType, "__reduce__", NewMethodDescr(gaIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			gi := args[0].(*gaIterObject)
+			if gi.obj == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewTuple(nil)})}), nil
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{gi.obj})}), nil
+		},
+	))
+	AddIterSlotWrappers(gaIterType)
+}
+
+// gaIter implements iter(alias). CPython uses a dedicated gaiterobject
+// that yields the alias once as a starred copy then exhausts.
 //
 // CPython: Objects/genericaliasobject.c:1001 ga_iter
 func gaIter(o Object) (Object, error) {
 	ga := o.(*GenericAlias)
-	starred := NewGenericAlias(ga.origin, ga.args)
-	starred.starred = true
-	return NewList([]Object{starred}).Type().Iter(NewList([]Object{starred}))
+	gi := &gaIterObject{obj: ga}
+	gi.init(gaIterType)
+	return gi, nil
 }
 
 // makeParameters walks args collecting type-parameter-like entries.

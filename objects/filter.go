@@ -9,6 +9,8 @@
 
 package objects
 
+import "fmt"
+
 // Filter is filterobject.
 //
 // CPython: Python/bltinmodule.c:493 filterobject
@@ -27,6 +29,7 @@ func init() {
 	FilterType.Iter = func(o Object) (Object, error) { return o, nil }
 	FilterType.IterNext = filterNext
 	AddIterSlotWrappers(FilterType)
+	SetTypeDescr(FilterType, "__reduce__", NewMethodDescr(FilterType, "__reduce__", filterReduce))
 }
 
 // NewFilter mirrors filter_new: turn iterable into an iterator and
@@ -49,7 +52,10 @@ func NewFilter(fn, iterable Object) (*Filter, error) {
 //
 // CPython: Python/bltinmodule.c:584 filter_next
 func filterNext(o Object) (Object, error) {
-	f := o.(*Filter)
+	f, ok := o.(*Filter)
+	if !ok {
+		return nil, ErrStopIteration
+	}
 	checktrue := IsNone(f.Func) || f.Func == BoolType
 	for {
 		item, err := IterNext(f.It)
@@ -76,4 +82,19 @@ func filterNext(o Object) (Object, error) {
 			return item, nil
 		}
 	}
+}
+
+// filterReduce returns (type(self), (func, it)) so pickle can reconstruct
+// the filter at the right iterator position.
+//
+// CPython: Python/bltinmodule.c:640 filter_reduce
+func filterReduce(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	f, ok := args[0].(*Filter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' for 'filter' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return NewTuple([]Object{FilterType, NewTuple([]Object{f.Func, f.It})}), nil
 }

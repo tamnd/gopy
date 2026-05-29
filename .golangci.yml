@@ -619,6 +619,14 @@ linters:
         linters:
           - gocyclo
           - gocognit
+      # floatPower mirrors float_pow from Objects/floatobject.c: the
+      # special-case table for (0,0), inf, nan, negative base is the
+      # parity unit. floatFromNumber mirrors float_from_number_impl's
+      # type-dispatch branch tree.
+      - path: objects/float.*\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:

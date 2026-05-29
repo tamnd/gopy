@@ -173,6 +173,11 @@ func callIterNext(o Object) (Object, error) {
 		}
 		return nil, err
 	}
+	// CPython: Objects/iterobject.c:198 calliter_iternext — re-check
+	// after call because a reentrant call may have exhausted us.
+	if it.callable == nil {
+		return nil, ErrStopIteration
+	}
 	eq, err := RichCmpBool(v, it.sentinel, CompareEQ)
 	if err != nil {
 		return nil, err

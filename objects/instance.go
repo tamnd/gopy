@@ -225,7 +225,7 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 	if !ok {
 		return GenericGetAttr(o, name)
 	}
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := inst.Type()
@@ -279,7 +279,7 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 	if !ok {
 		return GenericSetAttr(o, name, value)
 	}
-	if name == nil || name.Type() != strType {
+	if name == nil || !IsSubtype(name.Type(), strType) {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := inst.Type()

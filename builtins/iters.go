@@ -74,9 +74,24 @@ func Iter(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 func getIter(o objects.Object) (objects.Object, error) {
 	t := o.Type()
 	if t.Iter != nil {
-		return t.Iter(o)
+		it, err := t.Iter(o)
+		if err != nil || it == nil {
+			return it, err
+		}
+		// CPython: Objects/abstract.c:2832 PyObject_GetIter — check
+		// that __iter__ returned an actual iterator (has tp_iternext).
+		if it.Type().IterNext == nil {
+			return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", it.Type().Name)
+		}
+		return it, nil
 	}
-	if t.Sequence != nil && t.Sequence.GetItem != nil && t.Sequence.Length != nil {
+	// CPython: Objects/abstract.c:2826 PyObject_GetIter — when __iter__
+	// is explicitly set to None the type opts out; do not fall back to
+	// sequence iteration even if __getitem__ is present.
+	if d, _ := objects.LookupDescriptor(t, "__iter__"); d == objects.None() {
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", t.Name)
+	}
+	if t.Sequence != nil && t.Sequence.GetItem != nil {
 		return newSeqIter(o), nil
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not iterable", t.Name)

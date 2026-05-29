@@ -12,11 +12,16 @@ import "errors"
 // CPython: Objects/exceptions.c:L1937 PyExc_StopIteration
 var ErrStopIteration = errors.New("StopIteration")
 
-// errIndexOutOfRange signals out-of-range sequence access. Mirrors
-// PyExc_IndexError.
+// ErrIndexOutOfRange signals out-of-range sequence access. Mirrors
+// PyExc_IndexError. The exported alias lets packages outside objects/
+// check for this sentinel via errors.Is without importing the full
+// error hierarchy.
 //
 // CPython: Objects/exceptions.c:L2229 PyExc_IndexError
-var errIndexOutOfRange = errors.New("IndexError: index out of range")
+var ErrIndexOutOfRange = errors.New("IndexError: index out of range")
+
+// errIndexOutOfRange is an alias kept for internal use.
+var errIndexOutOfRange = ErrIndexOutOfRange
 
 // errKeyNotFound signals a missing dict key. Mirrors PyExc_KeyError.
 // The message carries the "KeyError:" prefix so the vm unwind path

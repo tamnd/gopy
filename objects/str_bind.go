@@ -9,6 +9,8 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/tamnd/gopy/codecs"
@@ -68,6 +70,12 @@ func init() {
 	bind("removeprefix", strRemovePrefixMethod)
 	bind("removesuffix", strRemoveSuffixMethod)
 	SetTypeDescr(strType, "maketrans", NewStaticMethod(NewBuiltinFunction("maketrans", strMakeTrans)))
+	bind("__getnewargs__", strGetNewArgs)
+	bind("__getitem__", strGetItemMethod)
+	bind("__mul__", strMulMethod)
+	bind("__rmul__", strRMulMethod)
+	bind("__add__", strAddMethod)
+	bind("__mod__", strModMethod)
 }
 
 func selfStr(args []Object, name string) (string, error) {
@@ -99,21 +107,40 @@ func selfStrUnicode(args []Object, name string) (*Unicode, error) {
 	return u, nil
 }
 
-func strRange(args []Object) (int, int, error) {
+// strRange parses the optional start/end integer arguments at positions
+// 2 and 3 (args[0]=self, args[1]=pattern). None is accepted as "not
+// specified", matching CPython's clinic "Py_ssize_t start=0" default.
+// math.MaxInt signals "end not specified" — adjustFindIndices clamps to n.
+//
+// CPython: Objects/unicodeobject.c:9680 any_find_slice start/end parsing
+// strRangeNamed parses optional (start, end) from args[2:] and
+// rejects any arguments beyond args[3]. methodName is used in the
+// TypeError message so callers can satisfy CPython's "find() takes at
+// most 3 arguments (N given)" pattern.
+//
+// CPython: Objects/unicodeobject.c find/count/startswith/endswith arg
+// parsing in each _impl function.
+func strRangeNamed(args []Object, methodName string) (int, int, error) {
 	const base = 2
-	start, end := 0, -1
-	if len(args) > base {
+	if len(args) > base+2 {
+		if methodName != "" {
+			return 0, 0, fmt.Errorf("TypeError: %s() takes at most 3 arguments (%d given)", methodName, len(args)-1)
+		}
+		return 0, 0, fmt.Errorf("TypeError: takes at most 3 arguments (%d given)", len(args)-1)
+	}
+	start, end := 0, math.MaxInt
+	if len(args) > base && !IsNone(args[base]) {
 		i, ok := args[base].(*Int)
 		if !ok {
-			return 0, 0, fmt.Errorf("TypeError: slice indices must be integers")
+			return 0, 0, fmt.Errorf("TypeError: slice indices must be integers or None")
 		}
 		n, _ := i.Int64()
 		start = int(n)
 	}
-	if len(args) > base+1 {
+	if len(args) > base+1 && !IsNone(args[base+1]) {
 		i, ok := args[base+1].(*Int)
 		if !ok {
-			return 0, 0, fmt.Errorf("TypeError: slice indices must be integers")
+			return 0, 0, fmt.Errorf("TypeError: slice indices must be integers or None")
 		}
 		n, _ := i.Int64()
 		end = int(n)
@@ -129,12 +156,6 @@ func strNeedle(o Object) (string, error) {
 	return s, nil
 }
 
-func resolveEnd(end, n int) int {
-	if end < 0 {
-		return n
-	}
-	return end
-}
 
 func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	u, err := selfStrUnicode(args, "startswith")
@@ -144,11 +165,11 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: startswith() takes at least 1 argument")
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "startswith")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	check := func(prefix string) bool { return strStartsWithKind(u, prefix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
@@ -164,7 +185,7 @@ func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	p, perr := strNeedle(args[1])
 	if perr != nil {
-		return nil, perr
+		return nil, fmt.Errorf("TypeError: startswith first arg must be str or a tuple of str, not %s", typeNameOf(args[1]))
 	}
 	return NewBool(check(p)), nil
 }
@@ -177,11 +198,11 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: endswith() takes at least 1 argument")
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "endswith")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	check := func(suffix string) bool { return strEndsWithKind(u, suffix, start, end) }
 	if t, ok := args[1].(*Tuple); ok {
 		for _, item := range tupleSlice(t) {
@@ -197,7 +218,7 @@ func strEndsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	p, perr := strNeedle(args[1])
 	if perr != nil {
-		return nil, perr
+		return nil, fmt.Errorf("TypeError: endswith first arg must be str or a tuple of str, not %s", typeNameOf(args[1]))
 	}
 	return NewBool(check(p)), nil
 }
@@ -214,11 +235,11 @@ func strFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if nerr != nil {
 		return nil, nerr
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "find")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	return NewInt(int64(strFindKind(u, needle, start, end))), nil
 }
 
@@ -234,11 +255,11 @@ func strRFindMethod(args []Object, _ map[string]Object) (Object, error) {
 	if nerr != nil {
 		return nil, nerr
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "rfind")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	return NewInt(int64(strRFindKind(u, needle, start, end))), nil
 }
 
@@ -254,11 +275,11 @@ func strIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if nerr != nil {
 		return nil, nerr
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "index")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	i, ierr := strIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
@@ -278,11 +299,11 @@ func strRIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if nerr != nil {
 		return nil, nerr
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "rindex")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	i, ierr := strRIndexKind(u, needle, start, end)
 	if ierr != nil {
 		return nil, ierr
@@ -302,19 +323,22 @@ func strCountMethod(args []Object, _ map[string]Object) (Object, error) {
 	if nerr != nil {
 		return nil, nerr
 	}
-	start, end, rerr := strRange(args)
+	start, end, rerr := strRangeNamed(args, "count")
 	if rerr != nil {
 		return nil, rerr
 	}
-	end = resolveEnd(end, u.length)
+
 	return NewInt(int64(strCountKind(u, needle, start, end))), nil
 }
 
 func strSimple1(fn func(string) string) func([]Object, map[string]Object) (Object, error) {
-	return func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
 		s, err := selfStr(args, "str-method")
 		if err != nil {
 			return nil, err
+		}
+		if len(args) > 1 || len(kwargs) > 0 {
+			return nil, fmt.Errorf("TypeError: takes no arguments (%d given)", len(args)-1)
 		}
 		return NewStr(fn(s)), nil
 	}
@@ -338,18 +362,19 @@ func strStripMethod(fn func(string, string) string) func([]Object, map[string]Ob
 	}
 }
 
-func strSplitMethod(args []Object, _ map[string]Object) (Object, error) {
+func strSplitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "split")
 	if err != nil {
 		return nil, err
 	}
-	sep := ""
-	if len(args) >= 2 && args[1] != None() {
-		c, cerr := strNeedle(args[1])
-		if cerr != nil {
-			return nil, cerr
-		}
-		sep = c
+	if len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: split() takes at most 2 arguments (%d given)", len(args)-1)
+	}
+	sepObj := Object(None())
+	if len(args) >= 2 {
+		sepObj = args[1]
+	} else if kw, ok := kwargs["sep"]; ok {
+		sepObj = kw
 	}
 	maxsplit := -1
 	if len(args) >= 3 {
@@ -357,6 +382,22 @@ func strSplitMethod(args []Object, _ map[string]Object) (Object, error) {
 			n, _ := i.Int64()
 			maxsplit = int(n)
 		}
+	} else if kw, ok := kwargs["maxsplit"]; ok {
+		if i, ok2 := kw.(*Int); ok2 {
+			n, _ := i.Int64()
+			maxsplit = int(n)
+		}
+	}
+	sep := ""
+	if sepObj != None() {
+		c, cerr := strNeedle(sepObj)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if c == "" {
+			return nil, fmt.Errorf("ValueError: empty separator")
+		}
+		sep = c
 	}
 	parts, perr := StrSplit(s, sep, maxsplit)
 	if perr != nil {
@@ -365,18 +406,19 @@ func strSplitMethod(args []Object, _ map[string]Object) (Object, error) {
 	return strListFromGoSlice(parts), nil
 }
 
-func strRSplitMethod(args []Object, _ map[string]Object) (Object, error) {
+func strRSplitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "rsplit")
 	if err != nil {
 		return nil, err
 	}
-	sep := ""
-	if len(args) >= 2 && args[1] != None() {
-		c, cerr := strNeedle(args[1])
-		if cerr != nil {
-			return nil, cerr
-		}
-		sep = c
+	if len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: rsplit() takes at most 2 arguments (%d given)", len(args)-1)
+	}
+	sepObj := Object(None())
+	if len(args) >= 2 {
+		sepObj = args[1]
+	} else if kw, ok := kwargs["sep"]; ok {
+		sepObj = kw
 	}
 	maxsplit := -1
 	if len(args) >= 3 {
@@ -384,6 +426,22 @@ func strRSplitMethod(args []Object, _ map[string]Object) (Object, error) {
 			n, _ := i.Int64()
 			maxsplit = int(n)
 		}
+	} else if kw, ok := kwargs["maxsplit"]; ok {
+		if i, ok2 := kw.(*Int); ok2 {
+			n, _ := i.Int64()
+			maxsplit = int(n)
+		}
+	}
+	sep := ""
+	if sepObj != None() {
+		c, cerr := strNeedle(sepObj)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if c == "" {
+			return nil, fmt.Errorf("ValueError: empty separator")
+		}
+		sep = c
 	}
 	parts, perr := StrRSplit(s, sep, maxsplit)
 	if perr != nil {
@@ -396,6 +454,9 @@ func strSplitLinesMethod(args []Object, kwargs map[string]Object) (Object, error
 	s, err := selfStr(args, "splitlines")
 	if err != nil {
 		return nil, err
+	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: splitlines() takes at most 1 argument (%d given)", len(args)-1)
 	}
 	keepends := false
 	if len(args) >= 2 {
@@ -410,7 +471,7 @@ func strSplitLinesMethod(args []Object, kwargs map[string]Object) (Object, error
 	return strListFromGoSlice(StrSplitLines(s, keepends)), nil
 }
 
-func strReplaceMethod(args []Object, _ map[string]Object) (Object, error) {
+func strReplaceMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "replace")
 	if err != nil {
 		return nil, err
@@ -432,6 +493,11 @@ func strReplaceMethod(args []Object, _ map[string]Object) (Object, error) {
 			n, _ := i.Int64()
 			count = int(n)
 		}
+	} else if cv, ok := kwargs["count"]; ok {
+		if i, ok := cv.(*Int); ok {
+			n, _ := i.Int64()
+			count = int(n)
+		}
 	}
 	return NewStr(StrReplace(s, old, newS, count)), nil
 }
@@ -444,18 +510,13 @@ func strJoinMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: join() takes 1 argument")
 	}
-	tp := args[1].Type()
-	if tp.Iter == nil {
+	it, ierr := Iter(args[1])
+	if ierr != nil {
 		return nil, fmt.Errorf("TypeError: can only join an iterable")
 	}
-	it, ierr := tp.Iter(args[1])
-	if ierr != nil {
-		return nil, ierr
-	}
-	itType := it.Type()
 	var parts []Object
 	for {
-		v, e := itType.IterNext(it)
+		v, e := IterNext(it)
 		if e != nil {
 			if errors.Is(e, ErrStopIteration) {
 				break
@@ -517,10 +578,13 @@ func strRPartitionMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func strBoolMethod(fn func(string) bool) func([]Object, map[string]Object) (Object, error) {
-	return func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
 		s, err := selfStr(args, "is*")
 		if err != nil {
 			return nil, err
+		}
+		if len(args) > 1 || len(kwargs) > 0 {
+			return nil, fmt.Errorf("TypeError: takes no arguments (%d given)", len(args)-1)
 		}
 		return NewBool(fn(s)), nil
 	}
@@ -629,10 +693,25 @@ func strFormatMethod(args []Object, kwargs map[string]Object) (Object, error) {
 //
 // CPython: Objects/stringlib/unicode_format.h:1306 do_string_format
 func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicode, error) {
+	auto := 0
+	return strFormatExpandInner(s, args, kwargs, nil, &auto, 0)
+}
+
+// strFormatExpandInner is the shared implementation of str.format() and
+// str.format_map().  mapObj, when non-nil, routes named-key lookups through
+// GetItem(mapObj, key) so that __missing__ / __getitem__ on the mapping is
+// honoured.  auto tracks the auto-numbering / manual-numbering mode across
+// nested spec expansions (the same counter is re-used for both the field
+// name and the spec string, matching CPython's AutoNumber behaviour).
+//
+// CPython: Objects/stringlib/unicode_format.h:906 build_string
+func strFormatExpandInner(s string, args []Object, kwargs map[string]Object, mapObj Object, auto *int, depth int) (*Unicode, error) {
+	if depth > 1 {
+		return nil, fmt.Errorf("ValueError: Max string recursion exceeded")
+	}
 	var w UnicodeWriter
 	w.Init()
 	w.overallocate = true
-	auto := 0
 	i := 0
 	for i < len(s) {
 		next := strings.IndexAny(s[i:], "{}")
@@ -657,18 +736,23 @@ func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicod
 				i += 2
 				continue
 			}
-			field, _, ok := strings.Cut(s[i+1:], "}")
-			if !ok {
-				return nil, fmt.Errorf("ValueError: unmatched '{' in format string")
+			// Find the matching '}', respecting nested braces so that
+			// specs like {:{}} are parsed correctly.
+			//
+			// CPython: Objects/stringlib/unicode_format.h:619 parse_field (count loop)
+			end := strFormatMatchBrace(s, i+1)
+			if end < 0 {
+				return nil, fmt.Errorf("ValueError: Single '{' encountered in format string")
 			}
-			rendered, ferr := strFormatField(field, args, kwargs, &auto)
+			field := s[i+1 : end]
+			rendered, ferr := strFormatFieldInner(field, args, kwargs, mapObj, auto, depth)
 			if ferr != nil {
 				return nil, ferr
 			}
 			if err := writeBodyChunk(&w, rendered); err != nil {
 				return nil, err
 			}
-			i += 1 + len(field) + 1
+			i = end + 1
 			continue
 		}
 		// c == '}'
@@ -679,22 +763,77 @@ func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicod
 			i += 2
 			continue
 		}
-		return nil, fmt.Errorf("ValueError: single '}' in format string")
+		return nil, fmt.Errorf("ValueError: Single '}' encountered in format string")
 	}
 	return w.Finish(), nil
 }
 
-func strFormatField(field string, args []Object, kwargs map[string]Object, auto *int) (string, error) {
+// strFormatMatchBrace finds the matching '}' for an opening '{'.
+// start is the index immediately after the opening '{'.
+// Returns the index of the matching '}', or -1 if not found.
+// Content inside '[...]' brackets is skipped so that brace characters
+// in subscript keys (e.g. "{[{]}") are not counted.
+//
+// CPython: Objects/stringlib/unicode_format.h:619 parse_field (depth counter)
+func strFormatMatchBrace(s string, start int) int {
+	depth := 1
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			// Skip to the matching ']', so brace chars in subscript keys
+			// are ignored (e.g. "{[{]}" has key "{").
+			for i++; i < len(s) && s[i] != ']'; i++ {
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func strFormatFieldInner(field string, args []Object, kwargs map[string]Object, mapObj Object, auto *int, depth int) (string, error) {
+	// Find the ':' that separates the field name from the format spec,
+	// skipping any '[...]' subscript components in the name.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:554 parse_field
+	colon := -1
+	for i := 0; i < len(field); i++ {
+		switch field[i] {
+		case '[':
+			for i++; i < len(field) && field[i] != ']'; i++ {
+			}
+		case ':':
+			colon = i
+			goto colonDone
+		}
+	}
+colonDone:
 	name, spec := field, ""
-	if colon := strings.IndexByte(field, ':'); colon >= 0 {
+	if colon >= 0 {
 		name, spec = field[:colon], field[colon+1:]
 	}
-	// Conversion suffix: name!s / name!r / name!a runs the result
-	// through str/repr/ascii before applying the format spec.
+	// Conversion suffix: name!s / name!r / name!a.
+	// Skip '[...]' subscripts so that '!' inside a key is not mistaken
+	// for a conversion specifier.
 	//
 	// CPython: Objects/stringlib/unicode_format.h:702 parse_field
 	conversion := byte(0)
-	if bang := strings.IndexByte(name, '!'); bang >= 0 {
+	bang := -1
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+		case '[':
+			for i++; i < len(name) && name[i] != ']'; i++ {
+			}
+		case '!':
+			bang = i
+		}
+	}
+	if bang >= 0 {
 		if bang+1 >= len(name) {
 			return "", fmt.Errorf("ValueError: end of format while looking for conversion specifier")
 		}
@@ -704,7 +843,7 @@ func strFormatField(field string, args []Object, kwargs map[string]Object, auto 
 		}
 		name = name[:bang]
 	}
-	v, err := strFormatLookup(name, args, kwargs, auto)
+	v, err := strFormatLookupInner(name, args, kwargs, mapObj, auto)
 	if err != nil {
 		return "", err
 	}
@@ -712,68 +851,110 @@ func strFormatField(field string, args []Object, kwargs map[string]Object, auto 
 	case 0:
 		// no conversion
 	case 's':
-		sv, sErr := Str(v)
+		sv, sErr := StrObject(v)
 		if sErr != nil {
 			return "", sErr
 		}
-		v = NewStr(sv)
+		v = sv
 	case 'r':
-		rv, rErr := Repr(v)
+		rv, rErr := ReprObject(v)
 		if rErr != nil {
 			return "", rErr
 		}
-		v = NewStr(rv)
+		v = rv
 	case 'a':
 		rv, rErr := Repr(v)
 		if rErr != nil {
 			return "", rErr
 		}
-		v = NewStr(rv)
+		v = NewStr(asciiEscape(rv))
 	default:
 		return "", fmt.Errorf("ValueError: Unknown conversion specifier %c", conversion)
 	}
+	// If the format spec itself contains field references (e.g., {:{}}),
+	// recursively expand them before passing to PyObject_Format.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:833 output_markup (build_string on spec)
+	if strings.ContainsRune(spec, '{') {
+		expanded, expErr := strFormatExpandInner(spec, args, kwargs, mapObj, auto, depth+1)
+		if expErr != nil {
+			return "", expErr
+		}
+		spec = expanded.Value()
+	}
 	// Dispatch through PyObject_Format so each replacement uses the
-	// argument's own __format__ slot. Routing unconditionally through
-	// unicodeFormat rejects ints and every other non-str type, which
-	// breaks even `'{}'.format(1)`.
+	// argument's own __format__ slot.
 	//
 	// CPython: Objects/stringlib/unicode_format.h:1024 output_markup
 	return Format(v, spec)
 }
 
-// strFormatLookup resolves a field name against args/kwargs and applies any
-// trailing attribute ("." access) and subscript ("[key]") components to the
-// base object. Mirrors the FieldNameIterator loop from CPython.
+// strFormatLookupInner resolves a field name against args/kwargs (or mapObj
+// for format_map) and applies any trailing ".attr" / "[key]" components.
+//
+// The auto counter encodes numbering mode:
+//   >= 0 : auto mode (or unset when 0 with no fields consumed yet)
+//   -1   : manual mode
 //
 // CPython: Objects/stringlib/unicode_format.h:392 get_field_object
-func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto *int) (Object, error) {
-	// Split into base and remaining components ("d[a].b" → base="d", rest="[a].b").
+func strFormatLookupInner(name string, args []Object, kwargs map[string]Object, mapObj Object, auto *int) (Object, error) {
 	base, rest := strFormatBaseName(name)
+	// Validate component syntax early so bracket errors surface as
+	// ValueError regardless of whether the base lookup would fail.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:610 parse_field ([ scan)
+	if err := strFormatValidateRest(rest); err != nil {
+		return nil, err
+	}
 	var obj Object
 	if base == "" {
+		// Auto-numbered field: {}.
+		if mapObj != nil {
+			return nil, fmt.Errorf("ValueError: Format string contains positional fields")
+		}
+		if *auto < 0 {
+			return nil, fmt.Errorf("ValueError: cannot switch from manual field specification to automatic field numbering")
+		}
 		if *auto >= len(args) {
 			return nil, fmt.Errorf("IndexError: tuple index out of range")
 		}
 		obj = args[*auto]
 		*auto++
-	} else if base[0] >= '0' && base[0] <= '9' {
-		idx := 0
-		for _, r := range base {
-			if r < '0' || r > '9' {
-				return nil, fmt.Errorf("ValueError: invalid field index %q", base)
-			}
-			idx = idx*10 + int(r-'0')
+	} else if len(base) > 0 && strIsAllDigits(base) {
+		// Manually-numbered field: {0}, {1}, etc.
+		// Only purely-numeric names are treated as integer indices;
+		// mixed strings like "0]" are keyword lookups per CPython.
+		if mapObj != nil {
+			return nil, fmt.Errorf("ValueError: Format string contains positional fields")
 		}
+		if *auto > 0 {
+			return nil, fmt.Errorf("ValueError: cannot switch from automatic field numbering to manual field specification")
+		}
+		*auto = -1
+		idx64, parseErr := strconv.ParseInt(base, 10, 64)
+		if parseErr != nil || idx64 < 0 {
+			return nil, fmt.Errorf("ValueError: too many decimal digits in format string")
+		}
+		idx := int(idx64)
 		if idx >= len(args) {
 			return nil, fmt.Errorf("IndexError: tuple index out of range")
 		}
 		obj = args[idx]
 	} else {
-		v, ok := kwargs[base]
-		if !ok {
-			return nil, fmt.Errorf("KeyError: '%s'", base)
+		// Named field: {name}.
+		if mapObj != nil {
+			v, err := GetItem(mapObj, NewStr(base))
+			if err != nil {
+				return nil, err
+			}
+			obj = v
+		} else {
+			v, ok := kwargs[base]
+			if !ok {
+				return nil, fmt.Errorf("KeyError: '%s'", base)
+			}
+			obj = v
 		}
-		obj = v
 	}
 	// Apply remaining components: ".attr" or "[key]".
 	//
@@ -787,6 +968,9 @@ func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto 
 				attr, rest = rest, ""
 			} else {
 				attr, rest = rest[:end], rest[end:]
+			}
+			if attr == "" {
+				return nil, fmt.Errorf("ValueError: Empty attribute in format string")
 			}
 			var err error
 			obj, err = GetAttr(obj, NewStr(attr))
@@ -810,11 +994,11 @@ func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto 
 			}
 			var err error
 			if isInt {
-				idx := 0
-				for _, r := range key {
-					idx = idx*10 + int(r-'0')
+				idx64, parseErr := strconv.ParseInt(key, 10, 64)
+				if parseErr != nil || idx64 < 0 {
+					return nil, fmt.Errorf("ValueError: too many decimal digits in format string")
 				}
-				obj, err = GetItem(obj, NewInt(int64(idx)))
+				obj, err = GetItem(obj, NewInt(idx64))
 			} else {
 				obj, err = GetItem(obj, NewStr(key))
 			}
@@ -822,7 +1006,7 @@ func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto 
 				return nil, err
 			}
 		} else {
-			break
+			return nil, fmt.Errorf("ValueError: Only '.' or '[' may follow ']' in format field specifier")
 		}
 	}
 	return obj, nil
@@ -830,12 +1014,52 @@ func strFormatLookup(name string, args []Object, kwargs map[string]Object, auto 
 
 // strFormatBaseName splits a field name into the leading identifier and the
 // remaining component string. E.g. "d[a].b" → ("d", "[a].b").
+func strIsAllDigits(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func strFormatBaseName(name string) (base, rest string) {
-	i := strings.IndexAny(name, ".[")
+	i := strings.IndexAny(name, ".[{")
 	if i < 0 {
 		return name, ""
 	}
 	return name[:i], name[i:]
+}
+
+// strFormatValidateRest checks field component syntax: every component
+// must start with '.' or '[', and every '[' must have a matching ']'.
+// This is called before the base-object lookup so invalid component
+// syntax always surfaces as ValueError rather than a lookup error.
+//
+// CPython: Objects/stringlib/unicode_format.h:610 parse_field ([ → '] scan)
+func strFormatValidateRest(rest string) error {
+	for i := 0; i < len(rest); {
+		switch rest[i] {
+		case '.':
+			// Skip dot and the attribute name that follows.
+			i++
+			for i < len(rest) && rest[i] != '.' && rest[i] != '[' {
+				i++
+			}
+		case '[':
+			close := strings.IndexByte(rest[i:], ']')
+			if close < 0 {
+				return fmt.Errorf("ValueError: expected '}' before end of string")
+			}
+			i += close + 1
+		default:
+			return fmt.Errorf("ValueError: Only '.' or '[' may follow ']' in format field specifier")
+		}
+	}
+	return nil
 }
 
 func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -846,21 +1070,31 @@ func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: format_map() takes 1 argument")
 	}
-	mp, ok := args[1].(*Dict)
-	if !ok {
+	mapObj := args[1]
+	if !strIsMappingLike(mapObj) {
 		return nil, fmt.Errorf("TypeError: format_map() argument must be a mapping")
 	}
-	kwargs := map[string]Object{}
-	for _, k := range mp.Keys() {
-		v, _ := mp.GetItem(k)
-		ks, _ := Str(k)
-		kwargs[ks] = v
-	}
-	out, ferr := strFormatExpand(s, nil, kwargs)
+	auto := 0
+	out, ferr := strFormatExpandInner(s, nil, nil, mapObj, &auto, 0)
 	if ferr != nil {
 		return nil, ferr
 	}
 	return out, nil
+}
+
+// strIsMappingLike returns true when o is a dict, a dict subclass, or a user
+// type with __getitem__.  Lists and other sequence-only types return false.
+//
+// CPython: abstract.c:2260 PyMapping_Check
+func strIsMappingLike(o Object) bool {
+	if o.Type().Mapping != nil {
+		return true
+	}
+	if o.Type().IsUser {
+		descr, _ := LookupDescriptor(o.Type(), "__getitem__")
+		return descr != nil
+	}
+	return false
 }
 
 // strTranslateMethod backs str.translate(table).
@@ -893,6 +1127,9 @@ func strTranslateMethod(args []Object, _ map[string]Object) (Object, error) {
 		switch tv := v.(type) {
 		case *Int:
 			n, _ := tv.Int64()
+			if n < 0 || n > 0x10FFFF {
+				return nil, fmt.Errorf("ValueError: character mapping must be in range(0x110000)")
+			}
 			out = append(out, rune(n))
 		case *Unicode:
 			out = append(out, []rune(tv.Value())...)
@@ -944,7 +1181,7 @@ func makeTransKey(k Object) (Object, error) {
 	case *Unicode:
 		rs := []rune(kt.Value())
 		if len(rs) != 1 {
-			return nil, fmt.Errorf("TypeError: string keys in translate table must be of length 1")
+			return nil, fmt.Errorf("ValueError: string keys in translate table must be of length 1")
 		}
 		return NewInt(int64(rs[0])), nil
 	}
@@ -1114,14 +1351,22 @@ func strRjustMethod(args []Object, _ map[string]Object) (Object, error) {
 // strExpandTabsMethod backs str.expandtabs([tabsize=8]).
 //
 // CPython: Objects/unicodeobject.c:11157 unicode_expandtabs_impl
-func strExpandTabsMethod(args []Object, _ map[string]Object) (Object, error) {
+func strExpandTabsMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	s, err := selfStr(args, "expandtabs")
 	if err != nil {
 		return nil, err
 	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: expandtabs() takes at most 1 argument (%d given)", len(args)-1)
+	}
 	tabsize := 8
 	if len(args) >= 2 {
 		if i, ok := args[1].(*Int); ok {
+			n, _ := i.Int64()
+			tabsize = int(n)
+		}
+	} else if kw, ok := kwargs["tabsize"]; ok {
+		if i, ok2 := kw.(*Int); ok2 {
 			n, _ := i.Int64()
 			tabsize = int(n)
 		}
@@ -1158,6 +1403,9 @@ func strRemovePrefixMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: removeprefix() takes exactly one argument")
 	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: removeprefix() takes exactly one argument (%d given)", len(args)-1)
+	}
 	prefix, perr := strNeedle(args[1])
 	if perr != nil {
 		return nil, perr
@@ -1178,6 +1426,9 @@ func strRemoveSuffixMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: removesuffix() takes exactly one argument")
+	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: removesuffix() takes exactly one argument (%d given)", len(args)-1)
 	}
 	suffix, serr := strNeedle(args[1])
 	if serr != nil {
@@ -1257,4 +1508,155 @@ func allSpace(s string) bool {
 		}
 	}
 	return true
+}
+
+// strGetNewArgs returns a 1-tuple containing a copy of the string,
+// used by pickle to reconstruct str instances.
+//
+// CPython: Objects/unicodeobject.c:15184 unicode_getnewargs
+func strGetNewArgs(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "__getnewargs__")
+	if err != nil {
+		return nil, err
+	}
+	return NewTuple([]Object{NewStr(s)}), nil
+}
+
+// strGetItemMethod implements str.__getitem__: handles both integer
+// indexing and slice objects.
+//
+// CPython: Objects/unicodeobject.c:15232 unicode_subscript
+func strGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'str' object")
+	}
+	if sl, ok := args[1].(*Slice); ok {
+		return StrGetSlice(u, sl)
+	}
+	// Try __index__ coercion (e.g. numpy int types), same as
+	// CPython's PyIndex_AsSsize_t call in unicode_subscript.
+	//
+	// CPython: Objects/unicodeobject.c:15232 unicode_subscript
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: string indices must be integers, not '%s'", typeNameOf(args[1]))
+	}
+	i, ok2 := idx.(*Int)
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: string indices must be integers, not '%s'", typeNameOf(args[1]))
+	}
+	n, _ := i.Int64()
+	return unicodeGetItemKind(u, int(n))
+}
+
+// StrGetSlice extracts a substring via a slice object, honoring
+// negative indices and step.
+//
+// CPython: Objects/unicodeobject.c:15232 unicode_subscript (slice path)
+func StrGetSlice(u *Unicode, sl *Slice) (Object, error) {
+	n := u.length
+	start, stop, step, slicelen, err := sl.GetIndices(n)
+	if err != nil {
+		return nil, err
+	}
+	if slicelen == 0 {
+		return NewStr(""), nil
+	}
+	if step == 1 {
+		if u.ascii {
+			return NewStr(u.v[start:stop]), nil
+		}
+		runes := []rune(u.v)
+		return NewStr(string(runes[start:stop])), nil
+	}
+	runes := []rune(u.v)
+	out := make([]rune, slicelen)
+	for i := range slicelen {
+		out[i] = runes[start+i*step]
+	}
+	return NewStr(string(out)), nil
+}
+
+// strMulMethod implements str.__mul__(n): 'ab' * 3 == 'ababab'.
+// Raises TypeError for non-integer arguments (CPython routes through
+// sq_repeat which calls _PyIndex_AsSsize_t, not nb_multiply).
+//
+// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+func strMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__mul__' requires a 'str' object")
+	}
+	n, err := NumberIndex(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+	}
+	ni, ok2 := n.(*Int)
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+	}
+	nv, _ := ni.Int64()
+	return strType.Sequence.Repeat(u, int(nv))
+}
+
+// strRMulMethod implements str.__rmul__(n): 3 * 'ab' == 'ababab'.
+//
+// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+func strRMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __rmul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__rmul__' requires a 'str' object")
+	}
+	n, err := NumberIndex(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+	}
+	ni, ok2 := n.(*Int)
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+	}
+	nv, _ := ni.Int64()
+	return strType.Sequence.Repeat(u, int(nv))
+}
+
+// strAddMethod implements str.__add__(other): 'ab' + 'cd' == 'abcd'.
+// Returns NotImplemented for non-str right-hand sides.
+//
+// CPython: Objects/unicodeobject.c:11641 PyUnicode_Concat
+func strAddMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__add__' requires a 'str' object")
+	}
+	v, ok := args[1].(*Unicode)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	return NewStr(u.v + v.v), nil
+}
+
+// strModMethod implements str.__mod__(args): '%s' % 'x' == 'x'.
+//
+// CPython: Objects/unicodeobject.c:14538 unicode_mod
+func strModMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mod__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[0].(*Unicode); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__mod__' requires a 'str' object")
+	}
+	return NumberRemainder(args[0], args[1])
 }

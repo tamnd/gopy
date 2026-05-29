@@ -15,6 +15,7 @@ package builtins
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/tamnd/gopy/abstract"
@@ -78,7 +79,15 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 	case *objects.Int:
 		return v, nil
 	case *objects.Float:
-		out, _ := new(big.Float).SetFloat64(v.Float64()).Int(nil)
+		// CPython: Objects/longobject.c:456 PyLong_FromDouble
+		f := v.Float64()
+		if math.IsInf(f, 0) {
+			return nil, fmt.Errorf("OverflowError: cannot convert float infinity to integer")
+		}
+		if math.IsNaN(f) {
+			return nil, fmt.Errorf("ValueError: cannot convert float NaN to integer")
+		}
+		out, _ := new(big.Float).SetFloat64(f).Int(nil)
 		return objects.NewIntFromBig(out), nil
 	case *objects.Bytes:
 		return parseIntString(string(v.Bytes()), 10)
@@ -169,7 +178,10 @@ func trimSpace(s string) string {
 // strings.
 //
 // CPython: Objects/floatobject.c float_new_impl
-func FloatCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: float() takes no keyword arguments")
+	}
 	if len(args) == 0 {
 		return objects.NewFloat(0), nil
 	}
@@ -178,37 +190,112 @@ func FloatCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	}
 	switch v := args[0].(type) {
 	case *objects.Float:
-		return v, nil
+		// CPython: Objects/floatobject.c:1595 float_new_impl
+		// For exact float, return self. For subclasses, call __float__
+		// if user-defined; otherwise extract value and return a new
+		// plain float.
+		if v.Type() == objects.FloatType {
+			return v, nil
+		}
+		// Only dispatch through __float__ when the subclass defines it.
+		// If not user-defined, the inherited slot returns self (a subclass
+		// instance), which would produce a spurious DeprecationWarning.
+		if objects.IsOwnDescriptor(v.Type(), "__float__") {
+			if n := v.Type().Number; n != nil && n.Float != nil {
+				res, err := n.Float(v)
+				if err != nil {
+					return nil, err
+				}
+				// __float__ must return a float.
+				rf, isFloat := res.(*objects.Float)
+				if !isFloat {
+					return nil, fmt.Errorf("TypeError: __float__ returned non-float (type %s)", res.Type().Name)
+				}
+				if rf.Type() == objects.FloatType {
+					return rf, nil
+				}
+				// __float__ returned a float subclass: emit DeprecationWarning
+				// and unwrap to a plain float.
+				// CPython: Objects/floatobject.c _PyFloat_FromNumberWithBase
+				msg := fmt.Sprintf("__float__ returned non-float (type %s). "+
+					"The ability to return an instance of a strict subclass of float "+
+					"is deprecated, and may be removed in a future version of Python.",
+					rf.Type().Name)
+				if objects.DeprecWarnHook != nil {
+					if werr := objects.DeprecWarnHook(msg); werr != nil {
+						return nil, werr
+					}
+				}
+				return objects.NewFloat(rf.Float64()), nil
+			}
+		}
+		return objects.NewFloat(v.Float64()), nil
 	case *objects.Int:
 		f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
 		return objects.NewFloat(f), nil
-	case *objects.Bytes:
-		s := string(v.Bytes())
-		f, err := pystrconv.ParseFloat(trimSpace(s))
-		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+	}
+	// CPython: Objects/abstract.c:1592 PyNumber_Float — try nb_float first
+	if n := args[0].Type().Number; n != nil {
+		if n.Float != nil {
+			res, err := n.Float(args[0])
+			if err != nil {
+				return nil, err
+			}
+			// If __float__ returned a non-exact float subclass, emit
+			// DeprecationWarning and unwrap.
+			// CPython: Objects/abstract.c:1614 PyNumber_Float
+			if rf, ok := res.(*objects.Float); ok && rf.Type() != objects.FloatType {
+				msg := fmt.Sprintf("__float__ returned non-float (type %s). "+
+					"The ability to return an instance of a strict subclass of float "+
+					"is deprecated, and may be removed in a future version of Python.",
+					rf.Type().Name)
+				if objects.DeprecWarnHook != nil {
+					if werr := objects.DeprecWarnHook(msg); werr != nil {
+						return nil, werr
+					}
+				}
+				return objects.NewFloat(rf.Float64()), nil
+			}
+			return res, nil
 		}
-		return objects.NewFloat(f), nil
-	case *objects.ByteArray:
-		s := string(v.Bytes())
-		f, err := pystrconv.ParseFloat(trimSpace(s))
+		// CPython: Objects/abstract.c:1630 PyNumber_Float — nb_index fallback
+		if n.Index != nil {
+			idx, err := n.Index(args[0])
+			if err != nil {
+				return nil, err
+			}
+			i, ok := idx.(*objects.Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+			}
+			f, _ := new(big.Float).SetInt(i.BigInt()).Float64()
+			if math.IsInf(f, 0) {
+				return nil, fmt.Errorf("OverflowError: int too large to convert to float")
+			}
+			return objects.NewFloat(f), nil
+		}
+	}
+	// CPython: Objects/floatobject.c:190 PyFloat_FromString
+	// Bytes, ByteArray, MemoryView, and buffer-protocol objects (array.array).
+	if buf, ok := objects.AsBytesLike(args[0]); ok {
+		f, err := pystrconv.ParseFloat(trimSpace(string(buf)))
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+			r, _ := objects.Repr(args[0])
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
 		return objects.NewFloat(f), nil
 	}
-	if args[0].Type() == objects.StrType() {
+	// CPython: Objects/floatobject.c:205 PyFloat_FromString — Unicode (str and subclasses)
+	if objects.IsSubtype(args[0].Type(), objects.StrType()) {
 		s, _ := objects.Str(args[0])
 		f, err := pystrconv.ParseFloat(trimSpace(s))
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: could not convert string to float: %q", s)
+			r, _ := objects.Repr(args[0])
+			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
 		return objects.NewFloat(f), nil
 	}
-	if n := args[0].Type().Number; n != nil && n.Float != nil {
-		return n.Float(args[0])
-	}
-	return nil, fmt.Errorf("TypeError: float() argument must be a string or a number, not '%s'", args[0].Type().Name)
+	return nil, fmt.Errorf("TypeError: float() argument must be a string or a real number, not '%s'", args[0].Type().Name)
 }
 
 // BoolCtor ports bool_new. 0 args returns False; one positional runs

@@ -34,6 +34,7 @@ func init() {
 	BoundMethodType.Repr = boundMethodRepr
 	BoundMethodType.Str = boundMethodRepr
 	BoundMethodType.Vectorcall = boundMethodVectorcall
+	BoundMethodType.Dealloc = boundMethodDealloc
 	BoundMethodType.TpTraverse = boundMethodTraverse
 	BoundMethodType.Getattro = boundMethodGetattro
 	BoundMethodType.Setattro = GenericSetAttr
@@ -122,13 +123,29 @@ func boundMethodTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
-// NewBoundMethod pairs fn with self.
+// NewBoundMethod pairs fn with self. Both fields take new references,
+// mirroring PyMethod_New's Py_INCREF calls.
 //
 // CPython: Objects/classobject.c:38 PyMethod_New
 func NewBoundMethod(fn Object, self Object) *BoundMethod {
 	m := &BoundMethod{imFunc: fn, imSelf: self}
 	m.init(BoundMethodType)
+	Incref(fn)
+	Incref(self)
 	return m
+}
+
+// boundMethodDealloc releases the owned references on fn and self.
+// Fields are not cleared: Go GC keeps the struct alive as long as any
+// Go pointer references it (e.g. a dict slot), so leaving fn/self set
+// lets short-lived dict entries remain callable even after the Python
+// refcount hits zero.
+//
+// CPython: Objects/classobject.c:26 method_dealloc
+func boundMethodDealloc(o Object) {
+	m := o.(*BoundMethod)
+	Decref(m.imFunc)
+	Decref(m.imSelf)
 }
 
 // Func returns the underlying function.

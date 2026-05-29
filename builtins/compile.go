@@ -267,12 +267,28 @@ const (
 
 // parseCompileFlags reads the optional flags arg. PyCF_ONLY_AST is now
 // accepted and triggers parse-only mode (no codegen). Other flag bits are
-// silently accepted for signature parity.
+// silently accepted for signature parity. Non-int types are coerced via
+// __index__ matching CPython's PyArg_ParseTuple "i" format behavior.
 //
 // CPython: Python/bltinmodule.c:771 builtin_compile_impl flags check
 func parseCompileFlags(o objects.Object) (int, error) {
 	if o == nil {
 		return 0, nil
+	}
+	if _, ok := o.(*objects.Int); !ok {
+		// Try __index__ coercion (CPython: PyNumber_Index path in PyArg_ParseTuple "i").
+		idxFn, err := objects.GetAttr(o, objects.NewStr("__index__"))
+		if err != nil || idxFn == nil {
+			return 0, fmt.Errorf("TypeError: flags must be int, not %s", o.Type().Name)
+		}
+		res, err := objects.CallNoArgs(idxFn)
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := res.(*objects.Int); !ok {
+			return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", res.Type().Name)
+		}
+		o = res
 	}
 	flags, err := intArg(o, "flags")
 	if err != nil {
@@ -316,8 +332,25 @@ func parseCompileOptimize(o objects.Object) (int, error) {
 
 // signedIntArg accepts negative ints (intArg in import.go forbids them
 // because the only caller wanted level >= 0). compile()'s optimize=-1
-// is meaningful so we need a permissive sibling.
+// is meaningful so we need a permissive sibling. Non-int types are
+// coerced via __index__ to match CPython's PyArg_ParseTuple "i" format.
+//
+// CPython: Python/bltinmodule.c:775 builtin_compile_impl optimize check
 func signedIntArg(o objects.Object, label string) (int, error) {
+	if _, ok := o.(*objects.Int); !ok {
+		idxFn, err := objects.GetAttr(o, objects.NewStr("__index__"))
+		if err != nil || idxFn == nil {
+			return 0, fmt.Errorf("TypeError: %s must be int, not %s", label, o.Type().Name)
+		}
+		res, err := objects.CallNoArgs(idxFn)
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := res.(*objects.Int); !ok {
+			return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", res.Type().Name)
+		}
+		o = res
+	}
 	iv, ok := o.(*objects.Int)
 	if !ok {
 		return 0, fmt.Errorf("TypeError: %s must be int, not %s", label, o.Type().Name)

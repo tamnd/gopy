@@ -115,8 +115,9 @@ func parseFormatString(s string) ([]formatSegment, error) {
 		literal := s[litStart:i]
 
 		if i == n {
-			// End of string. Emit a trailing literal-only segment.
-			if literal != "" || len(segments) == 0 {
+			// End of string. Emit a trailing literal-only segment, but
+			// skip the empty-string case (CPython yields nothing for "").
+			if literal != "" {
 				segments = append(segments, formatSegment{literal: literal})
 			}
 			break

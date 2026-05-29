@@ -198,6 +198,12 @@ func IterNext(o Object) (Object, error) {
 		v, err := next(o)
 		if err != nil {
 			if errors.Is(err, ErrStopIteration) {
+				// CPython: Objects/abstract.c:2856 PyIter_Next clears
+				// StopIteration from the thread state so the caller sees
+				// only the NULL return value, not a pending exception.
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
 				return nil, ErrStopIteration
 			}
 			if IsStopIterationHook != nil && IsStopIterationHook(err) {

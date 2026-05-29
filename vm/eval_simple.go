@@ -1133,10 +1133,20 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		var v objects.Object
 		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
 			v = w
-		} else if w, ok := lookupIn(e.f.Builtins, keyObj); ok {
-			v = w
 		} else {
-			return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+			// CPython: Python/bytecodes.c LOAD_GLOBAL — when builtins is not
+			// an exact dict, PyObject_GetItem is used and its TypeError
+			// propagates (e.g. exec(code, {'__builtins__': 123}) raises
+			// TypeError, not NameError).
+			w, found, err := objects.MappingGetOptionalItem(e.f.Builtins, keyObj)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				v = w
+			} else {
+				return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
+			}
 		}
 		e.pushObject(v)
 		if pushNull {
@@ -1336,6 +1346,21 @@ func powerOp(a, b, mod objects.Object) (objects.Object, error) {
 //
 // CPython: Objects/abstract.c binary_op1
 func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) (objects.Object, error) {
+	// When b's type is a strict subtype of a's type and b defines a reverse
+	// dunder that is not inherited from a's type, give b's reverse op priority.
+	// Mirrors the subtype-first block in CPython's binary_op1.
+	//
+	// CPython: Objects/abstract.c:986 binary_op1 (subtype-first block)
+	if a.Type() != b.Type() && objects.IsSubtype(b.Type(), a.Type()) {
+		if out, ok, err := objects.DunderBinaryReverse(b, a, sym); ok {
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if fn := mroNumberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
 		if err != nil {
@@ -1450,13 +1475,12 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		return nil, ierr
 	}
-	itType := it.Type()
-	if itType.IterNext == nil {
-		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", itType.Name)
+	if it.Type().IterNext == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", it.Type().Name)
 	}
 	out := make([]objects.Object, 0, n)
 	for i := 0; i < n; i++ {
-		v, nerr := itType.IterNext(it)
+		v, nerr := objects.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
 			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
 		}
@@ -1465,7 +1489,7 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		out = append(out, v)
 	}
-	extra, nerr := itType.IterNext(it)
+	extra, nerr := objects.IterNext(it)
 	if nerr != nil && !errors.Is(nerr, objects.ErrStopIteration) {
 		return nil, nerr
 	}
@@ -1637,9 +1661,8 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 	if ierr != nil {
 		return false, fmt.Errorf("TypeError: argument of type '%s' is not a container or iterable", t.Name)
 	}
-	itType := it.Type()
 	for {
-		item, nerr := itType.IterNext(it)
+		item, nerr := objects.IterNext(it)
 		if nerr != nil {
 			if errors.Is(nerr, objects.ErrStopIteration) {
 				return false, nil
@@ -1855,8 +1878,14 @@ func convertValue(v objects.Object, oparg uint32) (objects.Object, error) {
 			return nil, err
 		}
 		return objects.NewStr(s), nil
-	case 2, 3: // FVC_REPR / FVC_ASCII
+	case 2: // FVC_REPR
 		s, err := objects.Repr(v)
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	case 3: // FVC_ASCII
+		s, err := objects.ASCII(v)
 		if err != nil {
 			return nil, err
 		}

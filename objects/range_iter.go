@@ -7,7 +7,10 @@
 
 package objects
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+)
 
 type rangeIterator struct {
 	Header
@@ -35,6 +38,55 @@ func init() {
 		return out, nil
 	}
 	AddIterSlotWrappers(rangeIterType)
+	// CPython: Objects/rangeobject.c:1064 longrangeiter_reduce
+	SetTypeDescr(rangeIterType, "__reduce__", NewMethodDescr(rangeIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*rangeIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			// Build range(cur, stop, step) so the unpickled iterator starts
+			// from the current position. State is always 0.
+			r, err := NewRange(NewIntFromBig(&it.cur.v), it.stop, it.step)
+			if err != nil {
+				return nil, err
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{r}), NewInt(0)}), nil
+		},
+	))
+	// CPython: Objects/rangeobject.c:1095 longrangeiter_setstate
+	SetTypeDescr(rangeIterType, "__setstate__", NewMethodDescr(rangeIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*rangeIterator)
+			idx, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			// Clamp to valid range: [0, length]. CPython uses di_index which
+			// is an offset; gopy stores cur directly, so advance from start.
+			n := it.LengthHint()
+			if idx.v.Sign() < 0 {
+				idx = NewInt(0)
+			} else if idx.v.Cmp(&n.v) > 0 {
+				idx = n
+			}
+			// advance cur by idx steps
+			advance := new(big.Int).Mul(&idx.v, &it.step.v)
+			cur := new(big.Int).Add(&it.cur.v, advance)
+			it.cur = NewIntFromBig(cur)
+			return None(), nil
+		},
+	))
 }
 
 func newRangeIterator(start, stop, step *Int) *rangeIterator {

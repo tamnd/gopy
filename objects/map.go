@@ -34,6 +34,7 @@ func init() {
 	MapType.Iter = func(o Object) (Object, error) { return o, nil }
 	MapType.IterNext = mapNext
 	AddIterSlotWrappers(MapType)
+	SetTypeDescr(MapType, "__reduce__", NewMethodDescr(MapType, "__reduce__", mapReduce))
 }
 
 // NewMap mirrors map_new: convert each iterable to its iterator up
@@ -64,7 +65,10 @@ func NewMap(fn Object, iterables []Object, strict bool) (*Map, error) {
 //
 // CPython: Python/bltinmodule.c:1482 map_next
 func mapNext(o Object) (Object, error) {
-	m := o.(*Map)
+	m, ok := o.(*Map)
+	if !ok {
+		return nil, ErrStopIteration
+	}
 	stack := make([]Object, 0, len(m.Iters))
 	for i, it := range m.Iters {
 		val, err := IterNext(it)
@@ -81,6 +85,24 @@ func mapNext(o Object) (Object, error) {
 	}
 	args := NewTuple(stack)
 	return Call(m.Func, args, nil)
+}
+
+// mapReduce returns (type(self), (func, iter1, iter2, ...)) so pickle
+// can reconstruct the map at the right iterator position.
+//
+// CPython: Python/bltinmodule.c:1624 map_reduce
+func mapReduce(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	m, ok := args[0].(*Map)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' for 'map' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	elems := make([]Object, 0, 1+len(m.Iters))
+	elems = append(elems, m.Func)
+	elems = append(elems, m.Iters...)
+	return NewTuple([]Object{MapType, NewTuple(elems)}), nil
 }
 
 // mapStrictMismatch is the strict-mode error that map_next emits when

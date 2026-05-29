@@ -303,11 +303,14 @@ func memoryViewRichCmp(a, b Object, op CompareOp) (Object, error) {
 // Bytes, ByteArray; returns false otherwise.
 func bytesViewOf(o Object) ([]byte, bool) { return AsBytesLike(o) }
 
-// AsBytesLike unwraps any bytes-like object (Bytes, ByteArray, or
-// MemoryView) to the underlying byte slice. It is the gopy equivalent
-// of CPython's PyObject_GetBuffer for the common contiguous read path
-// and lets callers in io / marshal / struct accept any of those three
-// without re-implementing the switch.
+// ByteBufferHook extends AsBytesLike to buffer-protocol types outside
+// the objects package (e.g. array.array). Set at module init time.
+var ByteBufferHook func(Object) ([]byte, bool)
+
+// AsBytesLike unwraps any bytes-like object (Bytes, ByteArray,
+// MemoryView, or a type registered via ByteBufferHook) to the
+// underlying byte slice. It is the gopy equivalent of CPython's
+// PyObject_GetBuffer for the common contiguous read path.
 //
 // CPython: Objects/abstract.c:341 PyObject_GetBuffer (PyBUF_SIMPLE)
 func AsBytesLike(o Object) ([]byte, bool) {
@@ -318,6 +321,9 @@ func AsBytesLike(o Object) ([]byte, bool) {
 		return v.Bytes(), true
 	case *ByteArray:
 		return v.Bytes(), true
+	}
+	if ByteBufferHook != nil {
+		return ByteBufferHook(o)
 	}
 	return nil, false
 }

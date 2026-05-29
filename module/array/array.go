@@ -218,6 +218,16 @@ func init() {
 	}
 	ArrayType.TpFlags |= objects.TpFlagSequence
 	registerArrayMethods(ArrayType)
+	// CPython: Objects/abstract.c:351 PyObject_GetBuffer (PyBUF_SIMPLE)
+	// Register array.array with AsBytesLike so float(), bytes(), etc. can
+	// treat arrays as buffer-protocol sources.
+	objects.ByteBufferHook = func(o objects.Object) ([]byte, bool) {
+		a, ok := o.(*arrayObject)
+		if !ok {
+			return nil, false
+		}
+		return a.obItem[:a.nbytes()], true
+	}
 }
 
 // nativeOrder is the host byte order used by the native typecodes.

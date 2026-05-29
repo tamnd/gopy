@@ -22,13 +22,17 @@ func intRepr(o Object) (string, error) {
 // generic error sentinel.
 //
 // CPython: Objects/longobject.c:3551 long_hash
+// intHash ports long_hash: compute |n| mod (2^61-1), negate if n < 0.
+//
+// CPython: Objects/longobject.c:3397 long_hash
 func intHash(o Object) (int64, error) {
 	const modulus int64 = (1 << 61) - 1
-	v := new(big.Int).Set(&o.(*Int).v)
-	m := big.NewInt(modulus)
-	v.Mod(v, m)
-	h := v.Int64()
-	if o.(*Int).v.Sign() < 0 {
+	n := &o.(*Int).v
+	sign := n.Sign()
+	abs := new(big.Int).Abs(n)
+	abs.Mod(abs, big.NewInt(modulus))
+	h := abs.Int64()
+	if sign < 0 {
 		h = -h
 	}
 	if h == -1 {

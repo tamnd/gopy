@@ -155,8 +155,8 @@ func unicodeGetItemKind(s *Unicode, i int) (Object, error) {
 // CPython: Objects/stringlib/asciilib.h asciilib_find_slice
 func strFindASCII(s, needle string, start, end int) int {
 	n := len(s)
-	start, end = clampStrSlice(n, start, end)
-	if end-start < len(needle) {
+	start, end = adjustFindIndices(n, start, end)
+	if start > end || end-start < len(needle) {
 		return -1
 	}
 	idx := strings.Index(s[start:end], needle)
@@ -171,8 +171,8 @@ func strFindASCII(s, needle string, start, end int) int {
 // CPython: Objects/stringlib/asciilib.h asciilib_rfind_slice
 func strRFindASCII(s, needle string, start, end int) int {
 	n := len(s)
-	start, end = clampStrSlice(n, start, end)
-	if end-start < len(needle) {
+	start, end = adjustFindIndices(n, start, end)
+	if start > end || end-start < len(needle) {
 		return -1
 	}
 	idx := strings.LastIndex(s[start:end], needle)
@@ -188,7 +188,10 @@ func strRFindASCII(s, needle string, start, end int) int {
 // CPython: Objects/stringlib/asciilib.h asciilib_count
 func strCountASCII(s, needle string, start, end int) int {
 	n := len(s)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return 0
+	}
 	view := s[start:end]
 	if needle == "" {
 		return len(view) + 1
@@ -201,7 +204,10 @@ func strCountASCII(s, needle string, start, end int) int {
 // CPython: Objects/unicodeobject.c:13617 unicode_startswith_impl
 func strStartsWithASCII(s, prefix string, start, end int) bool {
 	n := len(s)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return false
+	}
 	return strings.HasPrefix(s[start:end], prefix)
 }
 
@@ -210,6 +216,9 @@ func strStartsWithASCII(s, prefix string, start, end int) bool {
 // CPython: Objects/unicodeobject.c:13673 unicode_endswith_impl
 func strEndsWithASCII(s, suffix string, start, end int) bool {
 	n := len(s)
-	start, end = clampStrSlice(n, start, end)
+	start, end = adjustFindIndices(n, start, end)
+	if start > end {
+		return false
+	}
 	return strings.HasSuffix(s[start:end], suffix)
 }

@@ -864,7 +864,24 @@ func dateNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects
 			}
 		}
 	}
-	if len(args) != 3 {
+	// Merge keyword args year/month/day into positional slots.
+	//
+	// CPython: Modules/_datetimemodule.c:3296 date_new (Argument Clinic)
+	if len(kwargs) > 0 {
+		posArgs := make([]objects.Object, 3)
+		copy(posArgs, args)
+		names := [3]string{"year", "month", "day"}
+		for i, nm := range names {
+			if v, ok := kwargs[nm]; ok {
+				if i < len(args) {
+					return nil, fmt.Errorf("TypeError: date() got multiple values for argument '%s'", nm)
+				}
+				posArgs[i] = v
+			}
+		}
+		args = posArgs
+	}
+	if len(args) != 3 || args[0] == nil || args[1] == nil || args[2] == nil {
 		return nil, fmt.Errorf("TypeError: date() takes exactly 3 arguments (%d given)", len(args))
 	}
 	year, err := asInt(args[0])
@@ -3101,12 +3118,38 @@ func datetimeStrftime(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return nil, err
 	}
+	// Naive datetimes (no tzinfo) produce "" for %z and %Z.
+	// Strip those directives from the format before calling Go's formatter.
+	// CPython: Modules/_datetimemodule.c:720 format_utcoffset (returns "" when no utcoffset)
+	if dt.TzInfo == nil {
+		fmtStr = stripNaiveTZDirectives(fmtStr)
+	}
 	gt := datetimeToGoTime(dt)
 	goFmt, hasDirectives := pythonToGoFmt(fmtStr)
 	if !hasDirectives {
 		return objects.NewStr(fmtStr), nil
 	}
 	return objects.NewStr(gt.Format(goFmt)), nil
+}
+
+// stripNaiveTZDirectives removes %z and %Z from a strftime format string for
+// naive datetimes. CPython calls format_utcoffset which returns "" when there
+// is no utcoffset; we replicate that by removing the directives entirely.
+//
+// CPython: Modules/_datetimemodule.c:720 format_utcoffset
+func stripNaiveTZDirectives(fmt string) string {
+	if !strings.ContainsAny(fmt, "zZ") {
+		return fmt
+	}
+	var b strings.Builder
+	for i := 0; i < len(fmt); i++ {
+		if fmt[i] == '%' && i+1 < len(fmt) && (fmt[i+1] == 'z' || fmt[i+1] == 'Z') {
+			i++ // skip both % and z/Z
+			continue
+		}
+		b.WriteByte(fmt[i])
+	}
+	return b.String()
 }
 
 // datetimeFormatMethod is datetime.__format__(format_spec).

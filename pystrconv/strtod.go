@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Locale-independent float parsing. Ported from
@@ -24,12 +25,18 @@ var ErrFloatOverflow = errors.New("value too large to convert to float")
 // ParseFloat mirrors PyOS_string_to_double. The string must already be
 // stripped of outer whitespace by the caller; ParseFloat itself does
 // not strip. Underscores following PEP 515 placement are accepted.
+// Unicode decimal digits and Unicode spaces are normalized to ASCII
+// before parsing, mirroring _PyUnicode_TransformDecimalAndSpaceToASCII.
 //
 // CPython: Python/pystrtod.c:L298 PyOS_string_to_double
+// CPython: Objects/unicodeobject.c:9612 _PyUnicode_TransformDecimalAndSpaceToASCII
 func ParseFloat(s string) (float64, error) {
 	if s == "" {
 		return 0, ErrInvalidFloat
 	}
+	// Transform Unicode decimal digits and spaces to ASCII, then strip
+	// spaces again (the caller's trimSpace only handles ASCII spaces).
+	s = strings.TrimSpace(transformDecimalAndSpaceToASCII(s))
 	cleaned, ok := stripUnderscores(s)
 	if !ok {
 		return 0, ErrInvalidFloat
@@ -40,6 +47,18 @@ func ParseFloat(s string) (float64, error) {
 	// Reject parenthesised NaN payload form that Go strconv accepts.
 	if strings.ContainsAny(cleaned, "()") {
 		return 0, ErrInvalidFloat
+	}
+	// CPython: Python/pystrtod.c:298 PyOS_string_to_double never accepts
+	// hex-float notation; only float.fromhex() does. Go's strconv.ParseFloat
+	// (1.13+) accepts "0x…" hex floats so we must reject them first.
+	{
+		rest := cleaned
+		if rest != "" && (rest[0] == '+' || rest[0] == '-') {
+			rest = rest[1:]
+		}
+		if strings.HasPrefix(strings.ToLower(rest), "0x") {
+			return 0, ErrInvalidFloat
+		}
 	}
 	v, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
@@ -94,6 +113,48 @@ func stripUnderscores(s string) (string, bool) {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
+// transformDecimalAndSpaceToASCII maps each rune in s to an ASCII byte:
+//   - runes < 128 pass through unchanged
+//   - Unicode whitespace maps to ' '
+//   - Unicode decimal digits (category Nd) map to their ASCII equivalent
+//   - anything else truncates the output with '?'
+//
+// CPython: Objects/unicodeobject.c:9612 _PyUnicode_TransformDecimalAndSpaceToASCII
+func transformDecimalAndSpaceToASCII(s string) string {
+	isASCII := true
+	for _, r := range s {
+		if r >= 128 {
+			isASCII = false
+			break
+		}
+	}
+	if isASCII {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r < 128:
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		case unicode.IsDigit(r):
+			// Decimal digit blocks are runs of exactly 10 consecutive
+			// code points (0–9). Walk down to find the '0' of the block.
+			base := r
+			for base > 0 && unicode.IsDigit(base-1) {
+				base--
+			}
+			b.WriteByte(byte('0' + (r - base)))
+		default:
+			b.WriteByte('?')
+			return b.String()
+		}
+	}
+	return b.String()
+}
+
 // parseInfNan recognizes the case-insensitive inf/infinity/nan tokens
 // with optional leading sign. Mirrors _Py_parse_inf_or_nan.
 //
@@ -113,7 +174,8 @@ func parseInfNan(s string) (float64, bool) {
 	case "inf", "infinity":
 		return math.Inf(int(sign)), true
 	case "nan":
-		return math.NaN(), true
+		// CPython: Python/pystrtod.c:28 _Py_parse_inf_or_nan preserves sign
+		return math.Copysign(math.NaN(), sign), true
 	}
 	return 0, false
 }

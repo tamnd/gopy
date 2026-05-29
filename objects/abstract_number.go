@@ -39,6 +39,21 @@ func numberSlot(o Object, op func(*NumberMethods) func(a, b Object) (Object, err
 // CPython: Objects/abstract.c:1029 binary_op
 // CPython: Objects/typeobject.c:8195 SLOT1BIN slot_nb_* table
 func numberBinary(a, b Object, opName string, pick func(*NumberMethods) func(a, b Object) (Object, error)) (Object, error) {
+	// When b's type is a strict subtype of a's type, give b's reverse
+	// operator a chance before a's forward slot.  Mirrors the subtype-first
+	// check in CPython's binary_op1.
+	//
+	// CPython: Objects/abstract.c:986 binary_op1 (subtype-first block)
+	if a.Type() != b.Type() && IsSubtype(b.Type(), a.Type()) {
+		if out, ok, err := dunderBinaryReverse(b, a, opName); ok {
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if fn := numberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
 		if err != nil {
@@ -61,6 +76,41 @@ func numberBinary(a, b Object, opName string, pick func(*NumberMethods) func(a, 
 		return out, err
 	}
 	return nil, binopTypeError(a, b, opName)
+}
+
+// DunderBinaryReverse tries only the reverse (__rop__) dunder on b with a as
+// the operand. Used for the subtype-first check in numberBinary and the VM.
+//
+// CPython: Objects/abstract.c:986 binary_op1 (slotw-first block)
+func DunderBinaryReverse(b, a Object, opName string) (Object, bool, error) {
+	return dunderBinaryReverse(b, a, opName)
+}
+
+func dunderBinaryReverse(b, a Object, opName string) (Object, bool, error) {
+	names, ok := binaryOpDunders[opName]
+	if !ok {
+		return nil, false, nil
+	}
+	// Only try b's reverse dunder if b's own type (not inherited from a's type)
+	// actually defines it. This avoids double-trying inherited slots.
+	reverseDescr, _ := LookupDescriptor(b.Type(), names[1])
+	if reverseDescr == nil {
+		return nil, false, nil
+	}
+	// Check that this dunder is not merely inherited from a's type.
+	aDescr, _ := LookupDescriptor(a.Type(), names[1])
+	if reverseDescr == aDescr {
+		return nil, false, nil
+	}
+	callable, err := bindDescriptor(reverseDescr, b)
+	if err != nil {
+		return nil, true, err
+	}
+	out, err := CallOneArg(callable, a)
+	if err != nil {
+		return nil, true, err
+	}
+	return out, true, nil
 }
 
 // DunderBinary is the __dunder__ / __rdunder__ fallback the binary
@@ -501,6 +551,27 @@ func IndexCheck(o Object) bool {
 // IntFromBool to drop the bool subtype.
 //
 // CPython: Objects/abstract.c:1446 PyNumber_Index
+// NumberLong calls __int__ protocol on o, mirroring PyNumber_Long.
+//
+// CPython: Objects/abstract.c:1765 PyNumber_Long
+func NumberLong(o Object) (Object, error) {
+	if _, ok := o.(*Int); ok {
+		return o, nil
+	}
+	if b, ok := o.(*Bool); ok {
+		if b == True() {
+			return NewInt(1), nil
+		}
+		return NewInt(0), nil
+	}
+	n := o.Type().Number
+	if n != nil && n.Int != nil {
+		return n.Int(o)
+	}
+	// Fall back to __index__.
+	return NumberIndex(o)
+}
+
 func NumberIndex(o Object) (Object, error) {
 	if i, ok := o.(*Int); ok {
 		return i, nil

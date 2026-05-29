@@ -129,6 +129,12 @@ func getRecursionLimit(_ []objects.Object, _ map[string]objects.Object) (objects
 	return objects.NewInt(int64(recursionLimit.Load())), nil
 }
 
+// RecursionLimit returns the current process-wide recursion ceiling.
+// Called from vm/eval_call.go to check depth before pushing a frame.
+//
+// CPython: Include/cpython/pystate.h py_recursion_limit field
+func RecursionLimit() int { return int(recursionLimit.Load()) }
+
 // getIntMaxStrDigits ports sys.get_int_max_str_digits().
 //
 // CPython: Python/sysmodule.c:2001 sys_get_int_max_str_digits_impl

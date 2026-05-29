@@ -120,7 +120,9 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
 	configureManagedDict(t, bases, noSlotsDeclared)
-	processClassNamespace(t, ns)
+	if err := processClassNamespace(t, ns); err != nil {
+		return nil, err
+	}
 	// NewType already ran inheritSlotsAllMRO when the namespace was not
 	// yet populated, so typeOverridesHash could not see __hash__. If the
 	// just-copied namespace declares __hash__, drop any inherited Hash /
@@ -290,9 +292,9 @@ func basesAllowInlineValues(bases []*Type, noSlotsDeclared bool) bool {
 
 // processClassNamespace patches __classcell__, installs __slots__
 // descriptors, and copies the rest of ns onto t.
-func processClassNamespace(t *Type, ns *Dict) {
+func processClassNamespace(t *Type, ns *Dict) error {
 	if ns == nil {
-		return
+		return nil
 	}
 	// __classcell__ is the cell __build_class__ left in the namespace so
 	// we can patch it with the new class. It is not a real attribute,
@@ -326,13 +328,14 @@ func processClassNamespace(t *Type, ns *Dict) {
 	// MemberDescr entries land in typeDescrTable before any class body
 	// assignments could overwrite them. Errors here are programming
 	// bugs in the class body (non-string slot, conflict with class
-	// variable, etc.). CPython raises TypeError/ValueError; gopy's
-	// NewUserType has no error channel yet, so panic with the same
-	// text.
+	// variable, etc.).
+	//
+	// CPython: Objects/typeobject.c:4397 type_new_slots — raises TypeError/ValueError
 	if err := installSlots(t, ns); err != nil {
-		panic(err)
+		return err
 	}
 	copyNamespaceToType(t, ns)
+	return nil
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type
@@ -852,6 +855,12 @@ func isOwnDescriptor(t *Type, name string) bool {
 	return providing == t
 }
 
+// IsOwnDescriptor reports whether name is defined directly on t (not
+// just inherited). Exported so builtins can detect user-defined slots.
+func IsOwnDescriptor(t *Type, name string) bool {
+	return isOwnDescriptor(t, name)
+}
+
 // fixupDescriptorSlots wires DescrGet when __get__ exists, DescrSet
 // when __set__ or __delete__ exists.
 //
@@ -1288,7 +1297,12 @@ func slotTpIter(o Object) (Object, error) {
 func slotTpIterNext(o Object) (Object, error) {
 	fn, err := lookupMethodOnSelf(o, "__next__")
 	if err != nil {
-		return nil, err
+		// CPython: Objects/typeobject.c:8421 slot_tp_iternext — when
+		// __next__ is absent (deleted after class creation), the slot
+		// still fires but the lookup fails. CPython returns NULL which
+		// FOR_ITER treats as end-of-iteration; raise TypeError so callers
+		// that bypassed FOR_ITER also see a sensible error.
+		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", o.Type().Name)
 	}
 	return Call(fn, NewTuple(nil), nil)
 }

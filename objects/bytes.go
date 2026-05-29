@@ -136,6 +136,51 @@ func init() {
 	bytesIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	bytesIterType.IterNext = bytesIterNext
 	AddIterSlotWrappers(bytesIterType)
+	// CPython: Objects/bytesobject.c:2858 bytes_iter_reduce
+	SetTypeDescr(bytesIterType, "__reduce__", NewMethodDescr(bytesIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*bytesIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			iterFn, err := BuiltinLookup("iter")
+			if err != nil {
+				return nil, err
+			}
+			if it.src == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewTuple(nil)})}), nil
+			}
+			return NewTuple([]Object{iterFn, NewTuple([]Object{it.src}), NewInt(int64(it.pos))}), nil
+		},
+	))
+	// CPython: Objects/bytesobject.c:2875 bytes_iter_setstate
+	SetTypeDescr(bytesIterType, "__setstate__", NewMethodDescr(bytesIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*bytesIterator)
+			idx, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+			}
+			n := int64(0)
+			if it.src != nil {
+				n = int64(len(it.src.v))
+			}
+			v, _ := idx.Int64()
+			if v < 0 {
+				v = 0
+			} else if v > n {
+				v = n
+			}
+			it.pos = int(v)
+			return None(), nil
+		},
+	))
 }
 
 func bytesIter(o Object) (Object, error) {
@@ -147,7 +192,8 @@ func bytesIter(o Object) (Object, error) {
 
 func bytesIterNext(o Object) (Object, error) {
 	it := o.(*bytesIterator)
-	if it.pos >= len(it.src.v) {
+	if it.src == nil || it.pos >= len(it.src.v) {
+		it.src = nil
 		return nil, ErrStopIteration
 	}
 	v := it.src.v[it.pos]

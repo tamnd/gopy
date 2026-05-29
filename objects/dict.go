@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 // dictEntry is one slot in the dict's open-addressed table. The slot
@@ -1033,8 +1035,19 @@ func dictPopItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewTuple([]Object{k, v}), nil
 }
 
+// dictReprInProgress guards against recursive dict repr: {1: {...}}.
+//
+// CPython: Objects/object.c:2256 Py_ReprEnter
+var dictReprInProgress sync.Map
+
 func dictRepr(o Object) (string, error) {
 	d := o.(*Dict)
+	ptr := uintptr(unsafe.Pointer(d))
+	if _, loaded := dictReprInProgress.LoadOrStore(ptr, struct{}{}); loaded {
+		return "{...}", nil
+	}
+	defer dictReprInProgress.Delete(ptr)
+
 	var b strings.Builder
 	b.WriteByte('{')
 	first := true

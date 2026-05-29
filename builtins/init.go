@@ -232,7 +232,8 @@ func wireTypeCalls() {
 		bindCtorDescr(objects.StrType(), StrOf)
 		objects.SetIntTpNewBase(IntCtor)
 		bindCtorDescr(objects.IntType, IntCtor)
-		bindCtor(objects.FloatType, FloatCtor)
+		objects.SetFloatTpNewBase(FloatCtor)
+		bindCtorDescr(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
 		bindListCtor(objects.ListType)
 		// tuple's TpNew is set in objects/tuple.go (subtype-aware,

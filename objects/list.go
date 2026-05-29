@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"unsafe"
 )
 
 // List is the Python list, a mutable ordered sequence.
@@ -562,8 +564,19 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 	}
 }
 
+// listReprInProgress guards against recursive list repr: [[...]].
+//
+// CPython: Objects/object.c:2256 Py_ReprEnter
+var listReprInProgress sync.Map
+
 func listRepr(o Object) (string, error) {
 	l := o.(*List)
+	ptr := uintptr(unsafe.Pointer(l))
+	if _, loaded := listReprInProgress.LoadOrStore(ptr, struct{}{}); loaded {
+		return "[...]", nil
+	}
+	defer listReprInProgress.Delete(ptr)
+
 	var b strings.Builder
 	b.WriteByte('[')
 	for i, it := range l.items {
@@ -595,7 +608,14 @@ func init() {
 	listIterType.Iter = func(o Object) (Object, error) { return o, nil }
 	listIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listIterator)
+		if it.src == nil {
+			return nil, ErrStopIteration
+		}
 		if it.pos >= len(it.src.items) {
+			// CPython: Objects/listobject.c:3573 listiter_next — clears
+			// it_seq on exhaustion so the iterator is a sink state:
+			// appending to the list after exhaustion does not resume it.
+			it.src = nil
 			return nil, ErrStopIteration
 		}
 		v := it.src.items[it.pos]
@@ -620,15 +640,10 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			var src *List
-			pos := 0
-			if it.src != nil {
-				src = it.src
-				pos = it.pos
-			} else {
-				src = NewList(nil)
+			if it.src == nil {
+				return NewTuple([]Object{iterFn, NewTuple([]Object{NewList(nil)})}), nil
 			}
-			return NewTuple([]Object{iterFn, NewTuple([]Object{src}), NewInt(int64(pos))}), nil
+			return NewTuple([]Object{iterFn, NewTuple([]Object{it.src}), NewInt(int64(it.pos))}), nil
 		},
 	))
 	// __setstate__ restores the iterator position after unpickling.

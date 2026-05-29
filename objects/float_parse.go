@@ -58,6 +58,13 @@ func FloatFromString(s string) (*Float, error) {
 		return nil, fmtFloatInvalid(s)
 	}
 
+	// CPython: Objects/floatobject.c:172 PyFloat_FromString never accepts
+	// hex-float notation ("0x…"); only float.fromhex() does.
+	low := strings.ToLower(digits)
+	if strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0X") {
+		return nil, fmtFloatInvalid(s)
+	}
+
 	v, err := strconv.ParseFloat(digits, 64)
 	if err != nil {
 		return nil, fmtFloatInvalid(s)
