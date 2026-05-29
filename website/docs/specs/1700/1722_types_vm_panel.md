@@ -8,7 +8,7 @@ description: "Close all failing ready-tests in the spec 1700 panel that regress 
 
 ## Status
 
-Active. Branch `feat/v0.12.5-spec-1719-parser-ast` (carry-over work).
+Active. Branch `feat/v0.12.7-vm-audit`.
 
 ## Goal
 
@@ -637,21 +637,21 @@ bytes via `memoryview.ToBytes()`.
 
 ### Spec 1700 rows to advance
 
-| Test | Current state | Unblocked by |
-|------|--------------|--------------|
+| Test | Current state (2026-05-29) | Unblocked by |
+|------|---------------------------|--------------|
 | test_float | crash (fractions) | P1.1 |
 | test_builtin | crash (fractions) | P1.1 |
-| test_compare | crash (fractions) | P1.1 |
+| test_compare | done (1722 audit) | — |
 | test_numeric_tower | crash (fractions) | P1.1 |
 | test_bytes | crash (string_tests) | P1.2 |
-| test_str | crash (string_tests) | P1.2 |
+| test_str | 18 fail / 1 error | P1.2 + str fixes |
 | test_userstring | crash (string_tests) | P1.2 |
 | test_dict | crash (mapping_tests) | P1.3 |
-| test_frame | crash (mapping_tests) | P1.3 |
+| test_frame | 17 fail / 9 errors | spec 1723 P4 |
 | test_symtable | crash (symtable) | P1.4 |
 | test_long | crash (int_info) | P2.3 |
 | test_int | 17 fail / 8 error | P2.1 P2.2 P2.4 |
-| test_complex | 38 fail / 10 error | P3.1–P3.10 |
-| test_slice | 4 fail | P4.1 P4.2 P4.3 P4.4 |
-| test_iter | crash | P5.1 |
+| test_complex | 37 fail / 10 error | P3.1–P3.10 |
+| test_slice | 1 fail | P4.3 |
+| test_iter | 1 fail | P5.1 |
 | test_py_compile | 1 error | P6.1 |
