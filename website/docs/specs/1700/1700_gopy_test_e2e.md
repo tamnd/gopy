@@ -239,31 +239,32 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 ### VM / eval loop (22 files)
 
 Spec [1723](1723_vm_eval_loop_audit.md) — full audit with CPython citations for every gap.
+Last retested at `2c01f361` (v0.12.7, 2026-05-29).
 
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_call | v0.12.7 | done | 4 pass, 182 skipped (_testcapi) |
+| test_augassign | v0.12.7 | done | 7/7 green |
+| test_call | v0.12.7 | done | 186/186 green (skipped=182, _testcapi) |
+| test_compare | v0.12.7 | done | 16/16 green |
+| test_contains | v0.12.7 | done | 4/4 green |
+| test_dynamic | v0.12.7 | done | 11/11 green |
+| test_eval | v0.10.1 | ready | not yet vendored (1723 P9) |
 | test_extcall | v0.9 | ready | 1 failure — error message module prefix (1723 P10) |
-| test_frame | v0.9 | ready | 17 fail — f_generator, f_trace, unraisablehook (1723 P4) |
-| test_eval | v0.10.1 | ready | file not yet vendored (1723 P9) |
-| test_dynamic | v0.12.7 | done | OK |
-| test_richcmp | v0.12.7 | done | OK |
-| test_compare | v0.12.7 | done | OK |
-| test_unary | v0.12.7 | done | OK |
-| test_pow | v0.12.7 | done | OK |
-| test_augassign | v0.12.7 | done | OK |
-| test_with | v0.12.7 | done | OK |
-| test_yield_from | v0.9 | ready | 15 fail — gen throw/close identity (1723 P8) |
-| test_coroutines | v0.9 | ready | panic — deadlock in coroutine.Send (1723 P1, P3) |
-| test_asyncgen | v0.9 | ready | 4 fail, 79 errors — asyncgen hooks (1723 P3) |
-| test_generator_stop | v0.9 | ready | 2 errors — PEP 479 StopIteration (1723 P8) |
-| test_generators | v0.9 | ready | 20 fail — gi_code, __name__, cr_frame (1723 P1) |
+| test_frame | v0.9 | ready | 17 fail, 9 errors — FrameLocalsProxy, frame.clear, f_generator (1723 P4) |
+| test_index | v0.4 | ready | 1 fail, 20 errors — __index__ on seq types, sequence repeat overflow (1723 P6) |
+| test_isinstance | v0.12.7 | done | 23/23 green |
 | test_iter | v0.2 | ready | 1 failure — str.join (spec 1722 P5) |
 | test_iterlen | v0.2 | ready | 18 fail — __length_hint__ on iterators (1723 P7) |
-| test_contains | v0.12.7 | done | OK |
-| test_index | v0.4 | ready | 20 errors — __index__ in subscript (1723 P6) |
-| test_isinstance | v0.12.7 | done | OK |
-| test_typechecks | v0.12.7 | done | OK |
+| test_pow | v0.12.7 | done | 7/7 green |
+| test_richcmp | v0.12.7 | done | 11/11 green |
+| test_typechecks | v0.12.7 | done | 6/6 green |
+| test_unary | v0.12.7 | done | 6/6 green |
+| test_with | v0.12.7 | done | 54/54 green |
+| test_asyncgen | v0.9 | ready | 4 fail, 79 errors — asyncgen hooks (1723 P3) |
+| test_coroutines | v0.9 | ready | panic — deadlock in coroutine.Send (1723 P1, P3) |
+| test_generator_stop | v0.9 | ready | 2 errors — PEP 479 StopIteration (1723 P8) |
+| test_generators | v0.9 | ready | 20 fail, 19 errors — gen.close/throw, frame attrs, gi_code/__name__ (1723 P1) |
+| test_yield_from | v0.9 | ready | 15 fail, 30 errors — gen.close/throw, yield-from delegation (1723 P8) |
 
 ### Exceptions / traceback (8 files)
 

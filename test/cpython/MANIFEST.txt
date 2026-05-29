@@ -92,12 +92,12 @@ test_compare	done	v0.12.7	16/16 green
 test_contains	done	v0.12.5	4/4 green. Legacy __getitem__ iteration in containsItem + NaN identity via listContains + None-slot block for __contains__ = None
 test_dynamic	done	v0.12.5	11/11 green
 test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14; no standalone test_eval.py exists
-test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)
-test_frame	ready	v0.9.0	58/59 pass (skipped=8); 1 fail: test_basic f_builtins==__builtins__ module-vs-dict artifact when run as __main__
-test_index	ready	v0.4.0	55/55 pass
+test_extcall	ready	v0.9.0	1 failure — error message module prefix (1723 P10)
+test_frame	ready	v0.9.0	17 fail, 9 errors (skipped=12) — FrameLocalsProxy, frame.clear, f_generator (1723 P4)
+test_index	ready	v0.4.0	1 fail, 20 errors — __index__ on seq types, sequence repeat overflow (1723 P6)
 test_isinstance	done	v0.12.7	23/23 green
-test_iter	ready	v0.2.0	57/57 pass
-test_iterlen	ready	v0.2.0	22/22 pass
+test_iter	ready	v0.2.0	1 failure — str.join (spec 1722 P5)
+test_iterlen	ready	v0.2.0	18 fail — __length_hint__ on iterators (1723 P7)
 test_pow	done	v0.12.7	7/7 green
 test_richcmp	done	v0.12.7	11/11 green
 test_typechecks	done	v0.12.5	6/6 green
@@ -105,11 +105,11 @@ test_unary	done	v0.12.5	6/6 green
 test_with	done	v0.12.5	54/54 green. _GeneratorContextManager.__init__ + frame.clear + traceback identity fix + LOAD_SPECIAL TypeError messages + PrevInstr column fix + traceback dedup guard
 
 # ---- Iterators / generators / coroutines ---------------------------
-test_asyncgen	ready	v0.9.0	85/85 pass
-test_coroutines	ready	v0.9.0	99/99 pass
-test_generator_stop	ready	v0.9.0	2/2 pass
-test_generators	ready	v0.9.0	59/59 pass
-test_yield_from	ready	v0.9.0	43/43 pass
+test_asyncgen	ready	v0.9.0	4 fail, 79 errors — asyncgen hooks (1723 P3)
+test_coroutines	ready	v0.9.0	panic — deadlock in coroutine.Send (1723 P1, P3)
+test_generator_stop	ready	v0.9.0	2 errors — PEP 479 StopIteration (1723 P8)
+test_generators	ready	v0.9.0	20 fail, 19 errors — gen.close/throw, frame attrs, gi_code/__name__ (1723 P1)
+test_yield_from	ready	v0.9.0	15 fail, 30 errors — gen.close/throw, yield-from delegation (1723 P8)
 
 # ---- Exceptions / traceback ----------------------------------------
 test_baseexception	done	v0.12.7	11/11 green
