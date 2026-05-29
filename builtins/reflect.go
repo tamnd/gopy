@@ -116,12 +116,12 @@ func Repr(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	return objects.ReprObject(args[0])
 }
 
-// StrOf ports the str() builtin factory. Follows CPython's unicode_new:
-// - str() or str(object) -> str(object)
-// - str(object, encoding) or str(object, encoding, errors) -> decode bytes
-// - 'object' may be passed as the keyword argument 'object'
-// - errors without encoding: if object is bytes-like, use utf-8 encoding;
-//   if no object is given, return ''
+// StrOf ports the str() builtin factory. Follows CPython's unicode_new.
+// str() or str(object) returns PyObject_Str of the argument.
+// str(object, encoding) and str(object, encoding, errors) decode a bytes-like
+// buffer through the codec registry. The 'object' positional argument may also
+// be passed by keyword. When only 'errors' is given and the object is
+// bytes-like, utf-8 is used as the encoding.
 //
 // CPython: Objects/unicodeobject.c:14112 unicode_new
 func StrOf(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {

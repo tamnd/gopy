@@ -75,7 +75,9 @@ func TestComplexDivByZero(t *testing.T) {
 func TestComplexNoOrdering(t *testing.T) {
 	a := NewComplex(1, 0)
 	b := NewComplex(2, 0)
-	if _, err := complexRichCmp(a, b, CompareLT); err == nil {
+	// complexRichCmp returns NotImplemented per CPython's slot contract;
+	// RichCmp (do_richcompare) is the function that raises TypeError.
+	if _, err := RichCmp(a, b, CompareLT); err == nil {
 		t.Error("complex < should error")
 	}
 }
