@@ -50,11 +50,7 @@ func IsSubclass(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: issubclass expected 2 arguments, got %d", len(args))
 	}
-	sub, ok := args[0].(*objects.Type)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: issubclass() arg 1 must be a class")
-	}
-	ok2, err := objects.ObjectIsSubclass(sub, args[1])
+	ok2, err := objects.ObjectIsSubclassObj(args[0], args[1])
 	if err != nil {
 		return nil, err
 	}

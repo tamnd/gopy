@@ -238,30 +238,32 @@ Spec [1719](1719_parser_ast_full_port.md) shipped (all phases green, PR #78, `9d
 
 ### VM / eval loop (22 files)
 
+Spec [1723](1723_vm_eval_loop_audit.md) — full audit with CPython citations for every gap.
+
 | Test | Owner | Mark | Notes |
 |------|-------|------|-------|
-| test_call | v0.9 | ready | CALL / KW_NAMES family |
-| test_extcall | v0.9 | ready | extended call (\* and \*\* expansion) |
-| test_frame | v0.9 | ready | frame object surface |
-| test_eval | v0.10.1 | ready | eval() builtin |
-| test_dynamic | v0.7 | ready | exec/eval against frame.f_locals |
-| test_richcmp | v0.2 | ready | rich comparison protocol |
-| test_compare | v0.2 | ready | comparison fallbacks |
-| test_unary | v0.4 | ready | unary number ops |
-| test_pow | v0.4 | ready | builtin pow() |
-| test_augassign | v0.5 | ready | augassign codegen |
-| test_with | v0.9 | ready | context manager; with statement |
-| test_yield_from | v0.9 | ready | yield from semantics |
-| test_coroutines | v0.9 | ready | async def + await codegen |
-| test_asyncgen | v0.9 | ready | async generators |
-| test_generator_stop | v0.9 | ready | PEP 479 |
-| test_generators | v0.9 | ready | generator protocol panel |
-| test_iter | v0.2 | ready | iter()/next() builtins |
-| test_iterlen | v0.2 | ready | __length_hint__ |
-| test_contains | v0.2 | ready | __contains__ protocol |
-| test_index | v0.4 | ready | __index__ protocol |
-| test_isinstance | v0.2 | ready | isinstance() panel |
-| test_typechecks | v0.2 | ready | type-check fast paths |
+| test_call | v0.12.7 | done | 4 pass, 182 skipped (_testcapi) |
+| test_extcall | v0.9 | ready | 1 failure — error message module prefix (1723 P10) |
+| test_frame | v0.9 | ready | 17 fail — f_generator, f_trace, unraisablehook (1723 P4) |
+| test_eval | v0.10.1 | ready | file not yet vendored (1723 P9) |
+| test_dynamic | v0.12.7 | done | OK |
+| test_richcmp | v0.12.7 | done | OK |
+| test_compare | v0.12.7 | done | OK |
+| test_unary | v0.12.7 | done | OK |
+| test_pow | v0.12.7 | done | OK |
+| test_augassign | v0.12.7 | done | OK |
+| test_with | v0.12.7 | done | OK |
+| test_yield_from | v0.9 | ready | 15 fail — gen throw/close identity (1723 P8) |
+| test_coroutines | v0.9 | ready | panic — deadlock in coroutine.Send (1723 P1, P3) |
+| test_asyncgen | v0.9 | ready | 4 fail, 79 errors — asyncgen hooks (1723 P3) |
+| test_generator_stop | v0.9 | ready | 2 errors — PEP 479 StopIteration (1723 P8) |
+| test_generators | v0.9 | ready | 20 fail — gi_code, __name__, cr_frame (1723 P1) |
+| test_iter | v0.2 | ready | 1 failure — str.join (spec 1722 P5) |
+| test_iterlen | v0.2 | ready | 18 fail — __length_hint__ on iterators (1723 P7) |
+| test_contains | v0.12.7 | done | OK |
+| test_index | v0.4 | ready | 20 errors — __index__ in subscript (1723 P6) |
+| test_isinstance | v0.12.7 | done | OK |
+| test_typechecks | v0.12.7 | done | OK |
 
 ### Exceptions / traceback (8 files)
 

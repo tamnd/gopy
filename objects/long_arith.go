@@ -138,9 +138,9 @@ func intDivmod(a, b Object) (Object, error) {
 
 // intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints.
 // CPython promotes `int ** neg_int` (no modulus) to a float, so we do
-// the same here via math.Pow on float64. The three-argument case with
-// a negative exponent is the modular-inverse path; for now we leave it
-// as NotImplemented since random.py and friends don't take it.
+// the same here via math.Pow on float64. The three-argument form with a
+// negative exponent computes the modular multiplicative inverse via the
+// extended Euclidean algorithm (big.Int.ModInverse).
 //
 // CPython: Objects/longobject.c:3837 long_pow
 func intPower(a, b, mod Object) (Object, error) {
@@ -148,24 +148,52 @@ func intPower(a, b, mod Object) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
-	if bi.v.Sign() < 0 {
-		if mod != nil && mod != None() {
-			return notImplemented(), nil
-		}
-		af, _ := new(big.Float).SetInt(&ai.v).Float64()
-		bf, _ := new(big.Float).SetInt(&bi.v).Float64()
-		return NewFloat(math.Pow(af, bf)), nil
-	}
-	var m *big.Int
 	if mod != nil && mod != None() {
-		mi, ok := mod.(*Int)
-		if !ok {
+		mi, mok := mod.(*Int)
+		if !mok {
 			return notImplemented(), nil
 		}
 		if mi.v.Sign() == 0 {
 			return nil, errors.New("ValueError: pow() 3rd argument cannot be 0")
 		}
-		m = &mi.v
+		// Normalise modulus to positive for big.Int.Exp, which requires a
+		// positive modulus. Apply Python floor-modulo convention at the end.
+		// CPython: Objects/longobject.c:4916 (negate c if negative)
+		negMod := mi.v.Sign() < 0
+		absM := new(big.Int).Abs(&mi.v)
+		if absM.Cmp(bigOne) == 0 {
+			return NewInt(0), nil
+		}
+		var result *big.Int
+		if bi.v.Sign() < 0 {
+			// Negative exponent: compute modular inverse first, then power.
+			// CPython: Objects/longobject.c:4955 long_invmod path
+			negB := new(big.Int).Neg(&bi.v)
+			inv := new(big.Int).ModInverse(&ai.v, absM)
+			if inv == nil {
+				return nil, errors.New("ValueError: base is not invertible for the given modulus")
+			}
+			result = new(big.Int).Exp(inv, negB, absM)
+		} else {
+			result = new(big.Int).Exp(&ai.v, &bi.v, absM)
+		}
+		// Convert Go's non-negative result to Python floor-modulo convention:
+		// result is in [0, |m|); if m is negative and result != 0, subtract |m|.
+		if negMod && result.Sign() != 0 {
+			result.Sub(result, absM)
+		}
+		return NewIntFromBig(result), nil
 	}
-	return NewIntFromBig(new(big.Int).Exp(&ai.v, &bi.v, m)), nil
+	if bi.v.Sign() < 0 {
+		// CPython: Objects/longobject.c:3897 "zero to a negative power"
+		if ai.v.Sign() == 0 {
+			return nil, errors.New("ZeroDivisionError: zero to a negative power")
+		}
+		af, _ := new(big.Float).SetInt(&ai.v).Float64()
+		bf, _ := new(big.Float).SetInt(&bi.v).Float64()
+		return NewFloat(math.Pow(af, bf)), nil
+	}
+	return NewIntFromBig(new(big.Int).Exp(&ai.v, &bi.v, nil)), nil
 }
+
+var bigOne = big.NewInt(1)

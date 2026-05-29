@@ -87,19 +87,19 @@ test_thread_local_bytecode	ready	post-0.12	6/6 pass (all skipped — only run un
 
 # ---- VM / eval loop ------------------------------------------------
 test_augassign	done	v0.12.5	7/7 green. Inplace op dispatch fix + None-slot TypeError (callBinaryDunder, isOwnDescriptor, slotTpRichCompare)
-test_call	ready	v0.9.0	186/186 pass
-test_compare	ready	v0.2.0	16/16 pass
+test_call	done	v0.12.7	186/186 green (skipped=182)
+test_compare	done	v0.12.7	16/16 green
 test_contains	done	v0.12.5	4/4 green. Legacy __getitem__ iteration in containsItem + NaN identity via listContains + None-slot block for __contains__ = None
 test_dynamic	done	v0.12.5	11/11 green
 test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14; no standalone test_eval.py exists
 test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)
 test_frame	ready	v0.9.0	58/59 pass (skipped=8); 1 fail: test_basic f_builtins==__builtins__ module-vs-dict artifact when run as __main__
 test_index	ready	v0.4.0	55/55 pass
-test_isinstance	ready	v0.2.0	23/23 pass
+test_isinstance	done	v0.12.7	23/23 green
 test_iter	ready	v0.2.0	57/57 pass
 test_iterlen	ready	v0.2.0	22/22 pass
-test_pow	ready	v0.4.0	7/7 pass
-test_richcmp	ready	v0.2.0	11/11 pass
+test_pow	done	v0.12.7	7/7 green
+test_richcmp	done	v0.12.7	11/11 green
 test_typechecks	done	v0.12.5	6/6 green
 test_unary	done	v0.12.5	6/6 green
 test_with	done	v0.12.5	54/54 green. _GeneratorContextManager.__init__ + frame.clear + traceback identity fix + LOAD_SPECIAL TypeError messages + PrevInstr column fix + traceback dedup guard
