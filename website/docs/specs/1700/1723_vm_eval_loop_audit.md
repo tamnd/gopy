@@ -37,7 +37,7 @@ that tree.
 | test_extcall | FAILED (1 failure) | ready |
 | test_frame | FAILED (17 failures, 9 errors) | ready |
 | test_eval | file not vendored | ready |
-| test_pow | FAILED (2 failures, 10000 errors) | ready |
+| test_pow | OK | done |
 | test_yield_from | FAILED (15 failures, 30 errors) | ready |
 | test_coroutines | PANIC (goroutine deadlock) | ready |
 | test_asyncgen | FAILED (4 failures, 79 errors) | ready |
@@ -46,7 +46,7 @@ that tree.
 | test_iter | FAILED (1 failure) — tracked in spec 1722 P5 | ready |
 | test_iterlen | FAILED (18 failures) | ready |
 | test_index | FAILED (1 failure, 20 errors) | ready |
-| test_isinstance | FAILED (1 failure, 16 errors) | ready |
+| test_isinstance | OK | done |
 
 ---
 
@@ -460,8 +460,8 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 
 ### P2 — pow() modular inverse
 
-- [ ] P2.1 `pow(a, -1, m)` modular inverse via `big.Int.ModInverse`
-- [ ] P2.2 `pow(a, b, m)` negative-modulus normalisation
+- [x] P2.1 `pow(a, -1, m)` modular inverse via `big.Int.ModInverse`
+- [x] P2.2 `pow(a, b, m)` negative-modulus normalisation
 
 ### P3 — sys hooks
 
@@ -476,10 +476,12 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 - [ ] P4.3 `sys.unraisablehook` settable attribute
 - [ ] P4.4 `frame.clear()` executing-frame guard
 
-### P5 — isinstance / issubclass with UnionType
+### P5 — isinstance / issubclass with UnionType and abstract classes
 
-- [ ] P5.1 `isinstance(x, int | str)` via UnionType.__instancecheck__
-- [ ] P5.2 `issubclass(T, int | str)` via UnionType.__subclasscheck__
+- [x] P5.1 `isinstance(x, int | str)` via `*UnionType` case in `objectIsInstance`
+- [x] P5.2 `issubclass(T, int | str)` via `*UnionType` case in `objectIsSubclassObj`
+- [x] P5.3 abstract class protocol (`checkClass` + `abstractIsSubclass` + `ClearCurrentExceptionHook`)
+- [x] P5.4 AttributeError masking: clear thread-state exception to avoid stale exception on synthesize path
 
 ### P6 — __index__ in subscript paths
 
@@ -526,9 +528,9 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 | test_asyncgen | ready | ready | P1, P3 |
 | test_yield_from | ready | ready | P1, P8 |
 | test_generator_stop | ready | ready | P8 |
-| test_pow | ready | ready | P2 |
+| test_pow | ready | done | P2 shipped |
 | test_frame | ready | ready | P4 |
-| test_isinstance | ready | ready | P5 |
+| test_isinstance | ready | done | P5 shipped |
 | test_index | ready | ready | P6 |
 | test_iterlen | ready | ready | P7 |
 | test_extcall | ready | ready | P10 |

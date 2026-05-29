@@ -250,7 +250,7 @@ Spec [1723](1723_vm_eval_loop_audit.md) — full audit with CPython citations fo
 | test_richcmp | v0.12.7 | done | OK |
 | test_compare | v0.12.7 | done | OK |
 | test_unary | v0.12.7 | done | OK |
-| test_pow | v0.4 | ready | 10000+ errors — pow(a,-1,m) modular inverse (1723 P2) |
+| test_pow | v0.12.7 | done | OK |
 | test_augassign | v0.12.7 | done | OK |
 | test_with | v0.12.7 | done | OK |
 | test_yield_from | v0.9 | ready | 15 fail — gen throw/close identity (1723 P8) |
@@ -262,7 +262,7 @@ Spec [1723](1723_vm_eval_loop_audit.md) — full audit with CPython citations fo
 | test_iterlen | v0.2 | ready | 18 fail — __length_hint__ on iterators (1723 P7) |
 | test_contains | v0.12.7 | done | OK |
 | test_index | v0.4 | ready | 20 errors — __index__ in subscript (1723 P6) |
-| test_isinstance | v0.2 | ready | 16 errors — UnionType instancecheck (1723 P5) |
+| test_isinstance | v0.12.7 | done | OK |
 | test_typechecks | v0.12.7 | done | OK |
 
 ### Exceptions / traceback (8 files)

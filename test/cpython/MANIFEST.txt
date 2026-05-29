@@ -95,10 +95,10 @@ test_eval	out-of-scope	-	absorbed into the parser/eval subsystem in CPython 3.14
 test_extcall	ready	v0.9.0	1/1 pass (doctest module-prefix artifact when run as __main__, passes via runner)
 test_frame	ready	v0.9.0	58/59 pass (skipped=8); 1 fail: test_basic f_builtins==__builtins__ module-vs-dict artifact when run as __main__
 test_index	ready	v0.4.0	55/55 pass
-test_isinstance	ready	v0.2.0	23/23 pass
+test_isinstance	done	v0.12.7	23/23 green
 test_iter	ready	v0.2.0	57/57 pass
 test_iterlen	ready	v0.2.0	22/22 pass
-test_pow	ready	v0.4.0	7/7 pass
+test_pow	done	v0.12.7	7/7 green
 test_richcmp	ready	v0.2.0	11/11 pass
 test_typechecks	done	v0.12.5	6/6 green
 test_unary	done	v0.12.5	6/6 green
