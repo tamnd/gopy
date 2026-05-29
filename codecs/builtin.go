@@ -171,7 +171,7 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 		// sequence is incomplete or invalid.
 		errStart := i
 		errEnd := i + 1
-		reason := "invalid start byte"
+		var reason string
 
 		switch {
 		case c < 0xC2:
@@ -203,9 +203,10 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 			// 0xED: first cb must be 0x80-0x9F (0xA0-0xBF would be a surrogate).
 			// CPython: Objects/unicodeobject.c:4756 (utf8_decode inner loop)
 			var cb1Lo, cb1Hi byte = 0x80, 0xBF
-			if c == 0xE0 {
+			switch c {
+			case 0xE0:
 				cb1Lo = 0xA0
-			} else if c == 0xED {
+			case 0xED:
 				cb1Hi = 0x9F
 			}
 			if i+1 >= len(input) {
@@ -241,9 +242,10 @@ func decodeUTF8(input []byte, errors string) (out string, n int, err error) {
 			// 0xF4: first cb must be 0x80-0x8F (0x90-0xBF would exceed U+10FFFF).
 			// CPython: Objects/unicodeobject.c:4756 (utf8_decode inner loop)
 			var cb1Lo4, cb1Hi4 byte = 0x80, 0xBF
-			if c == 0xF0 {
+			switch c {
+			case 0xF0:
 				cb1Lo4 = 0x90
-			} else if c == 0xF4 {
+			case 0xF4:
 				cb1Hi4 = 0x8F
 			}
 			if i+1 >= len(input) {

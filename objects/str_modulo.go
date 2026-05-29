@@ -405,7 +405,8 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 		}
 		return big.NewInt(0), nil
 	case *Float:
-		if ch == 'o' || ch == 'x' || ch == 'X' {
+		switch ch {
+		case 'o', 'x', 'X':
 			return nil, fmt.Errorf(
 				"TypeError: %%%c format: an integer is required, not %s",
 				ch, v.Type().Name)
@@ -420,7 +421,8 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 	// CPython: Objects/unicodeobject.c:14872 mainformatlong
 	// %x/%X/%o use __index__; %d/%i/%u use __int__ (PyNumber_Long).
 	// Non-TypeError errors (RuntimeError etc.) propagate immediately.
-	if ch == 'o' || ch == 'x' || ch == 'X' {
+	switch ch {
+	case 'o', 'x', 'X':
 		idx, ierr := NumberIndex(v)
 		if ierr != nil {
 			if !isTypeError(ierr) {
@@ -429,7 +431,7 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 		} else if i, ok := idx.(*Int); ok {
 			return new(big.Int).Set(&i.v), nil
 		}
-	} else if ch == 'd' || ch == 'i' || ch == 'u' {
+	case 'd', 'i', 'u':
 		lv, ierr := NumberLong(v)
 		if ierr != nil {
 			if !isTypeError(ierr) {

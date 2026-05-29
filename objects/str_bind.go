@@ -156,7 +156,6 @@ func strNeedle(o Object) (string, error) {
 	return s, nil
 }
 
-
 func strStartsWithMethod(args []Object, _ map[string]Object) (Object, error) {
 	u, err := selfStrUnicode(args, "startswith")
 	if err != nil {
@@ -370,7 +369,7 @@ func strSplitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if len(args) > 3 {
 		return nil, fmt.Errorf("TypeError: split() takes at most 2 arguments (%d given)", len(args)-1)
 	}
-	sepObj := Object(None())
+	sepObj := None()
 	if len(args) >= 2 {
 		sepObj = args[1]
 	} else if kw, ok := kwargs["sep"]; ok {
@@ -414,7 +413,7 @@ func strRSplitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if len(args) > 3 {
 		return nil, fmt.Errorf("TypeError: rsplit() takes at most 2 arguments (%d given)", len(args)-1)
 	}
-	sepObj := Object(None())
+	sepObj := None()
 	if len(args) >= 2 {
 		sepObj = args[1]
 	} else if kw, ok := kwargs["sep"]; ok {
@@ -700,9 +699,9 @@ func strFormatExpand(s string, args []Object, kwargs map[string]Object) (*Unicod
 // strFormatExpandInner is the shared implementation of str.format() and
 // str.format_map().  mapObj, when non-nil, routes named-key lookups through
 // GetItem(mapObj, key) so that __missing__ / __getitem__ on the mapping is
-// honoured.  auto tracks the auto-numbering / manual-numbering mode across
+// honored.  auto tracks the auto-numbering / manual-numbering mode across
 // nested spec expansions (the same counter is re-used for both the field
-// name and the spec string, matching CPython's AutoNumber behaviour).
+// name and the spec string, matching CPython's AutoNumber behavior).
 //
 // CPython: Objects/stringlib/unicode_format.h:906 build_string
 func strFormatExpandInner(s string, args []Object, kwargs map[string]Object, mapObj Object, auto *int, depth int) (*Unicode, error) {
@@ -893,8 +892,9 @@ colonDone:
 // for format_map) and applies any trailing ".attr" / "[key]" components.
 //
 // The auto counter encodes numbering mode:
-//   >= 0 : auto mode (or unset when 0 with no fields consumed yet)
-//   -1   : manual mode
+//
+//	>= 0 : auto mode (or unset when 0 with no fields consumed yet)
+//	-1   : manual mode
 //
 // CPython: Objects/stringlib/unicode_format.h:392 get_field_object
 func strFormatLookupInner(name string, args []Object, kwargs map[string]Object, mapObj Object, auto *int) (Object, error) {

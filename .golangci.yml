@@ -627,6 +627,31 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # StrOf mirrors unicode_new's encoding/errors/object dispatch
+      # branch-for-branch; the complexity is the parity surface.
+      - path: builtins/reflect\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # decodeUTF8 mirrors CPython's utf8_decode inner loop with per-byte
+      # state tracking; the branch tree is the parity unit.
+      - path: codecs/builtin\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # dict_iter init() wires every dict iterator descriptor in one block,
+      # matching Objects/dictobject.c's tp_methods table layout.
+      - path: objects/dict_iter\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # sliceGetLongIndices mirrors PySlice_GetIndicesEx and the extended
+      # long-index variant; naked returns are the parity-faithful shape.
+      - path: objects/slice_indices\.go
+        linters:
+          - gocognit
+          - gocyclo
+          - nakedret
 
 formatters:
   enable:
