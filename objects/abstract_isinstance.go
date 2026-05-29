@@ -37,67 +37,14 @@ func objectIsInstance(inst, cls Object, depth int) (bool, error) {
 		return true, nil
 	}
 	if tup, ok := cls.(*Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := objectIsInstance(inst, tup.Item(i), depth+1)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
+		return isInstanceItems(inst, tup.Len(), func(i int) Object { return tup.Item(i) }, depth)
 	}
 	// CPython: Objects/unionobject.c:234 union_instancecheck
 	if ut, ok := cls.(*UnionType); ok {
-		for i := 0; i < ut.Args().Len(); i++ {
-			ok, err := objectIsInstance(inst, ut.Args().Item(i), depth+1)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
+		return isInstanceItems(inst, ut.Args().Len(), func(i int) Object { return ut.Args().Item(i) }, depth)
 	}
 	if t, ok := cls.(*Type); ok {
-		// When the metaclass is not exactly `type`, check __instancecheck__.
-		// CPython: Objects/abstract.c:2589 object_isinstance
-		if t.Type() != TypeType() {
-			res, found, err := callMetaInstanceCheck(cls, "__instancecheck__", inst)
-			if err != nil {
-				return false, err
-			}
-			if found {
-				return IsTrue(res), nil
-			}
-		}
-		if IsSubtype(inst.Type(), t) {
-			return true, nil
-		}
-		// CPython: Objects/abstract.c:2601 inst.__class__ fallback
-		// When the type check fails, check inst.__class__ (may be overridden).
-		icls, err := GetAttr(inst, NewStr("__class__"))
-		if err != nil {
-			if isAttributeError(err) {
-				if ClearCurrentExceptionHook != nil {
-					ClearCurrentExceptionHook()
-				}
-				return false, nil
-			}
-			return false, err
-		}
-		if icls == None() || icls == nil {
-			return false, nil
-		}
-		if icls == inst.Type() {
-			return false, nil
-		}
-		if ict, ok := icls.(*Type); ok {
-			return IsSubtype(ict, t), nil
-		}
-		return false, nil
+		return isInstanceOfType(inst, t)
 	}
 	// cls is not a *Type — try __instancecheck__ on cls's type first.
 	// CPython: Objects/abstract.c:2665 _PyObject_LookupSpecial(__instancecheck__)
@@ -114,10 +61,76 @@ func objectIsInstance(inst, cls Object, depth int) (bool, error) {
 		return false, err
 	}
 	icls, err := GetAttr(inst, NewStr("__class__"))
-	if err != nil || icls == nil {
+	if err != nil {
+		if isAttributeError(err) {
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if icls == nil {
 		return false, nil
 	}
 	return abstractIsSubclass(icls, cls, depth+1)
+}
+
+// isInstanceItems iterates n items from the item accessor, returning true on
+// the first match. Shared by the Tuple and UnionType branches.
+func isInstanceItems(inst Object, n int, item func(int) Object, depth int) (bool, error) {
+	for i := 0; i < n; i++ {
+		ok, err := objectIsInstance(inst, item(i), depth+1)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isInstanceOfType handles the *Type branch of objectIsInstance.
+// Checks metaclass __instancecheck__, IsSubtype, and inst.__class__ fallback.
+//
+// CPython: Objects/abstract.c:2589 object_isinstance
+func isInstanceOfType(inst Object, t *Type) (bool, error) {
+	// When the metaclass is not exactly `type`, check __instancecheck__.
+	if t.Type() != TypeType() {
+		res, found, err := callMetaInstanceCheck(t, "__instancecheck__", inst)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return IsTrue(res), nil
+		}
+	}
+	if IsSubtype(inst.Type(), t) {
+		return true, nil
+	}
+	// CPython: Objects/abstract.c:2601 inst.__class__ fallback
+	// When the type check fails, check inst.__class__ (may be overridden).
+	icls, err := GetAttr(inst, NewStr("__class__"))
+	if err != nil {
+		if isAttributeError(err) {
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if icls == None() || icls == nil {
+		return false, nil
+	}
+	if icls == inst.Type() {
+		return false, nil
+	}
+	if ict, ok := icls.(*Type); ok {
+		return IsSubtype(ict, t), nil
+	}
+	return false, nil
 }
 
 // ObjectIsSubclass ports PyObject_IsSubclass. Supports a tuple of
@@ -140,49 +153,14 @@ func objectIsSubclassObj(sub, cls Object, depth int) (bool, error) {
 		return false, fmt.Errorf("RecursionError: maximum recursion depth exceeded in __subclasscheck__")
 	}
 	if tup, ok := cls.(*Tuple); ok {
-		for i := 0; i < tup.Len(); i++ {
-			ok, err := objectIsSubclassObj(sub, tup.Item(i), depth+1)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
+		return isSubclassItems(sub, tup.Len(), func(i int) Object { return tup.Item(i) }, depth)
 	}
 	// CPython: Objects/unionobject.c:257 union_subclasscheck
 	if ut, ok := cls.(*UnionType); ok {
-		for i := 0; i < ut.Args().Len(); i++ {
-			ok, err := objectIsSubclassObj(sub, ut.Args().Item(i), depth+1)
-			if err != nil {
-				return false, err
-			}
-			if ok {
-				return true, nil
-			}
-		}
-		return false, nil
+		return isSubclassItems(sub, ut.Args().Len(), func(i int) Object { return ut.Args().Item(i) }, depth)
 	}
 	if t, ok := cls.(*Type); ok {
-		if t.Type() != TypeType() {
-			res, found, err := callMetaInstanceCheck(cls, "__subclasscheck__", sub)
-			if err != nil {
-				return false, err
-			}
-			if found {
-				return IsTrue(res), nil
-			}
-		}
-		if st, ok := sub.(*Type); ok {
-			return IsSubtype(st, t), nil
-		}
-		// sub is not a *Type — must have __bases__ to be a valid class arg.
-		// CPython: Objects/abstract.c:2695 check_class for derived
-		if err := checkClass(sub, "issubclass() arg 1 must be a class"); err != nil {
-			return false, err
-		}
-		return abstractIsSubclass(sub, cls, depth+1)
+		return isSubclassOfType(sub, t, depth)
 	}
 	// cls is not a *Type — try __subclasscheck__ on cls's type.
 	// CPython: Objects/abstract.c:2700 _PyObject_LookupSpecial(__subclasscheck__)
@@ -202,6 +180,45 @@ func objectIsSubclassObj(sub, cls Object, depth int) (bool, error) {
 		return false, err
 	}
 	return abstractIsSubclass(sub, cls, depth+1)
+}
+
+// isSubclassItems iterates n items from the item accessor, returning true on
+// the first match. Shared by the Tuple and UnionType branches.
+func isSubclassItems(sub Object, n int, item func(int) Object, depth int) (bool, error) {
+	for i := 0; i < n; i++ {
+		ok, err := objectIsSubclassObj(sub, item(i), depth+1)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isSubclassOfType handles the *Type cls branch of objectIsSubclassObj.
+//
+// CPython: Objects/abstract.c:2742 object_issubclass (type branch)
+func isSubclassOfType(sub Object, t *Type, depth int) (bool, error) {
+	if t.Type() != TypeType() {
+		res, found, err := callMetaInstanceCheck(t, "__subclasscheck__", sub)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return IsTrue(res), nil
+		}
+	}
+	if st, ok := sub.(*Type); ok {
+		return IsSubtype(st, t), nil
+	}
+	// sub is not a *Type — must have __bases__ to be a valid class arg.
+	// CPython: Objects/abstract.c:2695 check_class for derived
+	if err := checkClass(sub, "issubclass() arg 1 must be a class"); err != nil {
+		return false, err
+	}
+	return abstractIsSubclass(sub, t, depth+1)
 }
 
 // checkClass verifies that cls has a __bases__ attribute, which is CPython's
@@ -231,8 +248,8 @@ func checkClass(cls Object, errMsg string) error {
 	return nil
 }
 
-// abstractIsSubclass walks derived's __mro__ or __bases__ to check whether
-// derived is a subclass of cls. Neither argument needs to be a *Type.
+// abstractIsSubclass walks derived's __bases__ to check whether derived is a
+// subclass of cls. Neither argument needs to be a *Type.
 //
 // CPython: Objects/abstract.c:2505 abstract_issubclass
 func abstractIsSubclass(derived, cls Object, depth int) (bool, error) {
@@ -266,7 +283,7 @@ func abstractIsSubclass(derived, cls Object, depth int) (bool, error) {
 	}
 	seq, seqErr := SequenceList(bases)
 	if seqErr != nil {
-		return false, nil
+		return false, seqErr
 	}
 	for i := 0; i < seq.Len(); i++ {
 		ok, err := abstractIsSubclass(seq.Item(i), cls, depth+1)
