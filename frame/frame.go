@@ -83,6 +83,17 @@ type Frame struct {
 	//   [ nlocalsplus .. nlocalsplus + stacktop              )  stack
 	LocalsPlus []stackref.Ref
 
+	// snapshot is a take_ownership-style mirror of LocalsPlus. Set
+	// once by TakeOwnership before a suspended generator's body is
+	// closed so that frame.f_locals and gi_frame consumers continue
+	// to see fast-local / cell / free data after the body unwinds and
+	// FrameClearLocals zeroes LocalsPlus. Each Ref carries an
+	// independent strong reference (Dup at take time) so the
+	// underlying objects survive the body's clear.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	snapshot []stackref.Ref
+
 	// Owner discriminates teardown / suspend behavior.
 	Owner OwnerKind
 
@@ -125,6 +136,9 @@ type Frame struct {
 //
 // CPython: Include/cpython/code.h:87 co_nlocals
 func NLocalsOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Nlocals
 	}
@@ -135,6 +149,9 @@ func NLocalsOf(co *objects.Code) int {
 //
 // CPython: Include/cpython/code.h:88 co_ncellvars
 func NCellsOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Ncellvars
 	}
@@ -145,6 +162,9 @@ func NCellsOf(co *objects.Code) int {
 //
 // CPython: Include/cpython/code.h:89 co_nfreevars
 func NFreeOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Nfreevars
 	}
@@ -379,8 +399,12 @@ func (f *Frame) FrameLasti() int { return f.InstrPtr }
 func (f *Frame) FrameNumLocals() int { return NLocalsOf(f.Code) }
 
 // FrameFastLocal returns the fast local at index i, or nil if the
-// slot is unbound.
+// slot is unbound. Reads the take_ownership snapshot when set so
+// reads survive a generator's body-close.
 func (f *Frame) FrameFastLocal(i int) objects.Object {
+	if f.snapshot != nil && i < len(f.snapshot) {
+		return f.snapshot[i].AsObject()
+	}
 	return f.LocalsPlus[i].AsObject()
 }
 
@@ -388,29 +412,118 @@ func (f *Frame) FrameFastLocal(i int) objects.Object {
 func (f *Frame) FrameNumCells() int { return NCellsOf(f.Code) }
 
 // FrameCellLocal returns the cell var at index i, or nil if unbound.
+// Reads the take_ownership snapshot when set.
 func (f *Frame) FrameCellLocal(i int) objects.Object {
-	return f.LocalsPlus[CellsStart(f.Code)+i].AsObject()
+	idx := CellsStart(f.Code) + i
+	if f.snapshot != nil && idx < len(f.snapshot) {
+		return f.snapshot[idx].AsObject()
+	}
+	return f.LocalsPlus[idx].AsObject()
 }
 
 // FrameNumFrees returns the count of free-var slots.
 func (f *Frame) FrameNumFrees() int { return NFreeOf(f.Code) }
 
 // FrameFreeLocal returns the free var at index i, or nil if unbound.
+// Reads the take_ownership snapshot when set.
 func (f *Frame) FrameFreeLocal(i int) objects.Object {
-	return f.LocalsPlus[FreesStart(f.Code)+i].AsObject()
+	idx := FreesStart(f.Code) + i
+	if f.snapshot != nil && idx < len(f.snapshot) {
+		return f.snapshot[idx].AsObject()
+	}
+	return f.LocalsPlus[idx].AsObject()
+}
+
+// FrameClearLocals releases every live stackref in LocalsPlus (fast
+// locals, cells, frees, and the value stack) without touching Code /
+// Globals / Builtins / Locals / Func / Previous. Matches CPython's
+// _PyFrame_ClearExceptCode: a generator that finished or was closed
+// still exposes gi_code, so the code pointer must survive even though
+// the per-call data is gone.
+//
+// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+func (f *Frame) FrameClearLocals() {
+	for i := range f.LocalsPlus {
+		f.LocalsPlus[i].Close()
+		f.LocalsPlus[i] = stackref.Null
+	}
+	f.StackTop = 0
 }
 
 // FrameLocalsPlusItem returns LocalsPlus[i] at the absolute slot
 // (post-fix_cell_offsets). Used by kinds-driven walks like
 // FrameFastToLocals where the slot semantics live in
 // LocalsplusKinds rather than the legacy varnames/cellvars/freevars
-// split.
+// split. Reads the take_ownership snapshot when set.
 //
 // CPython: Objects/frameobject.c:2199 frame_get_var (the
 // frame->localsplus[i] read).
 func (f *Frame) FrameLocalsPlusItem(i int) objects.Object {
+	if f.snapshot != nil {
+		if i < 0 || i >= len(f.snapshot) {
+			return nil
+		}
+		return f.snapshot[i].AsObject()
+	}
 	if i < 0 || i >= len(f.LocalsPlus) {
 		return nil
 	}
 	return f.LocalsPlus[i].AsObject()
+}
+
+// FrameSetLocalsPlusItem stores v in LocalsPlus[i] via
+// stackref.FromObject. Used by the FrameLocalsProxy write-through
+// path (f_locals[name] = v).
+//
+// CPython: Objects/frameobject.c:246 framelocalsproxy_setitem (the
+// fast[i] = PyStackRef_FromPyObjectNew(value) store)
+func (f *Frame) FrameSetLocalsPlusItem(i int, v objects.Object) {
+	if i < 0 || i >= len(f.LocalsPlus) {
+		return
+	}
+	f.LocalsPlus[i].Close()
+	f.LocalsPlus[i] = stackref.FromObject(v)
+}
+
+// FrameNumStack returns the count of live operand-stack entries.
+// frame_traverse walks LocalsPlus[StackBase:StackBase+StackTop] so the
+// cycle collector sees values held on the running stack (e.g., a
+// generator object passed as an argument to list()).
+//
+// CPython: Objects/frameobject.c:1163 frame_traverse (PyTrace_VISITOR
+// over PyFrame.localsplus[0:StackTop])
+func (f *Frame) FrameNumStack() int { return f.StackTop }
+
+// FrameStackItem returns the operand-stack entry at depth i from the
+// stack base (0 == bottom of the live region).
+//
+// CPython: Objects/frameobject.c:1163 frame_traverse
+func (f *Frame) FrameStackItem(i int) objects.Object {
+	if i < 0 || i >= f.StackTop {
+		return nil
+	}
+	return f.LocalsPlus[f.StackBase+i].AsObject()
+}
+
+// FrameTakeOwnership snapshots the activation record's LocalsPlus into
+// the frame's own backing store so a subsequent FrameClearLocals (the
+// body's natural unwind on GeneratorExit) does not break reads through
+// the Python-level frame object. Each snapshot ref is a Dup of the
+// corresponding LocalsPlus ref, so the snapshot owns an independent
+// strong reference. Idempotent: a second call after the snapshot is
+// installed is a no-op.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership
+func (f *Frame) FrameTakeOwnership() {
+	if f.snapshot != nil {
+		return
+	}
+	if len(f.LocalsPlus) == 0 {
+		return
+	}
+	snap := make([]stackref.Ref, len(f.LocalsPlus))
+	for i := range f.LocalsPlus {
+		snap[i] = f.LocalsPlus[i].Dup()
+	}
+	f.snapshot = snap
 }

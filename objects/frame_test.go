@@ -53,7 +53,27 @@ func (f *fakeInterpFrame) FrameLocalsPlusItem(i int) Object {
 	}
 	return nil
 }
+
+func (f *fakeInterpFrame) FrameSetLocalsPlusItem(i int, v Object) {
+	n := len(f.fast)
+	switch {
+	case i < n:
+		f.fast[i] = v
+	case i < n+len(f.cells):
+		f.cells[i-n] = v
+	case i < n+len(f.cells)+len(f.frees):
+		f.frees[i-n-len(f.cells)] = v
+	}
+}
 func (f *fakeInterpFrame) FrameFunc() Object { return nil }
+func (f *fakeInterpFrame) FrameClearLocals() {
+	f.fast = nil
+	f.cells = nil
+	f.frees = nil
+}
+func (f *fakeInterpFrame) FrameTakeOwnership()       {}
+func (f *fakeInterpFrame) FrameNumStack() int        { return 0 }
+func (f *fakeInterpFrame) FrameStackItem(int) Object { return nil }
 
 func TestFrameAccessors(t *testing.T) {
 	code := &Code{Name: "f", Filename: "t.py", Firstlineno: 10}

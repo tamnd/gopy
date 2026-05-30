@@ -28,6 +28,15 @@ type Chunk struct {
 type FrameStack struct {
 	current *Chunk // newest chunk (top of stack)
 	depth   int    // total live frames across all chunks
+	// ForcedPrev, when non-nil, overrides the normal s.Top() predecessor
+	// for the next Push call and is then cleared. Used by vm's
+	// genThrowForwardHook to make a custom-iterator throw's frame inherit
+	// f_back from the outer generator's frame rather than the FrameStack
+	// top, mirroring CPython's tstate->current_frame = gen_frame in
+	// _gen_throw before calling yf.throw().
+	//
+	// CPython: Objects/genobject.c:523 _gen_throw
+	ForcedPrev *Frame
 }
 
 // New returns an empty frame stack.
@@ -38,11 +47,16 @@ func New() *FrameStack {
 // Push allocates a frame, initializes it for co, and links it as
 // the new top of the call chain. The new frame's Previous is wired
 // to whatever frame was on top before the push, mirroring
-// _PyThreadState_PushFrame which uses tstate->current_frame.
+// _PyThreadState_PushFrame which uses tstate->current_frame. If
+// ForcedPrev is set it is used instead of s.Top() and then cleared.
 //
 // CPython: Python/frame.c _PyThreadState_PushFrame
 func (s *FrameStack) Push(co *objects.Code, globals, builtins, fn objects.Object) *Frame {
 	prev := s.Top()
+	if s.ForcedPrev != nil {
+		prev = s.ForcedPrev
+		s.ForcedPrev = nil
+	}
 	if s.current == nil || s.current.top == ChunkSize {
 		s.current = &Chunk{prev: s.current}
 	}

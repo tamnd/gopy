@@ -41,6 +41,16 @@ type InterpreterFrame interface {
 	FrameCellLocal(i int) Object
 	FrameNumFrees() int
 	FrameFreeLocal(i int) Object
+	// FrameNumStack returns the count of live operand-stack entries.
+	// frame_traverse visits these so the cycle collector marks values
+	// held on the running stack as reachable. Without this walk a
+	// generator passed as an argument to list() (still on the operand
+	// stack, not yet bound to a local) gets misclassified as
+	// unreachable.
+	//
+	// CPython: Objects/frameobject.c:1163 frame_traverse
+	FrameNumStack() int
+	FrameStackItem(i int) Object
 	// FrameLocalsPlusItem returns LocalsPlus[i] for the absolute
 	// localsplus index i. Callers walking LocalsplusKinds need this
 	// to fetch the post-fix_cell_offsets value at a kind-tagged slot
@@ -49,6 +59,14 @@ type InterpreterFrame interface {
 	// CPython: Objects/frameobject.c:2199 frame_get_var (the
 	// frame->localsplus[i] read).
 	FrameLocalsPlusItem(i int) Object
+	// FrameSetLocalsPlusItem writes v into LocalsPlus[i] using
+	// stackref.FromObject. Callers writing through FrameLocalsProxy
+	// need this to push values back to the fast slots when user code
+	// does f_locals[name] = v.
+	//
+	// CPython: Objects/frameobject.c:246 framelocalsproxy_setitem (the
+	// fast[i] = PyStackRef_FromPyObjectNew(value) store)
+	FrameSetLocalsPlusItem(i int, v Object)
 	// FrameFunc returns the Function that produced the call, or nil
 	// when the frame was not created from a function (e.g. module
 	// init, exec). The Tier-2 globals folder needs the function for
@@ -57,6 +75,25 @@ type InterpreterFrame interface {
 	//
 	// CPython: Python/optimizer_analysis.c:156 _PyFrame_GetFunction
 	FrameFunc() Object
+	// FrameClearLocals releases every live stackref in LocalsPlus
+	// (fast locals, cells, frees, and the value stack), leaving the
+	// code object and scope dicts intact so gi_code / f_code stay
+	// readable on a closed generator. Used by Generator.Close /
+	// gi_frame.clear() to break the references the body holds onto
+	// without losing the metadata callers still query.
+	//
+	// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+	FrameClearLocals()
+	// FrameTakeOwnership snapshots LocalsPlus into an internal
+	// backing store on the activation record so reads through
+	// FrameLocalsProxy and the f_locals view survive a subsequent
+	// FrameClearLocals. Idempotent. Used by genFinalize so a
+	// generator that is being dealloc'd while gi_frame or
+	// sys._getframe-returned wrappers are still externally
+	// referenced keeps fast-local data alive after the body unwinds.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	FrameTakeOwnership()
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
@@ -70,6 +107,13 @@ type Frame struct {
 	trace        Object
 	traceLines   bool
 	traceOpcodes bool
+	// extraLocals is the dict that f_locals stores keys that are not in
+	// LocalsplusNames. PEP 667 spills writes to unknown names here so
+	// repeated reads see the same dict.
+	//
+	// CPython: Objects/frameobject.c:419 framelocalsproxy_new (the
+	// f_extra_locals slot on PyFrameObject)
+	extraLocals *Dict
 }
 
 // frameType is the type singleton for `frame`.
@@ -84,11 +128,26 @@ func init() {
 	SetTypeDescr(frameType, "clear", NewMethodDescr(frameType, "clear", frameClear))
 }
 
-// frameClear clears the frame's local variables. This is used by
-// traceback.clear_frames() to break reference cycles.
+// frameClear releases the frame's locals/cells/frees/stack. Used by
+// traceback.clear_frames(), Generator.close()'s post-hoc cleanup, and
+// user code that wants to break reference cycles. If the frame belongs
+// to a Generator that has not finished, CPython raises RuntimeError;
+// we leave that guard for a follow-up because the live-frame check
+// requires inspecting the generator's running state.
 //
 // CPython: Objects/frameobject.c:68 frame_clear
 func frameClear(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: clear() missing self argument")
+	}
+	f, ok := args[0].(*Frame)
+	if !ok {
+		return nil, fmt.Errorf(
+			"TypeError: descriptor 'clear' requires a 'frame' object")
+	}
+	if f.interp != nil {
+		f.interp.FrameClearLocals()
+	}
 	return None(), nil
 }
 
@@ -107,11 +166,7 @@ func frameGetAttr(o Object, name Object) (Object, error) {
 	}
 	switch n.v {
 	case "f_locals":
-		d, err := FrameFastToLocals(f)
-		if err != nil {
-			return nil, err
-		}
-		return d, nil
+		return NewFrameLocalsProxy(f), nil
 	case "f_globals":
 		if g := f.Globals(); g != nil {
 			return g, nil
@@ -150,10 +205,15 @@ func frameGetAttr(o Object, name Object) (Object, error) {
 
 // frameTraverse walks every Object reachable from the frame: f_trace
 // plus the activation record's globals, builtins, locals, fast/cell/
-// free locals, and the back-frame chain. Mirrors frame_traverse on
-// the live PyFrameObject.
+// free locals, the value stack, and every back frame's same panel.
+// CPython visits f_back as a single edge (Py_VISIT(f->f_back)) and
+// relies on each PyFrameObject being independently tracked so the gc
+// reaches the chain. gopy's Frame.Back() allocates a fresh wrapper on
+// every call, so the back wrappers are not tracked. Walking the
+// activation-record chain inline reproduces what CPython gets from
+// per-frame tracking.
 //
-// CPython: Objects/frameobject.c:1163 frame_traverse
+// CPython: Objects/frameobject.c:1949 frame_traverse
 func frameTraverse(o Object, visit Visitor) error {
 	f := o.(*Frame)
 	if f.trace != nil {
@@ -178,19 +238,34 @@ func frameTraverse(o Object, visit Visitor) error {
 // visitInterp walks the references on a single activation record. It
 // is split out from frameTraverse so the back-chain loop can reuse it
 // without recursing through the wrapper-allocation path.
+//
+// Mirrors CPython's _PyFrame_Traverse: visits f_locals, f_funcobj,
+// f_executable, then the localsplus span (fast / cells / frees /
+// stack). f_globals and f_builtins are intentionally NOT visited here.
+// CPython reaches them transitively via f_funcobj (the function's
+// __globals__ traverse), and visiting them directly here over-counts
+// the same shared dict on every frame in a recursive chain, pushing
+// subtract_refs underwater (Conjoin / Queens / queens(8) regress to
+// half the expected solution count).
+//
+// CPython: Python/frame.c:11 _PyFrame_Traverse
 func visitInterp(ip InterpreterFrame, visit Visitor) error {
-	if g := ip.FrameGlobals(); g != nil {
-		if err := visit(g); err != nil {
-			return err
-		}
-	}
-	if b := ip.FrameBuiltins(); b != nil {
-		if err := visit(b); err != nil {
-			return err
-		}
-	}
 	if l := ip.FrameLocals(); l != nil {
 		if err := visit(l); err != nil {
+			return err
+		}
+	}
+	// Visit f_funcobj. CPython's _PyFrame_Traverse visits the function
+	// via _Py_VISIT_STACKREF so the function's tp_traverse can pull in
+	// __closure__, __defaults__, __globals__, __builtins__. Without
+	// this, a closure cell shared across a yield-from chain
+	// (Conjoin/Queens) misses its refcount contribution from the iframe
+	// and the cycle GC misclassifies a still-suspended chain member as
+	// unreachable.
+	//
+	// CPython: Python/frame.c:15 _PyFrame_Traverse (f_funcobj)
+	if fn := ip.FrameFunc(); fn != nil {
+		if err := visit(fn); err != nil {
 			return err
 		}
 	}
@@ -221,6 +296,21 @@ func visitInterp(ip InterpreterFrame, visit Visitor) error {
 			return err
 		}
 	}
+	// Walk live operand-stack entries. Without this, a generator object
+	// passed as an argument to list() but not yet bound to a local
+	// reads as unreachable mid-call.
+	//
+	// CPython: Objects/frameobject.c:1163 frame_traverse (visits the
+	// localsplus span between locals_start and stack_pointer).
+	for i, n := 0, ip.FrameNumStack(); i < n; i++ {
+		v := ip.FrameStackItem(i)
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -235,6 +325,11 @@ func NewFrame(interp InterpreterFrame) *Frame {
 		traceLines: true,
 	}
 	f.init(frameType)
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
+	// followed by PyObject_GC_Track at the call site.
+	if h := GCTrackHook; h != nil {
+		h(f)
+	}
 	return f
 }
 
@@ -245,6 +340,21 @@ func FrameType() *Type { return frameType }
 
 // Interp returns the underlying interpreter frame.
 func (f *Frame) Interp() InterpreterFrame { return f.interp }
+
+// TakeOwnership installs a take_ownership-style snapshot on the
+// underlying activation record so reads through this wrapper, and
+// through any sibling *Frame wrapping the same iframe (e.g., one
+// returned by sys._getframe() inside the gen's body), survive a
+// subsequent FrameClearLocals. Idempotent and safe to call when
+// interp is nil.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership
+func (f *Frame) TakeOwnership() {
+	if f == nil || f.interp == nil {
+		return
+	}
+	f.interp.FrameTakeOwnership()
+}
 
 // Code returns f.f_code: the running Code object.
 //
