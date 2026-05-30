@@ -1177,33 +1177,10 @@ func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objec
 	default:
 		return nil, fmt.Errorf("TypeError: complex() takes at most 2 arguments (%d given)", len(args))
 	}
-	toFloat := func(o objects.Object) (float64, error) {
-		if o == nil {
-			return 0, nil
-		}
-		switch v := o.(type) {
-		case *objects.Float:
-			return v.Float64(), nil
-		case *objects.Int:
-			f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
-			return f, nil
-		case *objects.Complex:
-			return real(v.Complex128()), nil
-		}
-		if n := o.Type().Number; n != nil && n.Float != nil {
-			fv, err := n.Float(o)
-			if err != nil {
-				return 0, err
-			}
-			return fv.(*objects.Float).Float64(), nil
-		}
-		return 0, fmt.Errorf("TypeError: complex() argument must be a string or a number, not '%s'", o.Type().Name)
-	}
-	// String form: complex("1+2j")
+	// String form: complex("1+2j") — only allowed when imag is absent.
 	if realObj != nil && imagObj == nil {
 		if realObj.Type() == objects.StrType() {
 			s, _ := objects.Str(realObj)
-			// strip whitespace
 			s = trimSpace(s)
 			c, err := parseComplexString(s)
 			if err != nil {
@@ -1211,24 +1188,38 @@ func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objec
 			}
 			return objects.NewComplex(real(c), imag(c)), nil
 		}
-		// If it's a complex, return it (imagObj ignored).
 		if cv, ok := realObj.(*objects.Complex); ok {
 			return cv, nil
 		}
 	}
-	re, err := toFloat(realObj)
-	if err != nil {
-		return nil, err
-	}
-	im, err := toFloat(imagObj)
-	if err != nil {
-		return nil, err
-	}
-	// If real was complex, add its imag to im.
+	// Coerce real and imag through PyComplexAsCComplex (which tries
+	// __complex__, then __float__, then __index__). The real component
+	// may itself be complex, in which case it brings an imag-contribution
+	// that mixes into the result. CPython: Objects/complexobject.c:1238
+	// complex_new_impl.
+	var re, im float64
 	if realObj != nil {
-		if cv, ok := realObj.(*objects.Complex); ok {
-			re = real(cv.Complex128())
-			im += imag(cv.Complex128())
+		rr, ri, err := objects.PyComplexAsCComplex(realObj)
+		if err != nil {
+			return nil, err
+		}
+		re, im = rr, ri
+	}
+	if imagObj != nil {
+		if _, ok := imagObj.(*objects.Complex); ok {
+			// complex(a, c): c is complex, mix in: re -= imag(c), im += real(c).
+			ir, ii, err := objects.PyComplexAsCComplex(imagObj)
+			if err != nil {
+				return nil, err
+			}
+			re -= ii
+			im += ir
+		} else {
+			ir, _, err := objects.PyComplexAsCComplex(imagObj)
+			if err != nil {
+				return nil, err
+			}
+			im += ir
 		}
 	}
 	return objects.NewComplex(re, im), nil

@@ -147,7 +147,7 @@ func complexFromNumber(args []Object, _ map[string]Object) (Object, error) {
 	if c, ok := number.(*Complex); ok && c.Type() == ComplexType && (cls == nil || cls == ComplexType) {
 		return c, nil
 	}
-	re, im, err := pyComplexAsCComplex(number)
+	re, im, err := PyComplexAsCComplex(number)
 	if err != nil {
 		return nil, err
 	}
@@ -158,14 +158,13 @@ func complexFromNumber(args []Object, _ map[string]Object) (Object, error) {
 	return result, nil
 }
 
-// pyComplexAsCComplex coerces o to a (real, imag) pair. Tries the
-// __complex__ special method first, falls back to __float__, and
-// finally to the runtime float conversion via the Number.Float slot
-// or the Number.Index slot. Mirrors CPython's PyComplex_AsCComplex
-// dispatch.
+// PyComplexAsCComplex coerces o to a (real, imag) pair. Tries the
+// __complex__ special method first via _PyObject_LookupSpecial, then
+// __float__ (Number.Float), finally __index__ (Number.Index). Mirrors
+// CPython's PyComplex_AsCComplex dispatch order.
 //
 // CPython: Objects/complexobject.c:521 PyComplex_AsCComplex
-func pyComplexAsCComplex(o Object) (float64, float64, error) {
+func PyComplexAsCComplex(o Object) (float64, float64, error) {
 	if c, ok := o.(*Complex); ok {
 		return real(c.v), imag(c.v), nil
 	}
