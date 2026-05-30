@@ -53,10 +53,17 @@ func intMul(a, b Object) (Object, error) {
 	return NewIntFromBig(new(big.Int).Mul(&ai.v, &bi.v)), nil
 }
 
-// intTrueDiv implements `a / b` for ints. CPython returns a float
-// even for exact integer ratios, so we shadow that contract here.
+// intTrueDiv implements `a / b` for ints. The previous implementation
+// cast both operands to float64 first and returned nan when both were
+// huge enough to overflow. CPython's long_true_divide does the work in
+// integer arithmetic, scales the result with ldexp, and raises
+// OverflowError when the result exceeds DBL_MAX. We approximate that
+// with a high-precision big.Float quotient: SetPrec(64) keeps two extra
+// bits beyond the float64 mantissa, Float64 does the final IEEE-754
+// rounding, and we explicitly raise OverflowError when the rounded
+// result is +/-Inf so huge/huge stays at 1.0 but huge*huge/1.0 errors.
 //
-// CPython: Objects/longobject.c:4053 long_true_divide
+// CPython: Objects/longobject.c:4504 long_true_divide
 func intTrueDiv(a, b Object) (Object, error) {
 	ai, bi, ok := intPair(a, b)
 	if !ok {
@@ -65,9 +72,22 @@ func intTrueDiv(a, b Object) (Object, error) {
 	if bi.v.Sign() == 0 {
 		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
-	af, _ := new(big.Float).SetInt(&ai.v).Float64()
-	bf, _ := new(big.Float).SetInt(&bi.v).Float64()
-	return NewFloat(af / bf), nil
+	if ai.v.Sign() == 0 {
+		// 0 / b: sign of b determines whether we get 0.0 or -0.0.
+		// CPython: Objects/longobject.c:4612 a_size == 0 underflow path.
+		if bi.v.Sign() < 0 {
+			return NewFloat(math.Copysign(0, -1)), nil
+		}
+		return NewFloat(0), nil
+	}
+	af := new(big.Float).SetPrec(64).SetInt(&ai.v)
+	bf := new(big.Float).SetPrec(64).SetInt(&bi.v)
+	q := new(big.Float).SetPrec(64).Quo(af, bf)
+	f, _ := q.Float64()
+	if math.IsInf(f, 0) {
+		return nil, errors.New("OverflowError: integer division result too large for a float")
+	}
+	return NewFloat(f), nil
 }
 
 // intFloorDiv implements `a // b` with Python floor semantics: the

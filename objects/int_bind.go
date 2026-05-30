@@ -28,6 +28,8 @@ func init() {
 	bind("__ceil__", intIndexMethod)
 	bind("conjugate", intIndexMethod)
 	bind("to_bytes", intToBytesMethod)
+	bind("as_integer_ratio", intAsIntegerRatioMethod)
+	bind("is_integer", intIsIntegerMethod)
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
 
@@ -118,6 +120,42 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 		}
 	}
 	return NewStr(s), nil
+}
+
+// intAsIntegerRatioMethod ports int.as_integer_ratio(): for an int v
+// returns (v, 1). Mirrors float.as_integer_ratio's API so callers can
+// duck-type over Real-protocol numbers.
+//
+// CPython: Objects/longobject.c:6263 int_as_integer_ratio_impl
+func intAsIntegerRatioMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: as_integer_ratio() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := asInt(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'as_integer_ratio' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	// Subclasses (including bool) return a fresh plain int as the
+	// numerator, matching long_long's behavior.
+	num := args[0]
+	if args[0].Type() != IntType {
+		num = NewIntFromBig(i.BigInt())
+	}
+	return NewTuple([]Object{num, NewInt(1)}), nil
+}
+
+// intIsIntegerMethod ports int.is_integer(): always True. Exists for
+// duck-type compatibility with float.is_integer.
+//
+// CPython: Objects/longobject.c:6415 int_is_integer_impl
+func intIsIntegerMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: is_integer() takes no arguments (%d given)", len(args)-1)
+	}
+	if _, ok := asInt(args[0]); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'is_integer' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return True(), nil
 }
 
 // intBitLengthMethod ports int.bit_length(): the number of bits needed
@@ -381,12 +419,19 @@ func intToByteArray(v *big.Int, length int, littleEndian, signed bool) ([]byte, 
 		}
 	} else {
 		u = v
-		maxBits := length * 8
-		if signed {
-			maxBits = length*8 - 1
-		}
-		if maxBits < 0 || u.BitLen() > maxBits {
-			return nil, fmt.Errorf("OverflowError: int too big to convert")
+		// CPython: Objects/longobject.c:1031 _PyLong_AsByteArray treats the
+		// zero case as trivially fitting in any non-negative length, so
+		// (0).to_bytes(0, signed=True) returns b''. Without the explicit
+		// guard, length=0 with signed=True would compute maxBits = -1 and
+		// reject a perfectly valid call.
+		if u.Sign() != 0 {
+			maxBits := length * 8
+			if signed {
+				maxBits = length*8 - 1
+			}
+			if maxBits < 0 || u.BitLen() > maxBits {
+				return nil, fmt.Errorf("OverflowError: int too big to convert")
+			}
 		}
 	}
 
