@@ -167,6 +167,7 @@ func init() {
 	frameType.Repr = frameRepr
 	frameType.TpTraverse = frameTraverse
 	frameType.Getattro = frameGetAttr
+	frameType.Setattro = frameSetAttr
 	SetTypeDescr(frameType, "clear", NewMethodDescr(frameType, "clear", frameClear))
 }
 
@@ -300,13 +301,60 @@ func frameGetAttr(o Object, name Object) (Object, error) {
 			return f.trace, nil
 		}
 		return None(), nil
+	case "f_trace_lines":
+		if f.traceLines {
+			return True(), nil
+		}
+		return False(), nil
+	case "f_trace_opcodes":
+		if f.traceOpcodes {
+			return True(), nil
+		}
+		return False(), nil
 	case "f_builtins":
 		if b := f.Builtins(); b != nil {
 			return b, nil
 		}
 		return NewDict(), nil
+	case "f_generator":
+		// CPython: Objects/frameobject.c:1887 frame_generator_get_impl
+		var owner Object
+		if f.interp != nil {
+			owner = f.interp.FrameGenOwner()
+		}
+		if owner == nil {
+			owner = f.owner
+		}
+		if owner == nil {
+			return None(), nil
+		}
+		return owner, nil
 	}
 	return GenericGetAttr(o, name)
+}
+
+// CPython: Objects/frameobject.c:1898 frame_getsetlist
+func frameSetAttr(o Object, name Object, v Object) error {
+	f, ok := o.(*Frame)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor requires a 'frame' object")
+	}
+	n, ok2 := name.(*Unicode)
+	if !ok2 {
+		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", name.Type().Name)
+	}
+	switch n.v {
+	case "f_trace":
+		f.SetTrace(v)
+		return nil
+	case "f_trace_lines":
+		f.SetTraceLines(v == True())
+		return nil
+	case "f_trace_opcodes":
+		f.SetTraceOpcodes(v == True())
+		return nil
+	}
+	return fmt.Errorf("AttributeError: 'frame' object attribute %q is read-only", n.v)
 }
 
 // frameTraverse walks every Object reachable from the frame: f_trace

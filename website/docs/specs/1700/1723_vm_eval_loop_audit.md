@@ -590,8 +590,8 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 
 ### P4 — Frame attributes
 
-- [ ] P4.1 `frame.f_generator`
-- [ ] P4.2 `frame.f_trace` settable
+- [x] P4.1 `frame.f_generator`
+- [x] P4.2 `frame.f_trace` settable
 - [ ] P4.3 `sys.unraisablehook` settable attribute
 - [ ] P4.4 `frame.clear()` executing-frame guard
 
