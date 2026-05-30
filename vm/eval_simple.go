@@ -1546,6 +1546,32 @@ func exactBuiltinLen(v objects.Object) (int, bool) {
 	return 0, false
 }
 
+// indexAsSsize coerces key to an int64 via PyNumber_AsSsize_t, calling
+// __index__ on non-int keys. Returns an error when key has no __index__
+// or the call fails.
+//
+// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
+func indexAsSsize(key objects.Object) (int64, error) {
+	if idx, ok := key.(*objects.Int); ok {
+		v, _ := idx.Int64()
+		return v, nil
+	}
+	if b, ok := key.(*objects.Bool); ok {
+		v, _ := b.Int64()
+		return v, nil
+	}
+	idxObj, err := objects.NumberIndex(key)
+	if err != nil {
+		return 0, err
+	}
+	idx, ok := idxObj.(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idxObj.Type().Name)
+	}
+	v, _ := idx.Int64()
+	return v, nil
+}
+
 // getItem mirrors PyObject_GetItem against the v0.6 container surface.
 // Mappings (Dict) take a key; sequences (List/Tuple/Str) take an int
 // index that may be negative (counted from the end).
@@ -1561,11 +1587,15 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 		if sl, ok := key.(*objects.Slice); ok {
 			return sliceSequence(container, sl)
 		}
-		idx, ok := key.(*objects.Int)
-		if !ok {
+		// CPython routes the subscript through PyNumber_AsSsize_t which
+		// calls __index__ on non-int objects. Without this, a class with
+		// only __index__ is rejected as "indices must be integers".
+		//
+		// CPython: Objects/abstract.c:1666 PySequence_GetItem
+		i, ierr := indexAsSsize(key)
+		if ierr != nil {
 			return nil, fmt.Errorf("TypeError: '%s' indices must be integers, not %s", t.Name, key.Type().Name)
 		}
-		i, _ := idx.Int64()
 		if sq.Length != nil {
 			n, lerr := sq.Length(container)
 			if lerr != nil {
@@ -1712,11 +1742,10 @@ func setItem(container, key, value objects.Object) error {
 		return mp.SetItem(container, key, value)
 	}
 	if sq != nil && sq.SetItem != nil {
-		idx, ok := key.(*objects.Int)
-		if !ok {
+		i, ierr := indexAsSsize(key)
+		if ierr != nil {
 			return fmt.Errorf("TypeError: %s indices must be integers, not %s", container.Type().Name, key.Type().Name)
 		}
-		i, _ := idx.Int64()
 		return sq.SetItem(container, int(i), value)
 	}
 	return fmt.Errorf("TypeError: '%s' object does not support item assignment", container.Type().Name)

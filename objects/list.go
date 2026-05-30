@@ -530,6 +530,17 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 		}
 		return 0, nil
 	}
+	// CPython routes the subscript through PyNumber_AsSsize_t which
+	// invokes __index__ when present. A class with only __index__ must
+	// work as a sequence subscript.
+	//
+	// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
+	if idx, err := NumberIndex(key); err == nil {
+		if i, ok := idx.(*Int); ok {
+			n, _ := i.Int64()
+			return int(n), nil
+		}
+	}
 	return 0, fmt.Errorf("TypeError: %s indices must be integers or slices, not %s", typeName, key.Type().Name)
 }
 

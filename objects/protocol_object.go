@@ -227,10 +227,11 @@ func TypeOf(o Object) Object {
 }
 
 // indexAsInt coerces a subscripting key to int the same way CPython's
-// PyNumber_Index/PyNumber_AsSsize_t does for the small range of
-// integer-like values gopy currently exposes.
+// PyNumber_Index/PyNumber_AsSsize_t does. Calls __index__ on non-int
+// objects so a class with only __index__ defined is accepted as a
+// sequence subscript or repeat count.
 //
-// CPython: Objects/abstract.c:1356 PyNumber_AsSsize_t
+// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
 func indexAsInt(o Object) (int, error) {
 	if i, ok := o.(*Int); ok {
 		v, fits := i.Int64()
@@ -245,5 +246,17 @@ func indexAsInt(o Object) (int, error) {
 		}
 		return 0, nil
 	}
-	return 0, fmt.Errorf("TypeError: indices must be integers, not '%s'", o.Type().Name)
+	idx, err := NumberIndex(o)
+	if err != nil {
+		return 0, fmt.Errorf("TypeError: indices must be integers, not '%s'", o.Type().Name)
+	}
+	i, ok := idx.(*Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+	}
+	v, fits := i.Int64()
+	if !fits {
+		return 0, fmt.Errorf("OverflowError: cannot fit integer into index")
+	}
+	return int(v), nil
 }
