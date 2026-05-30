@@ -65,6 +65,34 @@ func init() {
 		},
 		nil,
 	))
+	// type.__basicsize__ / type.__itemsize__ getsets expose tp_basicsize
+	// and tp_itemsize so int.__basicsize__ + int.__itemsize__ * ndigits
+	// reproduces CPython's PyLongObject allocation footprint. Lookup walks
+	// the MRO so a user subclass of int inherits the parent's layout
+	// sizes without needing every type to stamp its own.
+	//
+	// CPython: Objects/typeobject.c:1245 type_basicsize (getset entry)
+	// CPython: Objects/typeobject.c:1252 type_itemsize (getset entry)
+	SetTypeDescr(typeType, "__basicsize__", NewGetSetDescr("__basicsize__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__basicsize__' requires 'type' object")
+			}
+			return NewInt(int64(typeBasicSize(tp))), nil
+		},
+		nil,
+	))
+	SetTypeDescr(typeType, "__itemsize__", NewGetSetDescr("__itemsize__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__itemsize__' requires 'type' object")
+			}
+			return NewInt(int64(typeItemSize(tp))), nil
+		},
+		nil,
+	))
 	SetTypeDescr(typeType, "__annotate__", NewGetSetDescr("__annotate__",
 		func(o Object) (Object, error) {
 			tp, ok := o.(*Type)
@@ -81,6 +109,34 @@ func init() {
 			return typeSetAnnotate(tp, v)
 		},
 	))
+}
+
+// typeBasicSize walks the MRO and returns the first non-zero BaseSize.
+// A user subclass of int inherits the parent's tp_basicsize this way
+// rather than having every NewUserTypeMetaE call stamp its own.
+//
+// CPython: Objects/typeobject.c:1245 type_basicsize (getter reads
+// tp_basicsize on self directly; gopy stores BaseSize on the built-in
+// type alone and falls back via MRO for heap subclasses)
+func typeBasicSize(t *Type) int {
+	for _, cls := range t.MRO {
+		if cls.BaseSize != 0 {
+			return cls.BaseSize
+		}
+	}
+	return 0
+}
+
+// typeItemSize is the tp_itemsize companion of typeBasicSize.
+//
+// CPython: Objects/typeobject.c:1252 type_itemsize
+func typeItemSize(t *Type) int {
+	for _, cls := range t.MRO {
+		if cls.ItemSize != 0 {
+			return cls.ItemSize
+		}
+	}
+	return 0
 }
 
 // typeGetAttr is the tp_getattro slot for typeType. The receiver is a

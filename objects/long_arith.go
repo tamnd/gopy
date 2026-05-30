@@ -53,15 +53,12 @@ func intMul(a, b Object) (Object, error) {
 	return NewIntFromBig(new(big.Int).Mul(&ai.v, &bi.v)), nil
 }
 
-// intTrueDiv implements `a / b` for ints. The previous implementation
-// cast both operands to float64 first and returned nan when both were
-// huge enough to overflow. CPython's long_true_divide does the work in
-// integer arithmetic, scales the result with ldexp, and raises
-// OverflowError when the result exceeds DBL_MAX. We approximate that
-// with a high-precision big.Float quotient: SetPrec(64) keeps two extra
-// bits beyond the float64 mantissa, Float64 does the final IEEE-754
-// rounding, and we explicitly raise OverflowError when the rounded
-// result is +/-Inf so huge/huge stays at 1.0 but huge*huge/1.0 errors.
+// intTrueDiv implements `a / b` for ints with last-bit-exact IEEE-754
+// rounding. Ports CPython's long_true_divide shift+divmod algorithm:
+// scale operands so the quotient lands in the float53 mantissa window,
+// take a bigint divmod, apply round-half-to-even on the remainder, then
+// ldexp the integer mantissa back into a float64. This is the only way
+// to get bit-exact parity with CPython on subnormals and half-way cases.
 //
 // CPython: Objects/longobject.c:4504 long_true_divide
 func intTrueDiv(a, b Object) (Object, error) {
@@ -72,22 +69,82 @@ func intTrueDiv(a, b Object) (Object, error) {
 	if bi.v.Sign() == 0 {
 		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
+	negative := (ai.v.Sign() < 0) != (bi.v.Sign() < 0)
 	if ai.v.Sign() == 0 {
-		// 0 / b: sign of b determines whether we get 0.0 or -0.0.
-		// CPython: Objects/longobject.c:4612 a_size == 0 underflow path.
-		if bi.v.Sign() < 0 {
+		if negative {
 			return NewFloat(math.Copysign(0, -1)), nil
 		}
 		return NewFloat(0), nil
 	}
-	af := new(big.Float).SetPrec(64).SetInt(&ai.v)
-	bf := new(big.Float).SetPrec(64).SetInt(&bi.v)
-	q := new(big.Float).SetPrec(64).Quo(af, bf)
-	f, _ := q.Float64()
-	if math.IsInf(f, 0) {
+	// Work with absolute values.
+	aAbs := new(big.Int).Abs(&ai.v)
+	bAbs := new(big.Int).Abs(&bi.v)
+
+	const dblMantDig = 53
+	const dblMaxExp = 1024
+	const dblMinExp = -1021
+
+	// DBL_MIN_OVERFLOW = 2**DBL_MAX_EXP - 2**(DBL_MAX_EXP - DBL_MANT_DIG - 1)
+	dblMinOverflow := new(big.Int).Lsh(big.NewInt(1), dblMaxExp)
+	dblMinOverflow.Sub(dblMinOverflow, new(big.Int).Lsh(big.NewInt(1), dblMaxExp-dblMantDig-1))
+	threshold := new(big.Int).Mul(dblMinOverflow, bAbs)
+	if aAbs.Cmp(threshold) >= 0 {
 		return nil, errors.New("OverflowError: integer division result too large for a float")
 	}
-	return NewFloat(f), nil
+
+	// d satisfies 2**(d-1) <= a/b < 2**d
+	d := aAbs.BitLen() - bAbs.BitLen()
+	// Adjust: if a >= 2**d * b (positive d) or a*2**(-d) >= b (negative d), d += 1
+	if d >= 0 {
+		shifted := new(big.Int).Lsh(bAbs, uint(d))
+		if aAbs.Cmp(shifted) >= 0 {
+			d++
+		}
+	} else {
+		shifted := new(big.Int).Lsh(aAbs, uint(-d))
+		if shifted.Cmp(bAbs) >= 0 {
+			d++
+		}
+	}
+
+	exp := d - dblMantDig
+	if exp < dblMinExp-dblMantDig {
+		exp = dblMinExp - dblMantDig
+	}
+	if d < dblMinExp {
+		exp = dblMinExp - dblMantDig
+	} else {
+		exp = d - dblMantDig
+	}
+
+	scaledA, scaledB := new(big.Int).Set(aAbs), new(big.Int).Set(bAbs)
+	if exp < 0 {
+		scaledA.Lsh(scaledA, uint(-exp))
+	} else if exp > 0 {
+		scaledB.Lsh(scaledB, uint(exp))
+	}
+
+	q, r := new(big.Int), new(big.Int)
+	q.QuoRem(scaledA, scaledB, r)
+
+	// Round half-to-even: 2*r > b, or 2*r == b and q odd.
+	twoR := new(big.Int).Lsh(r, 1)
+	cmp := twoR.Cmp(scaledB)
+	if cmp > 0 || (cmp == 0 && q.Bit(0) == 1) {
+		q.Add(q, bigOne)
+	}
+
+	// Convert q * 2^exp to float64 via math.Ldexp on the int mantissa.
+	// q fits in DBL_MANT_DIG+1 bits at this point.
+	qf, _ := new(big.Float).SetPrec(dblMantDig+1).SetInt(q).Float64()
+	result := math.Ldexp(qf, exp)
+	if math.IsInf(result, 0) {
+		return nil, errors.New("OverflowError: integer division result too large for a float")
+	}
+	if negative {
+		result = -result
+	}
+	return NewFloat(result), nil
 }
 
 // intFloorDiv implements `a // b` with Python floor semantics: the

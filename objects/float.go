@@ -569,7 +569,10 @@ func compareFloats(a, b float64, op CompareOp) bool {
 }
 
 func floatAdd(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -577,7 +580,10 @@ func floatAdd(a, b Object) (Object, error) {
 }
 
 func floatSub(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -585,7 +591,10 @@ func floatSub(a, b Object) (Object, error) {
 }
 
 func floatMul(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -607,7 +616,10 @@ func floatAbs(o Object) (Object, error) {
 //
 // CPython: Objects/floatobject.c float_divmod
 func floatDivmod(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -627,7 +639,10 @@ func floatDivmod(a, b Object) (Object, error) {
 //
 // CPython: Objects/floatobject.c float_true_divide
 func floatTrueDiv(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -643,7 +658,10 @@ func floatTrueDiv(a, b Object) (Object, error) {
 //
 // CPython: Objects/floatobject.c float_floor_div
 func floatFloorDiv(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -658,7 +676,10 @@ func floatFloorDiv(a, b Object) (Object, error) {
 //
 // CPython: Objects/floatobject.c float_rem
 func floatMod(a, b Object) (Object, error) {
-	af, bf, ok := floatPair(a, b)
+	af, bf, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -690,7 +711,10 @@ func floatPower(a, b, mod Object) (Object, error) {
 	if mod != nil && mod != None() {
 		return nil, errors.New("TypeError: pow() 3rd argument not allowed unless all arguments are integers")
 	}
-	iv, iw, ok := floatPair(a, b)
+	iv, iw, ok, err := floatPair(a, b)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return notImplemented(), nil
 	}
@@ -796,23 +820,48 @@ func intToFloat(i *Int) float64 {
 	return f
 }
 
-func floatPair(a, b Object) (af, bf float64, ok bool) {
-	af, aOk := asFloat(a)
-	bf, bOk := asFloat(b)
-	if !aOk || !bOk {
-		return 0, 0, false
+// floatPair coerces two operands to float64 for mixed-numeric float
+// arithmetic. Returns ok=false when either side is not a numeric type
+// (callers return NotImplemented). When both sides are numeric but a
+// huge int overflows float64, err carries the OverflowError so callers
+// can propagate it instead of silently producing inf.
+//
+// CPython: Objects/floatobject.c float_add (PyFloat_AsDouble path)
+func floatPair(a, b Object) (af, bf float64, ok bool, err error) {
+	af, aOk, aErr := asFloatChecked(a)
+	if aErr != nil {
+		return 0, 0, true, aErr
 	}
-	return af, bf, true
+	bf, bOk, bErr := asFloatChecked(b)
+	if bErr != nil {
+		return 0, 0, true, bErr
+	}
+	if !aOk || !bOk {
+		return 0, 0, false, nil
+	}
+	return af, bf, true, nil
+}
+
+func asFloatChecked(o Object) (float64, bool, error) {
+	switch x := o.(type) {
+	case *Float:
+		return x.v, true, nil
+	case *Bool:
+		return intToFloat(&x.Int), true, nil
+	case *Int:
+		if v, ok := x.Int64(); ok {
+			return float64(v), true, nil
+		}
+		f, err := bigIntToFloat64(&x.v)
+		if err != nil {
+			return 0, true, err
+		}
+		return f, true, nil
+	}
+	return 0, false, nil
 }
 
 func asFloat(o Object) (float64, bool) {
-	switch x := o.(type) {
-	case *Float:
-		return x.v, true
-	case *Bool:
-		return intToFloat(&x.Int), true
-	case *Int:
-		return intToFloat(x), true
-	}
-	return 0, false
+	f, ok, _ := asFloatChecked(o)
+	return f, ok
 }

@@ -32,6 +32,7 @@ func init() {
 	bind("is_integer", intIsIntegerMethod)
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
+	bind("__sizeof__", intSizeofMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
@@ -120,6 +121,31 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 		}
 	}
 	return NewStr(s), nil
+}
+
+// intSizeofMethod ports int.__sizeof__: tp_basicsize + tp_itemsize *
+// max(ndigits, 1) where ndigits is the count of 30-bit limbs needed to
+// hold abs(self). CPython always allocates space for at least one
+// digit even when the value is zero.
+//
+// CPython: Objects/longobject.c:6176 int___sizeof___impl
+func intSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := args[0].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	const shift = 30
+	bits := i.v.BitLen()
+	ndigits := (bits + shift - 1) / shift
+	if ndigits < 1 {
+		ndigits = 1
+	}
+	bs := typeBasicSize(i.Type())
+	is := typeItemSize(i.Type())
+	return NewInt(int64(bs + is*ndigits)), nil
 }
 
 // intAsIntegerRatioMethod ports int.as_integer_ratio(): for an int v
@@ -313,7 +339,9 @@ func intFromBytesMethod(args []Object, kwargs map[string]Object) (Object, error)
 	if typ == BoolType {
 		return NewBool(val.Sign() != 0), nil
 	}
-	return newIntAs(val, typ), nil
+	// Subclass path: invoke type(long_obj) so user-defined __new__ runs.
+	// CPython: Objects/longobject.c:6402 PyObject_CallOneArg((PyObject *)type, long_obj)
+	return Call(typ, NewTuple([]Object{NewIntFromBig(val)}), nil)
 }
 
 // byteorderFrom validates the `byteorder` argument. Returns true for
@@ -354,8 +382,12 @@ func signedFromKwarg(kwargs map[string]Object) (bool, error) {
 }
 
 // bytesLike extracts the underlying byte slice from a bytes/bytearray/iterable
-// object. CPython 3.14 int.from_bytes accepts any iterable of ints.
+// object. Mirrors PyObject_Bytes followed by PyBytes_FromObject: first call
+// __bytes__ when present (which must return bytes), otherwise reject str and
+// int explicitly and fall back to iterating an iterable of 0..255 ints.
 //
+// CPython: Objects/object.c:870 PyObject_Bytes
+// CPython: Objects/bytesobject.c:2818 PyBytes_FromObject
 // CPython: Objects/longobject.c:6380 int_from_bytes_impl
 func bytesLike(o Object) ([]byte, error) {
 	switch v := o.(type) {
@@ -364,7 +396,25 @@ func bytesLike(o Object) ([]byte, error) {
 	case *ByteArray:
 		return v.Bytes(), nil
 	}
-	// Fall back: try to iterate and collect int values 0-255.
+	if descr, _ := LookupDescriptor(o.Type(), "__bytes__"); descr != nil {
+		fn, err := bindDescriptor(descr, o)
+		if err != nil {
+			return nil, err
+		}
+		out, err := Call(fn, NewTuple(nil), nil)
+		if err != nil {
+			return nil, err
+		}
+		b, ok := out.(*Bytes)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __bytes__ returned non-bytes (type %s)", typeNameOf(out))
+		}
+		return b.Bytes(), nil
+	}
+	switch o.(type) {
+	case *Unicode, *Int, *Bool, *Float, *Complex:
+		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))
+	}
 	iter, err := Iter(o)
 	if err != nil {
 		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))

@@ -123,7 +123,13 @@ func buildModule() (*objects.Module, error) {
 	return m, nil
 }
 
-// objectToFloat coerces a Python int or float to float64.
+// objectToFloat coerces a Python int or float to float64. For ints
+// outside the float64 range this raises OverflowError, matching
+// PyFloat_AsDouble's behavior when the operand exceeds DBL_MAX. The
+// only callers that want to swallow the overflow (math.log family) go
+// through loghelper instead.
+//
+// CPython: Objects/floatobject.c:298 PyFloat_AsDouble
 func objectToFloat(o objects.Object, fname string) (float64, error) {
 	switch x := o.(type) {
 	case *objects.Float:
@@ -133,10 +139,41 @@ func objectToFloat(o objects.Object, fname string) (float64, error) {
 		if ok {
 			return float64(v), nil
 		}
-		f, _ := x.BigInt().Float64()
-		return f, nil
+		return objects.IntToFloat64(x)
+	case *objects.Bool:
+		if v, _ := x.Int64(); v != 0 {
+			return 1, nil
+		}
+		return 0, nil
 	}
 	return 0, fmt.Errorf("TypeError: %s() requires a number, not '%s'", fname, o.Type().Name)
+}
+
+// loghelper mirrors CPython's static loghelper(): for ints it computes
+// log(v) via _PyLong_Frexp when the value overflows the float64 range.
+// For everything else it routes through objectToFloat and applies func.
+//
+// CPython: Modules/mathmodule.c:2228 loghelper
+func loghelper(arg objects.Object, fname string, fn func(float64) float64) (float64, error) {
+	if i, ok := arg.(*objects.Int); ok {
+		if i.Sign() <= 0 {
+			return 0, fmt.Errorf("ValueError: math domain error")
+		}
+		x, err := objects.IntToFloat64(i)
+		if err == nil {
+			return fn(x), nil
+		}
+		m, e := objects.IntFrexp(i)
+		return fn(m) + fn(2.0)*float64(e), nil
+	}
+	x, err := objectToFloat(arg, fname)
+	if err != nil {
+		return 0, err
+	}
+	if x <= 0 {
+		return 0, fmt.Errorf("ValueError: math domain error")
+	}
+	return fn(x), nil
 }
 
 // oneFloat is the standard helper for METH_O float functions.
@@ -537,25 +574,21 @@ func mathLog(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	if len(args) < 1 || len(args) > 2 {
 		return nil, fmt.Errorf("TypeError: log() requires 1 or 2 arguments (%d given)", len(args))
 	}
-	x, err := objectToFloat(args[0], "log")
+	num, err := loghelper(args[0], "log", gomath.Log)
 	if err != nil {
 		return nil, err
 	}
-	if x < 0 {
-		return nil, fmt.Errorf("ValueError: math domain error")
-	}
-	r := gomath.Log(x)
 	if len(args) == 2 {
-		base, err := objectToFloat(args[1], "log")
+		den, err := loghelper(args[1], "log", gomath.Log)
 		if err != nil {
 			return nil, err
 		}
-		if base <= 0 {
-			return nil, fmt.Errorf("ValueError: math domain error")
+		if den == 0 {
+			return nil, fmt.Errorf("ZeroDivisionError: float division by zero")
 		}
-		r /= gomath.Log(base)
+		return objects.NewFloat(num / den), nil
 	}
-	return objects.NewFloat(r), nil
+	return objects.NewFloat(num), nil
 }
 
 // mathLog1p implements math.log1p(x).
@@ -574,27 +607,27 @@ func mathLog1p(args []objects.Object, kwargs map[string]objects.Object) (objects
 // mathLog2 implements math.log2(x).
 // CPython: Modules/mathmodule.c:2316 math_log2
 func mathLog2(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	x, err := oneFloat(args, "log2")
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: log2() takes exactly 1 argument (%d given)", len(args))
+	}
+	r, err := loghelper(args[0], "log2", gomath.Log2)
 	if err != nil {
 		return nil, err
 	}
-	if x <= 0 {
-		return nil, fmt.Errorf("ValueError: math domain error")
-	}
-	return objects.NewFloat(gomath.Log2(x)), nil
+	return objects.NewFloat(r), nil
 }
 
 // mathLog10 implements math.log10(x).
 // CPython: Modules/mathmodule.c:2333 math_log10
 func mathLog10(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	x, err := oneFloat(args, "log10")
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: log10() takes exactly 1 argument (%d given)", len(args))
+	}
+	r, err := loghelper(args[0], "log10", gomath.Log10)
 	if err != nil {
 		return nil, err
 	}
-	if x <= 0 {
-		return nil, fmt.Errorf("ValueError: math domain error")
-	}
-	return objects.NewFloat(gomath.Log10(x)), nil
+	return objects.NewFloat(r), nil
 }
 
 // mathPow implements math.pow(x, y).

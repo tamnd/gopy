@@ -698,7 +698,7 @@ func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects
 	// Bytes, ByteArray, MemoryView, and buffer-protocol objects (array.array).
 	if buf, ok := objects.AsBytesLike(args[0]); ok {
 		f, err := pystrconv.ParseFloat(trimSpace(string(buf)))
-		if err != nil {
+		if err != nil && !errors.Is(err, pystrconv.ErrFloatOverflow) {
 			r, _ := objects.Repr(args[0])
 			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
@@ -708,7 +708,7 @@ func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects
 	if objects.IsSubtype(args[0].Type(), objects.StrType()) {
 		s, _ := objects.Str(args[0])
 		f, err := pystrconv.ParseFloat(trimSpace(s))
-		if err != nil {
+		if err != nil && !errors.Is(err, pystrconv.ErrFloatOverflow) {
 			r, _ := objects.Repr(args[0])
 			return nil, fmt.Errorf("ValueError: could not convert string to float: %s", r)
 		}
