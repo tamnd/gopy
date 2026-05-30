@@ -194,4 +194,3 @@ func boolXor(a, b Object) (Object, error) {
 	}
 	return NewIntFromBig(r), nil
 }
-

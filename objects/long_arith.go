@@ -84,7 +84,9 @@ func intTrueDiv(a, b Object) (Object, error) {
 	const dblMaxExp = 1024
 	const dblMinExp = -1021
 
-	// DBL_MIN_OVERFLOW = 2**DBL_MAX_EXP - 2**(DBL_MAX_EXP - DBL_MANT_DIG - 1)
+	// Overflow threshold from long_true_divide: the smallest a/b that
+	// rounds to +Inf is 2 to the DBL_MAX_EXP minus 2 to the
+	// (DBL_MAX_EXP minus DBL_MANT_DIG minus 1).
 	dblMinOverflow := new(big.Int).Lsh(big.NewInt(1), dblMaxExp)
 	dblMinOverflow.Sub(dblMinOverflow, new(big.Int).Lsh(big.NewInt(1), dblMaxExp-dblMantDig-1))
 	threshold := new(big.Int).Mul(dblMinOverflow, bAbs)
@@ -107,10 +109,7 @@ func intTrueDiv(a, b Object) (Object, error) {
 		}
 	}
 
-	exp := d - dblMantDig
-	if exp < dblMinExp-dblMantDig {
-		exp = dblMinExp - dblMantDig
-	}
+	var exp int
 	if d < dblMinExp {
 		exp = dblMinExp - dblMantDig
 	} else {
@@ -136,7 +135,7 @@ func intTrueDiv(a, b Object) (Object, error) {
 
 	// Convert q * 2^exp to float64 via math.Ldexp on the int mantissa.
 	// q fits in DBL_MANT_DIG+1 bits at this point.
-	qf, _ := new(big.Float).SetPrec(dblMantDig+1).SetInt(q).Float64()
+	qf, _ := new(big.Float).SetPrec(dblMantDig + 1).SetInt(q).Float64()
 	result := math.Ldexp(qf, exp)
 	if math.IsInf(result, 0) {
 		return nil, errors.New("OverflowError: integer division result too large for a float")
