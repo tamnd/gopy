@@ -144,6 +144,13 @@ func bytearrayExtendMethod() methodFn {
 			b.Extend(buf)
 			return None(), nil
 		}
+		// CPython: Objects/bytearrayobject.c:2329 bytearray_extend calls
+		// PyObject_LengthHint(iterable, 0); a non-TypeError out of
+		// __len__/__length_hint__ propagates instead of falling back to
+		// a silent default.
+		if _, err := LengthHint(args[1], 0); err != nil {
+			return nil, err
+		}
 		items, err := IterToSlice(args[1])
 		if err != nil {
 			return nil, err

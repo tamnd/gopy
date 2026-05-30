@@ -61,6 +61,15 @@ func init() {
 			return NewTuple([]Object{iterFn, NewTuple([]Object{r}), NewInt(0)}), nil
 		},
 	))
+	// CPython: Objects/rangeobject.c:1006 longrangeiter_len
+	SetTypeDescr(rangeIterType, "__length_hint__", NewMethodDescr(rangeIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			return args[0].(*rangeIterator).LengthHint(), nil
+		},
+	))
 	// CPython: Objects/rangeobject.c:1095 longrangeiter_setstate
 	SetTypeDescr(rangeIterType, "__setstate__", NewMethodDescr(rangeIterType, "__setstate__",
 		func(args []Object, _ map[string]Object) (Object, error) {

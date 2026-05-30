@@ -425,6 +425,23 @@ func init() {
 			return None(), nil
 		},
 	))
+	// CPython: Objects/tupleobject.c:1115 tupleiter_len
+	SetTypeDescr(tupleIterType, "__length_hint__", NewMethodDescr(tupleIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*tupleIterator)
+			if it.src == nil {
+				return NewInt(0), nil
+			}
+			n := len(it.src.items) - it.pos
+			if n < 0 {
+				n = 0
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
 }
 
 func tupleIter(o Object) (Object, error) {

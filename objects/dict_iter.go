@@ -120,6 +120,32 @@ func init() {
 	SetTypeDescr(dictKeyIterType, "__reduce__", NewMethodDescr(dictKeyIterType, "__reduce__", dictReduceFn))
 	SetTypeDescr(dictValueIterType, "__reduce__", NewMethodDescr(dictValueIterType, "__reduce__", dictReduceFn))
 	SetTypeDescr(dictItemIterType, "__reduce__", NewMethodDescr(dictItemIterType, "__reduce__", dictReduceFn))
+
+	// CPython: Objects/dictobject.c:5300 dictiter_len
+	// Returns 0 if the dict was mutated (size mismatch) so callers don't
+	// over-allocate when length is no longer trustworthy.
+	dictLenHintFn := func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+		}
+		it := args[0].(*dictIterObj)
+		if it.src == nil {
+			return NewInt(0), nil
+		}
+		if it.snapUsed != it.src.used {
+			return NewInt(0), nil
+		}
+		remaining := 0
+		for p := it.pos; p < len(it.src.order); p++ {
+			if it.src.slotIsLive(it.src.order[p]) {
+				remaining++
+			}
+		}
+		return NewInt(int64(remaining)), nil
+	}
+	SetTypeDescr(dictKeyIterType, "__length_hint__", NewMethodDescr(dictKeyIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictValueIterType, "__length_hint__", NewMethodDescr(dictValueIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictItemIterType, "__length_hint__", NewMethodDescr(dictItemIterType, "__length_hint__", dictLenHintFn))
 }
 
 // dictIter is the type-level Iter slot that DictType registers in

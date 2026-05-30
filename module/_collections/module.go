@@ -1049,7 +1049,22 @@ func newDequeIterType() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeIterNext
 	objects.AddIterSlotWrappers(t)
+	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len
+	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescr(t, "__length_hint__", dequeIterLenHint))
 	return t
+}
+
+// dequeIterLenHint reports the remaining item count. Mirrors CPython's
+// dequeiter_len, which returns counter (forced to 0 by dequeiter_next
+// on a deque mutation, so callers see 0 instead of a stale count).
+//
+// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len
+func dequeIterLenHint(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+	}
+	it := args[0].(*dequeIterObject)
+	return objects.NewInt(int64(it.counter)), nil
 }
 
 func newDequeIter(d *dequeObject) *dequeIterObject {
@@ -1095,6 +1110,8 @@ func newDequeRevIterType() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeRevIterNext
 	objects.AddIterSlotWrappers(t)
+	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len (shared with forward)
+	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescr(t, "__length_hint__", dequeIterLenHint))
 	return t
 }
 

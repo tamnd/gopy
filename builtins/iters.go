@@ -123,18 +123,24 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	return nil, err
 }
 
-// Reversed ports builtin_reversed. v0.7 covers the sequence path
-// (length + getitem) which handles tuple, list, str, range. The
-// __reversed__ slot lookup arrives once attribute access is wired
-// through the type slots.
+// Reversed ports builtin_reversed. Looks for __reversed__ on the type
+// first (range, dict_keys, deque all provide their own reverse
+// iterators) and falls back to the sequence protocol (length + getitem)
+// when the type has no __reversed__.
 //
-// CPython: Objects/enumobject.c:reversed_new_impl
+// CPython: Objects/enumobject.c:1086 reversed_new_impl
 func Reversed(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: reversed() takes exactly one argument (%d given)", len(args))
 	}
 	o := args[0]
 	t := o.Type()
+	if descr, _ := objects.LookupDescriptor(t, "__reversed__"); descr != nil {
+		fn, err := objects.GetAttr(o, objects.NewStr("__reversed__"))
+		if err == nil && fn != nil {
+			return objects.CallObject(fn, nil)
+		}
+	}
 	if t.Sequence == nil || t.Sequence.GetItem == nil || t.Sequence.Length == nil {
 		return nil, fmt.Errorf("TypeError: argument to reversed() must be a sequence")
 	}

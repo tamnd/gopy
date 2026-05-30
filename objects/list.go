@@ -234,6 +234,13 @@ func listInPlaceConcat(a, b Object) (Object, error) {
 	if itType.IterNext == nil {
 		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itType.Name)
 	}
+	// CPython: Objects/listobject.c:1078 list_extend_iter_lock_held —
+	// PyObject_LengthHint propagates exceptions out of __len__ /
+	// __length_hint__ so a broken iterable surfaces here instead of
+	// looking like a silent empty extend.
+	if _, lhErr := LengthHint(b, 8); lhErr != nil {
+		return nil, lhErr
+	}
 	for {
 		v, err := itType.IterNext(it)
 		if errors.Is(err, ErrStopIteration) {
@@ -693,6 +700,23 @@ func init() {
 			}
 			it.pos = int(p)
 			return None(), nil
+		},
+	))
+	// CPython: Objects/listobject.c:3593 listiter_len
+	SetTypeDescr(listIterType, "__length_hint__", NewMethodDescr(listIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*listIterator)
+			if it.src == nil {
+				return NewInt(0), nil
+			}
+			n := len(it.src.items) - it.pos
+			if n < 0 {
+				n = 0
+			}
+			return NewInt(int64(n)), nil
 		},
 	))
 }

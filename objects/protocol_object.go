@@ -12,6 +12,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Length returns len(o). Routes through Mapping.Length first, then
@@ -183,6 +184,42 @@ func Iter(o Object) (Object, error) {
 		return NewSeqIter(o), nil
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
+}
+
+// LengthHint mirrors PyObject_LengthHint. Returns __len__'s result when
+// available, then __length_hint__, else default. A non-TypeError out of
+// either dunder propagates to the caller, matching CPython's behavior.
+//
+// CPython: Objects/abstract.c:64 PyObject_LengthHint
+func LengthHint(o Object, defaultVal int64) (int64, error) {
+	if n, err := Length(o); err == nil {
+		return int64(n), nil
+	} else if !strings.HasPrefix(err.Error(), "TypeError") {
+		return 0, err
+	}
+	hint, hintErr := GetAttr(o, NewStr("__length_hint__"))
+	if hintErr != nil {
+		return defaultVal, nil //nolint:nilerr // CPython: missing __length_hint__ → default
+	}
+	res, callErr := Call(hint, NewTuple(nil), nil)
+	if callErr != nil {
+		if strings.HasPrefix(callErr.Error(), "TypeError") {
+			return defaultVal, nil //nolint:nilerr // CPython: TypeError → default
+		}
+		return 0, callErr
+	}
+	if IsNotImplemented(res) {
+		return defaultVal, nil
+	}
+	n, ok := res.(*Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __length_hint__ must be integer, not %s", res.Type().Name)
+	}
+	v, _ := n.Int64()
+	if v < 0 {
+		return 0, fmt.Errorf("ValueError: __length_hint__() should return >= 0")
+	}
+	return v, nil
 }
 
 // IterNext advances o by one. Equivalent to next(o), and propagates

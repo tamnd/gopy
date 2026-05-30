@@ -7,6 +7,7 @@ package builtins
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -207,11 +208,23 @@ func init() {
 	reversedIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	reversedIterType.IterNext = func(o objects.Object) (objects.Object, error) {
 		it := o.(*reversedIter)
-		if it.idx < 0 {
+		if it.idx < 0 || it.o == nil {
+			it.idx = -1
+			it.o = nil
 			return nil, objects.ErrStopIteration
 		}
 		v, err := it.o.Type().Sequence.GetItem(it.o, it.idx)
 		if err != nil {
+			// CPython: Objects/enumobject.c:1135 reversed_next clears
+			// IndexError / StopIteration and stops iteration. This is
+			// what makes `list(reversed_iter_into_truncated_seq)` yield
+			// an empty list instead of raising IndexError.
+			msg := err.Error()
+			if strings.HasPrefix(msg, "IndexError") || errors.Is(err, objects.ErrStopIteration) {
+				it.idx = -1
+				it.o = nil
+				return nil, objects.ErrStopIteration
+			}
 			return nil, err
 		}
 		it.idx--
@@ -269,6 +282,32 @@ func init() {
 			}
 			it.idx = int(v)
 			return objects.None(), nil
+		},
+	))
+	// CPython: Objects/enumobject.c:744 reversed_len
+	// Returns idx+1 unless the sequence has been truncated below that
+	// position, in which case CPython returns 0 (the iterator will
+	// raise IndexError on its next read).
+	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescr(reversedIterType, "__length_hint__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*reversedIter)
+			if it.idx < 0 || it.o == nil {
+				return objects.NewInt(0), nil
+			}
+			position := int64(it.idx + 1)
+			if it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
+				cur, err := it.o.Type().Sequence.Length(it.o)
+				if err != nil {
+					return nil, err
+				}
+				if int64(cur) < position {
+					return objects.NewInt(0), nil
+				}
+			}
+			return objects.NewInt(position), nil
 		},
 	))
 	objects.AddIterSlotWrappers(reversedIterType)

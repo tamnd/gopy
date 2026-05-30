@@ -976,6 +976,13 @@ func drainIterable(o objects.Object) ([]objects.Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// CPython: Objects/listobject.c:1078 list_extend_iter_lock_held calls
+	// PyObject_LengthHint(iterable, 8) to size the result; a non-TypeError
+	// from __len__/__length_hint__ propagates so list(BadLen()) raises
+	// instead of silently producing an empty list.
+	if _, err := objects.LengthHint(o, 8); err != nil {
+		return nil, err
+	}
 	var items []objects.Object
 	for {
 		v, err := abstract.IterNext(it)
