@@ -43,6 +43,13 @@ func init() {
 	//
 	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
 	pegen.IntMaxStrDigitsHook = intMaxStrDigits.Load
+	// Wire the runtime hook so int(str) and str(int) at the objects
+	// layer reject values past the ceiling, matching what the parser
+	// rejects at compile time.
+	//
+	// CPython: Objects/longobject.c:2049 long_to_decimal_string_internal,
+	// Objects/longobject.c:2943 long_from_string_base
+	objects.IntMaxStrDigitsHook = intMaxStrDigits.Load
 }
 
 // Bind stamps the runtime helpers onto d: exit, setrecursionlimit,

@@ -12,8 +12,66 @@ import (
 	"math/big"
 )
 
+// IntMaxStrDigitsHook returns the current sys.int_max_str_digits limit.
+// Zero means unlimited. module/sys sets this during init so the
+// objects layer can enforce the limit on int->str without pulling in
+// sys as a dependency.
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_STR
+var IntMaxStrDigitsHook func() int32
+
+// checkIntToStrLimit raises ValueError when n's decimal repr would
+// exceed sys.int_max_str_digits. Uses bit length as a lower bound on
+// the decimal digit count so the fast path stays O(1). Power-of-2
+// bases skip the check at the caller.
+//
+// CPython: Objects/longobject.c:2049 long_to_decimal_string_internal
+// (pre-check using 10/3 >= log2(10))
+func checkIntToStrLimit(bitLen int) error {
+	if IntMaxStrDigitsHook == nil {
+		return nil
+	}
+	limit := IntMaxStrDigitsHook()
+	if limit <= 0 {
+		return nil
+	}
+	// log10(2) ≈ 0.30103. Use 30/100 (a strict under-estimate of
+	// log10(2)) so (bit_len - 1) * 30/100 + 1 is a safe lower bound on
+	// the decimal digit count of a non-zero integer with bitLen bits.
+	if bitLen <= 0 {
+		return nil
+	}
+	minDigits := (bitLen-1)*30/100 + 1
+	if int32(minDigits) > limit {
+		return fmt.Errorf("ValueError: Exceeds the limit (%d digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit", limit)
+	}
+	return nil
+}
+
 func intRepr(o Object) (string, error) {
-	return o.(*Int).v.String(), nil
+	i := o.(*Int)
+	if err := checkIntToStrLimit(i.v.BitLen()); err != nil {
+		return "", err
+	}
+	s := i.v.String()
+	// Exact post-check: the bit-length lower bound only catches huge
+	// values; a number right at the boundary may pass the pre-check
+	// but still exceed the limit. The actual digit count without sign
+	// is what CPython compares to.
+	//
+	// CPython: Objects/longobject.c:2135 long_to_decimal_string_internal
+	if IntMaxStrDigitsHook != nil {
+		if limit := IntMaxStrDigitsHook(); limit > 0 {
+			n := len(s)
+			if n > 0 && s[0] == '-' {
+				n--
+			}
+			if int32(n) > limit {
+				return "", fmt.Errorf("ValueError: Exceeds the limit (%d digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit", limit)
+			}
+		}
+	}
+	return s, nil
 }
 
 // intHash mirrors CPython's long_hash: reduce modulo 2^61-1 and

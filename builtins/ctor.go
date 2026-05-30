@@ -105,12 +105,56 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 }
 
 func parseIntString(s string, base int) (objects.Object, error) {
+	stripped := stripIntLiteral(s, base)
+	effBase := parseBase(s, base)
+	// Limit check applies only to non-power-of-2 bases. CPython skips the
+	// gate for binary bases because long_from_binary_base is linear.
+	//
+	// CPython: Objects/longobject.c:2936 long_from_string_base (limit check)
+	if !isPowerOfTwoBase(effBase) && objects.IntMaxStrDigitsHook != nil {
+		if limit := objects.IntMaxStrDigitsHook(); limit > 0 {
+			n := digitCountForLimit(stripped)
+			if int32(n) > limit {
+				return nil, fmt.Errorf(
+					"ValueError: Exceeds the limit (%d digits) for integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit",
+					limit, n)
+			}
+		}
+	}
 	out := new(big.Int)
-	_, ok := out.SetString(stripIntLiteral(s, base), parseBase(s, base))
+	_, ok := out.SetString(stripped, effBase)
 	if !ok {
 		return nil, fmt.Errorf("ValueError: invalid literal for int() with base %d: %q", base, s)
 	}
 	return objects.NewIntFromBig(out), nil
+}
+
+// isPowerOfTwoBase reports whether base is one of the binary bases
+// (2, 4, 8, 16, 32) that skip the digit-limit gate.
+//
+// CPython: Objects/longobject.c:2911 is_binary_base
+func isPowerOfTwoBase(base int) bool {
+	switch base {
+	case 2, 4, 8, 16, 32:
+		return true
+	}
+	return false
+}
+
+// digitCountForLimit returns the count of significant digit characters
+// in a stripIntLiteral-output string, skipping a leading sign. Mirrors
+// the `digits` counter CPython's long_from_string_base passes to its
+// limit check (sign and prefix already removed, underscores stripped).
+//
+// CPython: Objects/longobject.c:2870 long_from_string_base (digits arg)
+func digitCountForLimit(s string) int {
+	if s == "" {
+		return 0
+	}
+	if s[0] == '+' || s[0] == '-' {
+		return len(s) - 1
+	}
+	return len(s)
 }
 
 // stripIntLiteral matches PyLong_FromString's handling of the 0b/0o/0x
