@@ -342,7 +342,7 @@ func init() {
 		}
 		out := make([]objects.Object, len(z.iters))
 		for i, it := range z.iters {
-			v, err := it.Type().IterNext(it)
+			v, err := objects.IterNext(it)
 			if errors.Is(err, objects.ErrStopIteration) {
 				z.done = true
 				if z.strict {
@@ -355,17 +355,29 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			if v == nil {
+				z.done = true
+				if z.strict {
+					if serr := zipStrictCheck(z.iters, i); serr != nil {
+						return nil, serr
+					}
+				}
+				return nil, objects.ErrStopIteration
+			}
 			out[i] = v
 		}
 		return objects.NewTuple(out), nil
 	}
 	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescr(ZipType, "__reduce__", zipReduce))
+	objects.SetTypeDescr(ZipType, "__setstate__", objects.NewMethodDescr(ZipType, "__setstate__", zipSetState))
 }
 
-// zipReduce returns (type(self), (iter1, iter2, ...)) so pickle can
-// reconstruct the zip at the right iterator position.
+// zipReduce returns (type(self), (iter1, iter2, ...)) when strict is
+// off, or the 3-tuple form (type(self), iters, True) when strict is
+// on. pickle calls __setstate__(True) after constructing the zip so
+// the unpickled instance still raises on length mismatch.
 //
-// CPython: Objects/enumobject.c:1142 zip_reduce
+// CPython: Python/bltinmodule.c:3262 zip_reduce
 func zipReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
@@ -374,7 +386,31 @@ func zipReduce(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' for 'zip' objects doesn't apply to a '%s' object", args[0].Type().Name)
 	}
+	if z.strict {
+		return objects.NewTuple([]objects.Object{ZipType, objects.NewTuple(z.iters), objects.True()}), nil
+	}
 	return objects.NewTuple([]objects.Object{ZipType, objects.NewTuple(z.iters)}), nil
+}
+
+// zipSetState rebinds the strict flag from the pickle state. CPython
+// coerces state to bool through PyObject_IsTrue so any truthy value
+// turns strict on.
+//
+// CPython: Python/bltinmodule.c:3273 zip_setstate
+func zipSetState(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	z, ok := args[0].(*zipIter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__setstate__' for 'zip' objects doesn't apply to a '%s' object", args[0].Type().Name)
+	}
+	strict, err := objects.IsTruthy(args[1])
+	if err != nil {
+		return nil, err
+	}
+	z.strict = strict
+	return objects.None(), nil
 }
 
 func newZip(iters []objects.Object, strict bool) *zipIter {
@@ -383,28 +419,46 @@ func newZip(iters []objects.Object, strict bool) *zipIter {
 	return z
 }
 
-// zipStrictCheck mirrors CPython's zip strict handling: when iter i
-// raises StopIteration, the iterators before it must also be done,
-// and the iterators after must already have been advanced. Any
-// mismatch is a ValueError.
+// zipStrictCheck mirrors CPython's zip_next strict branch. When iter
+// shortIdx raises StopIteration in the middle of building a result
+// tuple, two shapes of mismatch are possible:
 //
-// CPython: Objects/enumobject.c:1241 zip_next strict branch
+//  1. shortIdx > 0. Every iter before it already produced a value at
+//     this position, so iter shortIdx is the short one. Raise
+//     ValueError immediately.
+//  2. shortIdx == 0. The first iter stopped before any of the others
+//     was advanced. Walk iters[1..N-1] once each: if any still has a
+//     value, that iter is longer. Otherwise every iter was exhausted
+//     together and the strict pass succeeds.
+//
+// CPython: Python/bltinmodule.c:3222 zip_next (check: label)
 func zipStrictCheck(iters []objects.Object, shortIdx int) error {
-	for j, it := range iters {
-		if j == shortIdx {
-			continue
+	if shortIdx > 0 {
+		plural := " "
+		if shortIdx > 1 {
+			plural = "s 1-"
 		}
-		_, err := it.Type().IterNext(it)
+		return fmt.Errorf("ValueError: zip() argument %d is shorter than argument%s%d",
+			shortIdx+1, plural, shortIdx)
+	}
+	for j := 1; j < len(iters); j++ {
+		it := iters[j]
+		v, err := objects.IterNext(it)
 		if errors.Is(err, objects.ErrStopIteration) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		if j < shortIdx {
-			return fmt.Errorf("ValueError: zip() argument %d is longer than argument %d", j+1, shortIdx+1)
+		if v == nil {
+			continue
 		}
-		return fmt.Errorf("ValueError: zip() argument %d is shorter than argument %d", shortIdx+1, j+1)
+		plural := " "
+		if j > 1 {
+			plural = "s 1-"
+		}
+		return fmt.Errorf("ValueError: zip() argument %d is longer than argument%s%d",
+			j+1, plural, j)
 	}
 	return nil
 }
