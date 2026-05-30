@@ -438,6 +438,125 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 
 ---
 
+## P11 — Generator cycle-collector finalization
+
+**Blocked tests:** `test_generators` (5 remaining failures after P1):
+- `FinalizationTest.test_refcycle` — generator pinned by `g.send(g)` self-cycle
+  must run its `finally` clause on `gc.collect()`.
+- `FinalizationTest.test_frame_resurrect` — generator dropped by `del g` must
+  fire `tp_finalize` so `finally` runs and resurrects its own frame via
+  `sys._getframe()`.
+- `FinalizationTest.test_generator_resurrect` — generator's `except` clause
+  resurrects itself, must run after `gc.collect()` fires `tp_finalize`.
+- `coroutine` doctest — coroutine pinned in a similar cycle.
+- `refleaks` doctest — `__del__` raising must route through
+  `sys.unraisablehook` (related to P3.x but exposed here).
+
+**CPython mechanism:**
+- `Modules/gcmodule.c:1822 gc_collect_impl` runs the cycle collector.
+- `Python/gc.c:392 update_refs` seeds `gc_refs` from each tracked object's
+  refcount.
+- `Python/gc.c:482 subtract_refs` walks every tracked container's
+  `tp_traverse`, decrementing `gc_refs` on each visited tracked target.
+- `Python/gc.c:497 move_unreachable` partitions the candidate set into
+  reachable (`gc_refs > 0`, recursively reachable) and unreachable (the rest).
+- `Python/gc.c:1067 finalize_garbage` runs `tp_finalize` on every entry of
+  the unreachable list. For generators, that calls
+  `Objects/genobject.c:87 _PyGen_Finalize` which routes through
+  `Objects/genobject.c:131 gen_close` and runs the body's `finally` clauses.
+
+**Current gopy state:**
+
+`objects/generator.go NewGenerator` deliberately does NOT call
+`GCTrackHook`. The comment in that file documents the blocker: gopy's refcount
+discipline on container stores (`dict.SetItem`, `list.Append`, frame
+fast-local stores, stack-ref pushes/pops) is incomplete. Concretely, when
+the module-level `g = gen()` assignment stores the generator into the
+module's `__dict__`, the dict's stored value does not `Incref` the generator,
+and the dict's own refcount stays at the value it had on creation
+(`refcount == 1`).
+
+When `subtractRefs` runs against a tracked generator, every tracked container
+that holds the generator decrements its `gc_refs`. The module `__dict__` is
+tracked (`objects/dict.go:271` wires `GCTrackHook`) and its `tp_traverse`
+yields the generator. With `gc_refs` decremented to zero, `moveUnreachable`
+classifies the generator as unreachable, `finalize_garbage` calls
+`genFinalize`, and the body is closed prematurely.
+
+Empirically, enabling tracking on `NewGenerator` flips the three cycle tests
+(`test_refcycle`, `test_frame_resurrect`, `test_generator_resurrect`) to
+green at the cost of regressing four doctests
+(`conjoin`, `coroutine`, `email`, `fun`) and `test_modify_f_locals`, because
+those tests rely on a generator surviving an explicit `gc.collect()` between
+creation and consumption. The net delta is +1 failure, so tracking is
+currently off.
+
+### P11.1 — Faithful refcount on container stores
+
+Add `Incref`/`Decref` on every container mutation path so the cycle collector
+can compute external references accurately.
+
+**Files to audit (every `Object` store in these paths must Incref the new
+value and Decref the displaced value):**
+
+- `objects/dict.go` — `Dict.SetItem`, `Dict.DelItem`, internal slot mutations
+  in `insertDict`, `dictResize`, the split-dict materialization paths.
+- `objects/list.go` — `List.Append`, `List.SetItem`, slice assignment, `pop`,
+  `extend`, `clear`.
+- `objects/tuple.go` — `Tuple` is immutable, but `NewTuple`'s caller must
+  Incref each input; `BUILD_TUPLE` opcode and tuple-pack helpers need to pair
+  the Incref with a Decref of the source.
+- `objects/set.go` — `Set.Add`, `Set.Discard`, table resize.
+- `objects/instance.go` — `instanceSetAttr`, `instanceDelAttr` on
+  `inst.dict`, `inst.slots`.
+- `frame/frame.go` — `FrameFastLocalSet`, `FrameStackPush`/`Pop`, cell-local
+  writes (`MAKE_CELL`, `STORE_DEREF`), `FrameClearLocals`.
+- `vm/eval.go` — `STORE_FAST`, `STORE_GLOBAL`, `STORE_NAME`, `STORE_ATTR`,
+  `STORE_SUBSCR`, `STORE_DEREF`, every stack push/pop that transfers
+  ownership.
+
+**CPython reference:** every `Py_DECREF`/`Py_INCREF`/`Py_SETREF` in
+`Objects/dictobject.c`, `Objects/listobject.c`, `Objects/setobject.c`,
+`Objects/typeobject.c`, `Python/ceval.c`. Use `Include/object.h:605 Py_INCREF`,
+`Include/object.h:631 Py_DECREF`, and `Include/object.h:725 Py_SETREF` as
+the model.
+
+**Shipping criterion:** with `NewGenerator` calling `GCTrackHook`, both the
+five-test cycle suite AND the conjoin/email/fun/coroutine/test_modify_f_locals
+panel pass. The order is: land P11.1, then enable tracking in P11.2.
+
+### P11.2 — Wire `GCTrackHook` in `NewGenerator`
+
+After P11.1 lands, restore the `GCTrackHook` call in
+`objects/generator.go NewGenerator` and re-run `test_generators.py`. CPython
+calls `PyObject_GC_Track` at the end of `Objects/genobject.c:867
+gen_new_with_qualname`.
+
+### P11.3 — Resurrect-after-finalize semantics
+
+`test_generator_resurrect` and `test_frame_resurrect` both check that an
+object resurrected inside `tp_finalize` (by storing itself in a still-live
+container) survives. `Python/gc.c:1261 handle_resurrected_objects` re-runs
+`deduce_unreachable` on the post-finalize list and pulls survivors back out
+of the reclaim path. gopy's `module/gc/finalize.go handleResurrected`
+already implements this. Once tracking is on, these tests should pass.
+
+### P11.4 — `sys.unraisablehook` formatting for the `refleaks` doctest
+
+CPython's `refleaks` doctest verifies the exact `err_msg` produced when a
+`__del__` raises (`"Exception ignored while calling deallocator <repr>"`).
+gopy's hook stub does not produce this message. CPython:
+`Python/errors.c:1380 _PyErr_WriteUnraisable` and
+`Objects/typeobject.c:1450 subtype_dealloc` for the deallocator-context
+format string.
+
+**Fix:** in `vm/builtins_hook.go` (where `WriteUnraisableHook` is registered)
+and `objects/refcount.go Decref`, ensure the err_msg passed to
+`sys.unraisablehook` matches CPython's exact format for the
+`Finalize`-from-`Decref` path: `"Exception ignored while calling deallocator " + repr(t.Finalize)`.
+
+---
+
 ## Checklist
 
 ### Tests to flip to done
@@ -509,6 +628,13 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 ### P10 — Error message module prefix
 
 - [ ] P10.1 TypeError messages use `module.funcname()` not `__main__.funcname()` for non-main modules
+
+### P11 — Generator cycle-collector finalization
+
+- [ ] P11.1 Faithful refcount on container stores (dict/list/tuple/set/instance/frame/eval).
+- [ ] P11.2 Restore `GCTrackHook` call in `NewGenerator` once P11.1 lands.
+- [ ] P11.3 Verify `handle_resurrected_objects` flow on generator resurrect.
+- [ ] P11.4 `sys.unraisablehook` deallocator-context format string matches CPython.
 
 ### Spec 1700 rows advanced
 
