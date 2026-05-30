@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"strconv"
 	"strings"
@@ -425,27 +426,128 @@ func floatHash(o Object) (int64, error) {
 	return x, nil
 }
 
+// floatRichCmp implements float vs (float | int) ordering. The float vs
+// int case avoids a naive float64(int) cast (which loses precision past
+// 2^53 and overflows past 2^1024) by mirroring float_richcompare's
+// sign / bit-count / mantissa-truncation algorithm.
+//
+// CPython: Objects/floatobject.c:382 float_richcompare
 func floatRichCmp(a, b Object, op CompareOp) (Object, error) {
 	af, ok := a.(*Float)
 	if !ok {
 		return nil, fmt.Errorf("floatRichCmp: lhs is %T", a)
 	}
-	var bv float64
+	i := af.v
 	switch x := b.(type) {
 	case *Float:
-		bv = x.v
+		return boolFromBool(compareFloats(i, x.v, op)), nil
 	case *Bool:
-		bv = intToFloat(&x.Int)
+		return floatVsInt(i, &x.Int, op)
 	case *Int:
-		bv = intToFloat(x)
-	default:
-		return notImplemented(), nil
+		return floatVsInt(i, x, op)
 	}
-	res := compareFloats(af.v, bv, op)
-	if res {
-		return True(), nil
+	return notImplemented(), nil
+}
+
+// floatVsInt is the PyLong_Check(w) branch of float_richcompare:
+// it computes the exact ordering of float i vs integer w without
+// rounding either operand.
+//
+// CPython: Objects/floatobject.c:407 float_richcompare (PyLong_Check branch)
+func floatVsInt(i float64, w *Int, op CompareOp) (Object, error) {
+	// Infinities and NaN compare against any finite int without
+	// looking at the magnitude.
+	if math.IsInf(i, 0) || math.IsNaN(i) {
+		return boolFromBool(compareFloats(i, 0, op)), nil
 	}
-	return False(), nil
+	vsign := 0
+	switch {
+	case i > 0:
+		vsign = 1
+	case i < 0:
+		vsign = -1
+	}
+	wsign := w.Sign()
+	if vsign != wsign {
+		return boolFromBool(compareFloats(float64(vsign), float64(wsign), op)), nil
+	}
+	// Same sign: compare magnitudes precisely.
+	nbits := w.v.BitLen()
+	const dblMaxExp = 1024 // float64 DBL_MAX_EXP
+	if nbits > dblMaxExp {
+		// |w| exceeds any finite float, so the answer is determined by sign.
+		return boolFromBool(compareFloats(float64(vsign), float64(wsign)*2.0, op)), nil
+	}
+	if nbits <= 48 {
+		// w fits exactly in a float64 mantissa (52 bits, but CPython
+		// uses the conservative 48 to match its 32-bit C long path).
+		j, _ := w.v.Float64()
+		return boolFromBool(compareFloats(i, j, op)), nil
+	}
+	// nbits > 48 and same sign. Compare via frexp: the exponent of i
+	// is the number of bits before the radix point, so an exponent
+	// mismatch decides the ordering by magnitude.
+	_, exponent := math.Frexp(i)
+	if exponent < nbits {
+		// |w| > |i|. CPython sets j = i; i = 0; then compares
+		// i op j, which is 0 op old_i. We mirror that directly.
+		return boolFromBool(compareFloats(0, i, op)), nil
+	}
+	if exponent > nbits {
+		// |i| > |w|. CPython sets j = 0 and compares i op j.
+		return boolFromBool(compareFloats(i, 0, op)), nil
+	}
+	// Same number of bits before the radix point: split i into
+	// integer and fractional parts, fold a non-zero fractional part
+	// into the comparison op, then run an int/int compare.
+	intpart, fracpart := math.Modf(i)
+	if fracpart != 0 {
+		switch op {
+		case CompareEQ:
+			return False(), nil
+		case CompareNE:
+			return True(), nil
+		case CompareLT, CompareLE:
+			if vsign > 0 {
+				op = CompareLT
+			} else {
+				op = CompareLE
+			}
+		case CompareGT, CompareGE:
+			if vsign > 0 {
+				op = CompareGE
+			} else {
+				op = CompareGT
+			}
+		}
+	}
+	bf := new(big.Float).SetPrec(64).SetFloat64(intpart)
+	vv := new(big.Int)
+	bf.Int(vv)
+	cmp := vv.Cmp(&w.v)
+	var res bool
+	switch op {
+	case CompareLT:
+		res = cmp < 0
+	case CompareLE:
+		res = cmp <= 0
+	case CompareEQ:
+		res = cmp == 0
+	case CompareNE:
+		res = cmp != 0
+	case CompareGT:
+		res = cmp > 0
+	case CompareGE:
+		res = cmp >= 0
+	}
+	return boolFromBool(res), nil
+}
+
+func boolFromBool(b bool) Object {
+	if b {
+		return True()
+	}
+	return False()
 }
 
 func compareFloats(a, b float64, op CompareOp) bool {
