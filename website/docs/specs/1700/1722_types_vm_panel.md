@@ -624,7 +624,7 @@ bytes via `memoryview.ToBytes()`.
 
 - [ ] P4.1 `slice_hash` (xxHash3 over start/stop/step)
 - [ ] P4.2 `slice.__reduce__` for pickle
-- [ ] P4.3 slice GC traversal + `TpFlagHaveGC`
+- [x] P4.3 slice GC traversal + `TpFlagHaveGC`
 - [ ] P4.4 `slice.indices()` length `__index__` coercion
 
 ### P5 — VM / eval loop
@@ -652,6 +652,6 @@ bytes via `memoryview.ToBytes()`.
 | test_long | crash (int_info) | P2.3 |
 | test_int | 17 fail / 8 error | P2.1 P2.2 P2.4 |
 | test_complex | 37 fail / 10 error | P3.1–P3.10 |
-| test_slice | 1 fail | P4.3 |
+| test_slice | done (P4.3 landed via type_call orphan-tuple fix) | — |
 | test_iter | 1 fail | P5.1 |
 | test_py_compile | 1 error | P6.1 |
