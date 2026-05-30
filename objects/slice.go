@@ -37,6 +37,8 @@ func init() {
 	SliceType.Dealloc = sliceDealloc
 	SliceType.Hash = sliceHash
 	SliceType.Getattro = GenericGetAttr
+	// CPython: Objects/sliceobject.c:691 slice_traverse
+	SliceType.TpTraverse = sliceTraverse
 	// CPython: Objects/sliceobject.c:683 tp_hash = slice_hash
 	SetTypeDescr(SliceType, "__hash__", NewMethodDescr(SliceType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 1 {
@@ -145,7 +147,40 @@ func NewSlice(start, stop, step Object) *Slice {
 	Incref(start)
 	Incref(stop)
 	Incref(step)
+	// CPython: Objects/sliceobject.c:170 PySlice_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(s)
+	}
 	return s
+}
+
+// sliceTraverse visits start, stop, and step so the cycle collector
+// can see references the slice owns. Required for cases like
+// `o.s = slice(o)` (test_slice.test_cycle) where the slice itself
+// participates in a cycle through its bounds.
+//
+// CPython: Objects/sliceobject.c:691 slice_traverse
+func sliceTraverse(o Object, visit Visitor) error {
+	s, ok := o.(*Slice)
+	if !ok {
+		return nil
+	}
+	if s.Start != nil {
+		if err := visit(s.Start); err != nil {
+			return err
+		}
+	}
+	if s.Stop != nil {
+		if err := visit(s.Stop); err != nil {
+			return err
+		}
+	}
+	if s.Step != nil {
+		if err := visit(s.Step); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sliceDealloc releases the references the slice owns and returns the
