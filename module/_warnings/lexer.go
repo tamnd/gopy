@@ -21,7 +21,10 @@ func init() {
 	lexer.WarnHook = FlushLexerWarnings
 	compile.WarnHook = compileWarn
 	objects.DeprecWarnHook = func(msg string) error {
-		return WarnUnicode(errors.PyExc_DeprecationWarning, msg, 2, nil)
+		// CPython: Objects/abstract.c:1430 PyErr_WarnFormat(..., 1, ...)
+		// stack_level=1 attributes the warning to the current Python frame
+		// (the user's call site), which is what C-builtin deprecations want.
+		return WarnUnicode(errors.PyExc_DeprecationWarning, msg, 1, nil)
 	}
 }
 

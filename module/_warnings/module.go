@@ -48,6 +48,7 @@ type warningsState struct {
 	context        objects.Object // PEP 567 ContextVar; gopy stores the var instance.
 	filtersVersion int64
 	lockHeld       bool
+	fallbackReg    *objects.Dict
 }
 
 var state = func() *warningsState {
@@ -798,16 +799,74 @@ func warnExplicit(category objects.Object, message objects.Object, filename obje
 	return objects.None(), nil
 }
 
-// setupContext approximates the C version's frame walk. gopy does
-// not expose the current frame from builtin context, so the
-// filename / lineno default to "<unknown>" / 0 and module to
-// "<string>". Once the eval-loop walk lands, this function is the
-// place to plumb sys._getframe(stack_level) in.
+// setupContext walks the interpreter frame chain to mirror CPython's
+// setup_context: it returns the caller's filename, lineno, module name,
+// and the per-module __warningregistry__ dict (creating one in the
+// frame's globals when missing). When no frame is active or the chain
+// runs out before stackLevel hits zero, the function falls back to the
+// shared "<unknown>" entry in fallbackRegistry so successive warnings
+// from the same C-level call site dedup the way CPython's
+// "default" filter expects.
 //
 // CPython: Python/_warnings.c:1024 setup_context
-func setupContext(stackLevel int64) (filename objects.Object, lineno int64, module objects.Object, registry objects.Object, err error) { //nolint:unparam // error slot mirrors CPython once frame walking lands.
-	_ = stackLevel
-	return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), objects.NewDict(), nil
+func setupContext(stackLevel int64) (filename objects.Object, lineno int64, module objects.Object, registry objects.Object, err error) {
+	var f objects.InterpreterFrame
+	if objects.CurrentFrameHook != nil {
+		f = objects.CurrentFrameHook()
+		for stackLevel > 1 && f != nil {
+			f = f.FrameBack()
+			stackLevel--
+		}
+	}
+	if f == nil {
+		return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), fallbackRegistry(), nil
+	}
+	code := f.FrameCode()
+	if code == nil {
+		return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), fallbackRegistry(), nil
+	}
+	if code.Filename != "" {
+		filename = objects.NewStr(code.Filename)
+	} else {
+		filename = objects.NewStr("<unknown>")
+	}
+	if pos, ok := objects.CoAddr2Location(code, f.FrameLasti()); ok {
+		lineno = int64(pos.Line)
+	}
+	module = objects.NewStr("<string>")
+	registry = nil
+	if globals := f.FrameGlobals(); globals != nil {
+		if g, ok := globals.(*objects.Dict); ok {
+			if nm, _ := g.GetItem(objects.NewStr("__name__")); nm != nil && !objects.IsNone(nm) {
+				module = nm
+			}
+			regKey := objects.NewStr("__warningregistry__")
+			if reg, _ := g.GetItem(regKey); reg != nil && !objects.IsNone(reg) {
+				registry = reg
+			} else {
+				fresh := objects.NewDict()
+				_ = g.SetItem(regKey, fresh)
+				registry = fresh
+			}
+		}
+	}
+	if registry == nil {
+		registry = fallbackRegistry()
+	}
+	return filename, lineno, module, registry, nil
+}
+
+// fallbackRegistry returns a single shared __warningregistry__ dict
+// used when no Python frame is available (e.g. warnings emitted from
+// pure-Go startup code). Sharing the dict gives the same dedup behavior
+// CPython gets from per-module storage, so a tight loop in user code
+// that triggers a deprecation warning does not flood stderr with
+// thousands of identical lines.
+func fallbackRegistry() *objects.Dict {
+	if state.fallbackReg == nil {
+		state.fallbackReg = objects.NewDict()
+	}
+	return state.fallbackReg
 }
 
 // getCategory normalizes (message, category) into a Warning subclass.
