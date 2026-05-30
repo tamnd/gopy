@@ -122,6 +122,7 @@ func UnaryStopIterationError(ts *state.Thread, v objects.Object) (objects.Object
 	wrapped := pyerrors.New(pyerrors.PyExc_RuntimeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
 	wrapped.Cause = exc
 	wrapped.Context = exc
+	wrapped.Suppress = true
 	return wrapped, nil
 }
 

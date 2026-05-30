@@ -73,8 +73,12 @@ func TestBareYieldLoadsNone(t *testing.T) {
 	// yield
 	inner := yieldFunc(t, &ast.Yield{})
 	got := opNames(inner)
-	// Sequence should be: RESUME, LOAD_CONST None, YIELD_VALUE, POP_TOP, ...
-	if got[1] != "LOAD_CONST" || got[2] != "YIELD_VALUE" {
+	// Sequence should be: SETUP_CLEANUP (PEP 479 wrap), RESUME,
+	// LOAD_CONST None, YIELD_VALUE, POP_TOP, ...
+	//
+	// CPython: Python/codegen.c:1363 codegen_function_body
+	// (add_stopiteration_handler emits the wrap)
+	if got[2] != "LOAD_CONST" || got[3] != "YIELD_VALUE" {
 		t.Errorf("expected LOAD_CONST None then YIELD_VALUE; got %v", got)
 	}
 }

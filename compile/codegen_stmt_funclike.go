@@ -281,13 +281,20 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 		return err
 	}
 
-	// Implicit return None at the end if the body did not already
-	// return. CPython emits the synthetic LOAD_CONST None / RETURN_VALUE
-	// pair with NO_LOCATION so propagateLineNumbers carries the previous
-	// statement's line into the linetable epilogue.
+	// For generators and coroutines, wrap the body in a SETUP_CLEANUP that
+	// converts any escaping StopIteration into RuntimeError (PEP 479).
+	// wrapInStopIterationHandler already appends LOAD_CONST None / RETURN_VALUE
+	// as the normal exit path, so addReturnNoneIfMissing is not needed.
+	// For regular functions, fall back to addReturnNoneIfMissing.
 	//
-	// CPython: Python/codegen.c:867 codegen_body (implicit return None)
-	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
+	// CPython: Python/codegen.c:1363 codegen_function_body (add_stopiteration_handler)
+	// CPython: Python/codegen.c:1175 codegen_wrap_in_stopiteration_handler
+	if innerScope.Generator || innerScope.Coroutine {
+		c.wrapInStopIterationHandler()
+	} else {
+		// CPython: Python/codegen.c:867 codegen_body (implicit return None)
+		c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
+	}
 
 	innerUnit := c.unit()
 	innerUnit.Name = name

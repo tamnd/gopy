@@ -177,6 +177,16 @@ type Compiler struct {
 	// fblocks is the per-unit frame block stack. Cleared on each
 	// enterScope.
 	fblocks []fblock
+
+	// interactive marks compile-mode='single' (REPL / doctest). When
+	// set, expression-statements at module nest level emit
+	// CALL_INTRINSIC_1 INTRINSIC_PRINT so each result reaches
+	// sys.displayhook, even when the statement sits inside a compound
+	// block such as `with` or `if`.
+	//
+	// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
+	// c->c_nestlevel <= 1 fires PRINT_EXPR)
+	interactive bool
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built

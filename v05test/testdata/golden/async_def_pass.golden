@@ -11,3 +11,5 @@ Disassembly of f:
      4 RESUME                         0
      6 LOAD_CONST                     0
      8 RETURN_VALUE                   0
+    10 CALL_INTRINSIC_1               3
+    12 RERAISE                        1
