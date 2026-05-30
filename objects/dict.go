@@ -267,6 +267,10 @@ func dictTraverse(o Object, visit Visitor) error {
 func NewDict() *Dict {
 	d := &Dict{entries: make([]dictEntry, dictMinSize), kind: dictKindUnicode}
 	d.init(DictType)
+	// CPython: Objects/dictobject.c:737 new_dict (PyObject_GC_Track at end)
+	if h := GCTrackHook; h != nil {
+		h(d)
+	}
 	return d
 }
 
@@ -418,7 +422,10 @@ func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 //
 // CPython: Objects/dictobject.c:2229 dict_subscript
 func dictMappingGet(o, key Object) (Object, error) {
-	d := o.(*Dict)
+	d, ok := o.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
 	v, err := d.GetItem(key)
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
@@ -440,9 +447,29 @@ func dictMappingGet(o, key Object) (Object, error) {
 	return v, nil
 }
 
-func dictMappingSet(o, key, value Object) error { return o.(*Dict).SetItem(key, value) }
+// dictMappingSet is the mp_ass_subscript slot for dict. When the
+// receiver is not a real *Dict the slot raises a clean TypeError
+// instead of panicking. This protects against pathological MROs
+// (e.g. a metaclass that injects dict into a non-dict layout) where
+// CPython would either reject the class at type-ready time or, failing
+// that, raise TypeError on the first __setitem__ attempt.
+//
+// CPython: Objects/dictobject.c:2407 dict_ass_sub
+func dictMappingSet(o, key, value Object) error {
+	d, ok := o.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__setitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
+	return d.SetItem(key, value)
+}
 
-func dictMappingDel(o, key Object) error { return o.(*Dict).DelItem(key) }
+func dictMappingDel(o, key Object) error {
+	d, ok := o.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__delitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
+	return d.DelItem(key)
+}
 
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in

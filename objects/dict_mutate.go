@@ -78,13 +78,18 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	}
 	slot := &d.entries[idx]
 	if found {
-		Decref(slot.value)
+		// Install the new value and only then release the old one, so a
+		// Decref-triggered __del__ that reads back the same key sees the
+		// new value rather than a freed slot. CPython:
+		// Objects/dictobject.c:1875 sets ep->me_value to value before
+		// the matching Py_DECREF on the replaced pointer.
+		oldValue := slot.value
 		slot.value = value
 		Incref(value)
-		// CPython fires MODIFIED in insertdict's replace branch
-		// (dictobject.c:1875). The key set didn't change, but
-		// watchers still need to know the value did.
 		notifyDictEvent(DictEventModified, d, key, value)
+		if oldValue != nil {
+			Decref(oldValue)
+		}
 		return nil
 	}
 	if !slot.dummy {
@@ -132,10 +137,13 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 		return dictInsert(d, h, key, value)
 	}
 	if d.splitValues[idx] != nil {
-		Decref(d.splitValues[idx])
+		// Install before Decref so a re-entrant lookup from __del__
+		// observes the new value, matching the dictInsert replace path.
+		oldValue := d.splitValues[idx]
 		d.splitValues[idx] = value
 		Incref(value)
 		notifyDictEvent(DictEventModified, d, key, value)
+		Decref(oldValue)
 		return nil
 	}
 	Incref(value)
@@ -166,18 +174,20 @@ func dictDelete(d *Dict, key Object) error {
 	if !found {
 		return errKeyNotFound
 	}
+	// Clear the entry and update bookkeeping BEFORE running any Decref
+	// that may trigger __del__ re-entrancy through Finalize. CPython's
+	// delitem_common does the same dance: tombstone the slot, decrement
+	// ma_used, bump the version tag, and only then release the old key
+	// and value so a re-entrant lookup sees a consistent dict.
+	//
+	// CPython: Objects/dictobject.c:2853 delitem_common
+	var oldKey, oldValue Object
 	if d.sharedKeys != nil {
-		if d.splitValues[idx] != nil {
-			Decref(d.splitValues[idx])
-		}
+		oldValue = d.splitValues[idx]
 		d.splitValues[idx] = nil
 	} else {
-		if d.entries[idx].key != nil {
-			Decref(d.entries[idx].key)
-		}
-		if d.entries[idx].value != nil {
-			Decref(d.entries[idx].value)
-		}
+		oldKey = d.entries[idx].key
+		oldValue = d.entries[idx].value
 		d.entries[idx] = dictEntry{dummy: true}
 	}
 	for i, slot := range d.order {
@@ -191,6 +201,12 @@ func dictDelete(d *Dict, key Object) error {
 	// CPython fires DELETED from delitem_common (dictobject.c:2872).
 	// Pass nil for value (the old value isn't part of the contract).
 	notifyDictEvent(DictEventDeleted, d, key, nil)
+	if oldKey != nil {
+		Decref(oldKey)
+	}
+	if oldValue != nil {
+		Decref(oldValue)
+	}
 	return nil
 }
 
