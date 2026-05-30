@@ -1192,12 +1192,28 @@ func lookupMaybeMethod(self Object, name string) (Object, bool, error) {
 // sole positional argument; when false, fn is already bound and the
 // call carries no args.
 //
+// The args tuple is auto-tracked on creation (see NewTuple), and Go's
+// runtime cannot reclaim a tuple that still has a tracked-map entry.
+// Without an explicit GCUntrackHook the tuple lingers forever, holds
+// a phantom tp_traverse edge to self, and a subsequent cycle scan
+// over-decrements self.refs by one. The over-decrement matters most
+// in the resurrection path: a __del__ that hands self back to the
+// caller wants the next Collect to detect the lone-cycle and reclaim
+// it, but the lingering args tuple breaks the refcount math.
+//
 // CPython: Objects/typeobject.c:2308 call_unbound_noarg
 func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
+	var args *Tuple
 	if unbound {
-		return Call(fn, NewTuple([]Object{self}), nil)
+		args = NewTuple([]Object{self})
+	} else {
+		args = NewTuple(nil)
 	}
-	return Call(fn, NewTuple(nil), nil)
+	result, err := Call(fn, args, nil)
+	if h := GCUntrackHook; h != nil {
+		h(args)
+	}
+	return result, err
 }
 
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
@@ -1308,18 +1324,30 @@ func slotTpIterNext(o Object) (Object, error) {
 }
 
 // slotTpFinalize dispatches to the user's __del__. Errors raised by
-// __del__ are swallowed: CPython routes them through
-// PyErr_FormatUnraisable so the collector can press on; gopy follows
-// the same convention because re-raising mid-cycle-collection has no
-// useful target.
+// __del__ are routed through sys.unraisablehook via WriteUnraisableHook,
+// matching CPython's PyErr_FormatUnraisable. The instance's __del__
+// repr is the "calling deallocator" suffix.
 //
 // CPython: Objects/typeobject.c:10585 slot_tp_finalize
+// CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
 func slotTpFinalize(o Object) {
 	fn, unbound, err := lookupMaybeMethod(o, "__del__")
 	if err != nil {
 		return
 	}
-	_, _ = callUnboundNoArg(unbound, fn, o)
+	_, callErr := callUnboundNoArg(unbound, fn, o)
+	if callErr == nil {
+		return
+	}
+	if h := WriteUnraisableHook; h != nil {
+		msg := "Exception ignored while calling deallocator"
+		if fn != nil {
+			if s, reprErr := Repr(fn); reprErr == nil {
+				msg = "Exception ignored while calling deallocator " + s
+			}
+		}
+		h(o, msg, callErr)
+	}
 }
 
 // slotTpRichCompare looks up the dunder that matches op and calls it,

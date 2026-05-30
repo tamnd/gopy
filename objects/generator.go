@@ -12,8 +12,26 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sync/atomic"
 )
+
+var (
+	debugGenFinalize      = os.Getenv("GOPY_DEBUG_GENFINALIZE") != ""
+	debugGenFinalizeStack = os.Getenv("GOPY_DEBUG_GENFINALIZE_STACK") != ""
+)
+
+// CloseReturnValue is the sentinel error returned by closeWith when the
+// generator body caught GeneratorExit and returned a non-None value. The vm
+// package (genCloseMethod) unwraps it and returns Val to the Python caller.
+//
+// CPython: Objects/genobject.c:449 gen_close (_PyGen_FetchStopIterationValue)
+type CloseReturnValue struct {
+	Val Object
+}
+
+func (c *CloseReturnValue) Error() string { return "CloseReturnValue" }
 
 // ErrGeneratorExit is the Go-level sentinel for PyExc_GeneratorExit.
 // close() throws this into the body; if the body yields a value
@@ -67,7 +85,8 @@ func (r *RaisedError) Error() string {
 // CPython: Objects/genobject.c:L49 PyGenObject
 type Generator struct {
 	Header
-	Name string
+	Name     string
+	Qualname string
 
 	// YieldCh carries values from the generator to the caller.
 	YieldCh chan GenMsg
@@ -84,6 +103,48 @@ type Generator struct {
 	//
 	// CPython: Objects/genobject.c:275 gen_send_ex2 FRAME_EXECUTING check
 	Running atomic.Int32
+
+	// gi_exc_state emulation: CPython keeps a per-generator _PyErr_StackItem
+	// (gi_exc_state.exc_value) separate from the caller's exc_info chain.
+	// gopy replaces the linked-list model with three fields:
+	//   ExcHandled: the ts.HandledException value saved at the last yield,
+	//               only valid when ExcDepth > 0 (generator is inside ≥1
+	//               of its own except blocks at yield time).
+	//   CallerExc:  the caller's ts.HandledException at the most recent
+	//               send/throw boundary; restored when the generator yields.
+	//   ExcDepth:   nesting count of active PUSH_EXC_INFO opcodes executed
+	//               inside this generator (incremented by PUSH_EXC_INFO,
+	//               decremented by POP_EXCEPT).
+	//
+	// CPython: Include/cpython/genobject.h:L23 gi_exc_state (_PyErr_StackItem)
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push/pop)
+	// CPython: Python/errors.c:116 _PyErr_GetTopmostException (chain walk)
+	ExcHandled Object
+	CallerExc  Object
+	ExcDepth   int
+
+	// Code is the code object for the generator function.
+	// Set at creation time from the frame's code object so gi_code can
+	// return it even after the frame is released.
+	//
+	// CPython: Include/cpython/genobject.h:L17 gi_code (PyCodeObject*)
+	Code Object
+
+	// GiFrame holds the Python-visible frame object for the suspended
+	// generator. Set by the vm package (execReturnGenerator) and cleared
+	// to None when the generator is exhausted. Only non-nil between
+	// RETURN_GENERATOR and the final yield/return.
+	//
+	// CPython: Include/cpython/genobject.h:L15 gi_iframe
+	GiFrame Object
+
+	// YieldFromTarget is the sub-iterator currently being delegated by
+	// yield from. Set by execSend before forwarding a value and cleared
+	// when the sub-iterator raises StopIteration. Mirrors the
+	// FRAME_SUSPENDED_YIELD_FROM state check in _gen_throw.
+	//
+	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf)
+	YieldFromTarget Object
 }
 
 // GeneratorType is the type singleton for generator.
@@ -95,13 +156,29 @@ func init() {
 	GeneratorType = NewType("generator", []*Type{objectType})
 	GeneratorType.Repr = genRepr
 	GeneratorType.Str = genRepr
-	GeneratorType.Iter = func(o Object) (Object, error) { return o, nil }
+	GeneratorType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }
 	GeneratorType.IterNext = genIterNext
 	GeneratorType.Getattro = GenericGetAttr
+	GeneratorType.Setattro = GenericSetAttr
+	// Tp_finalize: invoked by the cycle collector when the generator
+	// becomes unreachable while still suspended. Calls close() so the
+	// body's finally clauses run before memory is reclaimed.
+	//
+	// CPython: Objects/genobject.c:87 _PyGen_Finalize
+	GeneratorType.Finalize = genFinalize
+	// Tp_traverse: lets the cycle collector walk references the
+	// generator holds (its frame, exception state). Without this, an
+	// orphaned generator looks reachable to the collector and never
+	// becomes a finalize candidate.
+	//
+	// CPython: Objects/genobject.c:69 gen_traverse
+	GeneratorType.TpTraverse = genTraverse
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
-		"send":  genSendMethod,
-		"throw": genThrowMethod,
-		"close": genCloseMethod,
+		"send":          genSendMethod,
+		"throw":         genThrowMethod,
+		"close":         genCloseMethod,
+		"__reduce__":    genReduceReject,
+		"__reduce_ex__": genReduceReject,
 	} {
 		SetTypeDescr(GeneratorType, name, NewMethodDescr(GeneratorType, name, fn))
 	}
@@ -114,14 +191,121 @@ func init() {
 			return NewInt(int64(g.Running.Load())), nil
 		}, nil))
 	// gi_frame: the frame object of the suspended generator. Returns None
-	// when the generator is exhausted or not yet started.
+	// when the generator is exhausted or closed.
 	//
 	// CPython: Objects/genobject.c gi_frame member
 	SetTypeDescr(GeneratorType, "gi_frame", NewGetSetDescr("gi_frame",
 		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			if !g.closed && g.GiFrame != nil {
+				return g.GiFrame, nil
+			}
 			return None(), nil
 		}, nil))
+	// gi_suspended: True when the generator is suspended (yielded), False when
+	// running or closed.
+	//
+	// CPython: Objects/genobject.c gi_suspended member (PyMemberDef)
+	SetTypeDescr(GeneratorType, "gi_suspended", NewGetSetDescr("gi_suspended",
+		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			if g.started && !g.closed && g.Running.Load() == 0 {
+				return True(), nil
+			}
+			return False(), nil
+		}, nil))
+	// gi_yieldfrom: the object currently being iterated by yield from,
+	// or None. CPython only exposes the yield-from target while the
+	// frame is in FRAME_SUSPENDED_YIELD_FROM, that is, suspended on a
+	// `yield from`. While the generator is executing (re-entered into
+	// the body) the attribute reads as None even if the body originally
+	// suspended on a yield-from, because the inner subgenerator is the
+	// one running, not us.
+	//
+	// CPython: Objects/genobject.c:374 _PyGen_yf
+	// CPython: Objects/genobject.c:750 gen_getyieldfrom
+	SetTypeDescr(GeneratorType, "gi_yieldfrom", NewGetSetDescr("gi_yieldfrom",
+		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			if g.YieldFromTarget != nil && g.started && !g.closed && g.Running.Load() == 0 {
+				return g.YieldFromTarget, nil
+			}
+			return None(), nil
+		}, nil))
+	// gi_code: the code object for the generator function.
+	//
+	// CPython: Objects/genobject.c gi_code member (PyMemberDef)
+	SetTypeDescr(GeneratorType, "gi_code", NewGetSetDescr("gi_code",
+		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			if g.Code != nil {
+				return g.Code, nil
+			}
+			return None(), nil
+		}, nil))
+	// __name__: writable string name of the generator.
+	//
+	// CPython: Objects/genobject.c gen_name getter/setter (PyGetSetDef)
+	SetTypeDescr(GeneratorType, "__name__", NewGetSetDescr("__name__",
+		func(o Object) (Object, error) {
+			return NewStr(o.(*Generator).Name), nil
+		},
+		func(o Object, v Object) error {
+			if v == nil {
+				return fmt.Errorf("TypeError: __name__ attribute cannot be deleted")
+			}
+			s, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: __name__ must be a string, not %s", v.Type().Name)
+			}
+			o.(*Generator).Name = s.Value()
+			return nil
+		}))
+	// __qualname__: writable qualified name of the generator.
+	//
+	// CPython: Objects/genobject.c gen_qualname getter/setter (PyGetSetDef)
+	SetTypeDescr(GeneratorType, "__qualname__", NewGetSetDescr("__qualname__",
+		func(o Object) (Object, error) {
+			g := o.(*Generator)
+			if g.Qualname != "" {
+				return NewStr(g.Qualname), nil
+			}
+			return NewStr(g.Name), nil
+		},
+		func(o Object, v Object) error {
+			if v == nil {
+				return fmt.Errorf("TypeError: __qualname__ attribute cannot be deleted")
+			}
+			s, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: __qualname__ must be a string, not %s", v.Type().Name)
+			}
+			o.(*Generator).Qualname = s.Value()
+			return nil
+		}))
 	AddIterSlotWrappers(GeneratorType)
+}
+
+// genReduceReject implements __reduce__ / __reduce_ex__ for generator,
+// coroutine, and async-generator objects by raising TypeError. CPython
+// does not register a pickle reducer for these types, so pickle.dumps
+// falls through to object.__reduce_ex__ which raises the same error.
+// The doctest gates rely on this rejection rather than producing a
+// dangling pickle that would fail to load.
+//
+// CPython: Objects/typeobject.c:5827 reduce_newobj (rejects types
+// without a usable __new__ chain)
+//
+//nolint:unparam // descriptor signature requires (Object, error); always rejects.
+func genReduceReject(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__ missing self")
+	}
+	tname := "object"
+	if t := args[0].Type(); t != nil {
+		tname = t.Name
+	}
+	return nil, fmt.Errorf("TypeError: cannot pickle %q object", tname)
 }
 
 func genSendMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -141,6 +325,42 @@ func genSendMethod(args []Object, _ map[string]Object) (Object, error) {
 // callers can pass it to Generator.Throw directly.
 var GenThrowHook func(Object) (error, error)
 
+// GenThrowTripleHook implements the legacy 3-arg throw normalization
+// (PyErr_NormalizeException + traceback validation). vm installs it
+// so the heavy lifting (exception class instantiation, MRO check)
+// lives next to the rest of the exception plumbing.
+//
+// CPython: Objects/genobject.c:541 _gen_throw (throw_here block)
+// CPython: Python/errors.c:389 _PyErr_NormalizeException
+var GenThrowTripleHook func(typ, val, tb Object) (error, error)
+
+// GenThrowForwardHook forwards a throw into a custom (non-Generator)
+// yield-from sub-iterator by calling yf.throw(exc). The first argument
+// is the outer Generator whose frame must be installed as the "current
+// frame" before the call, mirroring CPython's frame->previous/
+// tstate->current_frame dance in _gen_throw. Installed by vm.
+// Returns (val, nil) when yf.throw() yields a value, (nil, err) otherwise.
+//
+// CPython: Objects/genobject.c:523 _gen_throw (tstate->current_frame = frame
+// for both generator and custom-iterator paths)
+var GenThrowForwardHook func(gen Object, yf Object, err error) (Object, error)
+
+// GenAttachFrameTBHook prepends a traceback entry for the generator
+// body's frame onto err's underlying exception. Used by Throw on an
+// unstarted generator, where CPython would have started the body to
+// raise the throw at the body entry point (adding the body frame to
+// tb) but gopy's goroutine-driven body has no mechanism to inject an
+// exception at the first send. Installed by vm.
+//
+// CPython: Objects/genobject.c:466 _gen_throw (gen_send_ex runs the
+// body which propagates with PyTraceBack_Here entries)
+var GenAttachFrameTBHook func(g *Generator, err error) error
+
+// DebugGenFinalize, when set, is called at the entry to genFinalize for
+// every generator the cycle collector picks up. Used for diagnostics
+// only; production builds leave it nil.
+var DebugGenFinalize func(*Generator)
+
 // NewRaisedError wraps a Python exception object as a Go error. The
 // caller is responsible for ensuring exc is a real exception instance
 // (not a class). msg should be the formatted "Type: message" string.
@@ -159,6 +379,31 @@ func genThrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	if GenThrowHook == nil {
 		return nil, fmt.Errorf("RuntimeError: generator.throw not available")
 	}
+	// CPython: Objects/genobject.c:599 gen_throw. throw(typ, val, tb) is
+	// the deprecated 3-arg form; emit DeprecationWarning, then normalize
+	// the (typ, val, tb) triple via PyErr_NormalizeException-equivalent.
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: generator.throw 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		return g.Throw(exc)
+	}
 	exc, err := GenThrowHook(args[1])
 	if err != nil {
 		return nil, err
@@ -174,25 +419,175 @@ func genCloseMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'generator' object")
 	}
-	if err := g.Close(); err != nil {
-		return nil, err
+	err := g.Close()
+	if err == nil {
+		return None(), nil
 	}
-	return None(), nil
+	// When the generator caught GeneratorExit and returned a value, closeWith
+	// surfaces it via CloseReturnValue rather than propagating it as an error.
+	//
+	// CPython: Objects/genobject.c:449 gen_close (_PyGen_FetchStopIterationValue)
+	var crv *CloseReturnValue
+	if errors.As(err, &crv) {
+		return crv.Val, nil
+	}
+	return nil, err
 }
 
-// NewGenerator creates a generator with the given name. The caller
+// NewGenerator creates a generator with the given name and qualname. The caller
 // (RETURN_GENERATOR in the vm package) is responsible for starting the
 // goroutine that drives the body and communicates via YieldCh/SendCh.
 //
 // CPython: Objects/genobject.c:L867 gen_new_with_qualname
-func NewGenerator(name string) *Generator {
+func NewGenerator(name, qualname string) *Generator {
 	g := &Generator{
-		Name:    name,
-		YieldCh: make(chan GenMsg, 1),
-		SendCh:  make(chan GenMsg, 1),
+		Name:     name,
+		Qualname: qualname,
+		YieldCh:  make(chan GenMsg, 1),
+		SendCh:   make(chan GenMsg, 1),
 	}
 	g.init(GeneratorType)
+	// CPython tracks every generator at tp_alloc so the cycle collector
+	// can pick up the frame.locals self-cycle that forms on `g.send(g)`,
+	// or any other reachability path that would otherwise let a suspended
+	// generator outlive every Python-visible reference.
+	//
+	// CPython: Objects/genobject.c:867 gen_new_with_qualname
+	//   (PyObject_GC_Track at the end of make_gen)
+	if h := GCTrackHook; h != nil {
+		h(g)
+	}
 	return g
+}
+
+// genFinalize is the tp_finalize slot for generator objects. The cycle
+// collector calls it on a suspended (un-finished) generator that has
+// become unreachable. The generator is closed so its finally clauses
+// run and any resources held by the suspended frame are released.
+//
+// CPython: Objects/genobject.c:87 _PyGen_Finalize
+func genFinalize(o Object) {
+	g, ok := o.(*Generator)
+	if !ok {
+		return
+	}
+	// CPython: Objects/genobject.c:91 FRAME_STATE_FINISHED early return.
+	if g.closed {
+		return
+	}
+	if debugGenFinalize {
+		fmt.Fprintf(os.Stderr, "[genFinalize] g=%p qualname=%v running=%d closed=%v yf=%v refcnt=%d\n",
+			g, g.Qualname, g.Running.Load(), g.closed, g.YieldFromTarget, g.Hdr().Refcnt())
+		if debugGenFinalizeStack {
+			fmt.Fprintf(os.Stderr, "%s\n", string(debug.Stack()))
+		}
+	}
+	// A running generator cannot be finalized. In CPython the GIL plus
+	// the frame's external refcount make this unreachable: a generator
+	// whose body is mid-execution always has its frame on a call stack,
+	// so its refcount never drops to zero. In gopy the body executes on
+	// its own goroutine, and the goroutine-stack reference to the
+	// Generator is invisible to the Python cycle collector. Without this
+	// guard the collector picks up the running generator as unreachable
+	// and closeWith deadlocks: closeWith would send GeneratorExit on
+	// SendCh then block on YieldCh waiting for a yield that the running
+	// goroutine is in no position to produce (it is either this very
+	// goroutine, recursively, or another one whose next yield is what
+	// triggered the collection).
+	//
+	// CPython: Objects/genobject.c:91 _PyGen_Finalize
+	//   (FRAME_STATE_EXECUTING implicit via GIL)
+	if g.Running.Load() == 1 {
+		return
+	}
+	// Save the active thread's pending exception across Close: the
+	// generator body runs on its own goroutine but mutates the caller's
+	// thread-state slot (savedTS in vm/eval_gen). Without this, a
+	// finalize that fires while the caller already had a different
+	// exception pending (or no exception at all) would leak the body's
+	// GeneratorExit into the caller's slot.
+	//
+	// CPython: Objects/genobject.c:98 _PyGen_Finalize
+	//   (PyErr_GetRaisedException + PyErr_SetRaisedException pair)
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	// Build the err_msg prefix before Close clears any state so the
+	// generator's repr reflects the suspended frame, matching CPython's
+	// gen_close which formats the message before the body's GeneratorExit
+	// can change visible attributes.
+	//
+	// CPython: Objects/genobject.c:131 gen_close + PyErr_FormatUnraisable
+	gRepr, _ := Repr(g)
+	// Take ownership of the iframe so external references to gi_frame
+	// (the test_frame_outlives_generator path) keep reading fast-local
+	// data after Close clears the underlying activation record.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	if g.GiFrame != nil {
+		if fr, ok := g.GiFrame.(*Frame); ok {
+			fr.TakeOwnership()
+		}
+	}
+	closeErr := g.Close()
+	if closeErr != nil {
+		var crv *CloseReturnValue
+		if !errors.As(closeErr, &crv) {
+			if h := WriteUnraisableHook; h != nil {
+				h(g, "Exception ignored while closing generator "+gRepr, closeErr)
+			}
+		}
+	}
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
+}
+
+// genTraverse implements tp_traverse for generators. Walks the
+// references the generator owns so the cycle collector can decide
+// whether a generator participates in an unreachable cycle.
+//
+// YieldFromTarget is intentionally NOT visited here: CPython has no
+// separate gi_yieldfrom field, it recovers the yield-from receiver
+// from the frame's value stack on demand (_PyGen_yf). The receiver
+// always lives at the SEND peek slot on the suspended frame, so the
+// GiFrame walk below already visits it. Visiting YieldFromTarget on
+// top of that double-decrements the receiver's refs in subtract_refs
+// and pushes long yield-from chains (Conjoin/Queens) underwater.
+//
+// CPython: Objects/genobject.c:60 gen_traverse
+func genTraverse(o Object, visit Visitor) error {
+	g, ok := o.(*Generator)
+	if !ok {
+		return nil
+	}
+	if g.GiFrame != nil {
+		if err := visit(g.GiFrame); err != nil {
+			return err
+		}
+	}
+	if g.ExcHandled != nil {
+		if err := visit(g.ExcHandled); err != nil {
+			return err
+		}
+	}
+	if g.Code != nil {
+		if err := visit(g.Code); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkFinished records that the generator body has run to completion
+// (either by returning, raising, or having no more yields). After this
+// call genFinalize / Close are no-ops so we never try to send on
+// SendCh after the body goroutine has already exited.
+//
+// CPython: Objects/genobject.c:225 gen_send_ex2 (gi_frame_state = FRAME_COMPLETED)
+func (g *Generator) MarkFinished() {
+	g.closed = true
 }
 
 // Send delivers v into the generator and returns the next yielded value.
@@ -227,8 +622,10 @@ func (g *Generator) Send(v Object) (Object, error) {
 }
 
 // Throw raises err inside the generator at its current YIELD_VALUE
-// suspension point. If the generator catches it and yields, that
-// value is returned; if it propagates, Throw returns the error.
+// suspension point. If the generator is suspended inside yield from,
+// the throw is first forwarded to the sub-iterator. If the generator
+// catches it and yields, that value is returned; if it propagates,
+// Throw returns the error.
 //
 // CPython: Objects/genobject.c:L466 _gen_throw
 func (g *Generator) Throw(err error) (Object, error) {
@@ -239,11 +636,41 @@ func (g *Generator) Throw(err error) (Object, error) {
 		return nil, err
 	}
 	if !g.started {
-		// Throwing into an unstarted generator: do not run the body,
-		// just propagate the exception. Mirrors gen_send_ex when the
-		// frame has not yet executed a YIELD.
+		// Throwing into an unstarted generator: synthesize the body
+		// frame entry via GenAttachFrameTBHook so the body's frame
+		// appears in tb. We do not run the body because the goroutine
+		// is parked at <-sendCh and gopy has no mechanism to inject a
+		// pending exception at the body entry point without dispatching
+		// the body's first op.
+		//
+		// CPython: Objects/genobject.c:466 _gen_throw -> gen_send_ex
 		g.closed = true
+		if h := GenAttachFrameTBHook; h != nil {
+			err = h(g, err)
+		}
 		return nil, err
+	}
+	// Forward to the yield-from sub-iterator if present.
+	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf branch)
+	if yf := g.YieldFromTarget; yf != nil {
+		forwarded := true
+		var fval Object
+		var ferr error
+		switch v := yf.(type) {
+		case *Generator:
+			fval, ferr = v.Throw(err)
+		case *Coroutine:
+			fval, ferr = v.Throw(err)
+		default:
+			if GenThrowForwardHook != nil {
+				fval, ferr = GenThrowForwardHook(g, yf, err)
+			} else {
+				forwarded = false
+			}
+		}
+		if forwarded {
+			return g.forwardThrowResult(fval, ferr)
+		}
 	}
 	g.SendCh <- GenMsg{Err: err}
 	msg := <-g.YieldCh
@@ -254,21 +681,122 @@ func (g *Generator) Throw(err error) (Object, error) {
 	return msg.Val, nil
 }
 
+// forwardThrowResult handles the result of forwarding a throw to a
+// yield-from sub-iterator. Mirrors the retval/StopIteration/other-exc
+// branches in _gen_throw after the yf.throw() call.
+//
+// CPython: Objects/genobject.c:511 _gen_throw (retval / StopIteration branches)
+func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) {
+	if ferr == nil {
+		// Sub-iterator yielded fval. Return it directly as the outer
+		// generator's yielded value without entering the body.
+		//
+		// CPython: Objects/genobject.c:511 _gen_throw (retval != NULL)
+		return fval, nil
+	}
+	if stopVal, isStop := genStopIterVal(ferr); isStop {
+		// Sub-iterator raised StopIteration: resume the outer generator
+		// body normally so it can continue past yield from.
+		//
+		// CPython: Objects/genobject.c:519 _gen_throw
+		//   (StopIteration → gen_send_ex(gen, retval2, 0, 0))
+		g.YieldFromTarget = nil
+		g.SendCh <- GenMsg{Val: stopVal}
+		msg := <-g.YieldCh
+		if msg.Err != nil {
+			g.closed = true
+			if errors.Is(msg.Err, ErrStopIteration) {
+				return nil, ErrStopIteration
+			}
+			return nil, msg.Err
+		}
+		return msg.Val, nil
+	}
+	// Sub-iterator raised another exception: throw it into the outer
+	// generator body.
+	//
+	// CPython: Objects/genobject.c:528 _gen_throw (else: goto throw_here)
+	g.SendCh <- GenMsg{Err: ferr}
+	msg := <-g.YieldCh
+	if msg.Err != nil {
+		g.closed = true
+		if errors.Is(msg.Err, ErrStopIteration) {
+			return nil, ErrStopIteration
+		}
+		return nil, msg.Err
+	}
+	return msg.Val, nil
+}
+
+// genStopIterVal extracts the value from a StopIteration error.
+// Returns (value, true) if err is a StopIteration, (nil, false) otherwise.
+func genStopIterVal(err error) (Object, bool) {
+	if errors.Is(err, ErrStopIteration) {
+		var re *RaisedError
+		if errors.As(err, &re) {
+			if exc, ok := re.Exc.(ExceptionInstance); ok {
+				args := exc.ExceptionArgs()
+				if args != nil && args.Len() > 0 {
+					return args.Item(0), true
+				}
+			}
+		}
+		return None(), true
+	}
+	return nil, false
+}
+
 // Close throws GeneratorExit into the generator. A body that yields
 // instead of swallowing the exit raises RuntimeError; StopIteration
 // and GeneratorExit are both treated as a clean exit.
 //
 // CPython: Objects/genobject.c:L388 gen_close
 func (g *Generator) Close() error {
-	return g.closeWith("generator ignored GeneratorExit")
+	// Save and restore the active thread's pending exception across the
+	// body's close. The body's eval installs the synthesized GeneratorExit
+	// on the shared thread state via pyerrors.Raise as it unwinds. The
+	// goroutine returns the exception via channel but does not clear it,
+	// so without this sandwich the suppressed GeneratorExit leaks into the
+	// caller's slot and reappears at the next op that checks
+	// _PyErr_Occurred. CPython does not see this because gen_close runs on
+	// the same call stack (no shared mutable tstate slot).
+	//
+	// CPython: Objects/genobject.c:449 gen_close (PyErr_Get/SetRaisedException pair)
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	err := g.closeWith("generator ignored GeneratorExit")
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
+	return err
 }
 
+// closeWith bundles every shutdown path: a closed gen (no-op), an unstarted
+// gen (frame release without throw), a stuck-in-yieldfrom gen (throw forwarded
+// to sub-iterator), and the normal "throw GeneratorExit, swallow exit" walk.
+// Splitting them out duplicates the frame-release dance; keep cohesion.
+//
+//nolint:gocognit // unified shutdown state machine, mirrors gen_close in CPython
 func (g *Generator) closeWith(ignoredMsg string) error {
 	if g.closed {
 		return nil
 	}
 	if !g.started {
 		g.closed = true
+		// Release the bound args held in the suspended frame's
+		// LocalsPlus. The goroutine never woke, so its deferred Pop
+		// would otherwise leak those refs until the Generator object
+		// is collected.
+		//
+		// CPython: Objects/genobject.c:155 gen_dealloc (calls
+		// _PyFrame_ClearExceptCode before the generator object goes away)
+		if g.GiFrame != nil {
+			if fr, ok := g.GiFrame.(*Frame); ok && fr.interp != nil {
+				fr.interp.FrameClearLocals()
+			}
+		}
 		return nil
 	}
 	g.SendCh <- GenMsg{Err: ErrGeneratorExit}
@@ -282,6 +810,33 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 	if errors.Is(msg.Err, ErrGeneratorExit) ||
 		errors.Is(msg.Err, ErrStopIteration) {
 		return nil
+	}
+	// RaisedError wraps a Python exception that propagated out of the
+	// generator body. GeneratorExit is a clean exit (return nil). StopIteration
+	// carries the generator's return value when the body caught GeneratorExit
+	// and returned normally; surface it via CloseReturnValue so genCloseMethod
+	// can return it to the caller.
+	//
+	// CPython: Objects/genobject.c:449 gen_close (_PyGen_FetchStopIterationValue)
+	var re *RaisedError
+	if errors.As(msg.Err, &re) && re.Exc != nil {
+		name := re.Exc.Type().Name
+		if name == "GeneratorExit" {
+			return nil
+		}
+		if name == "StopIteration" {
+			// Extract the return value (StopIteration.args[0]).
+			if exc, ok := re.Exc.(ExceptionInstance); ok {
+				args := exc.ExceptionArgs()
+				if args != nil && args.Len() > 0 {
+					v := args.Item(0)
+					if v != nil && v != None() {
+						return &CloseReturnValue{Val: v}
+					}
+				}
+			}
+			return nil
+		}
 	}
 	return msg.Err
 }

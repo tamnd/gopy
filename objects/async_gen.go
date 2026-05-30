@@ -32,6 +32,12 @@ type AsyncGenerator struct {
 
 	started bool
 	closed  bool
+
+	// GiFrame is the Python-visible frame for the suspended async generator.
+	// Set by the vm package and cleared on close.
+	//
+	// CPython: Include/cpython/genobject.h ag_iframe
+	GiFrame Object
 }
 
 // AsyncGeneratorType is the type singleton for async_generator.
@@ -57,6 +63,18 @@ func init() {
 		Aiter: func(o Object) (Object, error) { return o, nil },
 		Anext: func(o Object) (Object, error) { return o.(*AsyncGenerator).Anext(), nil },
 	}
+
+	// ag_frame: the frame object of the suspended async generator.
+	//
+	// CPython: Objects/genobject.c ag_frame member (PyMemberDef)
+	SetTypeDescr(AsyncGeneratorType, "ag_frame", NewGetSetDescr("ag_frame",
+		func(o Object) (Object, error) {
+			g := o.(*AsyncGenerator)
+			if !g.closed && g.GiFrame != nil {
+				return g.GiFrame, nil
+			}
+			return None(), nil
+		}, nil))
 
 	AsyncGenASendType = NewType("async_generator_asend",
 		[]*Type{objectType})

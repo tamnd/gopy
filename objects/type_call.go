@@ -134,7 +134,11 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		if _, err := callBound(bound, args, kwargs); err != nil {
+		_, err := callBound(bound, args, kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -159,7 +163,11 @@ func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Objec
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		if _, err := callBound(bound, args, kwargs); err != nil {
+		_, err := callBound(bound, args, kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -449,7 +457,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+		_, err := Call(bound, NewTuple(args), kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -475,8 +487,12 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
-			return nil, err
+		_, callErr := Call(bound, NewTuple(args), kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if callErr != nil {
+			return nil, callErr
 		}
 	}
 	return inst, nil

@@ -37,7 +37,7 @@ func runGenBody(g *Generator, body func(yield genYieldFn) error) {
 }
 
 func TestGeneratorBasicIteration(t *testing.T) {
-	g := NewGenerator("count3")
+	g := NewGenerator("count3", "count3")
 	runGenBody(g, func(yield genYieldFn) error {
 		for _, v := range []int64{1, 2, 3} {
 			if _, err := yield(NewInt(v)); err != nil {
@@ -62,7 +62,7 @@ func TestGeneratorBasicIteration(t *testing.T) {
 }
 
 func TestGeneratorSendNonNoneToFresh(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error { return nil })
 	_, err := g.Send(NewInt(7))
 	if err == nil || err.Error() != "TypeError: can't send non-None value to a just-started generator" {
@@ -71,7 +71,7 @@ func TestGeneratorSendNonNoneToFresh(t *testing.T) {
 }
 
 func TestGeneratorSendValueRoundTrip(t *testing.T) {
-	g := NewGenerator("echo")
+	g := NewGenerator("echo", "echo")
 	runGenBody(g, func(yield genYieldFn) error {
 		v, err := yield(NewInt(0))
 		if err != nil {
@@ -94,7 +94,7 @@ func TestGeneratorSendValueRoundTrip(t *testing.T) {
 }
 
 func TestGeneratorThrowPropagates(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error {
 		_, err := yield(NewInt(1))
 		return err
@@ -107,7 +107,7 @@ func TestGeneratorThrowPropagates(t *testing.T) {
 }
 
 func TestGeneratorThrowCaught(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error {
 		_, err := yield(NewInt(1))
 		if err != nil && err.Error() == "boom" {
@@ -130,7 +130,7 @@ func TestGeneratorThrowCaught(t *testing.T) {
 }
 
 func TestGeneratorThrowOnFresh(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error {
 		_, err := yield(NewInt(1))
 		return err
@@ -142,7 +142,7 @@ func TestGeneratorThrowOnFresh(t *testing.T) {
 }
 
 func TestGeneratorCloseCleanExit(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error {
 		_, err := yield(NewInt(1))
 		return err
@@ -154,7 +154,7 @@ func TestGeneratorCloseCleanExit(t *testing.T) {
 }
 
 func TestGeneratorCloseIgnored(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	runGenBody(g, func(yield genYieldFn) error {
 		_, _ = yield(NewInt(1)) // swallow GeneratorExit
 		_, _ = yield(NewInt(2))
@@ -168,7 +168,7 @@ func TestGeneratorCloseIgnored(t *testing.T) {
 }
 
 func TestGeneratorCloseUnstarted(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	if err := g.Close(); err != nil {
 		t.Errorf("close on unstarted generator should be nil, got %v", err)
 	}
@@ -178,7 +178,7 @@ func TestGeneratorCloseUnstarted(t *testing.T) {
 }
 
 func TestGeneratorIterIsSelf(t *testing.T) {
-	g := NewGenerator("g")
+	g := NewGenerator("g", "g")
 	got, err := GeneratorType.Iter(g)
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestGeneratorIterIsSelf(t *testing.T) {
 }
 
 func TestGeneratorRepr(t *testing.T) {
-	g := NewGenerator("foo")
+	g := NewGenerator("foo", "foo")
 	s, err := genRepr(g)
 	if err != nil {
 		t.Fatal(err)

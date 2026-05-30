@@ -27,6 +27,12 @@ type Coroutine struct {
 
 	started bool
 	closed  bool
+
+	// GiFrame is the Python-visible frame for the suspended coroutine.
+	// Set by the vm package and cleared on close.
+	//
+	// CPython: Include/cpython/genobject.h cr_iframe
+	GiFrame Object
 }
 
 // CoroutineType is the type singleton for coroutine.
@@ -50,6 +56,18 @@ func init() {
 	} {
 		SetTypeDescr(CoroutineType, name, NewMethodDescr(CoroutineType, name, fn))
 	}
+
+	// cr_frame: the frame object of the suspended coroutine.
+	//
+	// CPython: Objects/genobject.c cr_frame member (PyMemberDef)
+	SetTypeDescr(CoroutineType, "cr_frame", NewGetSetDescr("cr_frame",
+		func(o Object) (Object, error) {
+			c := o.(*Coroutine)
+			if !c.closed && c.GiFrame != nil {
+				return c.GiFrame, nil
+			}
+			return None(), nil
+		}, nil))
 
 	CoroAwaitType = NewType("coroutine_wrapper", []*Type{objectType})
 	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }

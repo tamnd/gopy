@@ -7,7 +7,10 @@
 
 package objects
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // GetSetDescr is the v0.10 base descriptor: a (name, fget, fset)
 // triple that exposes a Go-backed property to Python attribute
@@ -155,14 +158,18 @@ func getsetDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 // getsetDescrSet calls fset, raising AttributeError when the
 // descriptor is read-only (no setter registered).
 //
-// CPython: Objects/descrobject.c:175 getset_set
+// CPython: Objects/descrobject.c:243 getset_set
 func getsetDescrSet(descr Object, owner Object, value Object) error {
 	d := descr.(*GetSetDescr)
 	if d.fset == nil {
-		if value == nil {
-			return errors.New("AttributeError: can't delete attribute " + d.name)
+		tname := "?"
+		if d.owner != nil {
+			tname = d.owner.Name
 		}
-		return errors.New("AttributeError: can't set attribute " + d.name)
+		if value == nil {
+			return fmt.Errorf("AttributeError: attribute '%s' of '%s' objects is not deletable", d.name, tname)
+		}
+		return fmt.Errorf("AttributeError: attribute '%s' of '%s' objects is not writable", d.name, tname)
 	}
 	return d.fset(owner, value)
 }
