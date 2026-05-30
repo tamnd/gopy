@@ -146,12 +146,37 @@ func builtinFunctionRepr(o Object) (string, error) {
 
 // builtinFunctionCall is the tp_call slot. It mirrors cfunction_call
 // for the METH_VARARGS|METH_KEYWORDS case, since gopy's BuiltinFunction
-// always carries a (slice, map) closure.
+// always carries a (slice, map) closure. For kwargs-less conventions
+// (MethNoArgs / MethO / MethFastcall) it raises TypeError on any
+// keyword argument the way cfunction_check_kwargs does in CPython, so
+// builtins like id() reject id(1, foo=2) without each impl having to
+// check.
 //
 // CPython: Objects/methodobject.c:544 cfunction_call
+// CPython: Objects/methodobject.c:399 cfunction_check_kwargs
 func builtinFunctionCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
 	bf := o.(*BuiltinFunction)
+	if err := builtinFunctionCheckKwargs(bf, len(kwargs)); err != nil {
+		return nil, err
+	}
 	return bf.Fn(args, kwargs)
+}
+
+// builtinFunctionCheckKwargs raises TypeError when a kwargs-less
+// calling convention received any keyword arguments. Mirrors
+// cfunction_check_kwargs over BuiltinFunction.Conv.
+//
+// CPython: Objects/methodobject.c:399 cfunction_check_kwargs
+func builtinFunctionCheckKwargs(bf *BuiltinFunction, nkw int) error {
+	if nkw == 0 {
+		return nil
+	}
+	calling := bf.Conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod)
+	switch calling {
+	case MethNoArgs, MethO, MethFastcall:
+		return fmt.Errorf("TypeError: %s() takes no keyword arguments", bf.Name)
+	}
+	return nil
 }
 
 // builtinFunctionVectorcall is the Vectorcall slot for built-in
@@ -170,8 +195,11 @@ func builtinFunctionVectorcall(callable Object, args []Object, nargsf uint, kwna
 	var kwargs map[string]Object
 	if kwnames != nil && kwnames.Len() > 0 {
 		nkw := kwnames.Len()
+		if err := builtinFunctionCheckKwargs(bf, nkw); err != nil {
+			return nil, err
+		}
 		kwargs = make(map[string]Object, nkw)
-		for i := 0; i < nkw; i++ {
+		for i := range nkw {
 			name, err := Str(kwnames.Item(i))
 			if err != nil {
 				return nil, err
