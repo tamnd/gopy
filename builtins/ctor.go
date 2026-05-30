@@ -26,59 +26,111 @@ import (
 
 // IntCtor ports long_new. 0 args returns 0; one positional converts
 // via PyNumber_Long; two arguments parse a string in the given base.
+// Keyword arguments are limited to {x, base}: anything else is
+// TypeError, and base= without an x value is also TypeError (an empty
+// int() returns 0, but int(base=0) does not).
 //
-// CPython: Objects/longobject.c long_new_impl
+// CPython: Objects/longobject.c:3389 long_new_impl
 func IntCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(args) == 0 {
-		return objects.NewInt(0), nil
+	// long_new_impl declares x as positional-only (the "/" in the
+	// argument clinic), so x= is rejected and any other keyword is
+	// TypeError-rejected too. Only base= is accepted by keyword.
+	//
+	// CPython: Objects/longobject.c:3389 long_new (argument clinic)
+	for k := range kwargs {
+		if k != "base" {
+			return nil, fmt.Errorf("TypeError: 'int' is an invalid keyword argument for int()")
+		}
 	}
 	if base, ok := kwargs["base"]; ok {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("TypeError: int() missing string argument")
+		}
 		args = append(args, base)
+	}
+	if len(args) == 0 {
+		return objects.NewInt(0), nil
 	}
 	if len(args) == 1 {
 		return numberToInt(args[0])
 	}
 	if len(args) == 2 {
-		// CPython: Objects/longobject.c:5904 long_new_impl accepts
-		// str, bytes, or bytearray when a base is given.
-		var s string
-		switch v := args[0].(type) {
-		case *objects.Bytes:
-			s = string(v.Bytes())
-		case *objects.ByteArray:
-			s = string(v.Bytes())
-		default:
-			if args[0].Type() != objects.StrType() {
-				return nil, fmt.Errorf("TypeError: int() can't convert non-string with explicit base")
-			}
-			s, _ = objects.Str(args[0])
+		base, err := indexAsBase(args[1])
+		if err != nil {
+			return nil, err
 		}
-		baseInt, ok := args[1].(*objects.Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: int() base must be an integer")
+		// long_new_impl restricts the value to str/bytes/bytearray
+		// when a base is given. memoryview and the buffer protocol
+		// are not accepted, which test_non_numeric_input_types relies
+		// on. CPython: Objects/longobject.c:3469 long_new_impl.
+		if objects.IsSubtype(args[0].Type(), objects.StrType()) {
+			s, _ := objects.Str(args[0])
+			return parseIntStringNormalized(s, base)
 		}
-		base, fits := baseInt.Int64()
-		if !fits || base < 0 || base == 1 || base > 36 {
-			return nil, fmt.Errorf("ValueError: int() base must be 0 or 2-36")
+		if v, ok := args[0].(*objects.Bytes); ok {
+			return parseIntStringFrom(string(v.Bytes()), base, true)
 		}
-		return parseIntString(s, int(base))
+		if v, ok := args[0].(*objects.ByteArray); ok {
+			return parseIntStringFrom(string(v.Bytes()), base, true)
+		}
+		return nil, fmt.Errorf("TypeError: int() can't convert non-string with explicit base")
 	}
 	return nil, fmt.Errorf("TypeError: int expected at most 2 arguments, got %d", len(args))
 }
 
-func numberToInt(o objects.Object) (objects.Object, error) {
-	switch v := o.(type) {
-	case *objects.Bool:
-		// bool is a subclass of int; PyNumber_Long(True) returns the
-		// plain int 1 (not the True singleton), so strip the bool
-		// wrapper and rebuild as an Int.
-		//
-		// CPython: Objects/boolobject.c bool_int / long_new_impl PyNumber_Long
-		n, _ := v.Int64()
-		return objects.NewInt(n), nil
+// indexAsBase normalizes the base argument: an exact int, or anything
+// with __index__. Mirrors _PyEval_SliceIndex / PyNumber_Index handling
+// in long_new_impl for the base parameter.
+//
+// CPython: Objects/longobject.c:3464 long_new_impl (PyNumber_Index on base)
+func indexAsBase(b objects.Object) (int, error) {
+	var n int64
+	switch v := b.(type) {
 	case *objects.Int:
-		return v, nil
-	case *objects.Float:
+		nv, fits := v.Int64()
+		if !fits {
+			return 0, fmt.Errorf("ValueError: int() base must be 0 or 2-36")
+		}
+		n = nv
+	case *objects.Bool:
+		nv, _ := v.Int64()
+		n = nv
+	default:
+		num := b.Type().Number
+		if num == nil || num.Index == nil {
+			return 0, fmt.Errorf("TypeError: int() base must be an integer")
+		}
+		idx, err := num.Index(b)
+		if err != nil {
+			return 0, err
+		}
+		iv, ok := idx.(*objects.Int)
+		if !ok {
+			return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+		}
+		nv, fits := iv.Int64()
+		if !fits {
+			return 0, fmt.Errorf("ValueError: int() base must be 0 or 2-36")
+		}
+		n = nv
+	}
+	if n != 0 && (n < 2 || n > 36) {
+		return 0, fmt.Errorf("ValueError: int() base must be 0 or 2-36")
+	}
+	return int(n), nil
+}
+
+// numberToInt mirrors PyNumber_Long: exact int passes through, then
+// try nb_int (__int__), then nb_index (__index__), then string (with
+// Unicode normalization), then bytes/buffer. Strict subclasses that
+// override __int__ still dispatch through the slot.
+//
+// CPython: Objects/abstract.c:1571 PyNumber_Long
+func numberToInt(o objects.Object) (objects.Object, error) {
+	if i, ok := o.(*objects.Int); ok && o.Type() == objects.IntType {
+		return i, nil
+	}
+	if v, ok := o.(*objects.Float); ok && o.Type() == objects.FloatType {
 		// CPython: Objects/longobject.c:456 PyLong_FromDouble
 		f := v.Float64()
 		if math.IsInf(f, 0) {
@@ -89,23 +141,195 @@ func numberToInt(o objects.Object) (objects.Object, error) {
 		}
 		out, _ := new(big.Float).SetFloat64(f).Int(nil)
 		return objects.NewIntFromBig(out), nil
-	case *objects.Bytes:
-		return parseIntString(string(v.Bytes()), 10)
-	case *objects.ByteArray:
-		return parseIntString(string(v.Bytes()), 10)
 	}
-	if o.Type() == objects.StrType() {
+	if n := o.Type().Number; n != nil {
+		if n.Int != nil {
+			res, err := n.Int(o)
+			if err != nil {
+				return nil, err
+			}
+			return unwrapIntResult(res, "__int__")
+		}
+		if n.Index != nil {
+			res, err := n.Index(o)
+			if err != nil {
+				return nil, err
+			}
+			return unwrapIntResult(res, "__index__")
+		}
+	}
+	if objects.IsSubtype(o.Type(), objects.StrType()) {
 		s, _ := objects.Str(o)
-		return parseIntString(s, 10)
+		return parseIntStringNormalized(s, 10)
 	}
-	if n := o.Type().Number; n != nil && n.Int != nil {
-		return n.Int(o)
+	if v, ok := o.(*objects.Bytes); ok {
+		return parseIntStringFrom(string(v.Bytes()), 10, true)
 	}
-	return nil, fmt.Errorf("TypeError: int() argument must be a string or a number, not '%s'", o.Type().Name)
+	if v, ok := o.(*objects.ByteArray); ok {
+		return parseIntStringFrom(string(v.Bytes()), 10, true)
+	}
+	if buf, ok := objects.AsBytesLike(o); ok {
+		return parseIntStringFrom(string(buf), 10, true)
+	}
+	return nil, fmt.Errorf("TypeError: int() argument must be a string, a bytes-like object or a real number, not '%s'", o.Type().Name)
+}
+
+// unwrapIntResult validates that the nb_int / nb_index slot returned
+// an int (or int subclass, incl. bool), and downcasts subclass results
+// to a plain int with a DeprecationWarning. Mirrors
+// _PyLong_FromNbIntOrNbIndex.
+//
+// CPython: Objects/abstract.c:1546 _PyLong_FromNbIntOrNbIndex
+func unwrapIntResult(res objects.Object, slot string) (objects.Object, error) {
+	var i *objects.Int
+	switch v := res.(type) {
+	case *objects.Int:
+		i = v
+	case *objects.Bool:
+		i = &v.Int
+	default:
+		return nil, fmt.Errorf("TypeError: %s returned non-int (type %s)", slot, res.Type().Name)
+	}
+	if res.Type() == objects.IntType {
+		return i, nil
+	}
+	// Subclass of int (incl. bool): emit DeprecationWarning and unwrap.
+	msg := fmt.Sprintf("%s returned non-int (type %s).  "+
+		"The ability to return an instance of a strict subclass of int "+
+		"is deprecated, and may be removed in a future version of Python.",
+		slot, res.Type().Name)
+	if objects.DeprecWarnHook != nil {
+		if werr := objects.DeprecWarnHook(msg); werr != nil {
+			return nil, werr
+		}
+	}
+	return objects.NewIntFromBig(i.BigInt()), nil
+}
+
+// parseIntStringNormalized strips Unicode whitespace and translates
+// Unicode decimal digits to ASCII before delegating to parseIntString.
+// Mirrors _PyUnicode_TransformDecimalAndSpaceToASCII applied by
+// PyLong_FromUnicodeObject.
+//
+// CPython: Objects/longobject.c:2992 PyLong_FromUnicodeObject,
+// Objects/unicodeobject.c:11075 _PyUnicode_TransformDecimalAndSpaceToASCII
+func parseIntStringNormalized(s string, base int) (objects.Object, error) {
+	return parseIntString(normalizeIntString(s), base)
+}
+
+// normalizeIntString converts Unicode whitespace to ASCII space and
+// Unicode decimal-digit characters (Nd category) to ASCII '0'-'9'.
+// Non-decimal, non-whitespace characters pass through; parseIntString
+// catches anything that big.Int.SetString rejects.
+//
+// CPython: Objects/unicodeobject.c:11075 _PyUnicode_TransformDecimalAndSpaceToASCII
+func normalizeIntString(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r < 128 {
+			out = append(out, r)
+			continue
+		}
+		if isUnicodeSpace(r) {
+			out = append(out, ' ')
+			continue
+		}
+		if d := unicodeDecimalValue(r); d >= 0 {
+			out = append(out, '0'+rune(d))
+			continue
+		}
+		out = append(out, r)
+	}
+	return string(out)
+}
+
+// isUnicodeSpace reports whether r is Unicode whitespace as recognized
+// by Py_UNICODE_ISSPACE. Covers the BMP whitespace block CPython
+// classifies in _PyUnicode_IsWhitespace.
+//
+// CPython: Objects/unicodetype_db.h _PyUnicode_IsWhitespace
+func isUnicodeSpace(r rune) bool {
+	switch r {
+	case 0x0085, 0x00A0,
+		0x1680,
+		0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+		0x2007, 0x2008, 0x2009, 0x200A,
+		0x2028, 0x2029,
+		0x202F, 0x205F, 0x3000:
+		return true
+	}
+	return false
+}
+
+// unicodeDecimalValue returns the decimal-digit value of r in the
+// Unicode Nd category, or -1 if r is not a decimal digit. The table
+// below covers the Nd ranges used by test_int's test_unicode (DEVANAGARI,
+// BENGALI, ARABIC-INDIC, etc.); the full Unicode database port lands
+// with unicodedata.
+//
+// CPython: Objects/unicodetype_db.h _PyUnicode_ToDecimalDigit
+func unicodeDecimalValue(r rune) int {
+	switch {
+	case r >= 0x0660 && r <= 0x0669: // ARABIC-INDIC
+		return int(r - 0x0660)
+	case r >= 0x06F0 && r <= 0x06F9: // EXTENDED ARABIC-INDIC
+		return int(r - 0x06F0)
+	case r >= 0x07C0 && r <= 0x07C9: // NKO
+		return int(r - 0x07C0)
+	case r >= 0x0966 && r <= 0x096F: // DEVANAGARI
+		return int(r - 0x0966)
+	case r >= 0x09E6 && r <= 0x09EF: // BENGALI
+		return int(r - 0x09E6)
+	case r >= 0x0A66 && r <= 0x0A6F: // GURMUKHI
+		return int(r - 0x0A66)
+	case r >= 0x0AE6 && r <= 0x0AEF: // GUJARATI
+		return int(r - 0x0AE6)
+	case r >= 0x0B66 && r <= 0x0B6F: // ORIYA
+		return int(r - 0x0B66)
+	case r >= 0x0BE6 && r <= 0x0BEF: // TAMIL
+		return int(r - 0x0BE6)
+	case r >= 0x0C66 && r <= 0x0C6F: // TELUGU
+		return int(r - 0x0C66)
+	case r >= 0x0CE6 && r <= 0x0CEF: // KANNADA
+		return int(r - 0x0CE6)
+	case r >= 0x0D66 && r <= 0x0D6F: // MALAYALAM
+		return int(r - 0x0D66)
+	case r >= 0x0DE6 && r <= 0x0DEF: // SINHALA
+		return int(r - 0x0DE6)
+	case r >= 0x0E50 && r <= 0x0E59: // THAI
+		return int(r - 0x0E50)
+	case r >= 0x0ED0 && r <= 0x0ED9: // LAO
+		return int(r - 0x0ED0)
+	case r >= 0x0F20 && r <= 0x0F29: // TIBETAN
+		return int(r - 0x0F20)
+	case r >= 0x1040 && r <= 0x1049: // MYANMAR
+		return int(r - 0x1040)
+	case r >= 0x1090 && r <= 0x1099: // MYANMAR SHAN
+		return int(r - 0x1090)
+	case r >= 0x17E0 && r <= 0x17E9: // KHMER
+		return int(r - 0x17E0)
+	case r >= 0x1810 && r <= 0x1819: // MONGOLIAN
+		return int(r - 0x1810)
+	case r >= 0xFF10 && r <= 0xFF19: // FULLWIDTH
+		return int(r - 0xFF10)
+	}
+	return -1
 }
 
 func parseIntString(s string, base int) (objects.Object, error) {
-	stripped := stripIntLiteral(s, base)
+	return parseIntStringFrom(s, base, false)
+}
+
+// parseIntStringFrom is parseIntString with a flag for whether the
+// source was bytes-like (so error messages use the b'...' repr CPython
+// emits when PyLong_FromBytes rejects a literal).
+//
+// CPython: Objects/longobject.c:3005 PyLong_FromBytes (error path)
+func parseIntStringFrom(s string, base int, fromBytes bool) (objects.Object, error) {
+	stripped, ok := stripIntLiteralChecked(s, base)
+	if !ok {
+		return nil, invalidLiteralError(base, s, fromBytes)
+	}
 	effBase := parseBase(s, base)
 	// Limit check applies only to non-power-of-2 bases. CPython skips the
 	// gate for binary bases because long_from_binary_base is linear.
@@ -122,11 +346,176 @@ func parseIntString(s string, base int) (objects.Object, error) {
 		}
 	}
 	out := new(big.Int)
-	_, ok := out.SetString(stripped, effBase)
-	if !ok {
-		return nil, fmt.Errorf("ValueError: invalid literal for int() with base %d: %q", base, s)
+	_, parsed := out.SetString(stripped, effBase)
+	if !parsed || stripped == "" || stripped == "+" || stripped == "-" {
+		return nil, invalidLiteralError(base, s, fromBytes)
 	}
 	return objects.NewIntFromBig(out), nil
+}
+
+func invalidLiteralError(base int, s string, fromBytes bool) error {
+	if fromBytes {
+		return fmt.Errorf("ValueError: invalid literal for int() with base %d: b%s", base, pyReprBytes(s))
+	}
+	return fmt.Errorf("ValueError: invalid literal for int() with base %d: %s", base, pyReprStr(s))
+}
+
+// pyReprBytes formats s as Python's bytes repr does: same quote rules as
+// pyReprStr, but every byte that is not printable ASCII gets the \xHH
+// escape regardless of whether it is a valid UTF-8 sequence head.
+// PyBytes_Repr escapes byte-by-byte, so b'\xbd' renders as the literal
+// six characters '\xbd' rather than the Unicode replacement char.
+//
+// CPython: Objects/bytesobject.c:1061 bytes_repr
+func pyReprBytes(s string) string {
+	hasSingle, hasDouble := false, false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			hasSingle = true
+		case '"':
+			hasDouble = true
+		}
+	}
+	quote := byte('\'')
+	if hasSingle && !hasDouble {
+		quote = '"'
+	}
+	out := make([]byte, 0, len(s)+2)
+	out = append(out, quote)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == quote:
+			out = append(out, '\\', quote)
+		case c == '\\':
+			out = append(out, '\\', '\\')
+		case c == '\t':
+			out = append(out, '\\', 't')
+		case c == '\n':
+			out = append(out, '\\', 'n')
+		case c == '\r':
+			out = append(out, '\\', 'r')
+		case c < 0x20 || c >= 0x7f:
+			out = fmt.Appendf(out, "\\x%02x", c)
+		default:
+			out = append(out, c)
+		}
+	}
+	out = append(out, quote)
+	return string(out)
+}
+
+// pyReprStr formats s as Python's repr does: prefer single quotes
+// unless s itself contains an unescaped single quote and no double
+// quote, then switch to double quotes. The format mirrors
+// PyUnicode_Repr for the test_int.test_error_message expectations.
+//
+// CPython: Objects/unicodeobject.c:11875 unicode_repr
+func pyReprStr(s string) string {
+	hasSingle, hasDouble := false, false
+	for _, r := range s {
+		switch r {
+		case '\'':
+			hasSingle = true
+		case '"':
+			hasDouble = true
+		}
+	}
+	quote := byte('\'')
+	if hasSingle && !hasDouble {
+		quote = '"'
+	}
+	out := make([]byte, 0, len(s)+2)
+	out = append(out, quote)
+	for _, r := range s {
+		switch {
+		case r == rune(quote):
+			out = append(out, '\\', quote)
+		case r == '\\':
+			out = append(out, '\\', '\\')
+		case r == '\t':
+			out = append(out, '\\', 't')
+		case r == '\n':
+			out = append(out, '\\', 'n')
+		case r == '\r':
+			out = append(out, '\\', 'r')
+		case r < 0x20 || r == 0x7f:
+			out = fmt.Appendf(out, "\\x%02x", r)
+		default:
+			// Non-ASCII passes through as-is (Python emits the literal
+			// character, since unicode repr keeps printable non-ASCII).
+			out = append(out, []byte(string(r))...)
+		}
+	}
+	out = append(out, quote)
+	return string(out)
+}
+
+// stripIntLiteralChecked strips whitespace, sign, and 0x/0o/0b prefix
+// from s and applies PEP 515 underscore validation: underscores must
+// lie between two digits, may appear after the prefix, and cannot
+// repeat. Returns (stripped, false) on any malformed placement so the
+// caller can raise ValueError. With base 0, a leading "0" followed by
+// more digits (the old octal form) is also invalid per PEP 3127.
+//
+// CPython: Objects/longobject.c:2789 long_from_string_base (digit/underscore loop)
+func stripIntLiteralChecked(s string, base int) (string, bool) {
+	t := trimSpace(s)
+	sign := ""
+	if t != "" && (t[0] == '+' || t[0] == '-') {
+		sign = string(t[0])
+		t = t[1:]
+	}
+	hadPrefix := false
+	if len(t) > 2 && t[0] == '0' {
+		switch {
+		case (base == 0 || base == 2) && (t[1] == 'b' || t[1] == 'B'):
+			t = t[2:]
+			hadPrefix = true
+		case (base == 0 || base == 8) && (t[1] == 'o' || t[1] == 'O'):
+			t = t[2:]
+			hadPrefix = true
+		case (base == 0 || base == 16) && (t[1] == 'x' || t[1] == 'X'):
+			t = t[2:]
+			hadPrefix = true
+		}
+	}
+	// PEP 3127: with base=0, a "0..." literal without a recognized
+	// prefix is invalid (it would be the legacy octal form).
+	if !hadPrefix && base == 0 && len(t) > 1 && t[0] == '0' {
+		for i := 1; i < len(t); i++ {
+			if t[i] != '0' && t[i] != '_' {
+				return "", false
+			}
+		}
+	}
+	if t == "" {
+		return "", false
+	}
+	// PEP 515: cannot end with _, cannot start with _ unless a prefix
+	// was just stripped (e.g. "0b_1010" is valid).
+	if t[len(t)-1] == '_' {
+		return "", false
+	}
+	if t[0] == '_' && !hadPrefix {
+		return "", false
+	}
+	out := make([]byte, 0, len(t))
+	prevUnderscore := false
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if c == '_' {
+			if prevUnderscore {
+				return "", false
+			}
+			prevUnderscore = true
+			continue
+		}
+		prevUnderscore = false
+		out = append(out, c)
+	}
+	return sign + string(out), true
 }
 
 // isPowerOfTwoBase reports whether base is one of the binary bases
@@ -155,35 +544,6 @@ func digitCountForLimit(s string) int {
 		return len(s) - 1
 	}
 	return len(s)
-}
-
-// stripIntLiteral matches PyLong_FromString's handling of the 0b/0o/0x
-// prefix when base is 0 or matches the prefix.
-func stripIntLiteral(s string, base int) string {
-	t := trimSpace(s)
-	sign := ""
-	if t != "" && (t[0] == '+' || t[0] == '-') {
-		sign = string(t[0])
-		t = t[1:]
-	}
-	if len(t) > 2 && t[0] == '0' {
-		switch {
-		case (base == 0 || base == 2) && (t[1] == 'b' || t[1] == 'B'):
-			t = t[2:]
-		case (base == 0 || base == 8) && (t[1] == 'o' || t[1] == 'O'):
-			t = t[2:]
-		case (base == 0 || base == 16) && (t[1] == 'x' || t[1] == 'X'):
-			t = t[2:]
-		}
-	}
-	out := make([]byte, 0, len(t))
-	for i := 0; i < len(t); i++ {
-		if t[i] == '_' {
-			continue
-		}
-		out = append(out, t[i])
-	}
-	return sign + string(out)
 }
 
 func parseBase(s string, base int) int {

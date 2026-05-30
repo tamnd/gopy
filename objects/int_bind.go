@@ -102,7 +102,22 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewStr(v.String()), nil
+	if err := checkIntToStrLimit(v.BitLen()); err != nil {
+		return nil, err
+	}
+	s := v.String()
+	if IntMaxStrDigitsHook != nil {
+		if limit := IntMaxStrDigitsHook(); limit > 0 {
+			n := len(s)
+			if n > 0 && s[0] == '-' {
+				n--
+			}
+			if int32(n) > limit {
+				return nil, fmt.Errorf("ValueError: Exceeds the limit (%d digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit", limit)
+			}
+		}
+	}
+	return NewStr(s), nil
 }
 
 // intBitLengthMethod ports int.bit_length(): the number of bits needed
