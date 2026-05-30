@@ -31,6 +31,7 @@ var frameLocalsProxyType = NewType("FrameLocalsProxy", []*Type{objectType})
 
 func init() {
 	frameLocalsProxyType.Repr = frameLocalsProxyRepr
+	frameLocalsProxyType.RichCmp = frameLocalsProxyRichCompare
 	frameLocalsProxyType.Iter = frameLocalsProxyIter
 	frameLocalsProxyType.Mapping = &MappingMethods{
 		Length:  frameLocalsProxyLen,
@@ -359,6 +360,28 @@ func frameLocalsProxyIter(self Object) (Object, error) {
 	}
 	keys := frameLocalsProxyKeysList(p)
 	return Iter(keys)
+}
+
+// CPython: Objects/frameobject.c:481 framelocalsproxy_richcompare
+func frameLocalsProxyRichCompare(a, b Object, op CompareOp) (Object, error) {
+	pa, ok := a.(*FrameLocalsProxy)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if pb, ok := b.(*FrameLocalsProxy); ok {
+		if op != CompareEQ && op != CompareNE {
+			return NotImplemented(), nil
+		}
+		eq := pa.frame == pb.frame
+		if op == CompareNE {
+			eq = !eq
+		}
+		return NewBool(eq), nil
+	}
+	if _, ok := asDictBacking(b); ok {
+		return RichCmp(frameLocalsProxyAsDict(pa), b, op)
+	}
+	return NotImplemented(), nil
 }
 
 // frameLocalsProxyRepr renders the proxy as the dict view of its keys.
