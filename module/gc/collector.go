@@ -19,6 +19,8 @@
 package gc
 
 import (
+	"runtime"
+
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -52,6 +54,20 @@ func Collect(gen int) int {
 	state.mu.Lock()
 	collected, pending := collectMain(gen)
 	state.mu.Unlock()
+
+	// Force Go GC so any weakref finalizers registered via
+	// runtime.SetFinalizer on dropped objects can fire. Without this,
+	// support.gc_collect() returns before the underlying Go runtime
+	// has a chance to reclaim user objects whose only post-Decref
+	// keep-alive is Go's tracing collector. Two passes are needed
+	// because the first GC marks finalizers runnable; the second
+	// reclaims the now-finalized memory.
+	//
+	// CPython: Modules/gcmodule.c:1822 gc_collect_impl (CPython's
+	// refcount makes collection synchronous, so the second pass
+	// approximates the same end state for gopy's Go-backed objects).
+	runtime.GC()
+	runtime.GC()
 
 	invokeWeakrefCallbacks(pending)
 	invokeGCCallback(cbList, "stop", gen, collected, 0)
@@ -112,7 +128,18 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	pending := handleWeakrefs(unreachable, state.weakrefs, state.weakProxies)
 
+	// Finalizers (tp_finalize) run user Python code that may allocate
+	// and therefore re-enter Track. Drop state.mu while finalizing so
+	// concurrent goroutines (e.g., a generator processing GeneratorExit
+	// in its own goroutine) can still allocate. state.collecting stays
+	// true, which maybeAutoCollect checks before re-triggering, so we
+	// won't recursively start a nested collection.
+	//
+	// CPython: Python/gc.c:1067 finalize_garbage (runs under the GIL;
+	// gopy approximates this by dropping the collector mutex.)
+	state.mu.Unlock()
 	finalizeGarbage(unreachable, state.finalizers, state.finalized)
+	state.mu.Lock()
 
 	// Resurrection check. handleResurrected re-runs deduce on the
 	// post-finalize list so any object a finalizer refloated comes

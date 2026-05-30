@@ -30,6 +30,14 @@ type Header struct {
 	//
 	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
 	weakrefs *weakrefList
+
+	// finalized records that tp_finalize has already run on this
+	// object. Decref consults this flag so __del__ fires at most once
+	// per object even when the object is resurrected and re-collected.
+	// Mirrors the _PyGC_FINALIZED bit CPython stores in the GC header.
+	//
+	// CPython: Include/internal/pycore_object.h _PyGC_FINALIZED
+	finalized bool
 }
 
 // VarHeader extends Header with ob_size for variable-length builtins

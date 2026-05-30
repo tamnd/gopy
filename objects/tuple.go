@@ -113,6 +113,10 @@ func NewTuple(items []Object) *Tuple {
 	t := &Tuple{items: append([]Object(nil), items...)}
 	t.init(TupleType)
 	t.size = int64(len(items))
+	// CPython: Objects/tupleobject.c:170 PyTuple_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(t)
+	}
 	return t
 }
 

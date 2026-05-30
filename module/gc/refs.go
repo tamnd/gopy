@@ -34,6 +34,18 @@ func updateRefs(containers *gcHead) {
 // objects to their gcHead so the visitor can land on the right node;
 // the caller (gc.Collect) supplies it under state.mu.
 //
+// The decrement floors at 0. CPython lets refs go negative on shared
+// objects only when a heap inconsistency exists; in gopy, negatives
+// happen routinely because containers (Frame's f_funcobj, Frame's
+// locals/cells, function __closure__ cells, generator gi_frame, etc.)
+// do not Incref what they store. Letting refs underflow then either
+// pushes a still-live module-level Func into the unreachable set
+// (refs > 0 branch, breaks recursive queens / conjoin) or hides a
+// genuinely-dead self-cycle (refs != 0 branch, breaks weakref-callback
+// tests). Flooring at 0 lets visit_reachable pull live objects back
+// through their reachable container while still classifying
+// no-external-ref cycles as unreachable.
+//
 // CPython: Python/gc.c:482 subtract_refs
 func subtractRefs(containers *gcHead, tracked map[objects.Object]*gcHead) error {
 	visit := func(target objects.Object) error {
@@ -47,7 +59,9 @@ func subtractRefs(containers *gcHead, tracked map[objects.Object]*gcHead) error 
 		if g.flags&gcCollecting == 0 {
 			return nil
 		}
-		g.refs--
+		if g.refs > 0 {
+			g.refs--
+		}
 		return nil
 	}
 	for g := containers.next; g != containers; g = g.next {

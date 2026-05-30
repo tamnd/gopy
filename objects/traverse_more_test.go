@@ -90,6 +90,14 @@ func (f *fakeInterp) FrameCellLocal(i int) Object { return f.cells[i] }
 func (f *fakeInterp) FrameNumFrees() int          { return len(f.frees) }
 func (f *fakeInterp) FrameFreeLocal(i int) Object { return f.frees[i] }
 func (f *fakeInterp) FrameFunc() Object           { return nil }
+func (f *fakeInterp) FrameClearLocals() {
+	f.fast = nil
+	f.cells = nil
+	f.frees = nil
+}
+func (f *fakeInterp) FrameTakeOwnership()       {}
+func (f *fakeInterp) FrameNumStack() int        { return 0 }
+func (f *fakeInterp) FrameStackItem(int) Object { return nil }
 func (f *fakeInterp) FrameLocalsPlusItem(i int) Object {
 	n := len(f.fast)
 	if i < n {
@@ -104,16 +112,26 @@ func (f *fakeInterp) FrameLocalsPlusItem(i int) Object {
 	return nil
 }
 
+func (f *fakeInterp) FrameSetLocalsPlusItem(i int, v Object) {
+	n := len(f.fast)
+	switch {
+	case i < n:
+		f.fast[i] = v
+	case i < n+len(f.cells):
+		f.cells[i-n] = v
+	case i < n+len(f.cells)+len(f.frees):
+		f.frees[i-n-len(f.cells)] = v
+	}
+}
+
 func TestFrameTraverseVisitsScopeAndLocals(t *testing.T) {
-	g := NewDict()
-	b := NewDict()
 	l := NewDict()
 	fast := NewStr("fast")
 	cell := NewStr("cell")
 	free := NewStr("free")
 	ip := &fakeInterp{
-		globals:  g,
-		builtins: b,
+		globals:  NewDict(),
+		builtins: NewDict(),
 		locals:   l,
 		fast:     []Object{fast, nil},
 		cells:    []Object{cell},
@@ -127,7 +145,11 @@ func TestFrameTraverseVisitsScopeAndLocals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("traverse: %v", err)
 	}
-	want := []Object{tracer, g, b, l, fast, cell, free}
+	// f_globals / f_builtins are intentionally NOT in the want list:
+	// CPython reaches them transitively via f_funcobj's tp_traverse
+	// (Python/frame.c:11 _PyFrame_Traverse). Visiting them directly
+	// here over-counts shared module dicts across recursive frames.
+	want := []Object{tracer, l, fast, cell, free}
 	if len(got) != len(want) {
 		t.Fatalf("frame traverse = %v, want %v", got, want)
 	}
@@ -139,15 +161,21 @@ func TestFrameTraverseVisitsScopeAndLocals(t *testing.T) {
 }
 
 func TestFrameTraverseFollowsBackChain(t *testing.T) {
-	outer := &fakeInterp{globals: NewDict()}
-	inner := &fakeInterp{globals: NewDict(), back: outer}
+	innerLocal := NewStr("inner-local")
+	outerLocal := NewStr("outer-local")
+	outer := &fakeInterp{globals: NewDict(), fast: []Object{outerLocal}}
+	inner := &fakeInterp{globals: NewDict(), fast: []Object{innerLocal}, back: outer}
 	f := NewFrame(inner)
 	got, err := collectVisited(f)
 	if err != nil {
 		t.Fatalf("traverse: %v", err)
 	}
-	if len(got) != 2 || got[0] != inner.globals || got[1] != outer.globals {
-		t.Fatalf("frame traverse with back-chain = %v, want [inner-g outer-g]", got)
+	// Per-frame state from both iframes must surface. Globals/builtins
+	// stay out (reached via f_funcobj in CPython); the back-chain walk
+	// has to land the outer iframe's locals so generators / suspended
+	// frames still keep their captured state alive.
+	if len(got) != 2 || got[0] != innerLocal || got[1] != outerLocal {
+		t.Fatalf("frame traverse with back-chain = %v, want [inner-local outer-local]", got)
 	}
 }
 

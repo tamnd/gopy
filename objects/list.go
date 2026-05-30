@@ -89,6 +89,10 @@ func NewList(items []Object) *List {
 	l := &List{items: append([]Object(nil), items...)}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(l)
+	}
 	return l
 }
 
@@ -103,6 +107,10 @@ func newListAdopt(items []Object) *List {
 	l := &List{items: items}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(l)
+	}
 	return l
 }
 

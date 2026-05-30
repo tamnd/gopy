@@ -34,6 +34,38 @@ var GCTrackHook func(Object)
 // CPython: Include/internal/pycore_object.h:248 _PyObject_GC_UNTRACK
 var GCUntrackHook func(Object)
 
+// SaveCurrentExceptionHook returns the active thread's pending exception
+// (a typed *pyerrors.Exception, returned here as any to avoid an objects
+// to pyerrors import edge). RestoreCurrentExceptionHook puts it back.
+// Used by genFinalize to mirror CPython's PyErr_GetRaisedException /
+// PyErr_SetRaisedException pair: a finalize that runs synchronously on
+// the active thread must not leak a GeneratorExit into the caller's
+// thread-state slot.
+//
+// CPython: Objects/genobject.c:87 _PyGen_Finalize
+var (
+	SaveCurrentExceptionHook    func() any
+	RestoreCurrentExceptionHook func(any)
+)
+
+// WriteUnraisableHook routes an exception that cannot be propagated
+// (raised in __del__, in a generator's close path, in a weakref
+// callback, etc) through sys.unraisablehook. The hook builds an
+// UnraisableHookArgs object and invokes sys.unraisablehook(args).
+// errMsg is the "Exception ignored while ..." prefix; obj is the object
+// that produced the exception (the instance whose __del__ raised, the
+// generator whose close errored). err is the exception that arose,
+// either wrapped in a RaisedError or a bare Go sentinel; the hook
+// converts the bare form into a typed Exception via the same
+// synthesizeException path the unwind uses.
+//
+// objects/ wires this through a hook variable because the vm package
+// owns the sys-module lookup machinery; objects cannot import
+// imp/state/sys without creating a cycle.
+//
+// CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
+var WriteUnraisableHook func(obj Object, errMsg string, err error)
+
 // Instance backs a Python-level object whose type is a user-defined
 // class. Header.typ is the class; dict holds per-instance attributes
 // (nil when the class declared __slots__ without __dict__); slots
@@ -154,16 +186,14 @@ func (i *Instance) EnsureDict() *Dict {
 }
 
 // instanceTraverse visits every Object reachable from a user-class
-// instance: each non-nil slot value plus every key and value stored
-// in the per-instance __dict__. The cycle collector calls this
-// through Type.TpTraverse to detect cycles whose back-edges run
-// through instance attributes.
+// instance: each non-nil slot value plus the per-instance __dict__.
+// The cycle collector calls this through Type.TpTraverse to detect
+// cycles whose back-edges run through instance attributes.
 //
-// gopy walks the dict's entries inline rather than visiting the dict
-// object itself (CPython's subtype_traverse does Py_VISIT(*dictptr)
-// because the dict has its own gc-tracked head). Inlining avoids the
-// requirement that every per-instance dict be tracked separately,
-// which gopy does not do today, and keeps the traversal complete.
+// CPython's subtype_traverse does Py_VISIT(*dictptr); we mirror that
+// because every Dict is now gc-tracked, so visiting the dict object
+// itself (rather than walking its entries inline) keeps refcount
+// accounting consistent with the dict's own tp_traverse.
 //
 // CPython: Objects/typeobject.c:1356 subtype_traverse
 func instanceTraverse(o Object, visit Visitor) error {
@@ -180,7 +210,7 @@ func instanceTraverse(o Object, visit Visitor) error {
 		}
 	}
 	if i.dict != nil {
-		if err := dictTraverse(i.dict, visit); err != nil {
+		if err := visit(i.dict); err != nil {
 			return err
 		}
 	}
@@ -239,6 +269,7 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 	}
 	if inst.dict != nil {
 		if v, err := inst.dict.GetItem(name); err == nil {
+			Incref(v)
 			return v, nil
 		}
 	}
