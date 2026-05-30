@@ -253,14 +253,16 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	genFrameObj := objects.NewFrame(savedFrame)
 	switch {
 	case flags&compile.CoCoroutine != 0:
-		c := objects.NewCoroutine(name)
+		c := objects.NewCoroutineWithQualname(name, qualname)
+		c.Code = e.f.Code
 		c.GiFrame = genFrameObj
 		genFrameObj.SetOwner(c)
 		savedFrame.GenOwner = c
 		yieldCh, sendCh = c.YieldCh, c.SendCh
 		retVal = c
 	case flags&compile.CoAsyncGenerator != 0:
-		ag := objects.NewAsyncGenerator(name)
+		ag := objects.NewAsyncGeneratorWithQualname(name, qualname)
+		ag.Code = e.f.Code
 		ag.GiFrame = genFrameObj
 		genFrameObj.SetOwner(ag)
 		savedFrame.GenOwner = ag
@@ -310,6 +312,12 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			//
 			// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
 			gen.CallerExc = pyerrors.HandledAsObject(savedTS)
+		}
+		if c, ok := genObj.(*objects.Coroutine); ok {
+			c.Running.Store(1)
+		}
+		if ag, ok := genObj.(*objects.AsyncGenerator); ok {
+			ag.Running.Store(1)
 		}
 		// Link savedFrame.Previous only when this generator is driven via
 		// yield from by another generator (recorded in genCallerFrames by
@@ -472,6 +480,12 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		}
 		pyerrors.SetHandledFromObject(e.ts, gen.CallerExc)
 	}
+	if c, ok := e.genRunning.(*objects.Coroutine); ok {
+		c.Running.Store(0)
+	}
+	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
+		ag.Running.Store(0)
+	}
 	// Deregister frame and clear f_back before yielding so that
 	// suspended generators are invisible to sys._getframe() from the
 	// caller's side, matching CPython (only running frames are visible).
@@ -522,6 +536,12 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		}
 		// else: ExcHandled == nil → chain-walk fallback: ts.HandledException
 		// stays as gen.CallerExc, which is what the generator inherits.
+	}
+	if c, ok := e.genRunning.(*objects.Coroutine); ok {
+		c.Running.Store(1)
+	}
+	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
+		ag.Running.Store(1)
 	}
 	if msg.Err != nil {
 		// A throw() that carried a Python exception object travels as

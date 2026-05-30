@@ -38,11 +38,11 @@ that tree.
 | test_frame | FAILED (17 failures, 9 errors) | ready |
 | test_eval | file not vendored | ready |
 | test_pow | OK | done |
-| test_yield_from | FAILED (15 failures, 30 errors) | ready |
-| test_coroutines | PANIC (goroutine deadlock) | ready |
-| test_asyncgen | FAILED (4 failures, 79 errors) | ready |
-| test_generator_stop | FAILED (2 errors) | ready |
-| test_generators | FAILED (20 failures, 19 errors) | ready |
+| test_yield_from | FAILED (12 failures, 8 errors) | ready |
+| test_coroutines | FAILED (25 failures, 29 errors) | ready |
+| test_asyncgen | FAILED (3 failures, 80 errors) | ready |
+| test_generator_stop | OK | done |
+| test_generators | OK (59 pass, 1 skip) | done |
 | test_iter | FAILED (1 failure) — tracked in spec 1722 P5 | ready |
 | test_iterlen | FAILED (18 failures) | ready |
 | test_index | FAILED (1 failure, 20 errors) | ready |
@@ -573,9 +573,9 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 
 ### P1 — Generator / coroutine / asyncgen attributes
 
-- [ ] P1.1 `gi_code`, `gi_suspended`, `gi_yieldfrom`, `__name__` (writable), `__qualname__` (writable) on GeneratorType
-- [ ] P1.2 `cr_frame`, `cr_running`, `cr_code`, `cr_await`, `cr_origin`, `__name__`, `__qualname__` on CoroutineType
-- [ ] P1.3 `ag_frame`, `ag_running`, `ag_code`, `ag_await`, `__name__`, `__qualname__` on AsyncGeneratorType
+- [x] P1.1 `gi_code`, `gi_suspended`, `gi_yieldfrom`, `__name__` (writable), `__qualname__` (writable) on GeneratorType
+- [x] P1.2 `cr_frame`, `cr_running`, `cr_code`, `cr_await`, `cr_origin`, `cr_suspended`, `__name__`, `__qualname__` on CoroutineType
+- [x] P1.3 `ag_frame`, `ag_running`, `ag_code`, `ag_await`, `ag_suspended`, `__name__`, `__qualname__` on AsyncGeneratorType
 
 ### P2 — pow() modular inverse
 
@@ -649,11 +649,11 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 | test_with | ready | done | existing pass |
 | test_contains | ready | done | existing pass |
 | test_typechecks | ready | done | existing pass |
-| test_generators | ready | ready | P1 |
-| test_coroutines | ready | ready | P1, P3 |
-| test_asyncgen | ready | ready | P1, P3 |
-| test_yield_from | ready | ready | P1, P8 |
-| test_generator_stop | ready | ready | P8 |
+| test_generators | ready | done | P1 shipped |
+| test_coroutines | ready | ready | P1 shipped, P3 pending |
+| test_asyncgen | ready | ready | P1 shipped, P3 pending |
+| test_yield_from | ready | ready | P1 shipped, P8 pending |
+| test_generator_stop | ready | done | existing pass |
 | test_pow | ready | done | P2 shipped |
 | test_frame | ready | ready | P4 |
 | test_isinstance | ready | done | P5 shipped |

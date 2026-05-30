@@ -260,11 +260,11 @@ Last retested at `2c01f361` (v0.12.7, 2026-05-29).
 | test_typechecks | v0.12.7 | done | 6/6 green |
 | test_unary | v0.12.7 | done | 6/6 green |
 | test_with | v0.12.7 | done | 54/54 green |
-| test_asyncgen | v0.9 | ready | 4 fail, 79 errors — asyncgen hooks (1723 P3) |
-| test_coroutines | v0.9 | ready | panic — deadlock in coroutine.Send (1723 P1, P3) |
-| test_generator_stop | v0.9 | ready | 2 errors — PEP 479 StopIteration (1723 P8) |
-| test_generators | v0.9 | ready | 20 fail, 19 errors — gen.close/throw, frame attrs, gi_code/__name__ (1723 P1) |
-| test_yield_from | v0.9 | ready | 15 fail, 30 errors — gen.close/throw, yield-from delegation (1723 P8) |
+| test_asyncgen | v0.12.8 | ready | 3 fail, 80 errors — asyncgen hooks (1723 P3) |
+| test_coroutines | v0.12.8 | ready | 25 fail, 29 errors — asyncio.run and coroutine hooks (1723 P3) |
+| test_generator_stop | v0.12.8 | done | 2/2 green |
+| test_generators | v0.12.8 | done | 59/60 green, 1 skip |
+| test_yield_from | v0.12.8 | ready | 12 fail, 8 errors — gen.close/throw, yield-from delegation (1723 P8) |
 
 ### Exceptions / traceback (8 files)
 
