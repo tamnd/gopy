@@ -182,6 +182,13 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	}
 	v, err := m.dict.GetItem(name)
 	if err == nil {
+		// dict.GetItem returns a borrowed reference; callers in the eval
+		// loop (pushObject) treat the return as a new strong ref and
+		// will Decref it later. Incref so the borrowed dict slot stays
+		// valid and the caller's Decref balances correctly.
+		//
+		// CPython: Objects/moduleobject.c:875 module_getattro
+		Incref(v)
 		return v, nil
 	}
 	// PEP 562: look for __getattr__ in the module dict.
