@@ -206,111 +206,107 @@ var reversedIterType = objects.NewType("reversed", []*objects.Type{objects.Objec
 
 func init() {
 	reversedIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
-	reversedIterType.IterNext = func(o objects.Object) (objects.Object, error) {
-		it := o.(*reversedIter)
-		if it.idx < 0 || it.o == nil {
+	reversedIterType.IterNext = reversedIterNext
+	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescr(reversedIterType, "__reduce__", reversedIterReduce))
+	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescr(reversedIterType, "__setstate__", reversedIterSetState))
+	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescr(reversedIterType, "__length_hint__", reversedIterLengthHint))
+	objects.AddIterSlotWrappers(reversedIterType)
+}
+
+// CPython: Objects/enumobject.c:1135 reversed_next
+func reversedIterNext(o objects.Object) (objects.Object, error) {
+	it := o.(*reversedIter)
+	if it.idx < 0 || it.o == nil {
+		it.idx = -1
+		it.o = nil
+		return nil, objects.ErrStopIteration
+	}
+	v, err := it.o.Type().Sequence.GetItem(it.o, it.idx)
+	if err != nil {
+		msg := err.Error()
+		if strings.HasPrefix(msg, "IndexError") || errors.Is(err, objects.ErrStopIteration) {
 			it.idx = -1
 			it.o = nil
 			return nil, objects.ErrStopIteration
 		}
-		v, err := it.o.Type().Sequence.GetItem(it.o, it.idx)
+		return nil, err
+	}
+	it.idx--
+	return v, nil
+}
+
+// CPython: Objects/enumobject.c:757 reversed_reduce
+func reversedIterReduce(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+	}
+	it := args[0].(*reversedIter)
+	if objects.BuiltinLookup == nil {
+		return nil, fmt.Errorf("PicklingError: builtins not loaded")
+	}
+	revFn, err := objects.BuiltinLookup("reversed")
+	if err != nil {
+		return nil, err
+	}
+	if it.idx < 0 {
+		return objects.NewTuple([]objects.Object{
+			revFn,
+			objects.NewTuple([]objects.Object{objects.NewList(nil)}),
+		}), nil
+	}
+	return objects.NewTuple([]objects.Object{
+		revFn,
+		objects.NewTuple([]objects.Object{it.o}),
+		objects.NewInt(int64(it.idx)),
+	}), nil
+}
+
+// CPython: Objects/enumobject.c:779 reversed_setstate
+func reversedIterSetState(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+	}
+	it := args[0].(*reversedIter)
+	idx, ok := args[1].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
+	}
+	v, _ := idx.Int64()
+	n := int64(-1)
+	if it.o != nil && it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
+		if ln, lerr := it.o.Type().Sequence.Length(it.o); lerr == nil {
+			n = int64(ln) - 1
+		}
+	}
+	if v < -1 {
+		v = -1
+	} else if v > n {
+		v = n
+	}
+	it.idx = int(v)
+	return objects.None(), nil
+}
+
+// CPython: Objects/enumobject.c:744 reversed_len
+func reversedIterLengthHint(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+	}
+	it := args[0].(*reversedIter)
+	if it.idx < 0 || it.o == nil {
+		return objects.NewInt(0), nil
+	}
+	position := int64(it.idx + 1)
+	if it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
+		cur, err := it.o.Type().Sequence.Length(it.o)
 		if err != nil {
-			// CPython: Objects/enumobject.c:1135 reversed_next clears
-			// IndexError / StopIteration and stops iteration. This is
-			// what makes `list(reversed_iter_into_truncated_seq)` yield
-			// an empty list instead of raising IndexError.
-			msg := err.Error()
-			if strings.HasPrefix(msg, "IndexError") || errors.Is(err, objects.ErrStopIteration) {
-				it.idx = -1
-				it.o = nil
-				return nil, objects.ErrStopIteration
-			}
 			return nil, err
 		}
-		it.idx--
-		return v, nil
+		if int64(cur) < position {
+			return objects.NewInt(0), nil
+		}
 	}
-	// CPython: Objects/enumobject.c:757 reversed_reduce
-	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescr(reversedIterType, "__reduce__",
-		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			if len(args) != 1 {
-				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
-			}
-			it := args[0].(*reversedIter)
-			if objects.BuiltinLookup == nil {
-				return nil, fmt.Errorf("PicklingError: builtins not loaded")
-			}
-			revFn, err := objects.BuiltinLookup("reversed")
-			if err != nil {
-				return nil, err
-			}
-			if it.idx < 0 {
-				return objects.NewTuple([]objects.Object{
-					revFn,
-					objects.NewTuple([]objects.Object{objects.NewList(nil)}),
-				}), nil
-			}
-			return objects.NewTuple([]objects.Object{
-				revFn,
-				objects.NewTuple([]objects.Object{it.o}),
-				objects.NewInt(int64(it.idx)),
-			}), nil
-		},
-	))
-	// CPython: Objects/enumobject.c:779 reversed_setstate
-	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescr(reversedIterType, "__setstate__",
-		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			if len(args) != 2 {
-				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
-			}
-			it := args[0].(*reversedIter)
-			idx, ok := args[1].(*objects.Int)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __setstate__ requires int argument")
-			}
-			v, _ := idx.Int64()
-			n := int64(-1)
-			if it.o != nil && it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
-				if ln, lerr := it.o.Type().Sequence.Length(it.o); lerr == nil {
-					n = int64(ln) - 1
-				}
-			}
-			if v < -1 {
-				v = -1
-			} else if v > n {
-				v = n
-			}
-			it.idx = int(v)
-			return objects.None(), nil
-		},
-	))
-	// CPython: Objects/enumobject.c:744 reversed_len
-	// Returns idx+1 unless the sequence has been truncated below that
-	// position, in which case CPython returns 0 (the iterator will
-	// raise IndexError on its next read).
-	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescr(reversedIterType, "__length_hint__",
-		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			if len(args) != 1 {
-				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
-			}
-			it := args[0].(*reversedIter)
-			if it.idx < 0 || it.o == nil {
-				return objects.NewInt(0), nil
-			}
-			position := int64(it.idx + 1)
-			if it.o.Type().Sequence != nil && it.o.Type().Sequence.Length != nil {
-				cur, err := it.o.Type().Sequence.Length(it.o)
-				if err != nil {
-					return nil, err
-				}
-				if int64(cur) < position {
-					return objects.NewInt(0), nil
-				}
-			}
-			return objects.NewInt(position), nil
-		},
-	))
-	objects.AddIterSlotWrappers(reversedIterType)
+	return objects.NewInt(position), nil
 }
 
 func newReversedIter(o objects.Object, n int) *reversedIter {
@@ -371,44 +367,38 @@ var ZipType = objects.NewType("zip", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	ZipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
-	ZipType.IterNext = func(o objects.Object) (objects.Object, error) {
-		z, ok := o.(*zipIter)
-		if !ok {
-			return nil, objects.ErrStopIteration
-		}
-		if z.done || len(z.iters) == 0 {
-			return nil, objects.ErrStopIteration
-		}
-		out := make([]objects.Object, len(z.iters))
-		for i, it := range z.iters {
-			v, err := objects.IterNext(it)
-			if errors.Is(err, objects.ErrStopIteration) {
-				z.done = true
-				if z.strict {
-					if serr := zipStrictCheck(z.iters, i); serr != nil {
-						return nil, serr
-					}
-				}
-				return nil, objects.ErrStopIteration
-			}
-			if err != nil {
-				return nil, err
-			}
-			if v == nil {
-				z.done = true
-				if z.strict {
-					if serr := zipStrictCheck(z.iters, i); serr != nil {
-						return nil, serr
-					}
-				}
-				return nil, objects.ErrStopIteration
-			}
-			out[i] = v
-		}
-		return objects.NewTuple(out), nil
-	}
+	ZipType.IterNext = zipIterNext
 	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescr(ZipType, "__reduce__", zipReduce))
 	objects.SetTypeDescr(ZipType, "__setstate__", objects.NewMethodDescr(ZipType, "__setstate__", zipSetState))
+}
+
+// CPython: Python/bltinmodule.c:3222 zip_next
+func zipIterNext(o objects.Object) (objects.Object, error) {
+	z, ok := o.(*zipIter)
+	if !ok {
+		return nil, objects.ErrStopIteration
+	}
+	if z.done || len(z.iters) == 0 {
+		return nil, objects.ErrStopIteration
+	}
+	out := make([]objects.Object, len(z.iters))
+	for i, it := range z.iters {
+		v, err := objects.IterNext(it)
+		if err != nil || v == nil {
+			if err != nil && !errors.Is(err, objects.ErrStopIteration) {
+				return nil, err
+			}
+			z.done = true
+			if z.strict {
+				if serr := zipStrictCheck(z.iters, i); serr != nil {
+					return nil, serr
+				}
+			}
+			return nil, objects.ErrStopIteration
+		}
+		out[i] = v
+	}
+	return objects.NewTuple(out), nil
 }
 
 // zipReduce returns (type(self), (iter1, iter2, ...)) when strict is

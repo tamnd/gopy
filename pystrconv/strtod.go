@@ -84,7 +84,7 @@ func ParseFloat(s string) (float64, error) {
 // CPython: Python/pystrtod.c:344 _Py_string_to_number_with_underscores
 func StripUnderscores(s string) (string, bool) { return stripUnderscores(s) }
 
-// ParseFloatPrefix mirrors PyOS_string_to_double's strtod-like behaviour:
+// ParseFloatPrefix mirrors PyOS_string_to_double's strtod-like behavior:
 // it parses the longest valid float at the start of s, returning the
 // value and the byte index of the first character that is not part of
 // the float. When the prefix is not a float, the returned end index is
@@ -123,15 +123,8 @@ func scanFloatPrefix(s string) int {
 	if i < n && (s[i] == '+' || s[i] == '-') {
 		i++
 	}
-	if i < n {
-		switch lower := asciiLower(s[i:]); {
-		case strings.HasPrefix(lower, "infinity"):
-			return i + 8
-		case strings.HasPrefix(lower, "inf"):
-			return i + 3
-		case strings.HasPrefix(lower, "nan"):
-			return i + 3
-		}
+	if tokLen := matchInfNanPrefix(s[i:]); tokLen > 0 {
+		return i + tokLen
 	}
 	hasDigits := false
 	for i < n && isDigit(s[i]) {
@@ -148,20 +141,45 @@ func scanFloatPrefix(s string) int {
 	if !hasDigits {
 		return 0
 	}
-	if i < n && (s[i] == 'e' || s[i] == 'E') {
-		j := i + 1
-		if j < n && (s[j] == '+' || s[j] == '-') {
-			j++
-		}
-		if j < n && isDigit(s[j]) {
-			j++
-			for j < n && isDigit(s[j]) {
-				j++
-			}
-			i = j
-		}
+	return i + scanExponent(s[i:])
+}
+
+// matchInfNanPrefix returns the byte length of a leading inf/infinity/nan
+// token (case-insensitive), or 0 if none.
+func matchInfNanPrefix(s string) int {
+	if s == "" {
+		return 0
 	}
-	return i
+	lower := asciiLower(s)
+	switch {
+	case strings.HasPrefix(lower, "infinity"):
+		return 8
+	case strings.HasPrefix(lower, "inf"):
+		return 3
+	case strings.HasPrefix(lower, "nan"):
+		return 3
+	}
+	return 0
+}
+
+// scanExponent returns the length of a valid [eE][+-]?digits suffix at the
+// start of s, or 0 if no full exponent is present.
+func scanExponent(s string) int {
+	n := len(s)
+	if n == 0 || (s[0] != 'e' && s[0] != 'E') {
+		return 0
+	}
+	j := 1
+	if j < n && (s[j] == '+' || s[j] == '-') {
+		j++
+	}
+	if j >= n || !isDigit(s[j]) {
+		return 0
+	}
+	for j < n && isDigit(s[j]) {
+		j++
+	}
+	return j
 }
 
 func asciiLower(s string) string {

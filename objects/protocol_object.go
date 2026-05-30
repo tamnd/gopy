@@ -204,7 +204,7 @@ func LengthHint(o Object, defaultVal int64) (int64, error) {
 	res, callErr := Call(hint, NewTuple(nil), nil)
 	if callErr != nil {
 		if strings.HasPrefix(callErr.Error(), "TypeError") {
-			return defaultVal, nil //nolint:nilerr // CPython: TypeError → default
+			return defaultVal, nil
 		}
 		return 0, callErr
 	}

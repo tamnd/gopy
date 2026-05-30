@@ -603,7 +603,7 @@ func NumberIndex(o Object) (Object, error) {
 		return i, nil
 	}
 	// Subclass of int (incl. bool): emit DeprecationWarning and downcast
-	// to plain int, mirroring _PyNumber_Index's behaviour for non-exact
+	// to plain int, mirroring _PyNumber_Index's behavior for non-exact
 	// long subclasses.
 	//
 	// CPython: Objects/abstract.c:1446 PyNumber_Index

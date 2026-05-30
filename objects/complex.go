@@ -901,6 +901,16 @@ func cNeg(a complex128) complex128 {
 	return complex(-real(a), -imag(a))
 }
 
+// nanToZero replaces NaN with copysign(0, x), leaving finite values alone.
+// Used by cProd/cQuot recovery to drop NaN intermediates when an infinity
+// is in play.
+func nanToZero(x float64) float64 {
+	if math.IsNaN(x) {
+		return math.Copysign(0, x)
+	}
+	return x
+}
+
 // cProd multiplies and recovers infinities that fell through to NaN+NaNj,
 // matching C11 Annex G.5.1 _Cmultd. Without this, inf*complex products
 // surface as NaN whenever an intermediate term involves NaN.
@@ -918,38 +928,22 @@ func cProd(z, w complex128) complex128 {
 	if math.IsInf(a, 0) || math.IsInf(b, 0) {
 		a = boxInfOrZero(a)
 		b = boxInfOrZero(b)
-		if math.IsNaN(c) {
-			c = math.Copysign(0, c)
-		}
-		if math.IsNaN(d) {
-			d = math.Copysign(0, d)
-		}
+		c = nanToZero(c)
+		d = nanToZero(d)
 		recalc = true
 	}
 	if math.IsInf(c, 0) || math.IsInf(d, 0) {
 		c = boxInfOrZero(c)
 		d = boxInfOrZero(d)
-		if math.IsNaN(a) {
-			a = math.Copysign(0, a)
-		}
-		if math.IsNaN(b) {
-			b = math.Copysign(0, b)
-		}
+		a = nanToZero(a)
+		b = nanToZero(b)
 		recalc = true
 	}
 	if !recalc && (math.IsInf(ac, 0) || math.IsInf(bd, 0) || math.IsInf(ad, 0) || math.IsInf(bc, 0)) {
-		if math.IsNaN(a) {
-			a = math.Copysign(0, a)
-		}
-		if math.IsNaN(b) {
-			b = math.Copysign(0, b)
-		}
-		if math.IsNaN(c) {
-			c = math.Copysign(0, c)
-		}
-		if math.IsNaN(d) {
-			d = math.Copysign(0, d)
-		}
+		a = nanToZero(a)
+		b = nanToZero(b)
+		c = nanToZero(c)
+		d = nanToZero(d)
 		recalc = true
 	}
 	if recalc {
