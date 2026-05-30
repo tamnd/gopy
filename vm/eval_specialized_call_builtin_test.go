@@ -418,14 +418,15 @@ func TestFastCallTuple1(t *testing.T) {
 }
 
 // TestFastCallBuiltinClass exercises CALL_BUILTIN_CLASS with a custom
-// *Type that has a Vectorcall slot. CPython picks this arm for any
-// IMMUTABLETYPE that exposes tp_vectorcall.
+// *Type that exposes a TpNew constructor. The fast arm dispatches
+// through the metatype's typeVectorcall, which falls through to TpNew
+// for non-user types, matching CPython's _CALL_BUILTIN_CLASS arm.
 //
 // CPython: Python/bytecodes.c:4203 _CALL_BUILTIN_CLASS
 func TestFastCallBuiltinClass(t *testing.T) {
 	ts := state.NewThread()
 	customType := objects.NewType("custom_class", []*objects.Type{objects.ObjectType()})
-	customType.Vectorcall = func(callable objects.Object, args []objects.Object, _ uint, _ *objects.Tuple) (objects.Object, error) {
+	customType.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("custom_class() expected 1 arg, got %d", len(args))
 		}

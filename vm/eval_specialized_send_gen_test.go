@@ -27,7 +27,7 @@ func stampSendGen(co *objects.Code, instr int) {
 // goroutine driven by yieldCh / sendCh, matching the structure
 // execReturnGenerator produces at runtime.
 func genYieldOnce(v objects.Object) *objects.Generator {
-	g := objects.NewGenerator("once")
+	g := objects.NewGenerator("once", "once")
 	go func() {
 		first := <-g.SendCh
 		if first.Err != nil {
@@ -44,7 +44,7 @@ func genYieldOnce(v objects.Object) *objects.Generator {
 // genStopImmediately builds a generator that signals StopIteration on
 // the first send. Used to drive the StopIteration path of SEND_GEN.
 func genStopImmediately() *objects.Generator {
-	g := objects.NewGenerator("done")
+	g := objects.NewGenerator("done", "done")
 	go func() {
 		<-g.SendCh
 		g.YieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
@@ -244,7 +244,7 @@ func TestFastSendGenCoroutine(t *testing.T) {
 // triggering the jump branch.
 func TestFastSendGenSurfacesError(t *testing.T) {
 	want := errors.New("boom")
-	g := objects.NewGenerator("err")
+	g := objects.NewGenerator("err", "err")
 	go func() {
 		<-g.SendCh
 		g.YieldCh <- objects.GenMsg{Err: want}

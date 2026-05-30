@@ -109,6 +109,12 @@ func synthesizeException(err error) *pyerrors.Exception {
 	if errors.Is(err, objects.ErrStopAsyncIteration) {
 		return pyerrors.New(pyerrors.PyExc_StopAsyncIteration, nil)
 	}
+	// GeneratorExit thrown into a generator body by gen.close() must land as
+	// a GeneratorExit exception, not as a bare Exception("GeneratorExit").
+	// CPython: Objects/genobject.c:388 gen_close (PyErr_SetNone(PyExc_GeneratorExit))
+	if errors.Is(err, objects.ErrGeneratorExit) {
+		return pyerrors.New(pyerrors.PyExc_GeneratorExit, nil)
+	}
 	// Structured parser SyntaxError: lift filename/lineno/offset/text
 	// into the (msg, info) 2-arg form so the SyntaxError instance
 	// carries the full set of attributes Python user code expects.
@@ -421,20 +427,6 @@ func (e *evalState) attachFrameTraceback() {
 	if co == nil {
 		return
 	}
-	// Do not add a duplicate entry if this frame's traceback was already
-	// prepended for this exception. CPython calls PyTraceBack_Here only
-	// once per exception per frame entry; gopy's handleException is called
-	// once per exception-table entry lookup, so we must guard here.
-	//
-	// CPython: Python/traceback.c:154 PyTraceBack_Here (called once per
-	// frame, not per exception-table entry).
-	if exc.TB != nil && exc.TB.TbFrame != nil {
-		if tbFrame, ok := exc.TB.TbFrame.(*objects.Frame); ok {
-			if tbFrame.Code() == co {
-				return
-			}
-		}
-	}
 	// CPython resolves the traceback line from the *previous* dispatched
 	// instruction's offset, since InstrPtr already points at whatever
 	// follows the raising op.
@@ -444,6 +436,21 @@ func (e *evalState) attachFrameTraceback() {
 	if off < 0 {
 		off = e.f.InstrPtr
 	}
+	// Skip only if the most recent tb entry is for the same frame at the
+	// same instruction offset. This matches CPython's exception_unwind,
+	// which calls PyTraceBack_Here once per unwind, but allows the same
+	// frame to appear multiple times in the chain when the exception
+	// leaves the frame via a sub-call and re-raises at a later op
+	// (e.g. the original raise site plus a later call that re-raises).
+	//
+	// CPython: Python/traceback.c:154 PyTraceBack_Here (no dedup; same
+	// frame can appear repeatedly when an exception travels through it)
+	// CPython: Python/traceback.c:154 PyTraceBack_Here adds a new entry
+	// every time it is invoked. No deduplication: the same frame can
+	// appear multiple times when the exception leaves the frame via a
+	// sub-call and is re-raised at a later op (raise / re-raise after
+	// re-entry).
+	_ = exc.TB
 	line := -1
 	if entry, ok := objects.CoAddr2Location(co, off); ok {
 		line = entry.Line

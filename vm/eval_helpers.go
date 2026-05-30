@@ -1174,6 +1174,7 @@ func (e *evalState) mappingGetOptionalItem(o, key objects.Object) (objects.Objec
 
 // cellSwapTakeRef wraps PyCell_SwapTakeRef: atomically replaces the
 // cell's contents and returns the previous value (nil if unbound).
+// The returned ref is "taken" from the cell, callers must Decref.
 //
 // CPython: Objects/cellobject.c:60 PyCell_SwapTakeRef
 func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object {
@@ -1197,16 +1198,23 @@ func (e *evalState) sliceNew(start, stop, step objects.Object) objects.Object {
 }
 
 // cellSetTakeRef wraps PyCell_SetTakeRef: writes a value into a cell,
-// stealing the caller's reference. Used by STORE_DEREF.
+// stealing the caller's reference and Decref'ing whatever the cell
+// previously held. Used by STORE_DEREF / DELETE_DEREF (the NULL form).
 //
 // CPython: Objects/cellobject.c PyCell_SetTakeRef
+//
+//	(Py_XDECREF(old_obj) before storing)
 func (e *evalState) cellSetTakeRef(cell, newVal objects.Object) {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
 		e.pendingErr = errors.New("TypeError: PyCell_SetTakeRef expected cell")
 		return
 	}
+	old := c.Contents
 	c.Contents = newVal
+	if old != nil {
+		objects.Decref(old)
+	}
 }
 
 // getANext wraps _PyEval_GetANext. Returns the awaitable for iter's
@@ -1385,10 +1393,14 @@ func (e *evalState) longIsZero(o objects.Object) bool {
 	return false
 }
 
-// cellGetStackRef wraps _PyCell_GetStackRef: returns the cell's contents
-// (nil if unbound).
+// cellGetStackRef wraps PyCell_GET + PyStackRef_FromPyObjectNew: returns
+// a new strong reference to the cell's contents (Null if unbound). The
+// cell retains its own strong reference, so the returned ref owns one
+// of its own. CPython's LOAD_DEREF / LOAD_FROM_DICT_OR_DEREF use this
+// pairing so popping the stack does not drop the cell's contents.
 //
-// CPython: Include/cpython/cellobject.h _PyCell_GetStackRef
+// CPython: Python/bytecodes.c LOAD_DEREF (PyStackRef_FromPyObjectNew)
+// CPython: Include/cpython/cellobject.h PyCell_GET
 func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
@@ -1398,7 +1410,7 @@ func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	if c.Contents == nil {
 		return stackref.Null
 	}
-	return stackref.FromObject(c.Contents)
+	return stackref.FromObjectNew(c.Contents)
 }
 
 // getAwaitable wraps _PyEval_GetAwaitable. opcode is a hint CPython uses

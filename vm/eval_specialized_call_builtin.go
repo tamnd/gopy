@@ -286,10 +286,19 @@ func (e *evalState) fastCallBuiltinClass(oparg uint32) (int, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
-	if tp.Vectorcall == nil {
+	// Dispatch through the metatype's vectorcall (typeVectorcall), not
+	// tp.Vectorcall which is the instance-calling slot set for types like
+	// FunctionType. CPython's _CALL_BUILTIN_CLASS uses tp->tp_vectorcall
+	// (set on the type itself for fast construction), but gopy conflates
+	// that with the instance vectorcall slot; using the metatype's slot
+	// is always safe for type construction.
+	//
+	// CPython: Python/bytecodes.c:4203 _CALL_BUILTIN_CLASS
+	vc := callable.Type().Vectorcall
+	if vc == nil {
 		return 0, false, nil
 	}
-	res, err := tp.Vectorcall(tp, args, uint(len(args)), nil)
+	res, err := vc(tp, args, uint(len(args)), nil)
 	if err != nil {
 		return 0, true, err
 	}

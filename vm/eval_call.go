@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/frame"
 	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
@@ -32,6 +33,46 @@ import (
 //
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
 var activeThreads sync.Map // map[uint64]*state.Thread
+
+// activeEvalFrames maps a goroutine ID to the *frame.Frame for the
+// generator body currently suspended or running on that goroutine.
+// Generator goroutines register here on resume and deregister on yield.
+//
+// CPython: _PyThreadState_GetFrame returns tstate->current_frame,
+// which is always current because CPython uses a single C-stack per
+// OS thread. gopy uses goroutines, so we maintain this per-goroutine.
+var activeEvalFrames sync.Map // map[uint64]*frame.Frame
+
+// genEntryDepths maps a generator goroutine ID to the frame-stack depth
+// at the moment the generator body last entered (started or resumed). When
+// the depth of frameStackFor(ts) exceeds this value, callPyFunction has
+// pushed at least one frame on behalf of the generator body and
+// currentInterpreterFrame should return the stack top rather than the
+// generator's own saved frame.
+//
+// CPython: no direct equivalent — CPython's current_frame pointer is always
+// the innermost frame regardless of whether it is a generator body or a
+// regular call; gopy needs this extra bookkeeping because the generator
+// frame is not on the shared FrameStack.
+var genEntryDepths sync.Map // map[uint64]int
+
+// genCallerFrames maps a *objects.Generator to the *frame.Frame that
+// most recently drove it via SEND. Set by execSend before forwarding,
+// read by the sub-generator goroutine on resume to establish f_back.
+//
+// CPython: Objects/genobject.c gen_send_ex2 sets previous_frame on the
+// sub-generator's _PyInterpreterFrame before entering the body.
+var genCallerFrames sync.Map // map[*objects.Generator]*frame.Frame
+
+// genOwnFrames maps a *objects.Generator to the *frame.Frame that IS the
+// generator's own suspended frame. Set when the generator goroutine starts,
+// cleared when the body returns. Used by genThrowForwardHook to temporarily
+// install the generator frame as the calling-thread's "current frame" before
+// forwarding a throw to a custom iterator, mirroring CPython's
+// tstate->current_frame = frame dance in _gen_throw.
+//
+// CPython: Objects/genobject.c:523 _gen_throw (frame->previous = prev; tstate->current_frame = frame)
+var genOwnFrames sync.Map // map[*objects.Generator]*frame.Frame
 
 // setActiveThread primes the current goroutine's Eval slot and
 // returns the previous occupant + goid so the caller can restore it
@@ -102,6 +143,28 @@ func init() {
 		}
 		ts.SetException(nil)
 	}
+	// Let genFinalize save and restore the active thread's pending
+	// exception across Close(). Mirrors CPython's PyErr_GetRaisedException
+	// / PyErr_SetRaisedException sandwich around gen_close in
+	// _PyGen_Finalize: a finalize that fires during normal evaluation
+	// must not let the body's GeneratorExit leak into the caller's slot.
+	//
+	// CPython: Objects/genobject.c:98 _PyGen_Finalize
+	objects.SaveCurrentExceptionHook = func() any {
+		ts := currentThread()
+		if ts == nil {
+			return nil
+		}
+		return ts.SwapException(nil)
+	}
+	objects.RestoreCurrentExceptionHook = func(saved any) {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		exc, _ := saved.(state.Exception)
+		ts.SetException(exc)
+	}
 	// Let typeSetNames attach a __notes__ string to the live exception
 	// when __set_name__ raises during class creation, matching
 	// _PyErr_FormatNote inside type_new_set_names. When the hook fires
@@ -157,12 +220,30 @@ func drainPendingNotes() []string {
 	return v.([]string)
 }
 
-// currentInterpreterFrame returns the top of the active thread's frame
-// stack, or nil when no Python frame is live on this goroutine. Used by
-// objects.superInitNoArgs to read __class__ and self off the caller.
+// currentInterpreterFrame returns the currently executing frame on this
+// goroutine. For regular code the frame is on the chunk-based FrameStack.
+// For generator bodies the frame is in activeEvalFrames, but when the
+// generator body has called a Python function via callPyFunction the
+// FrameStack grows beyond genEntryDepths and the stack top is the
+// innermost frame.
 //
 // CPython: pycore_frame.h _PyThreadState_GetFrame
 func currentInterpreterFrame() objects.InterpreterFrame {
+	g := goid()
+	if v, ok := activeEvalFrames.Load(g); ok {
+		// Running on a generator goroutine. Check whether callPyFunction
+		// pushed frames after the generator's entry point.
+		ts := currentThread()
+		if ts != nil {
+			if d, ok2 := genEntryDepths.Load(g); ok2 {
+				if frameStackFor(ts).Depth() > d.(int) {
+					// callPyFunction pushed at least one frame; return it.
+					return frameStackFor(ts).Top()
+				}
+			}
+		}
+		return v.(*frame.Frame)
+	}
 	ts := currentThread()
 	if ts == nil {
 		return nil

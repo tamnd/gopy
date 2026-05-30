@@ -549,7 +549,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if cell.Contents == nil {
 			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
-		e.pushObject(cell.Contents)
+		// PyStackRef_FromPyObjectNew bumps refcount: the cell retains
+		// its strong ref to Contents, the pushed ref owns its own. The
+		// caller (CALL, BINARY_OP, ...) will Decref when it pops.
+		//
+		// CPython: Python/bytecodes.c LOAD_DEREF (PyStackRef_FromPyObjectNew)
+		e.push(stackref.FromObjectNew(cell.Contents))
 		return e.advance(), true, nil
 
 	case compile.STORE_DEREF:
@@ -562,7 +567,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			cell = objects.NewCell(nil)
 			e.f.LocalsPlus[int(oparg)] = stackref.FromObject(cell)
 		}
-		cell.Contents = v
+		e.cellSetTakeRef(cell, v)
 		return e.advance(), true, nil
 
 	case compile.DELETE_DEREF:
@@ -572,7 +577,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if !ok || cell.Contents == nil {
 			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
-		cell.Contents = nil
+		e.cellSetTakeRef(cell, nil)
 		return e.advance(), true, nil
 
 	case compile.COPY_FREE_VARS:
@@ -1119,22 +1124,26 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 	switch op {
 	case compile.LOAD_NAME:
 		if v, ok := lookupIn(e.f.Locals, keyObj); ok {
-			e.pushObject(v)
+			// Borrowed reference from the locals dict. Use FromObjectNew
+			// so the stack owns its own strong reference; the CALL /
+			// STORE_NAME / Close consumers balance with Decref.
+			//
+			// CPython: Python/bytecodes.c LOAD_NAME
+			e.push(stackref.FromObjectNew(v))
 			return v, nil
 		}
 		fallthrough
 	case compile.LOAD_GLOBAL:
-		// Stack effect (CPython 3.14, bytecodes.c:1769):
-		//     ( -- res, null if oparg & 1 )
-		// res is pushed first (deeper slot), the NULL marker on top.
-		// That matches the codegen pair LOAD_GLOBAL + PUSH_NULL: the
-		// callable lands below, NULL above, so an insert_superinstructions
-		// fold to LOAD_GLOBAL with bit 0 set is a no-op for the stack.
+		// Stack effect (CPython 3.14, bytecodes.c:1769. res is pushed first
+		// (deeper slot), the NULL marker on top. That matches the codegen
+		// pair LOAD_GLOBAL + PUSH_NULL: the callable lands below, NULL
+		// above, so an insert_superinstructions fold to LOAD_GLOBAL with
+		// bit 0 set is a no-op for the stack.
 		var v objects.Object
 		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
 			v = w
 		} else {
-			// CPython: Python/bytecodes.c LOAD_GLOBAL — when builtins is not
+			// CPython: Python/bytecodes.c LOAD_GLOBAL, when builtins is not
 			// an exact dict, PyObject_GetItem is used and its TypeError
 			// propagates (e.g. exec(code, {'__builtins__': 123}) raises
 			// TypeError, not NameError).
@@ -1148,7 +1157,8 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 				return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
 			}
 		}
-		e.pushObject(v)
+		// Borrowed reference from globals/builtins. See LOAD_NAME above.
+		e.push(stackref.FromObjectNew(v))
 		if pushNull {
 			e.push(stackref.Null)
 		}
@@ -1171,10 +1181,20 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 				dst = e.f.Globals
 			}
 		}
-		return nil, storeIn(dst, keyObj, v)
+		// CPython: Python/bytecodes.c STORE_NAME calls PyObject_SetItem
+		// (which Increfs the value into the dict) and then DECREFs v.
+		// storeIn → dictInsert Increfs the value; we Decref the popped
+		// stack ref to balance.
+		err := storeIn(dst, keyObj, v)
+		objects.Decref(v)
+		return nil, err
 	case compile.STORE_GLOBAL:
 		v := e.popObject()
-		return nil, storeIn(e.f.Globals, keyObj, v)
+		// CPython: Python/bytecodes.c STORE_GLOBAL, same Incref/Decref
+		// pairing as STORE_NAME.
+		err := storeIn(e.f.Globals, keyObj, v)
+		objects.Decref(v)
+		return nil, err
 	case compile.DELETE_NAME:
 		dst := e.f.Locals
 		if dst == nil {

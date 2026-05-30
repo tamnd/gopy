@@ -776,7 +776,7 @@ func TestEvalGenerator(t *testing.T) {
 
 func TestEvalGetYieldFromIterPassesGenerator(t *testing.T) {
 	ts := state.NewThread()
-	gen := objects.NewGenerator("dummy")
+	gen := objects.NewGenerator("dummy", "dummy")
 	// LOAD_CONST 0 (generator); GET_YIELD_FROM_ITER; RETURN_VALUE.
 	co := &objects.Code{
 		Code: concat(

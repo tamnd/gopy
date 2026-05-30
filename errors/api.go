@@ -82,6 +82,33 @@ func Handled(ts *state.Thread) *Exception {
 	return exc
 }
 
+// HandledAsObject returns the currently-handled exception as an objects.Object
+// so generator structs (which cannot import the errors package) can store it.
+// Returns nil when there is no active handled exception.
+//
+// CPython: Python/errors.c _PyErr_GetHandledException
+func HandledAsObject(ts *state.Thread) objects.Object {
+	exc := Handled(ts)
+	if exc == nil {
+		return nil
+	}
+	return exc
+}
+
+// SetHandledFromObject installs an objects.Object previously saved by
+// HandledAsObject as the new handled exception. Pass nil to clear.
+//
+// CPython: Python/errors.c _PyErr_SetHandledException
+func SetHandledFromObject(ts *state.Thread, o objects.Object) {
+	if o == nil {
+		ts.SetHandledException(nil)
+		return
+	}
+	if exc, ok := o.(*Exception); ok {
+		ts.SetHandledException(exc)
+	}
+}
+
 // SetHandled installs exc as the currently-handled exception. PUSH_EXC_INFO
 // and POP_EXCEPT call this so sys.exc_info() can read it.
 //

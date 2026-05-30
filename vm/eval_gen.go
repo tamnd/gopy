@@ -184,8 +184,30 @@ func (e *evalState) execLoadSpecial(oparg uint32) (genResult, error) {
 // contents to the generator.
 //
 // CPython: Python/bytecodes.c:4982 RETURN_GENERATOR
+//
+//nolint:gocognit,gocyclo // single block mirrors CPython's RETURN_GENERATOR opcode + new_gen_or_coro setup
 func (e *evalState) execReturnGenerator() (genResult, error) {
 	name := e.f.Code.Name
+	qualname := e.f.Code.Qualname
+	// When the function's __name__ / __qualname__ have been mutated after
+	// compilation, read the live values from the function object so the
+	// generator reflects the current names.
+	//
+	// CPython: Objects/genobject.c:867 gen_new_with_qualname (reads from
+	// PyFunction_GET_QUALNAME / PyFunction_GET_NAME which follow the live
+	// function attribute, not the code object constant).
+	if fn := e.f.Func; fn != nil {
+		if v, err := objects.GetAttr(fn, objects.NewStr("__name__")); err == nil && v != nil {
+			if s, ok := v.(*objects.Unicode); ok {
+				name = s.Value()
+			}
+		}
+		if v, err := objects.GetAttr(fn, objects.NewStr("__qualname__")); err == nil && v != nil {
+			if s, ok := v.(*objects.Unicode); ok {
+				qualname = s.Value()
+			}
+		}
+	}
 
 	// Skip the POP_TOP that insert_prefix_instructions emits right
 	// after RETURN_GENERATOR. The two together have a net stack
@@ -205,6 +227,12 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	savedFrame.InstrPtr = resumeIP
 	savedFrame.PrevInstr = e.f.InstrPtr
 	savedFrame.Owner = frame.OwnedByGenerator
+	// A suspended generator frame has no f_back: it is not on any call
+	// stack. CPython clears the link when the frame is detached from the
+	// running stack; we mirror that by zeroing Previous here.
+	//
+	// CPython: Objects/genobject.c:867 gen_new_with_qualname (frame detach)
+	savedFrame.Previous = nil
 	e.f.Owner = frame.OwnedByGenerator
 	savedTS := e.ts
 
@@ -218,17 +246,26 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		sendCh  chan objects.GenMsg
 		retVal  objects.Object
 	)
+	// Build the Python-visible frame object wrapping the saved frame.
+	// Shared by gi_frame, cr_frame, ag_frame; cleared on generator close.
+	//
+	// CPython: Objects/genobject.c:867 gen_new_with_qualname (gi_frame init)
+	genFrameObj := objects.NewFrame(savedFrame)
 	switch {
 	case flags&compile.CoCoroutine != 0:
 		c := objects.NewCoroutine(name)
+		c.GiFrame = genFrameObj
 		yieldCh, sendCh = c.YieldCh, c.SendCh
 		retVal = c
 	case flags&compile.CoAsyncGenerator != 0:
 		ag := objects.NewAsyncGenerator(name)
+		ag.GiFrame = genFrameObj
 		yieldCh, sendCh = ag.YieldCh, ag.SendCh
 		retVal = ag
 	default:
-		g := objects.NewGenerator(name)
+		g := objects.NewGenerator(name, qualname)
+		g.Code = e.f.Code
+		g.GiFrame = genFrameObj
 		yieldCh, sendCh = g.YieldCh, g.SendCh
 		retVal = g
 	}
@@ -251,12 +288,68 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 			return
 		}
+		// Capture the generator reference before ge.run() shadows retVal.
+		genObj := retVal
 		// Mark generator as actively executing so re-entrant Send() calls
 		// raise ValueError instead of deadlocking on the channel.
 		//
 		// CPython: Objects/genobject.c:275 gi_frame_state = FRAME_EXECUTING
-		if gen, ok := retVal.(*objects.Generator); ok {
+		if gen, ok := genObj.(*objects.Generator); ok {
 			gen.Running.Store(1)
+			// Save caller's handled-exception so we can restore it on the
+			// first yield. The generator body inherits the caller's exception
+			// initially (chain-walk fallback: gen.ExcHandled == nil means
+			// fall through to caller's value), so we do NOT clear
+			// ts.HandledException here.
+			//
+			// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
+			gen.CallerExc = pyerrors.HandledAsObject(savedTS)
+		}
+		// Link savedFrame.Previous only when this generator is driven via
+		// yield from by another generator (recorded in genCallerFrames by
+		// execSend). Generators started by an external gen.send() call
+		// leave Previous nil: CPython clears the back-link when the frame
+		// is detached from the running stack so that gi_frame.f_back is
+		// None for externally-driven generators, preserving the invariant
+		// that f_back only connects frames within a yield-from chain.
+		//
+		// CPython: Objects/genobject.c:867 gen_new_with_qualname
+		//   (previous_frame = NULL for a freshly-created generator)
+		// CPython: Objects/genobject.c:291 gen_send_ex2
+		//   (previous_frame set only for yield-from sub-generators)
+		if gen, ok := genObj.(*objects.Generator); ok {
+			if cf, ok2 := genCallerFrames.Load(gen); ok2 {
+				savedFrame.Previous = cf.(*frame.Frame)
+			}
+			// else: externally driven — Previous stays nil (set at line 233)
+		}
+		// Coroutines and async generators driven via yield from would also
+		// need a genCallerFrames lookup, but await-chaining is tracked
+		// separately (see execSend Coroutine path). Leave Previous nil for
+		// now: cr_frame.f_back and ag_frame.f_back are None by default.
+		// Register the generator frame for sys._getframe() so that
+		// currentInterpreterFrame() returns it while this goroutine runs.
+		// Record the frame-stack depth at this entry point so
+		// currentInterpreterFrame can tell when callPyFunction has pushed
+		// additional frames on top (in which case the stack top, not the
+		// saved frame, is the innermost executing frame).
+		//
+		// CPython: _PyEval_EvalFrameDefault tstate->current_frame is always
+		// the innermost frame; gopy approximates that via depth tracking.
+		genEntryDepths.Store(g, frameStackFor(savedTS).Depth())
+		activeEvalFrames.Store(g, savedFrame)
+		defer genEntryDepths.Delete(g)
+		defer activeEvalFrames.Delete(g)
+		// Expose this generator's own frame so genThrowForwardHook can
+		// install it as the "current frame" when forwarding a throw to a
+		// custom (non-Generator) yield-from iterator. Mirrors CPython's
+		// tstate->current_frame = frame; ... tstate->current_frame = prev
+		// in _gen_throw for the custom-iterator path.
+		//
+		// CPython: Objects/genobject.c:523 _gen_throw
+		if gen, ok := genObj.(*objects.Generator); ok {
+			genOwnFrames.Store(gen, savedFrame)
+			defer genOwnFrames.Delete(gen)
 		}
 		// Run the generator body. yieldCh/sendCh are threaded through
 		// evalState so YIELD_VALUE can reach them.
@@ -267,9 +360,44 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			genYield:   yieldCh,
 			genSend:    sendCh,
 			code:       savedFrame.Code.Code,
-			genRunning: retVal,
+			genRunning: genObj,
 		}
 		retVal, runErr := ge.run()
+		// Clear f_back on exhaustion: a finished generator frame is detached
+		// from all call stacks. CPython does the same when the frame's
+		// reference count drops to zero; we mirror it eagerly so that
+		// gi_frame.f_back is None as soon as the body returns.
+		//
+		// CPython: Objects/genobject.c:254 gen_send_ex2 (frame detach on return)
+		savedFrame.Previous = nil
+		// Release every live stackref the body owned (locals, cells, frees,
+		// stack). A finished generator should not keep its arguments alive,
+		// so test_close_clears_frame / test_close_releases_frame_locals can
+		// see referenced objects collected as soon as the body returns or
+		// raises. gi_code stays valid because the Generator object holds
+		// the code pointer separately from the frame.
+		//
+		// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+		savedFrame.FrameClearLocals()
+		// Generator body has finished. Restore caller's exception state so
+		// the caller's sys.exception() is not contaminated by the generator's
+		// last except block. CallerExc is always current because execYieldValue
+		// refreshes it on every resume.
+		//
+		// CPython: Objects/genobject.c gen_send_ex2 (exc_info pop after return)
+		if gen, ok := genObj.(*objects.Generator); ok {
+			pyerrors.SetHandledFromObject(savedTS, gen.CallerExc)
+			// Mark the generator as closed and not running. Without this the
+			// last resume left Running == 1, so inspect.getgeneratorstate
+			// would report GEN_RUNNING for an exhausted generator. Closed
+			// also tells genFinalize to skip the SendCh round-trip; the
+			// goroutine has already exited, so sending would deadlock.
+			//
+			// CPython: Objects/genobject.c:225 gen_send_ex2
+			// (gi_frame_state = FRAME_COMPLETED on return)
+			gen.Running.Store(0)
+			gen.MarkFinished()
+		}
 		switch {
 		case runErr != nil && !errors.Is(runErr, objects.ErrStopIteration):
 			// Preserve Python exception identity so callers can check
@@ -320,21 +448,74 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		return genResult{ok: true}, fmt.Errorf("vm: YIELD_VALUE outside generator context")
 	}
 	val := e.popObject()
-	// Mark generator as suspended (not executing) so re-entrant Send()
-	// calls from other goroutines can proceed if they resume this generator.
+	// Swap exception states on yield: mirror CPython's YIELD_VALUE restoring
+	// tstate->exc_info to the caller's chain. ExcDepth tracks how many of
+	// the generator's own PUSH_EXC_INFO calls are still active. If ExcDepth
+	// is zero the generator's gi_exc_state.exc_value would be NULL in CPython
+	// (all own except blocks have been exited or the body never entered one),
+	// so we record nil to enable the chain-walk fallback on the next resume.
 	//
-	// CPython: Objects/genobject.c gi_frame_state = FRAME_SUSPENDED
+	// CPython: Python/bytecodes.c:1383 YIELD_VALUE (tstate->exc_info restore)
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
 	if gen, ok := e.genRunning.(*objects.Generator); ok {
 		gen.Running.Store(0)
+		if gen.ExcDepth > 0 {
+			gen.ExcHandled = pyerrors.HandledAsObject(e.ts)
+		} else {
+			gen.ExcHandled = nil
+		}
+		pyerrors.SetHandledFromObject(e.ts, gen.CallerExc)
 	}
+	// Deregister frame and clear f_back before yielding so that
+	// suspended generators are invisible to sys._getframe() from the
+	// caller's side, matching CPython (only running frames are visible).
+	//
+	// CPython: Objects/genobject.c gen_send_ex2 clears previous_frame on yield
+	gID := goid()
+	activeEvalFrames.Delete(gID)
+	savedPrev := e.f.Previous
+	e.f.Previous = nil
+
 	e.genYield <- objects.GenMsg{Val: val}
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
-	// Mark generator as executing again after being resumed.
+
+	// Re-register frame and re-link f_back on resume.
+	// CPython: Objects/genobject.c gen_send_ex2 sets previous_frame before
+	// re-entering the body.
+	if gen, ok2 := e.genRunning.(*objects.Generator); ok2 {
+		if cf, ok3 := genCallerFrames.Load(gen); ok3 {
+			e.f.Previous = cf.(*frame.Frame)
+		} else {
+			e.f.Previous = savedPrev
+		}
+	} else {
+		e.f.Previous = savedPrev
+	}
+	// Refresh the entry depth and re-register the generator frame. The
+	// entry depth is the frame-stack depth at this exact resume point;
+	// any subsequent callPyFunction call will push above it.
+	genEntryDepths.Store(gID, frameStackFor(e.ts).Depth())
+	activeEvalFrames.Store(gID, e.f)
+
+	// On resume: save the new caller state into CallerExc, then restore
+	// the generator's own exception state. When ExcHandled is nil (generator
+	// never entered its own except block, or exited all of them), do not
+	// override ts.HandledException — the generator sees the caller's current
+	// exception (chain-walk fallback). This mirrors gen_send_ex2 re-pushing
+	// gi_exc_state and _PyErr_GetTopmostException walking to previous_item
+	// when gen's slot is NULL.
 	//
-	// CPython: Objects/genobject.c gi_frame_state = FRAME_EXECUTING
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
+	// CPython: Python/errors.c:116 _PyErr_GetTopmostException (chain walk)
 	if gen, ok := e.genRunning.(*objects.Generator); ok {
 		gen.Running.Store(1)
+		gen.CallerExc = pyerrors.HandledAsObject(e.ts)
+		if gen.ExcHandled != nil {
+			pyerrors.SetHandledFromObject(e.ts, gen.ExcHandled)
+		}
+		// else: ExcHandled == nil → chain-walk fallback: ts.HandledException
+		// stays as gen.CallerExc, which is what the generator inherits.
 	}
 	if msg.Err != nil {
 		// A throw() that carried a Python exception object travels as
@@ -347,6 +528,16 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 		var re *objects.RaisedError
 		if errors.As(msg.Err, &re) {
 			if exc, ok2 := re.Exc.(*pyerrors.Exception); ok2 {
+				// Clear any stale exception left by the sub-generator's
+				// goroutine before re-raising so that pyerrors.Raise can
+				// chain __context__ correctly. Without the clear, prev ==
+				// exc (same pointer) and the condition prev != exc fails.
+				//
+				// CPython: Objects/genobject.c gen_send_ex2 PyErr_Restore
+				// always re-installs the exception on a fresh slot; the
+				// prior exception was normalised and cleared before
+				// gen_send_ex entered the body.
+				pyerrors.Clear(e.ts)
 				pyerrors.Raise(e.ts, exc)
 			}
 		}
@@ -372,24 +563,49 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 // for-loop's iterator.
 //
 // CPython: Python/bytecodes.c:1297 _SEND
+//
+//nolint:gocognit,gocyclo // mirrors _SEND opcode: gen/coro/async-gen routing, fastpath, blocking SendCh, exception handoff
 func (e *evalState) execSend(oparg uint32) (genResult, error) {
 	v := e.popObject()
 	recvRef := e.peek(0)
 	recv := recvRef.AsObject()
 
+	// Track the yield-from sub-iterator on the outer generator so
+	// gi_yieldfrom and throw-forwarding (_gen_throw) work correctly.
+	//
+	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf via
+	// gi_frame_state == FRAME_SUSPENDED_YIELD_FROM)
+	outerGen, _ := e.genRunning.(*objects.Generator)
+	if outerGen != nil {
+		outerGen.YieldFromTarget = recv
+	}
+
 	switch r := recv.(type) {
 	case *objects.Generator:
+		// Link r's frame back to this generator's frame so sys._getframe()
+		// chains correctly inside the sub-generator body.
+		//
+		// CPython: Objects/genobject.c gen_send_ex2 (sets previous_frame)
+		genCallerFrames.Store(r, e.f)
 		val, serr := r.Send(v)
-		if errors.Is(serr, objects.ErrStopIteration) {
+		if retVal, isStop := stopIterRetval(serr); isStop {
 			// Leave receiver on stack; push the StopIteration return
-			// value (None for generators without an explicit return).
-			// END_SEND will pop both receiver and retval.
+			// value (args[0] or None). END_SEND will pop both.
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
-			e.pushObject(objects.None())
+			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
+			genCallerFrames.Delete(r)
+			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
+			genCallerFrames.Delete(r)
 			return genResult{ok: true}, serr
 		}
 		e.pushObject(val)
@@ -404,10 +620,16 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
 			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
 			return genResult{ok: true}, serr
 		}
 		e.pushObject(val)
@@ -420,24 +642,37 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 		var nerr error
 		if v == objects.None() {
 			if t.IterNext == nil {
+				if outerGen != nil {
+					outerGen.YieldFromTarget = nil
+				}
 				return genResult{ok: true}, fmt.Errorf("TypeError: %s is not an iterator", t.Name)
 			}
 			val, nerr = t.IterNext(recv)
 		} else {
 			sendAttr, agerr := objects.GetAttr(recv, objects.NewStr("send"))
 			if agerr != nil {
+				if outerGen != nil {
+					outerGen.YieldFromTarget = nil
+				}
 				return genResult{ok: true}, agerr
 			}
 			val, nerr = objects.Call(sendAttr, objects.NewTuple([]objects.Object{v}), nil)
 		}
-		if errors.Is(nerr, objects.ErrStopIteration) {
+		if retVal, isStop := stopIterRetval(nerr); isStop {
 			// Same discipline as the Generator path above.
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
-			e.pushObject(objects.None())
+			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
+			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if nerr != nil {
+			if outerGen != nil {
+				outerGen.YieldFromTarget = nil
+			}
 			return genResult{ok: true}, nerr
 		}
 		e.pushObject(val)

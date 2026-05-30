@@ -283,7 +283,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setPendingErr("_PyEval_FormatExcUnbound")
 			return 0, e.error("error")
 		}
-		// Py_DECREF: no-op under GC
+		objects.Decref(oldobj)
 		return e.advance(), nil
 	case compile.DELETE_FAST:
 		v := e.localAt(int(oparg))
@@ -491,17 +491,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		return e.advance(), nil
 	case compile.GET_ITER:
 		iterable := e.peek(0)
-		_ = iterable
-		var iter stackref.Ref
 		iter_o := e.objectGetIter(iterable.AsObject())
-		_ = iter_o
-		iterable.Close()
 		if iter_o == nil {
+			e.drop(1)
 			return 0, e.error("error")
 		}
-		iter = stackref.FromObject(iter_o)
-		e.drop(1)
-		e.push(iter)
+		e.setPeek(0, stackref.FromObject(iter_o))
 		return e.advance(), nil
 	case compile.GET_LEN:
 		obj := e.peek(0)
@@ -878,7 +873,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if v_o == nil {
 			return 0, e.error("error")
 		}
-		v = stackref.FromObject(v_o)
+		// loadName returns a borrowed reference from the locals /
+		// globals / builtins dict. PyStackRef_FromPyObjectNew bumps the
+		// refcount so the stack owns its own strong reference; consumers
+		// (CALL arg-cleanup, STORE_FAST/NAME Close, etc.) will balance it
+		// with Decref. Using the steal variant drained the refcount on
+		// every dict load and stranded generator finalize.
+		//
+		// CPython: Python/bytecodes.c LOAD_NAME (PyMapping_GetOptionalItem
+		// returns a new ref; PyStackRef_FromPyObjectSteal wraps it)
+		v = stackref.FromObjectNew(v_o)
 		e.push(v)
 		return e.advance(), nil
 	case compile.LOAD_SMALL_INT:
@@ -1001,6 +1005,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setHandledException(exc_value.AsObject())
 		}
 		e.drop(1)
+		// Track generator's own except-block nesting so yield/resume knows
+		// whether the generator has an active own exception.
+		//
+		// CPython: Python/bytecodes.c:1420 POP_EXCEPT (tstate->exc_info write)
+		if gen, ok := e.genRunning.(*objects.Generator); ok {
+			if gen.ExcDepth > 0 {
+				gen.ExcDepth--
+			}
+		}
 		return e.advance(), nil
 	case compile.POP_TOP:
 		value := e.peek(0)
@@ -1023,6 +1036,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		e.push(prev_exc)
 		e.push(new_exc)
+		// Track generator's own except-block nesting depth.
+		//
+		// CPython: Python/bytecodes.c:3579 PUSH_EXC_INFO (tstate->exc_info write)
+		if gen, ok := e.genRunning.(*objects.Generator); ok {
+			gen.ExcDepth++
+		}
 		return e.advance(), nil
 	case compile.PUSH_NULL:
 		var res stackref.Ref
