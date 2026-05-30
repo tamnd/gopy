@@ -97,6 +97,19 @@ type Frame struct {
 	// Owner discriminates teardown / suspend behavior.
 	Owner OwnerKind
 
+	// GenOwner is the generator / coroutine / async-generator that
+	// holds this activation record when Owner == OwnedByGenerator.
+	// nil for thread-owned and eval-owned frames. Used by frameClear
+	// to mirror CPython's FRAME_OWNED_BY_GENERATOR liveness check: any
+	// *Frame wrapper that references this activation record resolves
+	// to the same generator state via this back-pointer, including
+	// wrappers minted on demand by tb_frame.
+	//
+	// CPython: Include/internal/pycore_frame.h _PyInterpreterFrame f_executable
+	// + Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame (back-derive
+	// via PyGenObject layout; gopy stores the pointer explicitly).
+	GenOwner objects.Object
+
 	// ReturnOffset is set on a callee frame when the caller wants
 	// the eval loop to resume at a non-default offset on return
 	// (inline calls reuse this; v0.6 always uses 0).
@@ -394,6 +407,14 @@ func (f *Frame) FrameBack() objects.InterpreterFrame {
 
 // FrameLasti returns the offset of the next instruction.
 func (f *Frame) FrameLasti() int { return f.InstrPtr }
+
+// FrameGenOwner returns the generator / coroutine / async-generator
+// that owns this activation record, or nil for thread-owned frames.
+// objects.frameClear uses this to mirror CPython's
+// FRAME_OWNED_BY_GENERATOR branch in frame_clear_impl.
+//
+// CPython: Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame
+func (f *Frame) FrameGenOwner() objects.Object { return f.GenOwner }
 
 // FrameNumLocals returns the count of fast-local slots.
 func (f *Frame) FrameNumLocals() int { return NLocalsOf(f.Code) }

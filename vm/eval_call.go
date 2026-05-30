@@ -189,6 +189,51 @@ func init() {
 		}
 		exc.Notes.Append(objects.NewStr(note))
 	}
+	// Let frameClear ask whether the target frame is still on this
+	// thread's FrameStack so f.clear() raises RuntimeError when the
+	// eval loop is running on f or any of its callees. CPython makes
+	// the equivalent check by inspecting f_frame->owner == FRAME_OWNED_BY_THREAD.
+	//
+	// CPython: Objects/frameobject.c:2007 frame_clear_impl
+	objects.CurrentStackProbe = frameIsLiveOnCurrentStack
+}
+
+// frameIsLiveOnCurrentStack walks the running thread's FrameStack
+// and reports whether wrapper's underlying activation record is on
+// it. Used by objects.frameClear to mirror CPython's executing-frame
+// guard.
+//
+// CPython: Objects/frameobject.c:2007 frame_clear_impl (FRAME_OWNED_BY_THREAD)
+func frameIsLiveOnCurrentStack(w *objects.Frame) bool {
+	if w == nil {
+		return false
+	}
+	// Two wrapper shapes hit clear(): a *Frame whose interp is the live
+	// *frame.Frame (sys._getframe, locals proxy) and a *Frame whose
+	// interp is a *FrameSnapshot built at unwind time (tb_frame). The
+	// snapshot remembers SrcFrame so we can still test stack membership.
+	var want *frame.Frame
+	switch ip := w.Interp().(type) {
+	case *frame.Frame:
+		want = ip
+	case *objects.FrameSnapshot:
+		if src, ok := ip.SrcFrame.(*frame.Frame); ok {
+			want = src
+		}
+	}
+	if want == nil {
+		return false
+	}
+	ts := currentThread()
+	if ts == nil {
+		return false
+	}
+	for f := frameStackFor(ts).Top(); f != nil; f = f.Previous {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingNotes carries __notes__ strings that FormatNoteHook produced

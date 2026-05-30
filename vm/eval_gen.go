@@ -255,17 +255,23 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	case flags&compile.CoCoroutine != 0:
 		c := objects.NewCoroutine(name)
 		c.GiFrame = genFrameObj
+		genFrameObj.SetOwner(c)
+		savedFrame.GenOwner = c
 		yieldCh, sendCh = c.YieldCh, c.SendCh
 		retVal = c
 	case flags&compile.CoAsyncGenerator != 0:
 		ag := objects.NewAsyncGenerator(name)
 		ag.GiFrame = genFrameObj
+		genFrameObj.SetOwner(ag)
+		savedFrame.GenOwner = ag
 		yieldCh, sendCh = ag.YieldCh, ag.SendCh
 		retVal = ag
 	default:
 		g := objects.NewGenerator(name, qualname)
 		g.Code = e.f.Code
 		g.GiFrame = genFrameObj
+		genFrameObj.SetOwner(g)
+		savedFrame.GenOwner = g
 		yieldCh, sendCh = g.YieldCh, g.SendCh
 		retVal = g
 	}

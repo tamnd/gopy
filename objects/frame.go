@@ -94,6 +94,14 @@ type InterpreterFrame interface {
 	//
 	// CPython: Objects/frameobject.c:1138 take_ownership
 	FrameTakeOwnership()
+	// FrameGenOwner returns the generator / coroutine / async-generator
+	// that owns this activation record, or nil. The owner is stored on
+	// the live frame so every *Frame wrapper that points at it
+	// (gi_frame plus any tb_frame minted on demand) resolves to the
+	// same suspended/executing state.
+	//
+	// CPython: Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame
+	FrameGenOwner() Object
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
@@ -114,6 +122,40 @@ type Frame struct {
 	// CPython: Objects/frameobject.c:419 framelocalsproxy_new (the
 	// f_extra_locals slot on PyFrameObject)
 	extraLocals *Dict
+	// owner is the generator / coroutine / async-generator that owns this
+	// frame, or nil when the frame is owned by the thread. Set by the vm
+	// in execReturnGenerator. frameClear consults it to mirror CPython's
+	// FRAME_OWNED_BY_GENERATOR liveness checks.
+	//
+	// CPython: Include/internal/pycore_frame.h _PyFrame_owner +
+	// Objects/frameobject.c:1997 frame_clear_impl FRAME_OWNED_BY_GENERATOR
+	owner Object
+}
+
+// SetOwner stamps the owning generator / coroutine / async-generator on
+// the frame. The vm calls this in execReturnGenerator right after
+// allocating the wrapper so frameClear and frame_is_suspended can
+// resolve the owner without walking the FrameStack.
+//
+// CPython: Python/frame.c:81 _PyFrame_InitializeSpecials sets the
+// owner field on _PyInterpreterFrame; gopy stores the equivalent
+// back-pointer on the Python-visible Frame.
+func (f *Frame) SetOwner(o Object) {
+	if f == nil {
+		return
+	}
+	f.owner = o
+}
+
+// Owner returns the generator / coroutine / async-generator that owns
+// the frame, or nil for thread-owned frames.
+//
+// CPython: Include/internal/pycore_frame.h FRAME_OWNED_BY_GENERATOR
+func (f *Frame) Owner() Object {
+	if f == nil {
+		return nil
+	}
+	return f.owner
 }
 
 // frameType is the type singleton for `frame`.
@@ -130,12 +172,12 @@ func init() {
 
 // frameClear releases the frame's locals/cells/frees/stack. Used by
 // traceback.clear_frames(), Generator.close()'s post-hoc cleanup, and
-// user code that wants to break reference cycles. If the frame belongs
-// to a Generator that has not finished, CPython raises RuntimeError;
-// we leave that guard for a follow-up because the live-frame check
-// requires inspecting the generator's running state.
+// user code that wants to break reference cycles. Mirrors CPython's
+// FRAME_OWNED_BY_GENERATOR / FRAME_OWNED_BY_THREAD branching: a frame
+// that belongs to a still-running or suspended generator raises
+// RuntimeError rather than tearing locals out from under it.
 //
-// CPython: Objects/frameobject.c:68 frame_clear
+// CPython: Objects/frameobject.c:1994 frame_clear_impl
 func frameClear(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: clear() missing self argument")
@@ -145,10 +187,74 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf(
 			"TypeError: descriptor 'clear' requires a 'frame' object")
 	}
+	var gowner Object
+	if f.interp != nil {
+		gowner = f.interp.FrameGenOwner()
+	}
+	if gowner == nil {
+		// Some wrappers (e.g. the gi_frame allocated by execReturnGenerator
+		// before SetOwner ran) carry the back-pointer only on the
+		// wrapper itself. Fall back to that.
+		gowner = f.owner
+	}
+	if gowner != nil {
+		// FRAME_OWNED_BY_GENERATOR. Running == 1 mirrors FRAME_EXECUTING;
+		// started && !closed && !Running mirrors FRAME_STATE_SUSPENDED.
+		// A finished generator (closed) drops through to
+		// FrameClearLocals just as CPython falls into _PyGen_Finalize.
+		//
+		// CPython: Objects/frameobject.c:1997 frame_clear_impl
+		// (FRAME_OWNED_BY_GENERATOR branch)
+		switch g := gowner.(type) {
+		case *Generator:
+			if g.Running.Load() == 1 {
+				return nil, fmt.Errorf("RuntimeError: cannot clear an executing frame")
+			}
+			if g.started && !g.closed {
+				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
+			}
+		case *Coroutine:
+			if g.started && !g.closed {
+				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
+			}
+		case *AsyncGenerator:
+			if g.started && !g.closed {
+				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
+			}
+		}
+	} else if frameIsOnCurrentStack(f) {
+		// FRAME_OWNED_BY_THREAD: the frame is currently live on this
+		// thread's call stack, so clearing would yank state out from
+		// under the eval loop. CPython raises here.
+		//
+		// CPython: Objects/frameobject.c:2007 frame_clear_impl
+		// (FRAME_OWNED_BY_THREAD goto running)
+		return nil, fmt.Errorf("RuntimeError: cannot clear an executing frame")
+	}
 	if f.interp != nil {
 		f.interp.FrameClearLocals()
 	}
 	return None(), nil
+}
+
+// CurrentStackProbe is the hook the vm installs so objects/ can ask
+// whether a given *Frame's activation record is still on the running
+// thread's FrameStack. Returns true when the frame is live (the eval
+// loop is mid-execution on it or one of its callees). Nil when the
+// runtime has not booted; in that case the frame cannot be live.
+//
+// CPython does this with a pointer chase from the thread state's
+// current frame down through f_back; gopy keeps the FrameStack inside
+// the vm package, so we route the probe through a function pointer.
+//
+// CPython: Include/internal/pycore_pystate.h tstate->current_frame
+var CurrentStackProbe func(*Frame) bool
+
+func frameIsOnCurrentStack(f *Frame) bool {
+	if CurrentStackProbe == nil {
+		return false
+	}
+	return CurrentStackProbe(f)
 }
 
 // frameGetAttr exposes the standard frame attributes f_locals, f_globals,

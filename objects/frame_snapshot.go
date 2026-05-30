@@ -51,6 +51,24 @@ type FrameSnapshot struct {
 	// frame_traverse walks this range, and gc/test_refleak relies on
 	// it so the snapshot stays reachable through the operand stack.
 	NumStack int
+	// GenOwner mirrors the live frame's GenOwner so frameClear can
+	// raise "cannot clear a suspended frame" on a tb_frame wrapper
+	// minted from a snapshot of a generator activation record.
+	//
+	// CPython: Objects/frameobject.c:1997 frame_clear_impl
+	// (FRAME_OWNED_BY_GENERATOR branch resolves the same gen)
+	GenOwner Object
+	// SrcFrame is the live activation record this snapshot was minted
+	// from. Held as an opaque InterpreterFrame so objects/ stays free of
+	// the frame package import. frameClear walks the current thread's
+	// FrameStack and treats the snapshot as "still executing" when this
+	// pointer matches a live frame. The chunk arena reuses storage on
+	// Pop, so callers also compare Code identity to ward off stale
+	// matches.
+	//
+	// CPython: Objects/frameobject.c:2007 frame_clear_impl
+	// (FRAME_OWNED_BY_THREAD goto running)
+	SrcFrame InterpreterFrame
 }
 
 // SnapshotFrame copies the read-only fields of src into a snapshot
@@ -68,6 +86,8 @@ func SnapshotFrame(src InterpreterFrame) *FrameSnapshot {
 		Func:     src.FrameFunc(),
 		Lasti:    src.FrameLasti(),
 		Back:     src.FrameBack(),
+		GenOwner: src.FrameGenOwner(),
+		SrcFrame: src,
 	}
 }
 
@@ -186,3 +206,9 @@ func (s *FrameSnapshot) FrameClearLocals() {
 // FrameTakeOwnership is a no-op on a snapshot: the snapshot already
 // owns its LocalsPlus copy.
 func (s *FrameSnapshot) FrameTakeOwnership() {}
+
+// FrameGenOwner returns the generator that owned the original
+// activation record at snapshot time, or nil.
+//
+// CPython: Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame
+func (s *FrameSnapshot) FrameGenOwner() Object { return s.GenOwner }

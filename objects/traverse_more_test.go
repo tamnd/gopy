@@ -98,6 +98,7 @@ func (f *fakeInterp) FrameClearLocals() {
 func (f *fakeInterp) FrameTakeOwnership()       {}
 func (f *fakeInterp) FrameNumStack() int        { return 0 }
 func (f *fakeInterp) FrameStackItem(int) Object { return nil }
+func (f *fakeInterp) FrameGenOwner() Object     { return nil }
 func (f *fakeInterp) FrameLocalsPlusItem(i int) Object {
 	n := len(f.fast)
 	if i < n {
