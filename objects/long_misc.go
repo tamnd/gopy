@@ -188,12 +188,22 @@ func intBool(o Object) (bool, error) {
 	return i.v.Sign() != 0, nil
 }
 
+// intFloat ports long___float__: convert int to float, raising
+// OverflowError when the magnitude exceeds DBL_MAX. PyLong_AsDouble
+// returns -1.0 with PyExc_OverflowError set on overflow, and
+// long___float__ propagates that.
+//
+// CPython: Objects/longobject.c:3127 long___float__
+// CPython: Objects/longobject.c:3038 PyLong_AsDouble
 func intFloat(o Object) (Object, error) {
 	i, ok := asInt(o)
 	if !ok {
 		return notImplemented(), nil
 	}
-	f, _ := new(big.Float).SetInt(&i.v).Float64()
+	f, err := bigIntToFloat64(&i.v)
+	if err != nil {
+		return nil, err
+	}
 	return NewFloat(f), nil
 }
 

@@ -635,7 +635,22 @@ func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects
 		}
 		return objects.NewFloat(v.Float64()), nil
 	case *objects.Int:
+		// CPython: Objects/floatobject.c:1623 float_new_impl — PyNumber_Float
+		// on a long routes through long___float__, which propagates the
+		// OverflowError from PyLong_AsDouble when the magnitude exceeds
+		// DBL_MAX. Going through Number.Float keeps that error path live
+		// for the exact-int case here.
+		if n := v.Type().Number; n != nil && n.Float != nil {
+			res, err := n.Float(v)
+			if err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
 		f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
+		if math.IsInf(f, 0) {
+			return nil, fmt.Errorf("OverflowError: int too large to convert to float")
+		}
 		return objects.NewFloat(f), nil
 	}
 	// CPython: Objects/abstract.c:1592 PyNumber_Float — try nb_float first
