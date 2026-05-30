@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"strings"
 
@@ -54,6 +55,11 @@ func init() {
 	SetTypeDescr(ComplexType, "real", NewGetSetDescr("real", complexRealGetter, nil))
 	SetTypeDescr(ComplexType, "imag", NewGetSetDescr("imag", complexImagGetter, nil))
 	SetTypeDescr(ComplexType, "conjugate", NewMethodDescr(ComplexType, "conjugate", complexConjugateMethod))
+	SetTypeDescr(ComplexType, "__complex__", NewMethodDescr(ComplexType, "__complex__", complexComplexMethod))
+	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescr(ComplexType, "__getnewargs__", complexGetNewArgsMethod))
+	// CPython: Objects/complexobject.c:1301 complex_from_number_impl, METH_O | METH_CLASS
+	SetTypeDescr(ComplexType, "from_number", NewClassMethod(
+		NewBuiltinFunction("complex.from_number", complexFromNumber)))
 }
 
 // complexRealGetter backs complex.real: returns the real component as
@@ -78,6 +84,145 @@ func complexImagGetter(owner Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor 'imag' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(owner))
 	}
 	return NewFloat(imag(c.v)), nil
+}
+
+// complexComplexMethod backs complex.__complex__(): returns self for
+// exact complex, otherwise rebuilds a fresh exact-type complex from
+// the cval. Subclasses lose their identity, matching CPython.
+//
+// CPython: Objects/complexobject.c:918 complex___complex___impl
+func complexComplexMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __complex__() takes no arguments (%d given)", len(args)-1)
+	}
+	c, ok := args[0].(*Complex)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__complex__' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	if c.Type() == ComplexType {
+		return c, nil
+	}
+	return NewComplex(real(c.v), imag(c.v)), nil
+}
+
+// complexGetNewArgsMethod backs complex.__getnewargs__(): returns
+// (real, imag) so pickle/copy can reconstruct via complex(real, imag).
+//
+// CPython: Objects/complexobject.c:874 complex___getnewargs___impl
+func complexGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	c, ok := args[0].(*Complex)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' for 'complex' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return NewTuple([]Object{NewFloat(real(c.v)), NewFloat(imag(c.v))}), nil
+}
+
+// complexFromNumber backs complex.from_number(number). Classmethod
+// signature: args[0] is the receiver type, args[1] is the number to
+// convert. Returns the receiver-typed complex obtained from
+// PyComplex_AsCComplex (tries __complex__, then __float__).
+//
+// CPython: Objects/complexobject.c:1309 complex_from_number_impl
+func complexFromNumber(args []Object, _ map[string]Object) (Object, error) {
+	var cls *Type
+	var number Object
+	switch len(args) {
+	case 1:
+		number = args[0]
+	case 2:
+		if t, ok := args[0].(*Type); ok {
+			cls = t
+		}
+		number = args[1]
+	default:
+		return nil, fmt.Errorf("TypeError: from_number() takes exactly one argument (%d given)", len(args))
+	}
+	if number == nil {
+		return nil, fmt.Errorf("TypeError: from_number() argument must not be None")
+	}
+	// Fast path: exact complex + exact target type.
+	if c, ok := number.(*Complex); ok && c.Type() == ComplexType && (cls == nil || cls == ComplexType) {
+		return c, nil
+	}
+	re, im, err := pyComplexAsCComplex(number)
+	if err != nil {
+		return nil, err
+	}
+	result := NewComplex(re, im)
+	if cls != nil && cls != ComplexType {
+		return Call(cls, NewTuple([]Object{result}), nil)
+	}
+	return result, nil
+}
+
+// pyComplexAsCComplex coerces o to a (real, imag) pair. Tries the
+// __complex__ special method first, falls back to __float__, and
+// finally to the runtime float conversion via the Number.Float slot
+// or the Number.Index slot. Mirrors CPython's PyComplex_AsCComplex
+// dispatch.
+//
+// CPython: Objects/complexobject.c:521 PyComplex_AsCComplex
+func pyComplexAsCComplex(o Object) (float64, float64, error) {
+	if c, ok := o.(*Complex); ok {
+		return real(c.v), imag(c.v), nil
+	}
+	// __complex__ slot via _PyObject_LookupSpecial.
+	special, err := lookupSpecial(o, "__complex__")
+	if err != nil {
+		return 0, 0, err
+	}
+	if special != nil {
+		res, callErr := CallNoArgs(special)
+		if callErr != nil {
+			return 0, 0, callErr
+		}
+		c, ok := res.(*Complex)
+		if !ok {
+			return 0, 0, fmt.Errorf("TypeError: __complex__ returned non-complex (type %s)", res.Type().Name)
+		}
+		return real(c.v), imag(c.v), nil
+	}
+	// Fall back to __float__: real part only, imag = 0.
+	switch v := o.(type) {
+	case *Float:
+		return v.Float64(), 0, nil
+	case *Int:
+		f, _ := new(big.Float).SetInt(v.BigInt()).Float64()
+		return f, 0, nil
+	case *Bool:
+		if v.v.Sign() != 0 {
+			return 1.0, 0, nil
+		}
+		return 0, 0, nil
+	}
+	n := o.Type().Number
+	if n != nil && n.Float != nil {
+		fv, ferr := n.Float(o)
+		if ferr != nil {
+			return 0, 0, ferr
+		}
+		ff, ok := fv.(*Float)
+		if !ok {
+			return 0, 0, fmt.Errorf("TypeError: %s.__float__ returned non-float (type %s)", o.Type().Name, fv.Type().Name)
+		}
+		return ff.Float64(), 0, nil
+	}
+	if n != nil && n.Index != nil {
+		idx, ierr := n.Index(o)
+		if ierr != nil {
+			return 0, 0, ierr
+		}
+		i, ok := idx.(*Int)
+		if !ok {
+			return 0, 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+		}
+		f, _ := new(big.Float).SetInt(i.BigInt()).Float64()
+		return f, 0, nil
+	}
+	return 0, 0, fmt.Errorf("TypeError: complex() argument must be a string or a number, not '%s'", o.Type().Name)
 }
 
 // complexConjugateMethod backs complex.conjugate(): negates the
@@ -319,10 +464,17 @@ func complexNeg(o Object) (Object, error) {
 }
 
 // complexAbs returns the magnitude as a float, matching CPython.
+// _Py_c_abs flags hypot()'s non-finite result via errno=ERANGE, which
+// complex_abs maps to OverflowError. We do the equivalent IsInf check.
 //
+// CPython: Objects/complexobject.c:368 _Py_c_abs
 // CPython: Objects/complexobject.c:798 complex_abs
 func complexAbs(o Object) (Object, error) {
-	return NewFloat(cmplx.Abs(o.(*Complex).v)), nil
+	r := cmplx.Abs(o.(*Complex).v)
+	if math.IsInf(r, 0) {
+		return nil, fmt.Errorf("OverflowError: absolute value too large")
+	}
+	return NewFloat(r), nil
 }
 
 func complexBool(o Object) (bool, error) {

@@ -1236,6 +1236,10 @@ func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objec
 
 // parseComplexString parses a Python-style complex literal like "1+2j".
 // Minimal port of CPython Objects/complexobject.c:392 complex_from_string_inner.
+// Overflow in either component yields +/-Inf without raising, matching
+// PyOS_string_to_double(s, &end, NULL).
+//
+// CPython: Python/pystrtod.c:299 PyOS_string_to_double (NULL overflow_exception)
 func parseComplexString(s string) (complex128, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty")
@@ -1246,16 +1250,16 @@ func parseComplexString(s string) (complex128, error) {
 	}
 	// Try parsing as a single float (real only or pure imaginary).
 	if s[len(s)-1] == 'j' || s[len(s)-1] == 'J' {
-		im, err := pystrconv.ParseFloat(s[:len(s)-1])
-		if err == nil {
+		im, ok := parseComplexComponent(s[:len(s)-1])
+		if ok {
 			return complex(0, im), nil
 		}
 		// Try "a+bj" or "a-bj" form.
 		for i := len(s) - 2; i > 0; i-- {
 			if s[i] == '+' || s[i] == '-' {
-				re, err1 := pystrconv.ParseFloat(s[:i])
-				im2, err2 := pystrconv.ParseFloat(s[i : len(s)-1])
-				if err1 == nil && err2 == nil {
+				re, ok1 := parseComplexComponent(s[:i])
+				im2, ok2 := parseComplexComponent(s[i : len(s)-1])
+				if ok1 && ok2 {
 					return complex(re, im2), nil
 				}
 				break
@@ -1263,11 +1267,24 @@ func parseComplexString(s string) (complex128, error) {
 		}
 		return 0, fmt.Errorf("malformed")
 	}
-	re, err := pystrconv.ParseFloat(s)
-	if err != nil {
-		return 0, err
+	re, ok := parseComplexComponent(s)
+	if !ok {
+		return 0, fmt.Errorf("malformed")
 	}
 	return complex(re, 0), nil
+}
+
+// parseComplexComponent parses one real/imag component, accepting
+// overflow as +/-Inf the way PyOS_string_to_double(s, &end, NULL) does.
+func parseComplexComponent(s string) (float64, bool) {
+	v, err := pystrconv.ParseFloat(s)
+	if err == nil {
+		return v, true
+	}
+	if errors.Is(err, pystrconv.ErrFloatOverflow) {
+		return v, true
+	}
+	return 0, false
 }
 
 // memoryViewCtor ports memoryview(). Accepts a single bytes-like object
