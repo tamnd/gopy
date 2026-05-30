@@ -595,17 +595,17 @@ bytes via `memoryview.ToBytes()`.
 
 ### P1 — Test infrastructure
 
-- [ ] P1.1 vendor `fractions.py` into `stdlib/`
-- [ ] P1.2 vendor `Lib/test/string_tests.py` for test harness
-- [ ] P1.3 vendor `Lib/test/mapping_tests.py` for test harness
-- [ ] P1.4 vendor `symtable.py` into `stdlib/`
+- [x] P1.1 vendor `fractions.py` into `stdlib/`
+- [x] P1.2 vendor `Lib/test/string_tests.py` for test harness
+- [x] P1.3 vendor `Lib/test/mapping_tests.py` for test harness
+- [x] P1.4 vendor `symtable.py` into `stdlib/`
 
 ### P2 — `int` type
 
-- [ ] P2.1 `int()` Unicode whitespace + decimal digit normalisation
-- [ ] P2.2 `int()` base `__index__` coercion
-- [ ] P2.3 `sys.int_info` structseq
-- [ ] P2.4 runtime int digit-limit enforcement
+- [x] P2.1 `int()` Unicode whitespace + decimal digit normalisation
+- [x] P2.2 `int()` base `__index__` coercion
+- [x] P2.3 `sys.int_info` structseq
+- [x] P2.4 runtime int digit-limit enforcement
 
 ### P3 — `complex` type
 
@@ -622,18 +622,18 @@ bytes via `memoryview.ToBytes()`.
 
 ### P4 — `slice` type
 
-- [ ] P4.1 `slice_hash` (xxHash3 over start/stop/step)
-- [ ] P4.2 `slice.__reduce__` for pickle
+- [x] P4.1 `slice_hash` (xxHash3 over start/stop/step)
+- [x] P4.2 `slice.__reduce__` for pickle
 - [x] P4.3 slice GC traversal + `TpFlagHaveGC`
-- [ ] P4.4 `slice.indices()` length `__index__` coercion
+- [x] P4.4 `slice.indices()` length `__index__` coercion
 
 ### P5 — VM / eval loop
 
-- [ ] P5.1 `str.join` materialise sequence before iterating (CPython `PyUnicode_Join` model)
+- [x] P5.1 `str.join` materialise sequence before iterating (CPython `PyUnicode_Join` model)
 
 ### P6 — OS module
 
-- [ ] P6.1 `os.write` accept `memoryview`
+- [x] P6.1 `os.write` accept `memoryview`
 
 ### Spec 1700 rows to advance
 
