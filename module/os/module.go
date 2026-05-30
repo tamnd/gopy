@@ -812,7 +812,7 @@ func walk(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 		followlinks = objectBool(v)
 	}
 
-	g := objects.NewGenerator("walk")
+	g := objects.NewGenerator("walk", "walk")
 	go func() {
 		walkDir(g, top, topdown, followlinks)
 		g.YieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}

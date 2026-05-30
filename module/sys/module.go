@@ -372,6 +372,19 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "__excepthook__", excepthookFn); err != nil {
 		return nil, err
 	}
+	// sys.unraisablehook is invoked by the runtime when an exception
+	// occurs in a destructor, in a generator close callback, or during
+	// GC, where there is no caller to re-raise into.
+	//
+	// CPython: Python/sysmodule.c:893 sys_unraisablehook
+	// CPython: Python/errors.c:1600 _PyErr_WriteUnraisableDefaultHook
+	unraisableHookFn := objects.NewBuiltinFunction("unraisablehook", unraisableHookShim)
+	if err := setItem(md, "unraisablehook", unraisableHookFn); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__unraisablehook__", unraisableHookFn); err != nil {
+		return nil, err
+	}
 	if err := setItem(md, "exit", objects.NewBuiltinFunction("exit", exitShim)); err != nil {
 		return nil, err
 	}

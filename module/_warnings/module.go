@@ -309,7 +309,10 @@ func getWarningsContext() (objects.Object, error) {
 	}
 	ctx, err := cv.Get(ts)
 	if err != nil {
-		// LookupError → no context set; treat as global context.
+		// LookupError → no context set; treat as global context. Clear
+		// the LookupError that cv.Get stamped on the thread state so it
+		// doesn't leak into whatever runs next.
+		errors.Clear(ts)
 		return objects.None(), nil
 	}
 	return ctx, nil
