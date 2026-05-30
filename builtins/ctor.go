@@ -1139,12 +1139,39 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 	}
 }
 
-// ComplexCtor ports complex(). Accepts complex(real=0, imag=0) or
-// complex(x) where x is a number or string.
+// ComplexCtor ports complex(). It mirrors CPython's two-stage split:
+// actual_complex_new fast-paths the "no kwargs, single positional"
+// shape (including exact-type passthrough, string parsing, __complex__
+// dispatch, and PyNumber_Float coercion); every other shape goes
+// through complex_new_impl which performs the cr/ci slot accounting
+// with the PEP 387 DeprecationWarning emissions.
 //
-// CPython: Objects/complexobject.c:739 complex_new_impl
+// CPython: Objects/complexobject.c:1094 actual_complex_new
+// CPython: Objects/complexobject.c:1169 complex_new_impl
 func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	// Pick up keyword args.
+	for k := range kwargs {
+		if k != "real" && k != "imag" {
+			return nil, fmt.Errorf("TypeError: complex() got unexpected keyword argument '%s'", k)
+		}
+	}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: complex() takes at most 2 arguments (%d given)", len(args))
+	}
+	// actual_complex_new: triggered only when no kwargs and at most one
+	// positional. Returns the exact-complex argument unchanged, parses
+	// strings, calls __complex__, or coerces real-only objects via
+	// PyNumber_Float. Never emits DeprecationWarning.
+	if len(kwargs) == 0 {
+		switch len(args) {
+		case 0:
+			return objects.NewComplex(0, 0), nil
+		case 1:
+			return actualComplexNew(args[0])
+		}
+	}
+	// complex_new_impl: everything else. Resolve real and imag from the
+	// merged positional/keyword bindings, then run the cr/ci slot
+	// algorithm with deprecation warnings on complex-typed inputs.
 	var realObj, imagObj objects.Object
 	if v, ok := kwargs["real"]; ok {
 		realObj = v
@@ -1152,14 +1179,9 @@ func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objec
 	if v, ok := kwargs["imag"]; ok {
 		imagObj = v
 	}
-	for k := range kwargs {
-		if k != "real" && k != "imag" {
-			return nil, fmt.Errorf("TypeError: complex() got unexpected keyword argument '%s'", k)
-		}
-	}
 	switch len(args) {
 	case 0:
-		// complex() or complex(real=x, imag=y)
+		// pure-kwargs form: realObj/imagObj already set above.
 	case 1:
 		if realObj != nil {
 			return nil, fmt.Errorf("TypeError: complex() got multiple values for argument 'real'")
@@ -1174,109 +1196,269 @@ func ComplexCtor(args []objects.Object, kwargs map[string]objects.Object) (objec
 		}
 		realObj = args[0]
 		imagObj = args[1]
-	default:
-		return nil, fmt.Errorf("TypeError: complex() takes at most 2 arguments (%d given)", len(args))
 	}
-	// String form: complex("1+2j") — only allowed when imag is absent.
-	if realObj != nil && imagObj == nil {
-		if realObj.Type() == objects.StrType() {
-			s, _ := objects.Str(realObj)
-			s = trimSpace(s)
-			c, err := parseComplexString(s)
-			if err != nil {
-				return nil, fmt.Errorf("ValueError: complex() arg is a malformed string")
-			}
-			return objects.NewComplex(real(c), imag(c)), nil
-		}
-		if cv, ok := realObj.(*objects.Complex); ok {
-			return cv, nil
-		}
-	}
-	// Coerce real and imag through PyComplexAsCComplex (which tries
-	// __complex__, then __float__, then __index__). The real component
-	// may itself be complex, in which case it brings an imag-contribution
-	// that mixes into the result. CPython: Objects/complexobject.c:1238
-	// complex_new_impl.
-	var re, im float64
+	// CPython splits cr (from "real") and ci (from "imag") into
+	// separate Py_complex slots and only mixes their cross-components
+	// when one of the inputs is itself a complex. That ordering matters
+	// for sign preservation: assigning float(arg) straight into the
+	// slot keeps the -0 / +0 distinction, whereas an unconditional
+	// "im += float(imag_arg)" would fold -0 into 0 via IEEE 754.
+	//
+	// CPython: Objects/complexobject.c:1169 complex_new_impl
+	var crReal, crImag, ciReal, ciImag float64
+	crIsComplex := false
+	ciIsComplex := false
+	origRealObj := realObj
 	if realObj != nil {
-		rr, ri, err := objects.PyComplexAsCComplex(realObj)
+		// try_complex_special_method first: if real defines __complex__,
+		// retarget realObj to the resulting complex so the rest of the
+		// algorithm picks up both components via the PyComplex_Check
+		// branch.
+		special, err := objects.TryComplexSpecialMethod(realObj)
 		if err != nil {
 			return nil, err
 		}
-		re, im = rr, ri
-	}
-	if imagObj != nil {
-		if _, ok := imagObj.(*objects.Complex); ok {
-			// complex(a, c): c is complex, mix in: re -= imag(c), im += real(c).
-			ir, ii, err := objects.PyComplexAsCComplex(imagObj)
-			if err != nil {
-				return nil, err
-			}
-			re -= ii
-			im += ir
-		} else {
-			ir, _, err := objects.PyComplexAsCComplex(imagObj)
-			if err != nil {
-				return nil, err
-			}
-			im += ir
+		ownR := false
+		if special != nil {
+			realObj = special
+			ownR = true
 		}
-	}
-	return objects.NewComplex(re, im), nil
-}
-
-// parseComplexString parses a Python-style complex literal like "1+2j".
-// Minimal port of CPython Objects/complexobject.c:392 complex_from_string_inner.
-// Overflow in either component yields +/-Inf without raising, matching
-// PyOS_string_to_double(s, &end, NULL).
-//
-// CPython: Python/pystrtod.c:299 PyOS_string_to_double (NULL overflow_exception)
-func parseComplexString(s string) (complex128, error) {
-	if s == "" {
-		return 0, fmt.Errorf("empty")
-	}
-	// Remove surrounding parens.
-	if s[0] == '(' && s[len(s)-1] == ')' {
-		s = trimSpace(s[1 : len(s)-1])
-	}
-	// Try parsing as a single float (real only or pure imaginary).
-	if s[len(s)-1] == 'j' || s[len(s)-1] == 'J' {
-		im, ok := parseComplexComponent(s[:len(s)-1])
-		if ok {
-			return complex(0, im), nil
-		}
-		// Try "a+bj" or "a-bj" form.
-		for i := len(s) - 2; i > 0; i-- {
-			if s[i] == '+' || s[i] == '-' {
-				re, ok1 := parseComplexComponent(s[:i])
-				im2, ok2 := parseComplexComponent(s[i : len(s)-1])
-				if ok1 && ok2 {
-					return complex(re, im2), nil
+		if cv, ok := realObj.(*objects.Complex); ok {
+			crReal, crImag = real(cv.Complex128()), imag(cv.Complex128())
+			crIsComplex = true
+			// CPython: Objects/complexobject.c:1242 emit DeprecationWarning
+			// whenever the post-special-method real is complex but the
+			// original input cannot be coerced via nb_float/nb_index.
+			// This fires for both one-arg-kwarg and two-arg shapes;
+			// actual_complex_new handles the silent one-arg positional.
+			_ = ownR
+			if !hasRealNumberSlot(origRealObj) {
+				msg := fmt.Sprintf("complex() argument 'real' must be a real number, not %s", origRealObj.Type().Name)
+				if objects.DeprecWarnHook != nil {
+					if werr := objects.DeprecWarnHook(msg); werr != nil {
+						return nil, werr
+					}
 				}
-				break
+			}
+		} else {
+			// CPython: Objects/complexobject.c:1196 TypeError when
+			// post-special-method real has no nb_float, nb_index, and is
+			// not complex. With try_complex_special_method already
+			// applied above, "not complex" already failed for this arm,
+			// so PyNumber_Float drives the conversion.
+			if !hasRealNumberSlot(realObj) {
+				return nil, fmt.Errorf("TypeError: complex() argument 'real' must be a real number, not %s", origRealObj.Type().Name)
+			}
+			rr, ferr := objects.PyNumberFloat(realObj)
+			if ferr != nil {
+				return nil, ferr
+			}
+			crReal, crImag = rr, 0
+		}
+	}
+	if imagObj == nil {
+		// "ci.real = cr.imag" — keeps the cross-term out of the
+		// returned imaginary unless cr was itself complex.
+		ciReal = crImag
+	} else if cv, ok := imagObj.(*objects.Complex); ok {
+		// CPython: Objects/complexobject.c:1269 always emit the
+		// DeprecationWarning when imag is itself a complex.
+		msg := fmt.Sprintf("complex() argument 'imag' must be a real number, not %s", imagObj.Type().Name)
+		if objects.DeprecWarnHook != nil {
+			if werr := objects.DeprecWarnHook(msg); werr != nil {
+				return nil, werr
 			}
 		}
-		return 0, fmt.Errorf("malformed")
+		ciReal, ciImag = real(cv.Complex128()), imag(cv.Complex128())
+		ciIsComplex = true
+	} else {
+		// CPython: Objects/complexobject.c:1209 TypeError when imag has
+		// no nb_float, nb_index, and is not complex. Unlike real, imag
+		// is NOT routed through try_complex_special_method, so an object
+		// like WithComplex (defines __complex__ only) must reject here.
+		if !hasRealNumberSlot(imagObj) {
+			return nil, fmt.Errorf("TypeError: complex() argument 'imag' must be a real number, not %s", imagObj.Type().Name)
+		}
+		ir, err := objects.PyNumberFloat(imagObj)
+		if err != nil {
+			return nil, err
+		}
+		ciReal = ir
 	}
-	re, ok := parseComplexComponent(s)
-	if !ok {
-		return 0, fmt.Errorf("malformed")
+	if ciIsComplex {
+		crReal -= ciImag
 	}
-	return complex(re, 0), nil
+	if crIsComplex && imagObj != nil {
+		ciReal += crImag
+	}
+	return objects.NewComplex(crReal, ciReal), nil
 }
 
-// parseComplexComponent parses one real/imag component, accepting
-// overflow as +/-Inf the way PyOS_string_to_double(s, &end, NULL) does.
-func parseComplexComponent(s string) (float64, bool) {
-	v, err := pystrconv.ParseFloat(s)
-	if err == nil {
-		return v, true
+// actualComplexNew ports actual_complex_new for the one-arg, no-kwargs
+// shape. It does NOT emit DeprecationWarning; the silent fast-path is
+// the whole point of the CPython split.
+//
+// CPython: Objects/complexobject.c:1094 actual_complex_new
+func actualComplexNew(arg objects.Object) (objects.Object, error) {
+	if cv, ok := arg.(*objects.Complex); ok && cv.Type() == objects.ComplexType {
+		return cv, nil
 	}
-	if errors.Is(err, pystrconv.ErrFloatOverflow) {
-		return v, true
+	if arg.Type() == objects.StrType() {
+		s, _ := objects.Str(arg)
+		c, perr := parseComplexString(s)
+		if perr != nil {
+			return nil, fmt.Errorf("ValueError: complex() arg is a malformed string")
+		}
+		return objects.NewComplex(real(c), imag(c)), nil
 	}
-	return 0, false
+	special, err := objects.TryComplexSpecialMethod(arg)
+	if err != nil {
+		return nil, err
+	}
+	if special != nil {
+		return objects.NewComplex(real(special.Complex128()), imag(special.Complex128())), nil
+	}
+	if cv, ok := arg.(*objects.Complex); ok {
+		// Complex subclass: strip subtype, return exact complex.
+		return objects.NewComplex(real(cv.Complex128()), imag(cv.Complex128())), nil
+	}
+	if hasRealNumberSlot(arg) {
+		f, ferr := objects.PyNumberFloat(arg)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return objects.NewComplex(f, 0), nil
+	}
+	return nil, fmt.Errorf("TypeError: complex() argument must be a string or a number, not %s", arg.Type().Name)
 }
+
+// hasRealNumberSlot mirrors CPython's `nbr->nb_float || nbr->nb_index`
+// check: returns true when the object's type can produce a plain real
+// via __float__ or __index__. Complex objects deliberately leave both
+// slots unfilled, so they fall through to the deprecation branch.
+//
+// CPython: Objects/complexobject.c:1242 nb_float/nb_index check
+func hasRealNumberSlot(o objects.Object) bool {
+	if o == nil {
+		return false
+	}
+	nb := o.Type().Number
+	if nb == nil {
+		return false
+	}
+	return nb.Float != nil || nb.Index != nil
+}
+
+// parseComplexString ports complex_from_string_inner. It accepts every
+// literal form the float constructor accepts plus the legacy "<float>j",
+// "<float><signed-float>j", "<float><sign>j", "<sign>j", and "j" shapes.
+// Surrounding whitespace and a single matched pair of parentheses are
+// allowed. PEP 515 underscores are scrubbed from the whole literal
+// before scanning, mirroring _Py_string_to_number_with_underscores.
+// Unicode decimal digits and Unicode whitespace are folded to ASCII via
+// pystrconv.TransformDecimalAndSpaceToASCII so byte-position scanning
+// works the same way it does on a strtod-style C buffer.
+//
+// CPython: Objects/complexobject.c:931 complex_from_string_inner
+func parseComplexString(s string) (complex128, error) {
+	s = pystrconv.TransformDecimalAndSpaceToASCII(s)
+	clean, ok := pystrconv.StripUnderscores(s)
+	if !ok {
+		return 0, errMalformedComplex
+	}
+	s = clean
+	start := 0
+	end := len(s)
+	gotBracket := false
+	i := 0
+	for i < end && pystrconv.IsSpace(s[i]) {
+		i++
+	}
+	if i < end && s[i] == '(' {
+		gotBracket = true
+		i++
+		for i < end && pystrconv.IsSpace(s[i]) {
+			i++
+		}
+	}
+	var x, y float64
+	// First look for forms starting with <float>.
+	z, zEnd, err := pystrconv.ParseFloatPrefix(s[i:])
+	if err != nil {
+		return 0, err
+	}
+	if zEnd != 0 {
+		i += zEnd
+		switch {
+		case i < end && (s[i] == '+' || s[i] == '-'):
+			// <float><signed-float>j or <float><sign>j.
+			x = z
+			yv, yEnd, yerr := pystrconv.ParseFloatPrefix(s[i:])
+			if yerr != nil {
+				return 0, yerr
+			}
+			if yEnd != 0 {
+				y = yv
+				i += yEnd
+			} else {
+				if s[i] == '+' {
+					y = 1.0
+				} else {
+					y = -1.0
+				}
+				i++
+			}
+			if i >= end || (s[i] != 'j' && s[i] != 'J') {
+				return 0, errMalformedComplex
+			}
+			i++
+		case i < end && (s[i] == 'j' || s[i] == 'J'):
+			// <float>j.
+			i++
+			y = z
+		default:
+			// Bare <float>.
+			x = z
+		}
+	} else {
+		// Not starting with <float>: must be <sign>j or j.
+		if i < end && (s[i] == '+' || s[i] == '-') {
+			if s[i] == '+' {
+				y = 1.0
+			} else {
+				y = -1.0
+			}
+			i++
+		} else {
+			y = 1.0
+		}
+		if i >= end || (s[i] != 'j' && s[i] != 'J') {
+			return 0, errMalformedComplex
+		}
+		i++
+	}
+	for i < end && pystrconv.IsSpace(s[i]) {
+		i++
+	}
+	if gotBracket {
+		if i >= end || s[i] != ')' {
+			return 0, errMalformedComplex
+		}
+		i++
+		for i < end && pystrconv.IsSpace(s[i]) {
+			i++
+		}
+	}
+	if i-start != end {
+		return 0, errMalformedComplex
+	}
+	return complex(x, y), nil
+}
+
+// errMalformedComplex is the sentinel for every parse_error path inside
+// complex_from_string_inner. Callers translate it to the
+// "complex() arg is a malformed string" ValueError.
+var errMalformedComplex = errors.New("complex() arg is a malformed string")
 
 // memoryViewCtor ports memoryview(). Accepts a single bytes-like object
 // and returns a MemoryView wrapping it.

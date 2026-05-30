@@ -609,16 +609,16 @@ bytes via `memoryview.ToBytes()`.
 
 ### P3 — `complex` type
 
-- [ ] P3.1 `complex.__complex__` method descriptor
-- [ ] P3.2 `complex()` constructor `__complex__` protocol
-- [ ] P3.3 `complex.from_number` classmethod
-- [ ] P3.4 `complex.__getnewargs__`
-- [ ] P3.5 expose numeric dunder descriptors on `ComplexType`
-- [ ] P3.6 negative-zero preservation in mixed float/complex arithmetic
-- [ ] P3.7 `complex_abs` OverflowError on infinite result
-- [ ] P3.8 complex string parser: spaces, parentheses, uppercase J, overflow→inf
-- [ ] P3.9 complex subtype preserved in constructor (`TpNew`)
-- [ ] P3.10 `complex.__format__` full format-spec support
+- [x] P3.1 `complex.__complex__` method descriptor
+- [x] P3.2 `complex()` constructor `__complex__` protocol
+- [x] P3.3 `complex.from_number` classmethod
+- [x] P3.4 `complex.__getnewargs__`
+- [x] P3.5 expose numeric dunder descriptors on `ComplexType`
+- [x] P3.6 negative-zero preservation in mixed float/complex arithmetic
+- [x] P3.7 `complex_abs` OverflowError on infinite result
+- [x] P3.8 complex string parser: spaces, parentheses, uppercase J, overflow→inf
+- [x] P3.9 complex subtype preserved in constructor (`TpNew`)
+- [x] P3.10 `complex.__format__` full format-spec support
 
 ### P4 — `slice` type
 
@@ -651,7 +651,7 @@ bytes via `memoryview.ToBytes()`.
 | test_symtable | crash (symtable) | P1.4 |
 | test_long | crash (int_info) | P2.3 |
 | test_int | 17 fail / 8 error | P2.1 P2.2 P2.4 |
-| test_complex | 37 fail / 10 error | P3.1–P3.10 |
+| test_complex | done (P3.1–P3.10 landed) | — |
 | test_slice | done (P4.3 landed via type_call orphan-tuple fix) | — |
 | test_iter | 1 fail | P5.1 |
 | test_py_compile | 1 error | P6.1 |

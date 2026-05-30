@@ -241,7 +241,8 @@ func wireTypeCalls() {
 		// __new__ descriptor needs binding here.
 		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
-		bindCtor(objects.ComplexType, ComplexCtor)
+		objects.SetComplexTpNewBase(ComplexCtor)
+		bindCtorDescr(objects.ComplexType, ComplexCtor)
 		// set/frozenset use subtype-aware TpNew so that class H(set): ...
 		// instances carry their own type (CPython: set_new passes subtype).
 		objects.SetType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
