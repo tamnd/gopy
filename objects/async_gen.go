@@ -247,15 +247,28 @@ func init() {
 
 	AsyncGenASendType = NewType("async_generator_asend",
 		[]*Type{objectType})
-	AsyncGenASendType.Iter = func(o Object) (Object, error) { return o, nil }
+	AsyncGenASendType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }
 	AsyncGenASendType.IterNext = asyncGenASendNext
 	AsyncGenASendType.TpTraverse = asyncGenASendTraverse
+	// am_await: the asend awaitable is its own iterator. CPython's
+	// _PyAsyncGenASend_Type.tp_as_async->am_await returns Py_NewRef(self).
+	//
+	// CPython: Objects/genobject.c:1957 async_gen_asend_as_async
+	AsyncGenASendType.Async = &AsyncMethods{
+		Await: func(o Object) (Object, error) { Incref(o); return o, nil },
+	}
 
 	AsyncGenAThrowType = NewType("async_generator_athrow",
 		[]*Type{objectType})
-	AsyncGenAThrowType.Iter = func(o Object) (Object, error) { return o, nil }
+	AsyncGenAThrowType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }
 	AsyncGenAThrowType.IterNext = asyncGenAThrowNext
 	AsyncGenAThrowType.TpTraverse = asyncGenAThrowTraverse
+	// am_await: the athrow awaitable is its own iterator (see asend).
+	//
+	// CPython: Objects/genobject.c:2363 async_gen_athrow_as_async
+	AsyncGenAThrowType.Async = &AsyncMethods{
+		Await: func(o Object) (Object, error) { Incref(o); return o, nil },
+	}
 
 	AsyncGenWrappedValueType = NewType("async_generator_wrapped_value",
 		[]*Type{objectType})
@@ -263,6 +276,111 @@ func init() {
 
 	AddIterSlotWrappers(AsyncGenASendType)
 	AddIterSlotWrappers(AsyncGenAThrowType)
+
+	// asend / athrow / aclose / __aiter__ / __anext__ Python methods.
+	// PyMethodDef rows in Objects/genobject.c:1623 async_gen_methods.
+	//
+	// CPython: Objects/genobject.c:1623 async_gen_methods
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"asend":         asyncGenAsendMethod,
+		"athrow":        asyncGenAthrowMethod,
+		"aclose":        asyncGenAcloseMethod,
+		"__aiter__":     asyncGenAiterMethod,
+		"__anext__":     asyncGenAnextMethod,
+		"__class_getitem__": asyncGenClassGetitemMethod,
+		"__reduce__":    genReduceReject,
+		"__reduce_ex__": genReduceReject,
+	} {
+		SetTypeDescr(AsyncGeneratorType, name, NewMethodDescr(AsyncGeneratorType, name, fn))
+	}
+}
+
+// asyncGenAsendMethod implements async_generator.asend(value).
+//
+// CPython: Objects/genobject.c:1862 async_gen_asend
+func asyncGenAsendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: asend() takes exactly one argument")
+	}
+	g, ok := args[0].(*AsyncGenerator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'asend' requires a 'async_generator' object")
+	}
+	return g.Asend(args[1]), nil
+}
+
+// asyncGenAthrowMethod implements async_generator.athrow(exc).
+//
+// CPython: Objects/genobject.c:2272 async_gen_athrow
+func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: athrow() requires an exception")
+	}
+	g, ok := args[0].(*AsyncGenerator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'athrow' requires a 'async_generator' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: async_generator.athrow not available")
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return g.Athrow(exc), nil
+}
+
+// asyncGenAcloseMethod implements async_generator.aclose().
+//
+// CPython: Objects/genobject.c:2317 async_gen_aclose
+func asyncGenAcloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: aclose() missing self argument")
+	}
+	g, ok := args[0].(*AsyncGenerator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'aclose' requires a 'async_generator' object")
+	}
+	return g.Aclose(), nil
+}
+
+// asyncGenAiterMethod returns self.
+//
+// CPython: Objects/genobject.c:1855 async_gen_aiter (am_aiter slot)
+func asyncGenAiterMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __aiter__() missing self argument")
+	}
+	if _, ok := args[0].(*AsyncGenerator); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__aiter__' requires a 'async_generator' object")
+	}
+	Incref(args[0])
+	return args[0], nil
+}
+
+// asyncGenAnextMethod returns asend(None).
+//
+// CPython: Objects/genobject.c:1869 async_gen_anext
+func asyncGenAnextMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __anext__() missing self argument")
+	}
+	g, ok := args[0].(*AsyncGenerator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__anext__' requires a 'async_generator' object")
+	}
+	return g.Anext(), nil
+}
+
+// asyncGenClassGetitemMethod implements async_generator.__class_getitem__.
+// Returns self, matching CPython's Py_GenericAlias for the async_gen type.
+//
+// CPython: Objects/genobject.c Py_GenericAlias entry in async_gen_methods
+func asyncGenClassGetitemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: __class_getitem__() requires exactly one argument")
+	}
+	return NewGenericAlias(AsyncGeneratorType, args[1]), nil
 }
 
 // asyncGenASendTraverse visits the wrapped generator and the pending

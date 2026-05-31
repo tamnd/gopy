@@ -327,6 +327,16 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 			c.addOpI(SWAP, 2, l)
 		}
 		_ = c.callExitWithNones(l)
+		if fb.Kind == fblockAsyncWith {
+			// Async-with's __aexit__ returns an awaitable: drive it
+			// through GET_AWAITABLE 2 + yield-from loop before the
+			// POP_TOP, mirroring CPython's FB_ASYNC_WITH unwind.
+			//
+			// CPython: Python/codegen.c:597 codegen_unwind_fblock FB_ASYNC_WITH
+			c.addOpI(GET_AWAITABLE, 2, l)
+			c.addLoadConst(nil, l)
+			c.addYieldFromLoop(l)
+		}
 		c.addOp(POP_TOP, l)
 	case fblockHandlerCleanup:
 		name, hasName := fb.Datum.(string)
