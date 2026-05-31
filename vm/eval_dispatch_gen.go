@@ -1005,14 +1005,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setHandledException(exc_value.AsObject())
 		}
 		e.drop(1)
-		// Track generator's own except-block nesting so yield/resume knows
-		// whether the generator has an active own exception.
+		// Track the suspendable's own except-block nesting so yield/resume
+		// knows whether it has an active own exception. Applies to
+		// generators, coroutines, and async generators alike.
 		//
 		// CPython: Python/bytecodes.c:1420 POP_EXCEPT (tstate->exc_info write)
-		if gen, ok := e.genRunning.(*objects.Generator); ok {
-			if gen.ExcDepth > 0 {
-				gen.ExcDepth--
-			}
+		if es, ok := e.genRunning.(objects.GenExcState); ok {
+			es.DecExcDepth()
 		}
 		return e.advance(), nil
 	case compile.POP_TOP:
@@ -1036,11 +1035,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		e.push(prev_exc)
 		e.push(new_exc)
-		// Track generator's own except-block nesting depth.
+		// Track the suspendable's own except-block nesting depth. Applies
+		// to generators, coroutines, and async generators alike.
 		//
 		// CPython: Python/bytecodes.c:3579 PUSH_EXC_INFO (tstate->exc_info write)
-		if gen, ok := e.genRunning.(*objects.Generator); ok {
-			gen.ExcDepth++
+		if es, ok := e.genRunning.(objects.GenExcState); ok {
+			es.IncExcDepth()
 		}
 		return e.advance(), nil
 	case compile.PUSH_NULL:

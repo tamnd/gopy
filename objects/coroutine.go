@@ -36,6 +36,19 @@ type Coroutine struct {
 	// CPython: Objects/genobject.c:1149 cr_getrunning
 	Running atomic.Int32
 
+	// cr_exc_state emulation. CPython gives coroutines the same
+	// _PyErr_StackItem slot generators get (cr_exc_state), and the shared
+	// gen_send_ex2 saves/restores it across every yield so a coroutine
+	// that catches an exception and then suspends does not leak its
+	// handled exception into the caller's exc_info. See Generator for the
+	// field roles.
+	//
+	// CPython: Include/cpython/genobject.h cr_exc_state (_PyErr_StackItem)
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push/pop)
+	ExcHandled Object
+	CallerExc  Object
+	ExcDepth   int
+
 	// Code is the code object for the coroutine function.
 	//
 	// CPython: Include/cpython/genobject.h cr_code via _gen_getcode
@@ -59,6 +72,18 @@ type Coroutine struct {
 	//
 	// CPython: Objects/genobject.c:1184 cr_origin (PyMemberDef)
 	CrOrigin Object
+}
+
+func (c *Coroutine) GetExcHandled() Object  { return c.ExcHandled }
+func (c *Coroutine) SetExcHandled(o Object) { c.ExcHandled = o }
+func (c *Coroutine) GetCallerExc() Object   { return c.CallerExc }
+func (c *Coroutine) SetCallerExc(o Object)  { c.CallerExc = o }
+func (c *Coroutine) ExcDepthVal() int       { return c.ExcDepth }
+func (c *Coroutine) IncExcDepth()           { c.ExcDepth++ }
+func (c *Coroutine) DecExcDepth() {
+	if c.ExcDepth > 0 {
+		c.ExcDepth--
+	}
 }
 
 // CoroutineType is the type singleton for coroutine.

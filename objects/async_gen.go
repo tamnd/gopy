@@ -52,6 +52,18 @@ type AsyncGenerator struct {
 	// CPython: Objects/genobject.c:1617 ag_running PyMemberDef (ag_running_async)
 	RunningAsync atomic.Int32
 
+	// ag_exc_state emulation. Same per-suspendable _PyErr_StackItem slot
+	// generators and coroutines carry, saved/restored across every yield
+	// by the shared gen_send_ex2 so a handled exception inside the async
+	// generator body does not leak into the caller's exc_info. See
+	// Generator for the field roles.
+	//
+	// CPython: Include/cpython/genobject.h ag_exc_state (_PyErr_StackItem)
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push/pop)
+	ExcHandled Object
+	CallerExc  Object
+	ExcDepth   int
+
 	// Code is the code object for the async generator function.
 	//
 	// CPython: Include/cpython/genobject.h ag_code via _gen_getcode
@@ -68,6 +80,18 @@ type AsyncGenerator struct {
 	//
 	// CPython: Objects/genobject.c:1608 ag_await -> coro_get_cr_await
 	YieldFromTarget Object
+}
+
+func (a *AsyncGenerator) GetExcHandled() Object  { return a.ExcHandled }
+func (a *AsyncGenerator) SetExcHandled(o Object) { a.ExcHandled = o }
+func (a *AsyncGenerator) GetCallerExc() Object   { return a.CallerExc }
+func (a *AsyncGenerator) SetCallerExc(o Object)  { a.CallerExc = o }
+func (a *AsyncGenerator) ExcDepthVal() int       { return a.ExcDepth }
+func (a *AsyncGenerator) IncExcDepth()           { a.ExcDepth++ }
+func (a *AsyncGenerator) DecExcDepth() {
+	if a.ExcDepth > 0 {
+		a.ExcDepth--
+	}
 }
 
 // AsyncGeneratorType is the type singleton for async_generator.

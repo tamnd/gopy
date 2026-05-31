@@ -155,6 +155,36 @@ type Generator struct {
 	YieldFromTarget Object
 }
 
+// GenExcState is implemented by generators, coroutines, and async
+// generators: the three suspendable types CPython drives through the
+// shared gen_send_ex2. Each carries its own _PyErr_StackItem
+// (gi_/cr_/ag_exc_state) that must be swapped out for the caller's
+// exc_info on yield and swapped back on resume, so a handled exception
+// inside a suspended body never leaks into the caller's chain.
+//
+// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push/pop)
+type GenExcState interface {
+	GetExcHandled() Object
+	SetExcHandled(Object)
+	GetCallerExc() Object
+	SetCallerExc(Object)
+	ExcDepthVal() int
+	IncExcDepth()
+	DecExcDepth()
+}
+
+func (g *Generator) GetExcHandled() Object  { return g.ExcHandled }
+func (g *Generator) SetExcHandled(o Object) { g.ExcHandled = o }
+func (g *Generator) GetCallerExc() Object   { return g.CallerExc }
+func (g *Generator) SetCallerExc(o Object)  { g.CallerExc = o }
+func (g *Generator) ExcDepthVal() int       { return g.ExcDepth }
+func (g *Generator) IncExcDepth()           { g.ExcDepth++ }
+func (g *Generator) DecExcDepth() {
+	if g.ExcDepth > 0 {
+		g.ExcDepth--
+	}
+}
+
 // GeneratorType is the type singleton for generator.
 //
 // CPython: Objects/genobject.c:L898 PyGen_Type

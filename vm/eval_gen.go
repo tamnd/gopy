@@ -503,18 +503,29 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
 	if gen, ok := e.genRunning.(*objects.Generator); ok {
 		gen.Running.Store(0)
-		if gen.ExcDepth > 0 {
-			gen.ExcHandled = pyerrors.HandledAsObject(e.ts)
-		} else {
-			gen.ExcHandled = nil
-		}
-		pyerrors.SetHandledFromObject(e.ts, gen.CallerExc)
 	}
 	if c, ok := e.genRunning.(*objects.Coroutine); ok {
 		c.Running.Store(0)
 	}
 	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
 		ag.Running.Store(0)
+	}
+	// Save this suspendable's own exc_info and restore the caller's, the
+	// same swap gen_send_ex2 does for generators, coroutines, and async
+	// generators alike. Without it a coroutine / async generator that
+	// catches an exception and then suspends leaks its handled exception
+	// into the caller's chain, so the caller's next raise picks it up as
+	// __context__.
+	//
+	// CPython: Python/bytecodes.c:1383 YIELD_VALUE (tstate->exc_info restore)
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
+	if es, ok := e.genRunning.(objects.GenExcState); ok {
+		if es.ExcDepthVal() > 0 {
+			es.SetExcHandled(pyerrors.HandledAsObject(e.ts))
+		} else {
+			es.SetExcHandled(nil)
+		}
+		pyerrors.SetHandledFromObject(e.ts, es.GetCallerExc())
 	}
 	// Deregister frame and clear f_back before yielding so that
 	// suspended generators are invisible to sys._getframe() from the
@@ -576,18 +587,26 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	// CPython: Python/errors.c:116 _PyErr_GetTopmostException (chain walk)
 	if gen, ok := e.genRunning.(*objects.Generator); ok {
 		gen.Running.Store(1)
-		gen.CallerExc = pyerrors.HandledAsObject(e.ts)
-		if gen.ExcHandled != nil {
-			pyerrors.SetHandledFromObject(e.ts, gen.ExcHandled)
-		}
-		// else: ExcHandled == nil → chain-walk fallback: ts.HandledException
-		// stays as gen.CallerExc, which is what the generator inherits.
 	}
 	if c, ok := e.genRunning.(*objects.Coroutine); ok {
 		c.Running.Store(1)
 	}
 	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
 		ag.Running.Store(1)
+	}
+	// Stash the new caller's exc_info, then re-push this suspendable's own
+	// handled exception. When ExcHandled is nil (no active own except
+	// block) we leave ts.HandledException as the caller's value, the
+	// chain-walk fallback _PyErr_GetTopmostException uses when the slot is
+	// NULL. Same restore for all three suspendable types.
+	//
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
+	// CPython: Python/errors.c:116 _PyErr_GetTopmostException (chain walk)
+	if es, ok := e.genRunning.(objects.GenExcState); ok {
+		es.SetCallerExc(pyerrors.HandledAsObject(e.ts))
+		if es.GetExcHandled() != nil {
+			pyerrors.SetHandledFromObject(e.ts, es.GetExcHandled())
+		}
 	}
 	if msg.Err != nil {
 		// A throw() that carried a Python exception object travels as
