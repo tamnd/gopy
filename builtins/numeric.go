@@ -249,7 +249,11 @@ func Format(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	}
 	specStr := ""
 	if len(args) == 2 {
-		if args[1].Type() != objects.StrType() {
+		// The clinic converter for format_spec is PyUnicode_Check, which
+		// admits str subclasses, not just exact str.
+		//
+		// CPython: Python/clinic/bltinmodule.c.h builtin_format
+		if !objects.IsSubtype(args[1].Type(), objects.StrType()) {
 			return nil, fmt.Errorf("TypeError: format() argument 2 must be str, not %s", args[1].Type().Name)
 		}
 		specStr, _ = objects.Str(args[1])
