@@ -503,12 +503,17 @@ func init() {
 			if !ok {
 				return fmt.Errorf("TypeError: __type_params__ can only be set on types")
 			}
-			if v == None() || v == nil {
-				t.TypeParams = nil
-				return nil
+			// check_set_special_type_attr: an immutable type rejects the
+			// write, and a delete (value nil) is reported the same way.
+			// Any other value is stored verbatim, with no tuple check.
+			//
+			// CPython: Objects/typeobject.c:2226 type_set_type_params
+			// CPython: Objects/typeobject.c check_set_special_type_attr
+			if t.TpFlags&TpFlagImmutable != 0 {
+				return fmt.Errorf("TypeError: cannot set '__type_params__' attribute of immutable type '%s'", t.Name)
 			}
-			if _, ok := v.(*Tuple); !ok {
-				return fmt.Errorf("TypeError: __type_params__ must be a tuple")
+			if v == nil {
+				return fmt.Errorf("TypeError: cannot delete '__type_params__' attribute of immutable type '%s'", t.Name)
 			}
 			t.TypeParams = v
 			return nil

@@ -294,6 +294,12 @@ func SetTypeDescr(t *Type, name string, d Object) {
 	if t.ClassAttrDict != nil {
 		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
 	}
+	// Mutating tp_dict invalidates every adaptive cache keyed on this
+	// type's version tag (LOAD_ATTR_CLASS stamps the value it read).
+	// During construction versionTag is still 0 so this is a no-op.
+	//
+	// CPython: Objects/typeobject.c:6088 type_setattro -> PyType_Modified
+	t.InvalidateVersionTag()
 }
 
 // TypeOwnDescrs returns the names and values registered directly on
@@ -349,5 +355,7 @@ func DelTypeDescr(t *Type, name string) bool {
 			break
 		}
 	}
+	// CPython: Objects/typeobject.c:6088 type_setattro -> PyType_Modified
+	t.InvalidateVersionTag()
 	return true
 }

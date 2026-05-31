@@ -406,6 +406,21 @@ func copyNamespaceToType(t *Type, ns *Dict) error {
 			if _, isFn := v.(*Function); isFn {
 				v = NewClassMethod(v)
 			}
+		case "__doc__":
+			// type_new_set_doc runs PyUnicode_AsUTF8 on a string __doc__;
+			// a lone surrogate cannot encode and surfaces the codec's
+			// UnicodeEncodeError, aborting the whole class creation. A null
+			// byte encodes fine (the C truncation only clips tp_doc, not the
+			// __doc__ attribute), and non-string docs are stored verbatim.
+			//
+			// CPython: Objects/typeobject.c:4496 type_new_set_doc
+			if u, ok := v.(*Unicode); ok {
+				for i, r := range strLenientRunes(u.v) {
+					if r >= 0xD800 && r <= 0xDFFF {
+						return fmt.Errorf("UnicodeEncodeError: 'utf-8' codec can't encode character '\\u%04x' in position %d: surrogates not allowed", r, i)
+					}
+				}
+			}
 		case "__module__":
 			if u, ok := v.(*Unicode); ok {
 				t.Module = u.v

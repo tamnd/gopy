@@ -20,6 +20,7 @@ func init() {
 	register("__qualname__", typeGetQualname, typeSetQualname)
 	register("__module__", typeGetModule, typeSetModule)
 	register("__bases__", typeGetBases, typeSetBases)
+	register("__base__", typeGetBase, nil)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
 	register("__parameters__", typeGetParameters, typeSetParameters)
@@ -271,6 +272,83 @@ func typeGetBases(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeGetBase returns the type's single "best base", the base whose
+// instance layout the type inherits. object has no base and reports
+// None; every other type reports the winner of best_base over its
+// explicit bases.
+//
+// CPython: Objects/typeobject.c:1095 type_get_base
+func typeGetBase(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__base__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if len(t.Bases) == 0 {
+		return None(), nil
+	}
+	base, err := bestBase(t.Bases)
+	if err != nil {
+		return nil, err
+	}
+	if base == nil {
+		return None(), nil
+	}
+	return base, nil
+}
+
+// shapeDiffers reports whether two types lay their instances out
+// differently. CPython compares tp_basicsize and tp_itemsize.
+//
+// CPython: Objects/typeobject.c:2962 shape_differs
+func shapeDiffers(t1, t2 *Type) bool {
+	return t1.BaseSize != t2.BaseSize || t1.ItemSize != t2.ItemSize
+}
+
+// solidBase returns the most-derived ancestor of t whose instance
+// layout differs from its own base, walking the primary base chain.
+//
+// CPython: Objects/typeobject.c:2971 solid_base
+func solidBase(t *Type) *Type {
+	var base *Type
+	if len(t.Bases) > 0 {
+		base = solidBase(t.Bases[0])
+	} else {
+		base = objectType
+	}
+	if shapeDiffers(t, base) {
+		return t
+	}
+	return base
+}
+
+// bestBase mirrors best_base: of the explicit bases it picks the one
+// whose solid base is the most derived, raising on an instance-layout
+// conflict between two unrelated solid bases.
+//
+// CPython: Objects/typeobject.c:2998 best_base
+func bestBase(bases []*Type) (*Type, error) {
+	var base, winner *Type
+	for _, bi := range bases {
+		if bi.TpFlags&TpFlagBasetype == 0 {
+			return nil, fmt.Errorf("TypeError: type '%s' is not an acceptable base type", bi.Name)
+		}
+		candidate := solidBase(bi)
+		switch {
+		case winner == nil:
+			winner = candidate
+			base = bi
+		case IsSubtype(winner, candidate):
+			// winner already dominates; keep it.
+		case IsSubtype(candidate, winner):
+			winner = candidate
+			base = bi
+		default:
+			return nil, fmt.Errorf("TypeError: multiple bases have instance lay-out conflict")
+		}
+	}
+	return base, nil
 }
 
 // typeSetBases reassigns t.Bases and recomputes the MRO. Only allowed
