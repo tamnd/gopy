@@ -96,6 +96,7 @@ func (f *fakeInterp) FrameClearLocals() {
 	f.frees = nil
 }
 func (f *fakeInterp) FrameTakeOwnership()       {}
+func (f *fakeInterp) FrameRegisterWrapper(Object) {}
 func (f *fakeInterp) FrameNumStack() int        { return 0 }
 func (f *fakeInterp) FrameStackItem(int) Object { return nil }
 func (f *fakeInterp) FrameGenOwner() Object     { return nil }

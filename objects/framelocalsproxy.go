@@ -30,6 +30,14 @@ type FrameLocalsProxy struct {
 var frameLocalsProxyType = NewType("FrameLocalsProxy", []*Type{objectType})
 
 func init() {
+	// CPython stamps Py_TPFLAGS_MAPPING on PyFrameLocalsProxy_Type so the
+	// MATCH_MAPPING opcode treats f_locals as a mapping subject. Without
+	// this bit, `match d: case {...}` for a FrameLocalsProxy falls into
+	// the default arm.
+	//
+	// CPython: Objects/frameobject.c:786 PyFrameLocalsProxy_Type
+	// (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_MAPPING)
+	frameLocalsProxyType.TpFlags |= TpFlagMapping
 	frameLocalsProxyType.Repr = frameLocalsProxyRepr
 	frameLocalsProxyType.RichCmp = frameLocalsProxyRichCompare
 	frameLocalsProxyType.Iter = frameLocalsProxyIter

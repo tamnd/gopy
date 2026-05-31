@@ -535,6 +535,15 @@ func NewType(name string, bases []*Type) *Type {
 	if err != nil {
 		panic(err)
 	}
+	// Built-in (static) types are immortal in CPython 3.12+: their
+	// refcount is stamped with _Py_IMMORTAL_REFCNT so Decref never drops
+	// them. gopy depends on this so weakrefs registered against the type
+	// (e.g. Mapping.register(FrameLocalsProxy) in _collections_abc) do
+	// not get cleared the moment a transient refcount blip hits zero.
+	//
+	// CPython: Objects/object.c _PyObject_Init (immortal stamp for static
+	// types via _PyStaticType_InitBuiltin)
+	t.MakeImmortal()
 	return t
 }
 

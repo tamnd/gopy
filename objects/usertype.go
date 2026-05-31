@@ -113,6 +113,14 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// CPython: Objects/typeobject.c:4153 type_new (heap types lack
 	// Py_TPFLAGS_IMMUTABLETYPE)
 	t.TpFlags &^= TpFlagImmutable
+	// NewType stamps the type immortal so static built-in types never
+	// deallocate. Heap types ARE refcounted (they die with the last
+	// reference, e.g. when a class falls out of its defining scope), so
+	// reset the refcount to a freshly-allocated value.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (heap types start at
+	// refcount 1 from PyObject_GC_NewVar)
+	t.Hdr().refcnt = 1
 	stampMetaclass(t, meta)
 	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
