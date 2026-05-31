@@ -51,6 +51,94 @@ func init() {
 		Length:  byteArrayLen,
 		GetItem: byteArraySubscript,
 	}
+	// Slot wrappers added so attribute lookup finds the dunder methods.
+	//
+	// CPython: Objects/typeobject.c add_operators slotdefs (sq_item,
+	// sq_concat, sq_repeat, sq_inplace_concat, sq_inplace_repeat,
+	// sq_length, mp_ass_subscript).
+	SetTypeDescr(ByteArrayType, "__getitem__", NewMethodDescr(ByteArrayType, "__getitem__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return byteArraySubscript(args[0], args[1])
+		},
+	))
+	SetTypeDescr(ByteArrayType, "__len__", NewMethodDescr(ByteArrayType, "__len__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+			}
+			n, err := byteArrayLen(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
+	SetTypeDescr(ByteArrayType, "__add__", NewMethodDescr(ByteArrayType, "__add__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return byteArrayConcat(args[0], args[1])
+		},
+	))
+	SetTypeDescr(ByteArrayType, "__iadd__", NewMethodDescr(ByteArrayType, "__iadd__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __iadd__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return byteArrayIConcat(args[0], args[1])
+		},
+	))
+	SetTypeDescr(ByteArrayType, "__mul__", NewMethodDescr(ByteArrayType, "__mul__",
+		byteArrayMulMethod,
+	))
+	SetTypeDescr(ByteArrayType, "__rmul__", NewMethodDescr(ByteArrayType, "__rmul__",
+		byteArrayMulMethod,
+	))
+	SetTypeDescr(ByteArrayType, "__imul__", NewMethodDescr(ByteArrayType, "__imul__",
+		byteArrayIMulMethod,
+	))
+}
+
+func byteArrayMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return byteArrayRepeat(args[0], int(v))
+}
+
+func byteArrayIMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __imul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return byteArrayIRepeat(args[0], int(v))
 }
 
 // byteArraySubscript ports bytearray_subscript: int keys return the

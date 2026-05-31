@@ -56,6 +56,65 @@ func init() {
 	}
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(BytesType)
+	// Slot wrappers for sequence dunders. add_operators on the C side
+	// installs these from sq_item/sq_concat/sq_repeat; gopy mirrors them
+	// directly so attribute lookup finds bytes.__getitem__ etc.
+	//
+	// CPython: Objects/typeobject.c add_operators slotdefs (sq_item,
+	// sq_concat, sq_repeat).
+	SetTypeDescr(BytesType, "__getitem__", NewMethodDescr(BytesType, "__getitem__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return bytesSubscript(args[0], args[1])
+		},
+	))
+	SetTypeDescr(BytesType, "__len__", NewMethodDescr(BytesType, "__len__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+			}
+			n, err := bytesLen(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
+	SetTypeDescr(BytesType, "__add__", NewMethodDescr(BytesType, "__add__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return bytesConcat(args[0], args[1])
+		},
+	))
+	SetTypeDescr(BytesType, "__mul__", NewMethodDescr(BytesType, "__mul__",
+		bytesMulMethod,
+	))
+	SetTypeDescr(BytesType, "__rmul__", NewMethodDescr(BytesType, "__rmul__",
+		bytesMulMethod,
+	))
+}
+
+func bytesMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return bytesRepeat(args[0], int(v))
 }
 
 // bytesModulo implements bytes % args (PEP 461).

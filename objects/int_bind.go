@@ -536,8 +536,13 @@ func intIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: this method takes no arguments (%d given)", len(args)-1)
 	}
-	i, ok := args[0].(*Int)
-	if !ok {
+	var i *Int
+	switch v := args[0].(type) {
+	case *Int:
+		i = v
+	case *Bool:
+		i = &v.Int
+	default:
 		return nil, fmt.Errorf("TypeError: descriptor 'this' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
 	}
 	if i.Type() == IntType {

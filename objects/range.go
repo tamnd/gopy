@@ -50,6 +50,52 @@ func init() {
 			}), nil
 		},
 	))
+	// __getitem__ and __len__ slot wrappers so attribute lookup finds
+	// range.__getitem__ / range.__len__ without bouncing through
+	// add_operators on the C side.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrappers for
+	// sq_item / sq_length.
+	SetTypeDescr(RangeType, "__getitem__", NewMethodDescr(RangeType, "__getitem__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return rangeSubscript(args[0], args[1])
+		},
+	))
+	SetTypeDescr(RangeType, "__len__", NewMethodDescr(RangeType, "__len__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+			}
+			n, err := rangeLen(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
+	SetTypeDescr(RangeType, "__contains__", NewMethodDescr(RangeType, "__contains__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			ok, err := rangeContains(args[0], args[1])
+			if err != nil {
+				return nil, err
+			}
+			return NewBool(ok), nil
+		},
+	))
+	SetTypeDescr(RangeType, "__iter__", NewMethodDescr(RangeType, "__iter__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __iter__() takes no arguments (%d given)", len(args)-1)
+			}
+			return rangeIter(args[0])
+		},
+	))
 }
 
 // NewRange builds a range. Step must be non-zero.

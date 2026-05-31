@@ -69,6 +69,9 @@ func init() {
 	// CPython: Objects/typeobject.c add_operators slot wrapper for sq_item / sq_length
 	SetTypeDescr(TupleType, "__getitem__", NewMethodDescr(TupleType, "__getitem__", tupleGetItemMethod))
 	SetTypeDescr(TupleType, "__len__", NewMethodDescr(TupleType, "__len__", tupleLenMethod))
+	SetTypeDescr(TupleType, "__add__", NewMethodDescr(TupleType, "__add__", tupleAddMethod))
+	SetTypeDescr(TupleType, "__mul__", NewMethodDescr(TupleType, "__mul__", tupleMulMethod))
+	SetTypeDescr(TupleType, "__rmul__", NewMethodDescr(TupleType, "__rmul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
 	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
@@ -171,6 +174,43 @@ func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'tuple' object")
 	}
 	return GetItem(t, args[1])
+}
+
+// tupleAddMethod backs tuple.__add__. Returns NotImplemented when other
+// is not a tuple, matching tuple_concat's PyTuple_Check guard.
+//
+// CPython: Objects/tupleobject.c:559 tuple_concat
+func tupleAddMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[1].(*Tuple); !ok {
+		return NotImplemented(), nil
+	}
+	return tupleConcat(args[0], args[1])
+}
+
+// tupleMulMethod backs tuple.__mul__ / tuple.__rmul__. n is coerced via
+// PyNumber_Index.
+//
+// CPython: Objects/tupleobject.c:606 tuple_repeat
+func tupleMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return tupleRepeat(args[0], int(v))
 }
 
 func tupleLenMethod(args []Object, _ map[string]Object) (Object, error) {

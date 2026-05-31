@@ -1596,13 +1596,16 @@ func strMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return NotImplemented(), nil
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return NotImplemented(), nil
 	}
-	nv, _ := ni.Int64()
+	nv, fits := ni.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
 	return strType.Sequence.Repeat(u, int(nv))
 }
 
@@ -1619,13 +1622,16 @@ func strRMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return NotImplemented(), nil
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return NotImplemented(), nil
 	}
-	nv, _ := ni.Int64()
+	nv, fits := ni.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
 	return strType.Sequence.Repeat(u, int(nv))
 }
 
