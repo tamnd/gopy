@@ -151,6 +151,32 @@ var (
 	pendingStderr io.Writer
 )
 
+// pendingBreakpointHook holds the default breakpoint hook supplied by
+// the builtins package before sys is built. The hook lives in builtins
+// because its body imports modules and calls warnings.warn, neither of
+// which module/sys can reach without an import cycle. SetBreakpointHook
+// records it here so buildModule can stamp sys.breakpointhook and
+// sys.__breakpointhook__ once the module dict exists.
+//
+// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+var pendingBreakpointHook objects.Object
+
+// SetBreakpointHook records the default breakpoint hook and, when sys
+// is already live, installs it as both sys.breakpointhook and
+// sys.__breakpointhook__. builtins.Init calls this with its
+// sys_breakpointhook port so breakpoint() has a hook to dispatch to.
+//
+// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+func SetBreakpointHook(hook objects.Object) {
+	pendingBreakpointHook = hook
+	d := liveSysDict()
+	if d == nil {
+		return
+	}
+	_ = d.SetItem(objects.NewStr("breakpointhook"), hook)
+	_ = d.SetItem(objects.NewStr("__breakpointhook__"), hook)
+}
+
 // SetStdio records the io.Writers the next sys-module build should
 // expose as sys.stdout and sys.stderr. nil means "use os.Stdout /
 // os.Stderr". If sys is already in the module cache, the live
@@ -509,6 +535,19 @@ func buildModule() (*objects.Module, error) {
 	}
 	if err := setItem(md, "__stderr__", makeStderrFile()); err != nil {
 		return nil, err
+	}
+	// breakpoint() dispatches to sys.breakpointhook; the default
+	// (sys.__breakpointhook__) is the builtins-side sys_breakpointhook
+	// port, registered via SetBreakpointHook before sys is built.
+	//
+	// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+	if pendingBreakpointHook != nil {
+		if err := setItem(md, "breakpointhook", pendingBreakpointHook); err != nil {
+			return nil, err
+		}
+		if err := setItem(md, "__breakpointhook__", pendingBreakpointHook); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }

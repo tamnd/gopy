@@ -138,6 +138,17 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
+	// breakpoint() forwards to sys.breakpointhook. Register the builtin
+	// here and hand the default hook to sys so sys.breakpointhook and
+	// sys.__breakpointhook__ resolve once the sys module is built.
+	//
+	// CPython: Python/bltinmodule.c:3359 breakpoint PyMethodDef
+	breakpointFn := objects.NewBuiltinFunction("breakpoint", Breakpoint)
+	if err := setBuiltin(dict, "breakpoint", breakpointFn); err != nil {
+		return nil, err
+	}
+	sys.SetBreakpointHook(objects.NewBuiltinFunction("breakpointhook", breakpointHook))
+
 	compileFn := objects.NewBuiltinFunction("compile", Compile)
 	if err := setBuiltin(dict, "compile", compileFn); err != nil {
 		return nil, err
