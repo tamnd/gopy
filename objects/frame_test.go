@@ -71,10 +71,11 @@ func (f *fakeInterpFrame) FrameClearLocals() {
 	f.cells = nil
 	f.frees = nil
 }
-func (f *fakeInterpFrame) FrameTakeOwnership()       {}
-func (f *fakeInterpFrame) FrameNumStack() int        { return 0 }
-func (f *fakeInterpFrame) FrameStackItem(int) Object { return nil }
-func (f *fakeInterpFrame) FrameGenOwner() Object     { return nil }
+func (f *fakeInterpFrame) FrameTakeOwnership()         {}
+func (f *fakeInterpFrame) FrameNumStack() int          { return 0 }
+func (f *fakeInterpFrame) FrameStackItem(int) Object   { return nil }
+func (f *fakeInterpFrame) FrameGenOwner() Object       { return nil }
+func (f *fakeInterpFrame) FrameRegisterWrapper(Object) {}
 
 func TestFrameAccessors(t *testing.T) {
 	code := &Code{Name: "f", Filename: "t.py", Firstlineno: 10}

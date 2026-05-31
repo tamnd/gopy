@@ -139,6 +139,18 @@ type Frame struct {
 	//
 	// CPython: Include/cpython/frameobject.h PyFrameObject.f_lineno
 	Lineno int
+
+	// Wrappers is the list of Python-visible frame objects that point
+	// at this activation record (sys._getframe, traceback walks, etc).
+	// FrameStack.Pop reads this list to rebind each wrapper to a
+	// FrameSnapshot before the chunk slot is recycled, so f_code / f_globals
+	// / f_locals reads continue to work after the call returns. Held as
+	// opaque objects.Object so the *Frame layout does not pull in the
+	// objects package's wrapper type for every slot.
+	//
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+	// PyFrameObject linkage CPython gets for free from refcounting).
+	Wrappers []objects.Object
 }
 
 // NLocalsOf returns the count of fast-local slots a code object owns.
@@ -253,6 +265,7 @@ func (f *Frame) Init(co *objects.Code, globals, builtins objects.Object, fn obje
 	f.TraceLines = true
 	f.TraceOpcodes = false
 	f.Lineno = 0
+	f.Wrappers = nil
 	size := SizeFor(co)
 	if cap(f.LocalsPlus) >= size {
 		f.LocalsPlus = f.LocalsPlus[:size]
@@ -524,6 +537,19 @@ func (f *Frame) FrameStackItem(i int) objects.Object {
 		return nil
 	}
 	return f.LocalsPlus[f.StackBase+i].AsObject()
+}
+
+// FrameRegisterWrapper records a Python-level wrapper for this
+// activation record. FrameStack.Pop walks the list and calls SwapInterp
+// on each wrapper with a FrameSnapshot so reads through the wrapper
+// survive the chunk slot's recycle.
+//
+// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
+func (f *Frame) FrameRegisterWrapper(w objects.Object) {
+	if w == nil {
+		return
+	}
+	f.Wrappers = append(f.Wrappers, w)
 }
 
 // FrameTakeOwnership snapshots the activation record's LocalsPlus into

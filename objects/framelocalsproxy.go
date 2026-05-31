@@ -33,6 +33,7 @@ func init() {
 	frameLocalsProxyType.Repr = frameLocalsProxyRepr
 	frameLocalsProxyType.RichCmp = frameLocalsProxyRichCompare
 	frameLocalsProxyType.Iter = frameLocalsProxyIter
+	frameLocalsProxyType.Call = frameLocalsProxyCall
 	frameLocalsProxyType.Mapping = &MappingMethods{
 		Length:  frameLocalsProxyLen,
 		GetItem: frameLocalsProxyGetItem,
@@ -83,6 +84,25 @@ func NewFrameLocalsProxy(f *Frame) *FrameLocalsProxy {
 	p := &FrameLocalsProxy{frame: f}
 	p.init(frameLocalsProxyType)
 	return p
+}
+
+// frameLocalsProxyCall implements tp_new for FrameLocalsProxy. Builds
+// a proxy from a frame argument; rejects keyword args and non-frame
+// positional args, mirroring CPython's framelocalsproxy_new.
+//
+// CPython: Objects/frameobject.c:418 framelocalsproxy_new
+func frameLocalsProxyCall(_ Object, args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: FrameLocalsProxy takes no keyword arguments")
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: FrameLocalsProxy expected 1 argument, got %d", len(args))
+	}
+	frame, ok := args[0].(*Frame)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: expect frame, not %s", args[0].Type().Name)
+	}
+	return NewFrameLocalsProxy(frame), nil
 }
 
 // framelocalsproxyGetval returns the value at LocalsPlus[i] with cell

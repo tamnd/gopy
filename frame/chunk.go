@@ -78,6 +78,27 @@ func (s *FrameStack) Pop() {
 	s.current.top--
 	s.depth--
 	f := &s.current.frames[s.current.top]
+	if len(f.Wrappers) > 0 && f.Owner != OwnedByGenerator {
+		// External code (sys._getframe, traceback, inspect) holds a
+		// Python-visible wrapper for this activation record. The chunk
+		// slot is about to be recycled, so copy the read-only fields
+		// plus LocalsPlus into a FrameSnapshot and point every wrapper
+		// at it. Reads through wrapper.f_code / f_globals / f_locals
+		// then survive the natural return of the call.
+		//
+		// CPython: Objects/frameobject.c:1138 take_ownership (the
+		// iframe copy PyFrameObject keeps after the activation record
+		// goes away).
+		snap := objects.SnapshotFrameWithLocals(f)
+		for _, w := range f.Wrappers {
+			if sw, ok := w.(interface {
+				SwapInterp(objects.InterpreterFrame)
+			}); ok {
+				sw.SwapInterp(snap)
+			}
+		}
+		f.Wrappers = nil
+	}
 	if f.Owner == OwnedByGenerator {
 		// The frame's been handed off to a Generator object; the
 		// generator owns the storage now, including the LocalsPlus

@@ -102,6 +102,15 @@ type InterpreterFrame interface {
 	//
 	// CPython: Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame
 	FrameGenOwner() Object
+	// FrameRegisterWrapper records a Python-level frame wrapper for the
+	// activation record. The chunk arena uses this list to rebind every
+	// wrapper to a snapshot before its storage is recycled on Pop, so
+	// reads through sys._getframe / inspect / tb_frame survive the
+	// natural return of the call.
+	//
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+	// PyFrameObject linkage that gopy emulates via wrapper registration)
+	FrameRegisterWrapper(w Object)
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
@@ -484,7 +493,29 @@ func NewFrame(interp InterpreterFrame) *Frame {
 	if h := GCTrackHook; h != nil {
 		h(f)
 	}
+	// Register the wrapper on the live activation record so the chunk
+	// arena can rebind us to a snapshot before its storage gets recycled.
+	//
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+	// PyFrameObject linkage CPython gets for free from refcounting).
+	if interp != nil {
+		interp.FrameRegisterWrapper(f)
+	}
 	return f
+}
+
+// SwapInterp replaces the wrapper's underlying activation record. The
+// chunk arena calls this on Pop when the live iframe is about to be
+// recycled, pointing the wrapper at a FrameSnapshot so f_code,
+// f_globals, and f_locals reads still work after the function returns.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (the iframe copy
+// PyFrameObject keeps after the activation record goes away).
+func (f *Frame) SwapInterp(i InterpreterFrame) {
+	if f == nil {
+		return
+	}
+	f.interp = i
 }
 
 // FrameType returns the type singleton for `frame`.

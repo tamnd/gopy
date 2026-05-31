@@ -207,6 +207,13 @@ func (s *FrameSnapshot) FrameClearLocals() {
 // owns its LocalsPlus copy.
 func (s *FrameSnapshot) FrameTakeOwnership() {}
 
+// FrameRegisterWrapper is a no-op on a snapshot. Snapshots are not
+// recycled through the chunk arena so wrappers never need rebinding.
+//
+// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+// snapshot is already the post-take_ownership backing store).
+func (s *FrameSnapshot) FrameRegisterWrapper(_ Object) {}
+
 // FrameGenOwner returns the generator that owned the original
 // activation record at snapshot time, or nil.
 //
