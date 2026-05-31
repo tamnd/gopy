@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -59,6 +60,16 @@ func Import(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 	}
 	if currentImporter == nil {
 		return nil, fmt.Errorf("ImportError: __import__ not configured")
+	}
+	// The bound __import__ only computes the package anchor for a
+	// relative import; an absolute import (level == 0) never touches
+	// _calc___package__, so its ImportWarning fallback only fires here.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1390 __import__
+	if parsed.level > 0 {
+		if err := warnPackageFallback(parsed.globals); err != nil {
+			return nil, err
+		}
 	}
 	pkgname := pkgnameFromGlobals(parsed.globals)
 	return currentImporter(parsed.name, pkgname, parsed.level, parsed.fromlist)
@@ -225,6 +236,57 @@ func pkgnameFromGlobals(globals objects.Object) string {
 		return name[:dot]
 	}
 	return ""
+}
+
+// warnPackageFallback mirrors the else branch of _calc___package__:
+// when a relative import (level > 0) runs in a module whose globals
+// carry neither a non-None __package__ nor a non-None __spec__, the
+// machinery falls back to __name__/__path__ and emits an ImportWarning
+// before doing so (bpo-37409). A non-dict globals has nothing to read,
+// so it warns nothing.
+//
+// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__
+func warnPackageFallback(globals objects.Object) error {
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	if dictHasNonNone(d, "__package__") || dictHasNonNone(d, "__spec__") {
+		return nil
+	}
+	return emitImportWarning("can't resolve package from __spec__ or __package__, falling back on __name__ and __path__")
+}
+
+// dictHasNonNone reports whether d[key] exists and is not None. Used to
+// decide whether __package__ / __spec__ supply a usable anchor before
+// falling back to __name__.
+func dictHasNonNone(d *objects.Dict, key string) bool {
+	v, err := d.GetItem(objects.NewStr(key))
+	if err != nil || v == nil || objects.IsNone(v) {
+		return false
+	}
+	return true
+}
+
+// emitImportWarning routes message through warnings.warn(message,
+// ImportWarning) so the emission walks the live filter list and any
+// recording context manager (catch_warnings / assertWarns).
+//
+// CPython: Python/_warnings.c PyErr_WarnFormat(PyExc_ImportWarning, ...)
+func emitImportWarning(message string) error {
+	mod, err := importBreakpointModule("warnings")
+	if err != nil {
+		return err
+	}
+	warn, err := objects.GetAttr(mod, objects.NewStr("warn"))
+	if err != nil {
+		return err
+	}
+	_, err = objects.Call(warn, objects.NewTuple([]objects.Object{
+		objects.NewStr(message),
+		errors.PyExc_ImportWarning,
+	}), nil)
+	return err
 }
 
 // dictStringEntry reads dict[key] and returns its string value, or ""
