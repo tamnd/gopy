@@ -765,7 +765,20 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 			return asyncGenAThrowDriveResult(a, r, e)
 		}
 		if r != nil {
-			return asyncGenAThrowDriveResult(a, r, nil)
+			// aclose() mode. A wrapped value means the body answered
+			// GeneratorExit with another async yield instead of letting
+			// it propagate, so raise "async generator ignored
+			// GeneratorExit". A plain value is an intermediate await the
+			// body is suspended on; forward it untouched.
+			//
+			// CPython: Objects/genobject.c:2190 async_gen_athrow_send
+			// (aclose() mode, yield_close label)
+			if _, ok := r.(*AsyncGenWrappedValue); ok {
+				a.state = asyncAwaitClosed
+				a.gen.RunningAsync.Store(0)
+				return nil, fmt.Errorf("RuntimeError: async generator ignored GeneratorExit")
+			}
+			return r, nil
 		}
 		a.state = asyncAwaitClosed
 		a.gen.RunningAsync.Store(0)
