@@ -101,6 +101,14 @@ type InterpreterFrame interface {
 	//
 	// CPython: Objects/frameobject.c:1138 take_ownership
 	FrameTakeOwnership()
+	// FrameDropSnapshot releases the take_ownership snapshot so the
+	// duplicated strong references it holds disappear. FrameClearLocals
+	// keeps the snapshot (an externally-held gi_frame must still read the
+	// locals after the body is gone); the explicit frame.clear() path
+	// calls this afterwards so the locals truly go away.
+	//
+	// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+	FrameDropSnapshot()
 	// FrameGenOwner returns the generator / coroutine / async-generator
 	// that owns this activation record, or nil. The owner is stored on
 	// the live frame so every *Frame wrapper that points at it
@@ -268,6 +276,17 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 	}
 	if f.interp != nil {
 		f.interp.FrameClearLocals()
+		// Explicit clear() must drop the take_ownership snapshot too. The
+		// _PyGen_Finalize call above snapshots LocalsPlus (Dup'ing every
+		// ref) so an externally-held gi_frame keeps reading after the body
+		// unwinds; the natural dealloc path wants that, but clear() asked
+		// for the locals to disappear, so the duplicated strong references
+		// have to drop. Without this an object bound only to a generator
+		// argument lives forever once gi_frame.clear() snapshotted it
+		// (gh-142766: test_close_clears_frame).
+		//
+		// CPython: Objects/frameobject.c:1994 frame_clear_impl
+		f.interp.FrameDropSnapshot()
 	}
 	return None(), nil
 }
@@ -430,6 +449,24 @@ func frameTraverse(o Object, visit Visitor) error {
 		return err
 	}
 	for back := f.interp.FrameBack(); back != nil; back = back.FrameBack() {
+		// Stop at a generator / coroutine / async-generator activation
+		// record. That frame's contents (locals, cells, frees, value
+		// stack) are already reached independently through the owning
+		// gen-like object's tp_traverse, which visits gi_frame and walks
+		// the same panel. Re-visiting them here from the back chain
+		// double-counts every reference the suspended ancestor holds on
+		// its value stack (the FOR_ITER / yield-from sub-iterators of a
+		// deep conjoin / Queens chain), driving subtract_refs underwater
+		// so still-reachable sub-generators are misread as garbage and
+		// finalized mid-iteration. CPython never hits this because each
+		// PyFrameObject is its own tracked node visited via the single
+		// Py_VISIT(f->f_back) edge; gopy's inline walk must skip frames
+		// that have an independent node of their own.
+		//
+		// CPython: Objects/frameobject.c:1949 frame_traverse (Py_VISIT f_back)
+		if back.FrameGenOwner() != nil {
+			break
+		}
 		if err := visitInterp(back, visit); err != nil {
 			return err
 		}

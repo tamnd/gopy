@@ -101,6 +101,7 @@ func (s *stubFrame) FrameStackItem(int) objects.Object          { return nil }
 func (s *stubFrame) FrameFunc() objects.Object                  { return s.fn }
 func (s *stubFrame) FrameClearLocals()                          {}
 func (s *stubFrame) FrameTakeOwnership()                        {}
+func (s *stubFrame) FrameDropSnapshot()                         {}
 func (s *stubFrame) FrameGenOwner() objects.Object              { return nil }
 func (s *stubFrame) FrameRegisterWrapper(objects.Object)        {}
 

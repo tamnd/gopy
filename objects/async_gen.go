@@ -944,6 +944,14 @@ func asyncGenTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
+// GCRoot pins a running async generator as a cycle-collector root for
+// the same reason as Generator.GCRoot: the body runs on its own
+// goroutine whose stack is the only live reference the refcount
+// collector cannot see.
+//
+// CPython: Python/gc.c:1208 gc_collect_main (executing frame stays rooted)
+func (g *AsyncGenerator) GCRoot() bool { return g.Running.Load() == 1 }
+
 // MarkFinished records that the async-generator body has run to
 // completion so subsequent Send/Throw/Close are no-ops. Mirrors
 // Generator.MarkFinished.

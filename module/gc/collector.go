@@ -116,6 +116,7 @@ func collectMain(gen int) (int, []pendingCallback) {
 		listMerge(young, state.generations[gen].head)
 		return 0, nil
 	}
+	pinRoots(young)
 
 	unreachable := newListHead()
 	if err := moveUnreachable(young, unreachable, state.tracked); err != nil {

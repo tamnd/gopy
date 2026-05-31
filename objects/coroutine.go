@@ -74,6 +74,13 @@ type Coroutine struct {
 	CrOrigin Object
 }
 
+// GCRoot pins a running coroutine as a cycle-collector root: its body
+// executes on its own goroutine, whose stack holds the live reference
+// the refcount collector cannot see.
+//
+// CPython: Python/gc.c:1208 gc_collect_main (executing frame stays rooted)
+func (c *Coroutine) GCRoot() bool { return c.Running.Load() == 1 }
+
 func (c *Coroutine) GetExcHandled() Object  { return c.ExcHandled }
 func (c *Coroutine) SetExcHandled(o Object) { c.ExcHandled = o }
 func (c *Coroutine) GetCallerExc() Object   { return c.CallerExc }

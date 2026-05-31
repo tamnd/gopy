@@ -619,6 +619,16 @@ func genTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
+// GCRoot pins a running generator as a cycle-collector root. The body
+// executes on its own goroutine, whose stack holds the live reference
+// to this generator and to every sub-generator it is currently
+// iterating. That reference is invisible to the refcount collector, so
+// without pinning, subtract_refs would drive the whole active spine to
+// zero and reclaim the suspended children mid-iteration.
+//
+// CPython: Python/gc.c:1208 gc_collect_main (executing frame stays rooted)
+func (g *Generator) GCRoot() bool { return g.Running.Load() == 1 }
+
 // MarkFinished records that the generator body has run to completion
 // (either by returning, raising, or having no more yields). After this
 // call genFinalize / Close are no-ops so we never try to send on

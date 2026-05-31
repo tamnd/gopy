@@ -296,6 +296,23 @@ type Type struct {
 // CPython: Include/cpython/object.h:L83 visitproc
 type Visitor func(Object) error
 
+// GCRoot marks objects the cycle collector must treat as roots even
+// when no tracked container references them. gopy runs every generator,
+// coroutine, and async generator body on its own goroutine; while that
+// body is mid-execution the goroutine stack holds the only live
+// reference to the gen-like object and to the chain of sub-generators
+// it is iterating. That reference is a plain Go pointer, invisible to
+// the refcount-based collector, so subtract_refs drives the whole
+// active spine to gc_refs == 0 and move_unreachable would reclaim the
+// suspended sub-generators hanging off it mid-iteration. An object whose
+// GCRoot reports true is pinned as a root, mirroring CPython where an
+// executing frame is kept reachable through tstate->current_frame.
+//
+// CPython: Python/gc.c:1208 gc_collect_main (tstate roots stay reachable)
+type GCRoot interface {
+	GCRoot() bool
+}
+
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //
 // CPython: Include/object.h:L284 Py_TPFLAGS_MAPPING / Py_TPFLAGS_SEQUENCE

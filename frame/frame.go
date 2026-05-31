@@ -501,6 +501,25 @@ func (f *Frame) FrameClearLocals() {
 	f.StackTop = 0
 }
 
+// FrameDropSnapshot releases the take_ownership snapshot. It is the
+// explicit counterpart to FrameClearLocals: the natural generator
+// unwind keeps the snapshot so an externally-held gi_frame can still
+// read the locals after the body is gone (test_frame_outlives_generator),
+// but frame.clear() asks for the locals to truly disappear, so the
+// duplicated strong references the snapshot holds must drop too.
+// Without this, an object bound only to a generator argument lives
+// forever once gi_frame.clear() has snapshotted it (gh-142766).
+//
+// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode (the single
+// owned copy is the one cleared; gopy keeps the snapshot separate).
+func (f *Frame) FrameDropSnapshot() {
+	for i := range f.snapshot {
+		f.snapshot[i].Close()
+		f.snapshot[i] = stackref.Null
+	}
+	f.snapshot = nil
+}
+
 // FrameLocalsPlusItem returns LocalsPlus[i] at the absolute slot
 // (post-fix_cell_offsets). Used by kinds-driven walks like
 // FrameFastToLocals where the slot semantics live in

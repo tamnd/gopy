@@ -237,6 +237,22 @@ func (s *FrameSnapshot) FrameClearLocals() {
 // owns its LocalsPlus copy.
 func (s *FrameSnapshot) FrameTakeOwnership() {}
 
+// FrameDropSnapshot releases the snapshot's own LocalsPlus copy. The
+// snapshot is the owned backing store, so an explicit frame.clear()
+// drops the references it holds the same way FrameClearLocals already
+// does (the two are the same store on a snapshot, so this is the
+// idempotent tail of the clear).
+//
+// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+func (s *FrameSnapshot) FrameDropSnapshot() {
+	for i := range s.LocalsPlus {
+		if s.LocalsPlus[i] != nil {
+			Decref(s.LocalsPlus[i])
+			s.LocalsPlus[i] = nil
+		}
+	}
+}
+
 // FrameRegisterWrapper is a no-op on a snapshot. Snapshots are not
 // recycled through the chunk arena so wrappers never need rebinding.
 //
