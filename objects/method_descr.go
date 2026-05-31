@@ -81,6 +81,15 @@ func (d *MethodDescr) Name() string { return d.name }
 // Doc returns the documentation string for this descriptor, or "".
 func (d *MethodDescr) Doc() string { return d.doc }
 
+// WithDoc attaches a docstring to the descriptor and returns it. Mirrors
+// the ml_doc field set by PyMethodDef rows in CPython.
+//
+// CPython: Objects/descrobject.c:642 descr_members ml_doc
+func (d *MethodDescr) WithDoc(doc string) *MethodDescr {
+	d.doc = doc
+	return d
+}
+
 // Conv returns the METH_* calling-convention tag the specializer
 // uses to pick the descriptor-specific CALL fast arm.
 func (d *MethodDescr) Conv() MethFlag { return d.conv }

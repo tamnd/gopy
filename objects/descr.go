@@ -21,6 +21,7 @@ import (
 type GetSetDescr struct {
 	Header
 	name  string
+	doc   string
 	owner *Type
 	fget  func(owner Object) (Object, error)
 	fset  func(owner Object, value Object) error
@@ -129,6 +130,18 @@ func NewGetSetDescr(name string, fget func(owner Object) (Object, error), fset f
 // Name returns the attribute name this descriptor binds to.
 func (d *GetSetDescr) Name() string {
 	return d.name
+}
+
+// Doc returns the documentation string for this descriptor, or "".
+func (d *GetSetDescr) Doc() string { return d.doc }
+
+// WithDoc attaches a docstring to the descriptor and returns it. Mirrors
+// the doc field set by PyGetSetDef rows in CPython.
+//
+// CPython: Objects/descrobject.c:1696 PyDescr_NewGetSet
+func (d *GetSetDescr) WithDoc(doc string) *GetSetDescr {
+	d.doc = doc
+	return d
 }
 
 func getsetDescrRepr(o Object) (string, error) {

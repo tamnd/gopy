@@ -87,6 +87,23 @@ func init() {
 	} {
 		SetTypeDescr(CoroutineType, name, NewMethodDescr(CoroutineType, name, fn))
 	}
+	// Docstrings for the method descriptors. CPython's PyMethodDef rows
+	// carry the strings inline; gopy attaches them via WithDoc after the
+	// loop so introspection (inspect, help, types.CoroutineType.send.__doc__)
+	// returns the same text.
+	//
+	// CPython: Objects/genobject.c:1188 coro_send_doc
+	// CPython: Objects/genobject.c:1192 coro_throw_doc
+	// CPython: Objects/genobject.c:1202 coro_close_doc
+	if d, ok := typeDescrTable[CoroutineType]["send"].(*MethodDescr); ok {
+		d.WithDoc("send(arg) -> send 'arg' into coroutine,\nreturn next iterated value or raise StopIteration.")
+	}
+	if d, ok := typeDescrTable[CoroutineType]["throw"].(*MethodDescr); ok {
+		d.WithDoc("throw(value)\nthrow(type[,value[,traceback]])\n\nRaise exception in coroutine, return next iterated value or raise\nStopIteration.\nthe (type, val, tb) signature is deprecated, \nand may be removed in a future version of Python.")
+	}
+	if d, ok := typeDescrTable[CoroutineType]["close"].(*MethodDescr); ok {
+		d.WithDoc("close() -> raise GeneratorExit inside coroutine.")
+	}
 
 	// cr_frame: the frame object of the suspended coroutine.
 	//
@@ -179,7 +196,7 @@ func init() {
 			}
 			o.(*Coroutine).Name = s.Value()
 			return nil
-		}))
+		}).WithDoc("name of the coroutine"))
 
 	// __qualname__: writable qualified name of the coroutine.
 	//
@@ -202,7 +219,7 @@ func init() {
 			}
 			o.(*Coroutine).Qualname = s.Value()
 			return nil
-		}))
+		}).WithDoc("qualified name of the coroutine"))
 
 	// tp_traverse: lets the cycle collector walk references the
 	// coroutine holds (its frame, code object). Mirrors gen_traverse
@@ -223,9 +240,11 @@ func init() {
 	//
 	// CPython: Objects/genobject.c:1466 coro_wrapper_methods
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
-		"send":  coroWrapperSendMethod,
-		"throw": coroWrapperThrowMethod,
-		"close": coroWrapperCloseMethod,
+		"send":          coroWrapperSendMethod,
+		"throw":         coroWrapperThrowMethod,
+		"close":         coroWrapperCloseMethod,
+		"__reduce__":    genReduceReject,
+		"__reduce_ex__": genReduceReject,
 	} {
 		SetTypeDescr(CoroAwaitType, name, NewMethodDescr(CoroAwaitType, name, fn))
 	}
