@@ -53,6 +53,14 @@ var ErrStopAsyncIteration = errors.New("StopAsyncIteration")
 type GenMsg struct {
 	Val Object // yielded / sent value; nil when Err is set
 	Err error  // ErrStopIteration at normal end; other errors on throw()
+	// CallerFrame is the caller's currently-executing frame at the time of
+	// Send/Throw/Close. The generator goroutine assigns it to its own
+	// frame.Previous so gi_frame.f_back reflects the caller while the body
+	// is running. Mirrors CPython's gen_send_ex2 which sets
+	// frame->previous = tstate->current_frame on every resume.
+	//
+	// CPython: Objects/genobject.c:248 gen_send_ex2
+	CallerFrame InterpreterFrame
 }
 
 // RaisedError is the Go-level wrapper for a Python exception object
@@ -612,13 +620,26 @@ func (g *Generator) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: generator already executing")
 	}
 	g.started = true
-	g.SendCh <- GenMsg{Val: v}
+	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
 		return nil, msg.Err
 	}
 	return msg.Val, nil
+}
+
+// callerFrame returns the current Python frame on this goroutine, used by
+// Send / Throw / Close to stamp gi_frame.f_back on the generator body for
+// the duration of the resume. CPython does the same via
+// frame->previous = tstate->current_frame in gen_send_ex2.
+//
+// CPython: Objects/genobject.c:248 gen_send_ex2
+func callerFrame() InterpreterFrame {
+	if CurrentFrameHook == nil {
+		return nil
+	}
+	return CurrentFrameHook()
 }
 
 // Throw raises err inside the generator at its current YIELD_VALUE
@@ -672,7 +693,7 @@ func (g *Generator) Throw(err error) (Object, error) {
 			return g.forwardThrowResult(fval, ferr)
 		}
 	}
-	g.SendCh <- GenMsg{Err: err}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -701,7 +722,7 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) 
 		// CPython: Objects/genobject.c:519 _gen_throw
 		//   (StopIteration → gen_send_ex(gen, retval2, 0, 0))
 		g.YieldFromTarget = nil
-		g.SendCh <- GenMsg{Val: stopVal}
+		g.SendCh <- GenMsg{Val: stopVal, CallerFrame: callerFrame()}
 		msg := <-g.YieldCh
 		if msg.Err != nil {
 			g.closed = true
@@ -716,7 +737,7 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) 
 	// generator body.
 	//
 	// CPython: Objects/genobject.c:528 _gen_throw (else: goto throw_here)
-	g.SendCh <- GenMsg{Err: ferr}
+	g.SendCh <- GenMsg{Err: ferr, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -799,7 +820,7 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 		return nil
 	}
-	g.SendCh <- GenMsg{Err: ErrGeneratorExit}
+	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {

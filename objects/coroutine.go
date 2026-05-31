@@ -292,7 +292,7 @@ func (c *Coroutine) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: coroutine already executing")
 	}
 	c.started = true
-	c.SendCh <- GenMsg{Val: v}
+	c.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -315,7 +315,7 @@ func (c *Coroutine) Throw(err error) (Object, error) {
 		c.closed = true
 		return nil, err
 	}
-	c.SendCh <- GenMsg{Err: err}
+	c.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -337,7 +337,7 @@ func (c *Coroutine) Close() error {
 		c.closed = true
 		return nil
 	}
-	c.SendCh <- GenMsg{Err: ErrGeneratorExit}
+	c.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
 	msg := <-c.YieldCh
 	c.closed = true
 	if msg.Err == nil {

@@ -319,28 +319,26 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		if ag, ok := genObj.(*objects.AsyncGenerator); ok {
 			ag.Running.Store(1)
 		}
-		// Link savedFrame.Previous only when this generator is driven via
-		// yield from by another generator (recorded in genCallerFrames by
-		// execSend). Generators started by an external gen.send() call
-		// leave Previous nil: CPython clears the back-link when the frame
-		// is detached from the running stack so that gi_frame.f_back is
-		// None for externally-driven generators, preserving the invariant
-		// that f_back only connects frames within a yield-from chain.
+		// Set savedFrame.Previous to the caller's frame at the moment of
+		// resume. CPython does exactly this in gen_send_ex2:
 		//
-		// CPython: Objects/genobject.c:867 gen_new_with_qualname
-		//   (previous_frame = NULL for a freshly-created generator)
-		// CPython: Objects/genobject.c:291 gen_send_ex2
-		//   (previous_frame set only for yield-from sub-generators)
-		if gen, ok := genObj.(*objects.Generator); ok {
-			if cf, ok2 := genCallerFrames.Load(gen); ok2 {
-				savedFrame.Previous = cf.(*frame.Frame)
+		//   frame->previous = tstate->current_frame;
+		//   tstate->current_frame = frame;
+		//
+		// Generator.Send / Throw / Close stamp the caller's frame into
+		// msg.CallerFrame so the resume can read it from this goroutine
+		// without racing on the caller's frame stack. genCallerFrames is
+		// still consulted as a fallback because yield-from forwarding may
+		// route through a hook that does not populate CallerFrame.
+		//
+		// CPython: Objects/genobject.c:248 gen_send_ex2
+		if cf, ok := msg.CallerFrame.(*frame.Frame); ok && cf != nil {
+			savedFrame.Previous = cf
+		} else if gen, ok2 := genObj.(*objects.Generator); ok2 {
+			if cf2, ok3 := genCallerFrames.Load(gen); ok3 {
+				savedFrame.Previous = cf2.(*frame.Frame)
 			}
-			// else: externally driven — Previous stays nil (set at line 233)
 		}
-		// Coroutines and async generators driven via yield from would also
-		// need a genCallerFrames lookup, but await-chaining is tracked
-		// separately (see execSend Coroutine path). Leave Previous nil for
-		// now: cr_frame.f_back and ag_frame.f_back are None by default.
 		// Register the generator frame for sys._getframe() so that
 		// currentInterpreterFrame() returns it while this goroutine runs.
 		// Record the frame-stack depth at this entry point so
@@ -500,16 +498,32 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
 
-	// Re-register frame and re-link f_back on resume.
-	// CPython: Objects/genobject.c gen_send_ex2 sets previous_frame before
-	// re-entering the body.
-	if gen, ok2 := e.genRunning.(*objects.Generator); ok2 {
-		if cf, ok3 := genCallerFrames.Load(gen); ok3 {
-			e.f.Previous = cf.(*frame.Frame)
+	// Re-register frame and re-link f_back on resume. CPython unconditionally
+	// sets frame->previous = tstate->current_frame on every resume, not just
+	// the first one (so gi_frame.f_back tracks the caller correctly across
+	// suspend/resume). Read it from msg.CallerFrame which Send/Throw/Close
+	// populate; fall back to genCallerFrames for yield-from-only paths and
+	// savedPrev for non-Generator producers (coroutine / asyncgen).
+	//
+	// CPython: Objects/genobject.c:248 gen_send_ex2 (previous_frame set)
+	switch {
+	case msg.CallerFrame != nil:
+		if cf, ok := msg.CallerFrame.(*frame.Frame); ok {
+			e.f.Previous = cf
 		} else {
 			e.f.Previous = savedPrev
 		}
-	} else {
+	case e.genRunning != nil:
+		if gen, ok2 := e.genRunning.(*objects.Generator); ok2 {
+			if cf, ok3 := genCallerFrames.Load(gen); ok3 {
+				e.f.Previous = cf.(*frame.Frame)
+			} else {
+				e.f.Previous = savedPrev
+			}
+		} else {
+			e.f.Previous = savedPrev
+		}
+	default:
 		e.f.Previous = savedPrev
 	}
 	// Refresh the entry depth and re-register the generator frame. The
