@@ -400,7 +400,7 @@ func (c *Coroutine) MarkFinished() {
 // CPython: Objects/genobject.c:L260 gen_send_ex2
 func (c *Coroutine) Send(v Object) (Object, error) {
 	if c.closed {
-		return nil, ErrStopIteration
+		return nil, errReuseAwaited()
 	}
 	if !c.started && v != None() {
 		return nil, errors.New("TypeError: can't send non-None value to a just-started coroutine")
@@ -419,6 +419,17 @@ func (c *Coroutine) Send(v Object) (Object, error) {
 	return msg.Val, nil
 }
 
+// errReuseAwaited mirrors CPython's "cannot reuse already awaited
+// coroutine" RuntimeError raised by gen_send_ex2 when a coroutine in
+// FRAME_COMPLETED state is sent/thrown into. Mirrors the behavior of
+// gen_send_ex2 setting PyExc_RuntimeError for the coroutine variant of
+// the FRAME_COMPLETED branch (vs StopIteration for plain generators).
+//
+// CPython: Objects/genobject.c:230 gen_send_ex2 FRAME_COMPLETED
+func errReuseAwaited() error {
+	return errors.New("RuntimeError: cannot reuse already awaited coroutine")
+}
+
 // Throw raises err inside the coroutine at its await suspension.
 //
 // CPython: Objects/genobject.c:L466 _gen_throw
@@ -427,13 +438,67 @@ func (c *Coroutine) Throw(err error) (Object, error) {
 		return nil, errors.New("TypeError: throw() requires an exception")
 	}
 	if c.closed {
-		return nil, err
+		return nil, errReuseAwaited()
 	}
 	if !c.started {
 		c.closed = true
 		return nil, err
 	}
+	// Forward to the await sub-target if present so the exception
+	// propagates through the await chain. This mirrors _gen_throw's
+	// PyGen_yf branch which recursively throws into the awaited
+	// generator/coroutine before resuming the outer body.
+	//
+	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf branch)
+	if yf := c.YieldFromTarget; yf != nil {
+		forwarded := true
+		var fval Object
+		var ferr error
+		switch v := yf.(type) {
+		case *Generator:
+			fval, ferr = v.Throw(err)
+		case *Coroutine:
+			fval, ferr = v.Throw(err)
+		default:
+			if GenThrowForwardHook != nil {
+				fval, ferr = GenThrowForwardHook(nil, yf, err)
+			} else {
+				forwarded = false
+			}
+		}
+		if forwarded {
+			return c.forwardThrowResult(fval, ferr)
+		}
+	}
 	c.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
+	msg := <-c.YieldCh
+	if msg.Err != nil {
+		c.closed = true
+		return nil, msg.Err
+	}
+	return msg.Val, nil
+}
+
+// forwardThrowResult handles the result of forwarding a throw to an
+// await sub-target. Mirrors the retval / StopIteration / other-exception
+// branches in _gen_throw after the yf.throw() call.
+//
+// CPython: Objects/genobject.c:511 _gen_throw (retval / StopIteration branches)
+func (c *Coroutine) forwardThrowResult(fval Object, ferr error) (Object, error) {
+	if ferr == nil {
+		return fval, nil
+	}
+	if stopVal, isStop := genStopIterVal(ferr); isStop {
+		c.YieldFromTarget = nil
+		c.SendCh <- GenMsg{Val: stopVal, CallerFrame: callerFrame()}
+		msg := <-c.YieldCh
+		if msg.Err != nil {
+			c.closed = true
+			return nil, msg.Err
+		}
+		return msg.Val, nil
+	}
+	c.SendCh <- GenMsg{Err: ferr, CallerFrame: callerFrame()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
