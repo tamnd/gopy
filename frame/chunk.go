@@ -75,9 +75,15 @@ func (s *FrameStack) Pop() {
 	if s.current == nil || s.current.top == 0 {
 		return
 	}
-	s.current.top--
-	s.depth--
-	f := &s.current.frames[s.current.top]
+	// Defer the top/depth decrement until after Clear runs. Close on a
+	// fast local can fire weakref callbacks (or finalizers) which then
+	// re-enter the eval loop via sys.unraisablehook. That re-entry Pushes
+	// a new frame onto this chunk; if top has already been decremented
+	// the new frame lands on top of the slot mid-Clear and Init resizes
+	// LocalsPlus out from under the loop. Keeping top high parks the
+	// re-entrant Push one slot above us so the two activations stay
+	// independent.
+	f := &s.current.frames[s.current.top-1]
 	if len(f.Wrappers) > 0 && f.Owner != OwnedByGenerator {
 		// External code (sys._getframe, traceback, inspect) holds a
 		// Python-visible wrapper for this activation record. The chunk
@@ -104,7 +110,7 @@ func (s *FrameStack) Pop() {
 		// generator owns the storage now, including the LocalsPlus
 		// slice, so unwire the slot wholesale. The next Push at this
 		// slot will allocate fresh LocalsPlus.
-		s.current.frames[s.current.top] = Frame{}
+		s.current.frames[s.current.top-1] = Frame{}
 	} else {
 		// f.Clear() closes every live stackref and nils out Code /
 		// Globals / Builtins / Locals / Func / Previous, but leaves
@@ -119,6 +125,8 @@ func (s *FrameStack) Pop() {
 		// (recycles _PyInterpreterFrame slots in-place)
 		f.Clear()
 	}
+	s.current.top--
+	s.depth--
 	// Drop a now-empty chunk only when there is an older chunk
 	// underneath it. The bottom chunk stays attached so its frame
 	// slots survive across a pop-back-to-zero cycle, mirroring

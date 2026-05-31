@@ -592,10 +592,20 @@ func clearListAndFire(list *weakrefList) {
 		if tp == nil || tp.Call == nil {
 			continue
 		}
-		// CPython logs callback errors through sys.unraisablehook;
-		// gopy has no equivalent so we drop them, matching what
-		// module/gc/weakref.go invokeWeakrefCallbacks already does.
-		_, _ = tp.Call(p.cb, []Object{p.w}, nil)
+		// CPython routes weakref callback errors through
+		// sys.unraisablehook with the "Exception ignored on calling
+		// callback for %R" prefix, then keeps draining the rest of the
+		// list.
+		//
+		// CPython: Objects/weakrefobject.c:97 handle_callback
+		_, err := tp.Call(p.cb, []Object{p.w}, nil)
+		if err != nil && WriteUnraisableHook != nil {
+			s, sErr := Repr(p.w)
+			if sErr != nil {
+				s = "<weakref>"
+			}
+			WriteUnraisableHook(p.cb, "Exception ignored on calling callback for "+s, err)
+		}
 	}
 }
 
