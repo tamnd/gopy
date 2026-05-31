@@ -192,6 +192,7 @@ func init() {
 		func(o Object) (Object, error) {
 			g := o.(*AsyncGenerator)
 			if g.YieldFromTarget != nil && g.started && !g.closed && g.Running.Load() == 0 {
+				Incref(g.YieldFromTarget)
 				return g.YieldFromTarget, nil
 			}
 			return None(), nil
@@ -536,6 +537,10 @@ func (g *AsyncGenerator) Close() error {
 		g.closed = true
 		return nil
 	}
+	if yf := g.YieldFromTarget; yf != nil {
+		_ = GenCloseIter(yf)
+		g.YieldFromTarget = nil
+	}
 	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	g.closed = true
@@ -545,6 +550,13 @@ func (g *AsyncGenerator) Close() error {
 	if errors.Is(msg.Err, ErrGeneratorExit) ||
 		errors.Is(msg.Err, ErrStopIteration) {
 		return nil
+	}
+	var re *RaisedError
+	if errors.As(msg.Err, &re) && re.Exc != nil {
+		switch re.Exc.Type().Name {
+		case "GeneratorExit", "StopIteration", "StopAsyncIteration":
+			return nil
+		}
 	}
 	return msg.Err
 }

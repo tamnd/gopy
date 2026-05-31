@@ -236,6 +236,7 @@ func init() {
 		func(o Object) (Object, error) {
 			g := o.(*Generator)
 			if g.YieldFromTarget != nil && g.started && !g.closed && g.Running.Load() == 0 {
+				Incref(g.YieldFromTarget)
 				return g.YieldFromTarget, nil
 			}
 			return None(), nil
@@ -820,6 +821,16 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 		return nil
 	}
+	// Close the sub-iterator first so its finally clauses fire before
+	// the GeneratorExit lands on the outer body. Without this, a
+	// yield-from / await chain leaves the inner finally unrun: CPython
+	// solves it via _PyGen_yf inside gen_close.
+	//
+	// CPython: Objects/genobject.c:445 gen_close (gen_close_iter call)
+	if yf := g.YieldFromTarget; yf != nil {
+		_ = GenCloseIter(yf)
+		g.YieldFromTarget = nil
+	}
 	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	g.closed = true
@@ -860,6 +871,33 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 	}
 	return msg.Err
+}
+
+// GenCloseIter mirrors CPython's gen_close_iter: a yield-from target
+// that is a generator or coroutine has its Close() driven directly;
+// any other awaitable has its close attribute looked up and called.
+// Errors are reported back to the caller so gen_close can choose
+// whether to surface them or swallow.
+//
+// CPython: Objects/genobject.c:412 gen_close_iter
+func GenCloseIter(yf Object) error {
+	switch v := yf.(type) {
+	case *Generator:
+		return v.Close()
+	case *Coroutine:
+		return v.Close()
+	case *AsyncGenerator:
+		return v.Close()
+	}
+	closeFn, err := GetAttr(yf, NewStr("close"))
+	if err != nil {
+		if WriteUnraisableHook != nil {
+			WriteUnraisableHook(yf, "Exception ignored while closing iterator", err)
+		}
+		return nil
+	}
+	_, callErr := Call(closeFn, NewTuple(nil), nil)
+	return callErr
 }
 
 func genIterNext(o Object) (Object, error) {

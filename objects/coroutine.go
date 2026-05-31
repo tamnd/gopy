@@ -154,12 +154,17 @@ func init() {
 		}, nil))
 
 	// cr_await: the awaitable currently driven by `await`, or None.
+	// CPython's coro_get_cr_await returns a new reference (Py_NewRef of
+	// the yf result); we mirror that with Incref so LOAD_ATTR receives
+	// an owned reference and the subsequent stackref Close does not
+	// underflow the target's refcount.
 	//
 	// CPython: Objects/genobject.c:1129 coro_get_cr_await (-> _PyGen_yf)
 	SetTypeDescr(CoroutineType, "cr_await", NewGetSetDescr("cr_await",
 		func(o Object) (Object, error) {
 			c := o.(*Coroutine)
 			if c.YieldFromTarget != nil && c.started && !c.closed && c.Running.Load() == 0 {
+				Incref(c.YieldFromTarget)
 				return c.YieldFromTarget, nil
 			}
 			return None(), nil
@@ -561,7 +566,9 @@ func (c *Coroutine) forwardThrowResult(fval Object, ferr error) (Object, error) 
 
 // Close throws GeneratorExit. A coroutine that yields after seeing
 // GeneratorExit raises RuntimeError, mirroring "coroutine ignored
-// GeneratorExit".
+// GeneratorExit". When the coroutine is parked at an `await`, the
+// sub-iterator is closed first via gen_close_iter so its finally
+// clauses fire before the body sees the exit.
 //
 // CPython: Objects/genobject.c:L388 gen_close (coroutine variant)
 func (c *Coroutine) Close() error {
@@ -572,6 +579,10 @@ func (c *Coroutine) Close() error {
 		c.closed = true
 		return nil
 	}
+	if yf := c.YieldFromTarget; yf != nil {
+		_ = GenCloseIter(yf)
+		c.YieldFromTarget = nil
+	}
 	c.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
 	msg := <-c.YieldCh
 	c.closed = true
@@ -581,6 +592,13 @@ func (c *Coroutine) Close() error {
 	if errors.Is(msg.Err, ErrGeneratorExit) ||
 		errors.Is(msg.Err, ErrStopIteration) {
 		return nil
+	}
+	var re *RaisedError
+	if errors.As(msg.Err, &re) && re.Exc != nil {
+		switch re.Exc.Type().Name {
+		case "GeneratorExit", "StopIteration":
+			return nil
+		}
 	}
 	return msg.Err
 }
