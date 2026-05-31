@@ -549,7 +549,7 @@ func currentScope() (objects.Object, objects.Object) {
 // EvalCode against the supplied globals/locals.
 //
 // CPython: equivalent of PyEval_EvalCode (Python/ceval.c)
-func currentEvaluator(code *objects.Code, globals, locals objects.Object) (objects.Object, error) {
+func currentEvaluator(code *objects.Code, globals, locals, closure objects.Object) (objects.Object, error) {
 	ts := currentThread()
 	if ts == nil {
 		ts = state.NewThread()
@@ -569,7 +569,7 @@ func currentEvaluator(code *objects.Code, globals, locals objects.Object) (objec
 			}
 		}
 	}
-	return EvalCode(ts, code, globals, locals)
+	return EvalCodeClosure(ts, code, globals, locals, closure)
 }
 
 // currentImporter is the hook builtins.__import__ delegates to. It

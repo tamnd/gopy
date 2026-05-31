@@ -119,8 +119,35 @@ func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
 //
 // CPython: Python/ceval.c PyEval_EvalCode
 func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object) (objects.Object, error) {
+	return EvalCodeClosure(ts, co, globals, locals, nil)
+}
+
+// EvalCodeClosure is EvalCode with an explicit closure: the tuple of
+// cells exec(code, closure=...) supplies for a code object that has
+// free variables. The cells are wired into the frame's free-var slots
+// the same way COPY_FREE_VARS seeds a function call, so LOAD_DEREF in
+// the executed body resolves against them. closure is nil for the
+// ordinary no-closure path.
+//
+// CPython: Python/ceval.c PyEval_EvalCodeEx (closure argument)
+func EvalCodeClosure(ts *state.Thread, co *objects.Code, globals, locals, closure objects.Object) (objects.Object, error) {
 	stack := frameStackFor(ts)
-	f := stack.Push(co, globals, builtinsFromGlobals(globals), nil)
+	// When a closure is supplied, exec() runs the code as though it
+	// were a freshly built function carrying that closure: CPython's
+	// builtin_exec_impl creates a func via PyFunction_New, sets its
+	// func_closure, and the COPY_FREE_VARS prologue copies those cells
+	// into the free-var slots. Give the frame a function object holding
+	// the closure so the same opcode resolves here instead of failing
+	// with "frame has no closure".
+	//
+	// CPython: Python/bltinmodule.c:1196 builtin_exec_impl (func closure)
+	var fn objects.Object
+	if t, ok := closure.(*objects.Tuple); ok && t.Len() > 0 {
+		exfn := objects.NewFunction(co.Name, co, globals)
+		exfn.SetClosure(t)
+		fn = exfn
+	}
+	f := stack.Push(co, globals, builtinsFromGlobals(globals), fn)
 	if locals != nil {
 		f.Locals = locals
 	} else {
