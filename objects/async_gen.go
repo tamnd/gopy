@@ -87,7 +87,7 @@ var AsyncGenAThrowType *Type
 
 // AsyncGenWrappedValueType is the type for _PyAsyncGenWrappedValue.
 // Wraps a value yielded inside an async generator body so the asend /
-// __anext__ awaitable can recognise it and convert to StopIteration.
+// __anext__ awaitable can recognize it and convert to StopIteration.
 //
 // CPython: Objects/genobject.c:2005 _PyAsyncGenWrappedValue_Type
 var AsyncGenWrappedValueType *Type
@@ -293,14 +293,14 @@ func init() {
 	//
 	// CPython: Objects/genobject.c:1623 async_gen_methods
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
-		"asend":         asyncGenAsendMethod,
-		"athrow":        asyncGenAthrowMethod,
-		"aclose":        asyncGenAcloseMethod,
-		"__aiter__":     asyncGenAiterMethod,
-		"__anext__":     asyncGenAnextMethod,
+		"asend":             asyncGenAsendMethod,
+		"athrow":            asyncGenAthrowMethod,
+		"aclose":            asyncGenAcloseMethod,
+		"__aiter__":         asyncGenAiterMethod,
+		"__anext__":         asyncGenAnextMethod,
 		"__class_getitem__": asyncGenClassGetitemMethod,
-		"__reduce__":    genReduceReject,
-		"__reduce_ex__": genReduceReject,
+		"__reduce__":        genReduceReject,
+		"__reduce_ex__":     genReduceReject,
 	} {
 		SetTypeDescr(AsyncGeneratorType, name, NewMethodDescr(AsyncGeneratorType, name, fn))
 	}
