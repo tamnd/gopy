@@ -365,6 +365,15 @@ func NewCoroutineWithQualname(name, qualname string) *Coroutine {
 	return c
 }
 
+// MarkFinished records that the coroutine body has run to completion
+// so subsequent Send/Throw/Close are no-ops and inspect.getcoroutinestate
+// reports CORO_CLOSED. Mirrors Generator.MarkFinished.
+//
+// CPython: Objects/genobject.c:225 gen_send_ex2 (gi_frame_state = FRAME_COMPLETED)
+func (c *Coroutine) MarkFinished() {
+	c.closed = true
+}
+
 // Send drives the coroutine forward by one suspension point. The
 // rules match Generator.Send: None on first call, otherwise an
 // already-started coroutine receives the sent value.

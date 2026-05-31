@@ -287,6 +287,15 @@ func asyncGenTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
+// MarkFinished records that the async-generator body has run to
+// completion so subsequent Send/Throw/Close are no-ops. Mirrors
+// Generator.MarkFinished.
+//
+// CPython: Objects/genobject.c:225 gen_send_ex2 (gi_frame_state = FRAME_COMPLETED)
+func (g *AsyncGenerator) MarkFinished() {
+	g.closed = true
+}
+
 // Send drives the async generator one yield-point forward. The
 // public surface is asend(), which returns an awaitable; this method
 // is the inner driver the awaitable uses.

@@ -397,18 +397,27 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		// refreshes it on every resume.
 		//
 		// CPython: Objects/genobject.c gen_send_ex2 (exc_info pop after return)
-		if gen, ok := genObj.(*objects.Generator); ok {
-			pyerrors.SetHandledFromObject(savedTS, gen.CallerExc)
-			// Mark the generator as closed and not running. Without this the
-			// last resume left Running == 1, so inspect.getgeneratorstate
-			// would report GEN_RUNNING for an exhausted generator. Closed
-			// also tells genFinalize to skip the SendCh round-trip; the
-			// goroutine has already exited, so sending would deadlock.
-			//
-			// CPython: Objects/genobject.c:225 gen_send_ex2
-			// (gi_frame_state = FRAME_COMPLETED on return)
-			gen.Running.Store(0)
-			gen.MarkFinished()
+		// Mark the running gen-like as closed and not running. Without
+		// this the last resume left Running == 1, so
+		// inspect.getgeneratorstate / getcoroutinestate / getasyncgenstate
+		// would report a still-running state for an exhausted body. The
+		// closed flag also tells the per-type Finalize/Close paths to
+		// skip the SendCh round-trip; the body goroutine has already
+		// exited, so sending would deadlock.
+		//
+		// CPython: Objects/genobject.c:225 gen_send_ex2
+		// (gi_frame_state = FRAME_COMPLETED on return)
+		switch g := genObj.(type) {
+		case *objects.Generator:
+			pyerrors.SetHandledFromObject(savedTS, g.CallerExc)
+			g.Running.Store(0)
+			g.MarkFinished()
+		case *objects.Coroutine:
+			g.Running.Store(0)
+			g.MarkFinished()
+		case *objects.AsyncGenerator:
+			g.Running.Store(0)
+			g.MarkFinished()
 		}
 		switch {
 		case runErr != nil && !errors.Is(runErr, objects.ErrStopIteration):
@@ -610,15 +619,17 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 	recvRef := e.peek(0)
 	recv := recvRef.AsObject()
 
-	// Track the yield-from sub-iterator on the outer generator so
-	// gi_yieldfrom and throw-forwarding (_gen_throw) work correctly.
+	// Track the yield-from sub-iterator on whichever gen-like object is
+	// driving this frame so gi_yieldfrom / cr_await / ag_await
+	// (and throw-forwarding through _gen_throw) work correctly. CPython
+	// surfaces this via _PyGen_yf walking the suspended frame's TOS;
+	// gopy stores it explicitly on the running object instead.
 	//
 	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf via
 	// gi_frame_state == FRAME_SUSPENDED_YIELD_FROM)
-	outerGen, _ := e.genRunning.(*objects.Generator)
-	if outerGen != nil {
-		outerGen.YieldFromTarget = recv
-	}
+	// CPython: Objects/genobject.c:1129 coro_get_cr_await
+	// CPython: Objects/genobject.c:1608 async_gen ag_await
+	setRunningYieldFrom(e.genRunning, recv)
 
 	switch r := recv.(type) {
 	case *objects.Generator:
@@ -634,17 +645,13 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			genCallerFrames.Delete(r)
 			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			genCallerFrames.Delete(r)
 			return genResult{ok: true}, serr
 		}
@@ -660,16 +667,12 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			return genResult{ok: true}, serr
 		}
 		e.pushObject(val)
@@ -682,18 +685,14 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 		var nerr error
 		if v == objects.None() {
 			if t.IterNext == nil {
-				if outerGen != nil {
-					outerGen.YieldFromTarget = nil
-				}
+				setRunningYieldFrom(e.genRunning, nil)
 				return genResult{ok: true}, fmt.Errorf("TypeError: %s is not an iterator", t.Name)
 			}
 			val, nerr = t.IterNext(recv)
 		} else {
 			sendAttr, agerr := objects.GetAttr(recv, objects.NewStr("send"))
 			if agerr != nil {
-				if outerGen != nil {
-					outerGen.YieldFromTarget = nil
-				}
+				setRunningYieldFrom(e.genRunning, nil)
 				return genResult{ok: true}, agerr
 			}
 			val, nerr = objects.Call(sendAttr, objects.NewTuple([]objects.Object{v}), nil)
@@ -703,16 +702,12 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if nerr != nil {
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			return genResult{ok: true}, nerr
 		}
 		e.pushObject(val)
@@ -787,6 +782,27 @@ func (e *evalState) execEndAsyncFor() (genResult, error) {
 	return genResult{ok: true}, excAsError(excVal)
 }
 
+// setRunningYieldFrom mirrors CPython's _PyGen_yf reflection by
+// stashing the awaitable currently being delegated to on whichever
+// gen-like object owns the running frame. Pass nil to clear. CPython
+// derives yieldfrom from the suspended frame's TOS; gopy stores it
+// explicitly on the Generator / Coroutine / AsyncGenerator so that
+// gi_yieldfrom, cr_await, ag_await all read it directly.
+//
+// CPython: Objects/genobject.c:1129 coro_get_cr_await (calls _PyGen_yf)
+// CPython: Objects/genobject.c:1608 async_gen tp_getset (ag_await)
+// CPython: Objects/genobject.c:1043 _PyGen_yf
+func setRunningYieldFrom(running objects.Object, target objects.Object) {
+	switch r := running.(type) {
+	case *objects.Generator:
+		r.YieldFromTarget = target
+	case *objects.Coroutine:
+		r.YieldFromTarget = target
+	case *objects.AsyncGenerator:
+		r.YieldFromTarget = target
+	}
+}
+
 // getAwaitableIter ports _PyCoro_GetAwaitableIter: a coroutine is its
 // own awaitable iterator; anything else routes through tp_as_async's
 // am_await slot. The slot's result must be an iterator and must not
@@ -796,6 +812,21 @@ func (e *evalState) execEndAsyncFor() (genResult, error) {
 // CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter
 func getAwaitableIter(o objects.Object) (objects.Object, error) {
 	if _, ok := o.(*objects.Coroutine); ok {
+		// CPython does Py_INCREF once; the GET_AWAITABLE framework
+		// then does a single STACK_SHRINK (no slot decref because the
+		// body already did PyStackRef_CLOSE on the input). gopy's
+		// autogenerated GET_AWAITABLE arm drops the slot twice
+		// (explicit iterable.Close() in body, plus DropStack inside
+		// e.drop(1)), so we bump twice to leave the surviving slot
+		// with the same refcount the receiver had on entry. Until
+		// the bytecodes_gen template learns to fold (X -- Y) shapes
+		// with explicit CLOSE into a single setPeek, the double-bump
+		// stays.
+		//
+		// CPython: Objects/genobject.c:1095 _PyCoro_GetAwaitableIter
+		// CPython: Python/bytecodes.c:1274 GET_AWAITABLE (CLOSE + steal)
+		objects.Incref(o)
+		objects.Incref(o)
 		return o, nil
 	}
 	// Generators flagged CO_ITERABLE_COROUTINE (via @types.coroutine)
@@ -807,6 +838,8 @@ func getAwaitableIter(o objects.Object) (objects.Object, error) {
 	if g, ok := o.(*objects.Generator); ok {
 		if g.Code != nil {
 			if cd, ok2 := g.Code.(*objects.Code); ok2 && uint32(cd.Flags)&compile.CoIterableCoroutine != 0 {
+				objects.Incref(o)
+				objects.Incref(o)
 				return o, nil
 			}
 		}

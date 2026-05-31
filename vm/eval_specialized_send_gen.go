@@ -49,23 +49,20 @@ func (e *evalState) fastSendGen(oparg uint32) (int, bool, error) {
 		val  objects.Object
 		serr error
 	)
-	// Mirror the outerGen.YieldFromTarget and genCallerFrames maintenance
-	// from execSend: the fast path must register the caller frame so that
-	// sys._getframe() inside the sub-generator body can walk f_back
-	// through the yield-from chain.
-	outerGen, _ := e.genRunning.(*objects.Generator)
+	// Mirror execSend's YieldFromTarget + genCallerFrames maintenance:
+	// the fast path must register the caller frame so that sys._getframe()
+	// inside the sub-generator body can walk f_back, and stash recv on
+	// the running gen-like so gi_yieldfrom / cr_await / ag_await stay in
+	// sync. CPython derives both from the suspended frame; gopy stores
+	// them explicitly because of the goroutine-driven body model.
 	switch r := recv.(type) {
 	case *objects.Generator:
 		v := e.popObject()
-		if outerGen != nil {
-			outerGen.YieldFromTarget = r
-		}
+		setRunningYieldFrom(e.genRunning, r)
 		genCallerFrames.Store(r, e.f)
 		val, serr = r.Send(v)
 		if retVal, isStop := stopIterRetval(serr); isStop {
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			genCallerFrames.Delete(r)
 			// Leave receiver on stack and push the StopIteration return
 			// value (args[0] or None). The trailing END_SEND will pop both.
@@ -76,20 +73,21 @@ func (e *evalState) fastSendGen(oparg uint32) (int, bool, error) {
 			return e.cacheAdvance(compile.SEND) + 2*int(oparg), true, nil
 		}
 		if serr != nil {
-			if outerGen != nil {
-				outerGen.YieldFromTarget = nil
-			}
+			setRunningYieldFrom(e.genRunning, nil)
 			genCallerFrames.Delete(r)
 			return 0, true, serr
 		}
 	case *objects.Coroutine:
 		v := e.popObject()
+		setRunningYieldFrom(e.genRunning, r)
 		val, serr = r.Send(v)
 		if retVal, isStop := stopIterRetval(serr); isStop {
+			setRunningYieldFrom(e.genRunning, nil)
 			e.pushObject(retVal)
 			return e.cacheAdvance(compile.SEND) + 2*int(oparg), true, nil
 		}
 		if serr != nil {
+			setRunningYieldFrom(e.genRunning, nil)
 			return 0, true, serr
 		}
 	default:
