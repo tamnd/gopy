@@ -199,6 +199,16 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
 
+	// HasWeakref is true when instances of this type carry weak-reference
+	// support, mirroring a non-zero tp_weaklistoffset. Every plain user
+	// class (no __slots__, or __slots__ that names __weakref__) gets it,
+	// and it inherits down the base chain. __slots__ validation reads it
+	// to reject a redundant __weakref__ slot when a base already provides
+	// one.
+	//
+	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
+	HasWeakref bool
+
 	// ClassAttrDict is the live attribute dict for user types, mirroring
 	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
 	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the

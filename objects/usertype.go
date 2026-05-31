@@ -114,6 +114,15 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
+	// best_base validates the instance layout before anything else: two
+	// bases whose solid bases differ (int and str each own a distinct C
+	// struct) cannot be combined, so type('A', (int, str), {}) raises a
+	// lay-out conflict here rather than producing a broken type.
+	//
+	// CPython: Objects/typeobject.c:2998 best_base
+	if _, err := bestBase(bases); err != nil {
+		return nil, err
+	}
 	t, err := newTypeE(name, bases)
 	if err != nil {
 		return nil, err
@@ -310,6 +319,25 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	if noSlotsDeclared {
 		t.HasDict = true
 	}
+	// HasWeakref tracks tp_weaklistoffset. It inherits from any base that
+	// provides weak-reference support, and the no-__slots__ case adds it
+	// for the new type whenever the solid base is not a variable-size
+	// built-in (the may_add_weak gate). A class declaring __slots__ only
+	// gains weakref support when the list names __weakref__, which
+	// installSlots handles.
+	//
+	// CPython: Objects/typeobject.c:4160 type_new_slots (may_add_weak)
+	for _, b := range bases {
+		if b != nil && mroHasWeakref(b) {
+			t.HasWeakref = true
+			break
+		}
+	}
+	if !t.HasWeakref && noSlotsDeclared {
+		if base, err := bestBase(bases); err == nil && base != nil && typeItemSize(base) == 0 {
+			t.HasWeakref = true
+		}
+	}
 	if !t.HasDict {
 		return
 	}
@@ -317,6 +345,32 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	if basesAllowInlineValues(bases, noSlotsDeclared) {
 		t.TpFlags |= TpFlagInlineValues
 	}
+}
+
+// mroHasDict reports whether any class in b's MRO carries a per-instance
+// __dict__ (a non-zero tp_dictoffset), the signal type_new reads to gate
+// may_add_dict.
+//
+// CPython: Objects/typeobject.c:4160 type_new_slots (base->tp_dictoffset)
+func mroHasDict(b *Type) bool {
+	for _, cls := range b.MRO {
+		if cls.HasDict {
+			return true
+		}
+	}
+	return false
+}
+
+// mroHasWeakref is the tp_weaklistoffset companion of mroHasDict.
+//
+// CPython: Objects/typeobject.c:4161 type_new_slots (base->tp_weaklistoffset)
+func mroHasWeakref(b *Type) bool {
+	for _, cls := range b.MRO {
+		if cls.HasWeakref {
+			return true
+		}
+	}
+	return false
 }
 
 // basesAllowInlineValues reports whether every non-object base on bases
@@ -1745,20 +1799,43 @@ func installSlots(t *Type, ns *Dict) error {
 	if err != nil {
 		return err
 	}
+	// type_new_slots: a non-empty __slots__ is rejected outright when the
+	// solid base is a variable-size built-in (int, tuple, bytes, str),
+	// whose instances cannot grow a fixed slot array. may_add_dict /
+	// may_add_weak then gate the two special slot names against a base
+	// that already supplies that storage.
+	//
+	// CPython: Objects/typeobject.c:4124 type_new_slots_impl
+	base, _ := bestBase(t.Bases)
+	if base == nil {
+		base = objectType
+	}
+	itemSize := typeItemSize(base)
+	if len(names) > 0 && itemSize != 0 {
+		return fmt.Errorf("TypeError: nonempty __slots__ not supported for subtype of '%s'", base.Name)
+	}
+	mayAddDict := !mroHasDict(base)
+	mayAddWeak := !mroHasWeakref(base) && itemSize == 0
+	addDict, addWeak := 0, 0
 	resolved := make([]string, 0, len(names))
 	seen := map[string]bool{}
-	addedDictSlot := false
 	for _, n := range names {
 		switch n {
 		case "__dict__":
-			if addedDictSlot {
+			// CPython: Objects/typeobject.c:3989 type_new_visit_slots
+			if !mayAddDict || addDict != 0 {
 				return fmt.Errorf("TypeError: __dict__ slot disallowed: we already got one")
 			}
-			addedDictSlot = true
+			addDict++
 			t.HasDict = true
 			continue
 		case "__weakref__":
-			// Recognized but no per-instance weakref offset yet.
+			// CPython: Objects/typeobject.c:3998 type_new_visit_slots
+			if !mayAddWeak || addWeak != 0 {
+				return fmt.Errorf("TypeError: __weakref__ slot disallowed: we already got one")
+			}
+			addWeak++
+			t.HasWeakref = true
 			continue
 		}
 		if !StrIsIdentifier(n) {
