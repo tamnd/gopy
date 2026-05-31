@@ -684,6 +684,44 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 	}
 }
 
+// DrainIterable materializes any iterable into a slice. Unlike
+// drainIterableForSlice it propagates the underlying TypeError from
+// PyObject_GetIter, so callers like list() / tuple() / set() surface
+// "'X' object is not iterable" instead of the slice-assign wording.
+//
+// CPython: Objects/abstract.c:2820 PySequence_Fast (constructor path)
+func DrainIterable(o Object) ([]Object, error) {
+	if l, ok := o.(*List); ok {
+		out := make([]Object, len(l.items))
+		copy(out, l.items)
+		return out, nil
+	}
+	if t, ok := o.(*Tuple); ok {
+		out := make([]Object, len(t.items))
+		copy(out, t.items)
+		return out, nil
+	}
+	it, err := Iter(o)
+	if err != nil {
+		return nil, err
+	}
+	itT := it.Type()
+	if itT.IterNext == nil {
+		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itT.Name)
+	}
+	var out []Object
+	for {
+		v, err := itT.IterNext(it)
+		if errors.Is(err, ErrStopIteration) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+}
+
 // listReprInProgress guards against recursive list repr: [[...]].
 //
 // CPython: Objects/object.c:2256 Py_ReprEnter

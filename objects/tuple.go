@@ -85,7 +85,7 @@ func init() {
 		}
 		var items []Object
 		if len(args) == 1 {
-			drained, err := drainIterableForSlice(args[0])
+			drained, err := DrainIterable(args[0])
 			if err != nil {
 				return nil, err
 			}
