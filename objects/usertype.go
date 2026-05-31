@@ -131,6 +131,22 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if err := processClassNamespace(t, ns); err != nil {
 		return nil, err
 	}
+	// When the namespace did not carry __module__, inherit it from the
+	// calling frame's globals __name__. The compiler injects __module__
+	// into every class-statement namespace, so this only fires for the
+	// type(name, bases, {}) constructor form, matching CPython where
+	// type_new_set_module pulls globals __name__ for the bare builtin call.
+	//
+	// CPython: Objects/typeobject.c:4382 type_new_set_module
+	if t.Module == "" {
+		has := false
+		if ns != nil {
+			has, _ = ns.Contains(NewStr("__module__"))
+		}
+		if !has {
+			t.Module = CallerModuleName()
+		}
+	}
 	// NewType already ran inheritSlotsAllMRO when the namespace was not
 	// yet populated, so typeOverridesHash could not see __hash__. If the
 	// just-copied namespace declares __hash__, drop any inherited Hash /

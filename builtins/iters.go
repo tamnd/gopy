@@ -10,7 +10,6 @@
 package builtins
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
@@ -114,7 +113,13 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	if err == nil {
 		return v, nil
 	}
-	if errors.Is(err, objects.ErrStopIteration) {
+	// next(it, default) swaps in the default for any StopIteration,
+	// whether the built-in sentinel or a Python `raise StopIteration`
+	// from a user __next__. Match the exception type, not just the
+	// sentinel, mirroring builtin_next's PyErr_ExceptionMatches.
+	//
+	// CPython: Python/bltinmodule.c:1620 builtin_next
+	if objects.IsStopIteration(err) {
 		if len(args) == 2 {
 			return args[1], nil
 		}

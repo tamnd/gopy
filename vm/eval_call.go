@@ -10,6 +10,7 @@ package vm
 // See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -569,7 +570,32 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		}
 		return nil, objects.TooManyPositionalError(qualname, len(args), atLeast, atMost, kwonlyGiven)
 	}
-	return Eval(ts, f)
+	ret, err := Eval(ts, f)
+	return wrapCallError(ts, ret, err)
+}
+
+// wrapCallError surfaces the live thread-state exception alongside the
+// textual unwind sentinel that Eval returns. CPython leaves the raised
+// exception set on the tstate for the C caller, which inspects it with
+// PyErr_ExceptionMatches; gopy's Go-level callers (builtin next/any/all,
+// the comprehension drivers, map/filter) need the same introspection, so
+// the Python-function call boundary returns a RaisedError carrying the
+// exception object instead of a bare string. Already-wrapped errors and
+// the no-exception case pass through untouched.
+//
+// CPython: Objects/call.c:370 PyObject_Call (exception stays on tstate)
+func wrapCallError(ts *state.Thread, ret objects.Object, err error) (objects.Object, error) {
+	if err == nil {
+		return ret, nil
+	}
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		return ret, err
+	}
+	if exc := pyerrors.Occurred(ts); exc != nil {
+		return ret, objects.NewRaisedError(exc, err.Error())
+	}
+	return ret, err
 }
 
 // pyFunctionVectorcall is the PEP 590 vectorcall entry for Python functions.
@@ -918,5 +944,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		}
 		return nil, objects.TooManyPositionalError(qualname, len(posArgs), atLeast, atMost, kwonlyGiven)
 	}
-	return Eval(ts, f)
+	ret, err := Eval(ts, f)
+	return wrapCallError(ts, ret, err)
 }

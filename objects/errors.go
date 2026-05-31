@@ -2,6 +2,28 @@ package objects
 
 import "errors"
 
+// IsStopIteration reports whether err is a StopIteration: either the
+// ErrStopIteration sentinel raised by built-in iterators or a Python
+// exception (RaisedError) whose type is StopIteration or a subclass.
+// Mirrors PyErr_ExceptionMatches(PyExc_StopIteration), which next(it,
+// default) uses to decide when to swap in the default.
+//
+// CPython: Python/errors.c:259 PyErr_GivenExceptionMatches
+func IsStopIteration(err error) bool {
+	if errors.Is(err, ErrStopIteration) {
+		return true
+	}
+	var re *RaisedError
+	if errors.As(err, &re) && re.Exc != nil {
+		for cur := re.Exc.Type(); cur != nil; cur = parentBase(cur) {
+			if cur.Name == "StopIteration" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // v0.2 has no Python-level exception machinery (that lands in v0.3).
 // Until then, the runtime uses sentinel Go errors that the abstract
 // layer maps to placeholder strings; v0.3 rewires these to real
