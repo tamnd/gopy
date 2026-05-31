@@ -739,10 +739,16 @@ func BoolCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.
 }
 
 // ListCtor ports list_init. 0 args returns []; one positional drains
-// the iterable into a fresh list.
+// the iterable into a fresh list. Keyword arguments are rejected so
+// the clinic signature "iterable: object = (), /" (positional-only)
+// matches CPython.
 //
 // CPython: Objects/listobject.c list_init
-func ListCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+// CPython: Objects/clinic/listobject.c.h list___init__ (_PyArg_NoKeywords)
+func ListCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) > 0 {
+		return nil, fmt.Errorf("TypeError: list() takes no keyword arguments")
+	}
 	if len(args) == 0 {
 		return objects.NewList(nil), nil
 	}
@@ -768,9 +774,29 @@ func bindListCtor(t *objects.Type) {
 	// iterable into it.
 	//
 	// CPython: Objects/listobject.c:2716 list___init___impl
-	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 		if len(args) < 1 || len(args) > 2 {
 			return nil, fmt.Errorf("TypeError: list expected at most 1 argument, got %d", len(args)-1)
+		}
+		// CPython: Objects/clinic/listobject.c.h list___init__ skips
+		// _PyArg_NoKeywords when the instance's class has overridden
+		// __new__ (Py_TYPE(self)->tp_new != base_tp->tp_new). That lets a
+		// subclass like `class S(list): def __new__(cls, seq, kw=None)`
+		// pass keyword arguments through type.__call__ without tripping
+		// the bare-list check.
+		if len(kwargs) > 0 {
+			selfTp := args[0].Type()
+			ownNew := false
+			if selfTp != t {
+				if cd := selfTp.ClassAttrDict; cd != nil {
+					if has, _ := cd.Contains(objects.NewStr("__new__")); has {
+						ownNew = true
+					}
+				}
+			}
+			if !ownNew {
+				return nil, fmt.Errorf("TypeError: list() takes no keyword arguments")
+			}
 		}
 		l, ok := args[0].(*objects.List)
 		if !ok {

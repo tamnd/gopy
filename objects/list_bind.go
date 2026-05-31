@@ -199,9 +199,13 @@ func listIterMethod(args []Object, _ map[string]Object) (Object, error) {
 	return listIter(args[0])
 }
 
-// listReversedMethod backs list.__reversed__ via the dedicated
-// list_reversed iterator type. Falls through to a generic reversed()
-// path when the helper is absent.
+// listReversedMethod backs list.__reversed__ by allocating a real
+// list_reverseiterator over the source list. The iterator keeps a
+// reference to the source so pickle round-trips share identity and
+// list mutations after pickle.loads are visible to the loaded
+// iterator (test_reversed_pickle).
+//
+// CPython: Objects/listobject.c:4140 list___reversed___impl
 func listReversedMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
@@ -210,12 +214,7 @@ func listReversedMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__reversed__' requires a 'list' object")
 	}
-	rev := NewList(nil)
-	n := l.Len()
-	for i := n - 1; i >= 0; i-- {
-		rev.Append(l.Item(i))
-	}
-	return listIter(rev)
+	return listRevIter(l), nil
 }
 
 func listRichCmpMethod(name string, op CompareOp) func(args []Object, _ map[string]Object) (Object, error) {
@@ -319,6 +318,12 @@ func listPopMethod(args []Object, _ map[string]Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// CPython: Objects/clinic/listobject.c.h list_pop accepts at most one
+	// positional argument; _PyArg_CheckPositional reports the count
+	// before the body runs (test_pop expects TypeError, not IndexError).
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: list.pop() takes at most 1 argument (%d given)", len(args)-1)
+	}
 	i := -1
 	if len(args) >= 2 {
 		idx, ok := args[1].(*Int)
@@ -365,23 +370,25 @@ func listIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: index() takes at least 1 argument")
 	}
+	// CPython: Objects/listobject.c:1430 list_index_impl uses the
+	// _PyEval_SliceIndex converter so start / stop accept any
+	// integer-like value, including ones larger than PY_SSIZE_T_MAX
+	// (clamped to the ssize_t range).
 	start := 0
 	stop := len(l.items)
 	if len(args) >= 3 {
-		i, ok := args[2].(*Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: 'start' must be an integer")
+		v, ierr := sliceIndex(args[2])
+		if ierr != nil {
+			return nil, ierr
 		}
-		n, _ := i.Int64()
-		start = int(n)
+		start = v
 	}
 	if len(args) >= 4 {
-		i, ok := args[3].(*Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: 'stop' must be an integer")
+		v, ierr := sliceIndex(args[3])
+		if ierr != nil {
+			return nil, ierr
 		}
-		n, _ := i.Int64()
-		stop = int(n)
+		stop = v
 	}
 	idx, ierr := l.Index(args[1], start, stop)
 	if ierr != nil {
