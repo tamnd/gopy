@@ -14,7 +14,10 @@
 
 package objects
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // NewUserType builds a Python-defined class. bases default to
 // [object] when empty; ns must be non-nil and is iterated for type
@@ -391,8 +394,45 @@ func processClassNamespace(t *Type, ns *Dict) error {
 //
 // CPython: Objects/typeobject.c:4526 type_new_set_attrs
 // CPython: Objects/typeobject.c:4372 type_new_classmethod
+// namespaceKeyOrder returns ns's keys in the order type_new should copy
+// them into tp_dict. CPython does dict = PyDict_Copy(orig_dict), and
+// PyDict_Copy/PyDict_Merge walk the source via its Python iterator when
+// the source overrides dict.__iter__ (an OrderedDict namespace, per
+// bpo-34320). For an exact dict the storage order is already correct, so
+// the common class-statement path keeps the cheap ns.Keys() walk.
+//
+// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
+func namespaceKeyOrder(ns *Dict) []Object {
+	if !dictIterOverridden(ns.Type()) {
+		return ns.Keys()
+	}
+	keysAttr, err := GetAttr(ns, NewStr("keys"))
+	if err != nil {
+		return ns.Keys()
+	}
+	keysObj, err := Call(keysAttr, NewTuple(nil), nil)
+	if err != nil {
+		return ns.Keys()
+	}
+	it, err := Iter(keysObj)
+	if err != nil {
+		return ns.Keys()
+	}
+	out := make([]Object, 0, ns.Len())
+	for {
+		k, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				return out
+			}
+			return ns.Keys()
+		}
+		out = append(out, k)
+	}
+}
+
 func copyNamespaceToType(t *Type, ns *Dict) error {
-	for _, k := range ns.Keys() {
+	for _, k := range namespaceKeyOrder(ns) {
 		s, ok := k.(*Unicode)
 		if !ok || s.v == "__slots__" {
 			continue

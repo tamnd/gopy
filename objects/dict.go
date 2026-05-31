@@ -787,13 +787,36 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:2873 PyDict_Merge
 func dictMergeFromArg(dst *Dict, src Object) error {
-	if d, ok := src.(*Dict); ok {
+	// CPython gates the fast PyDict_Next copy on the source's tp_iter
+	// being the exact dict iterator. A subclass that overrides __iter__
+	// (OrderedDict walks its linked list) must merge through keys() so the
+	// caller observes the subclass's iteration order, not the underlying
+	// hash-table order.
+	//
+	// CPython: Objects/dictobject.c:2901 dict_merge (Py_TYPE(b)->tp_iter == dict_iter)
+	if d, ok := src.(*Dict); ok && !dictIterOverridden(src.Type()) {
 		return dictMergeFromDict(dst, d)
 	}
 	if keysAttr, err := GetAttr(src, NewStr("keys")); err == nil {
 		return dictMergeFromKeys(dst, src, keysAttr)
 	}
 	return dictMergeFromPairs(dst, src)
+}
+
+// dictIterOverridden reports whether t overrides dict.__iter__. It is the
+// gopy stand-in for CPython's Py_TYPE(b)->tp_iter != dict_iter gate: when
+// the slot differs, callers that care about iteration order (PyDict_Merge,
+// type_new's namespace copy) must walk the Python iterator rather than the
+// raw hash table.
+//
+// CPython: Objects/dictobject.c:2901 dict_merge
+func dictIterOverridden(t *Type) bool {
+	if t == nil || t == DictType {
+		return false
+	}
+	base, _ := LookupDescriptor(DictType, "__iter__")
+	sub, _ := LookupDescriptor(t, "__iter__")
+	return base != sub
 }
 
 func dictMergeFromDict(dst, src *Dict) error {
