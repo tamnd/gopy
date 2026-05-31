@@ -126,11 +126,16 @@ func UnaryStopIterationError(ts *state.Thread, v objects.Object) (objects.Object
 	return wrapped, nil
 }
 
-// UnaryAsyncGenWrap builds an _PyAsyncGenWrappedValue around v.
+// UnaryAsyncGenWrap builds an _PyAsyncGenWrappedValue around v. The
+// compiler emits CALL_INTRINSIC_1 INTRINSIC_ASYNC_GEN_WRAP just before
+// YIELD_VALUE in an async-generator body so the yielded object surfaces
+// to the asend / __anext__ awaitable wrapped; async_gen_unwrap_value
+// then converts the wrapper into StopIteration(inner).
 //
-// CPython: Python/intrinsics.c async_gen_wrap
+// CPython: Python/intrinsics.c:216 INTRINSIC_ASYNC_GEN_WRAP
+// CPython: Objects/genobject.c:2049 _PyAsyncGenValueWrapperNew
 func UnaryAsyncGenWrap(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryAsyncGenWrap", "async generator object lives in 1687")
+	return objects.NewAsyncGenWrappedValue(v), nil
 }
 
 // UnaryUnaryPositive computes +v via the type's __pos__ slot.

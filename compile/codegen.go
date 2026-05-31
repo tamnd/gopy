@@ -21,6 +21,7 @@ import (
 const (
 	intrinsicPrint              int32 = 1
 	intrinsicStopIterationError int32 = 3
+	intrinsicAsyncGenWrap       int32 = 4
 	intrinsicTypeVar            int32 = 7
 	intrinsicParamSpec          int32 = 8
 	intrinsicTypeVarTuple       int32 = 9

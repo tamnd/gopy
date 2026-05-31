@@ -112,6 +112,18 @@ func init() {
 	// CPython: Objects/exceptions.c:684 StopIteration_init
 	objects.SetTypeDescr(PyExc_StopIteration, "value",
 		objects.NewGetSetDescr("value", stopIterValueGet, stopIterValueSet))
+	// AsyncGenStopIterationHook lets objects/async_gen.go raise a typed
+	// StopIteration(value) without importing this package. Mirrors
+	// _PyGen_SetStopIterationValue in the async_gen_unwrap_value path.
+	//
+	// CPython: Objects/genobject.c:652 _PyGen_SetStopIterationValue
+	objects.AsyncGenStopIterationHook = func(value objects.Object) error {
+		if value == nil {
+			value = objects.None()
+		}
+		exc := New(PyExc_StopIteration, objects.NewTuple([]objects.Object{value}))
+		return &objects.RaisedError{Exc: exc, Msg: "StopIteration"}
+	}
 }
 
 // stopIterValueGet returns args[0] when StopIteration was constructed

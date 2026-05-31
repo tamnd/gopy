@@ -75,6 +75,56 @@ var AsyncGenASendType *Type
 // CPython: Objects/genobject.c:L2272 _PyAsyncGenAThrow_Type
 var AsyncGenAThrowType *Type
 
+// AsyncGenWrappedValueType is the type for _PyAsyncGenWrappedValue.
+// Wraps a value yielded inside an async generator body so the asend /
+// __anext__ awaitable can recognise it and convert to StopIteration.
+//
+// CPython: Objects/genobject.c:2005 _PyAsyncGenWrappedValue_Type
+var AsyncGenWrappedValueType *Type
+
+// AsyncGenStopIterationHook builds a StopIteration error carrying the
+// async-gen wrapped value. async_gen_unwrap_value at
+// Objects/genobject.c:1745 calls _PyGen_SetStopIterationValue with the
+// inner value; gopy reaches the same surface through this hook so
+// objects/ can stay free of the errors package.
+//
+// CPython: Objects/genobject.c:1745 async_gen_unwrap_value
+// CPython: Objects/genobject.c:652 _PyGen_SetStopIterationValue
+var AsyncGenStopIterationHook func(value Object) error
+
+// AsyncGenWrappedValue mirrors _PyAsyncGenWrappedValue. The compiler
+// emits CALL_INTRINSIC_1 INTRINSIC_ASYNC_GEN_WRAP before YIELD_VALUE
+// in async-generator bodies so the yielded object surfaces here, not
+// as the awaitable's normal next() value.
+//
+// CPython: Objects/genobject.c:1463 _PyAsyncGenWrappedValue
+type AsyncGenWrappedValue struct {
+	Header
+	Value Object
+}
+
+// NewAsyncGenWrappedValue boxes v for the async-generator yield path.
+//
+// CPython: Objects/genobject.c:2049 _PyAsyncGenValueWrapperNew
+func NewAsyncGenWrappedValue(v Object) *AsyncGenWrappedValue {
+	w := &AsyncGenWrappedValue{Value: v}
+	w.init(AsyncGenWrappedValueType)
+	return w
+}
+
+// asyncGenWrappedValueTraverse visits the wrapped value so the cycle
+// collector can reach through the wrapper. Mirrors
+// async_gen_wrapped_val_traverse.
+//
+// CPython: Objects/genobject.c:1997 async_gen_wrapped_val_traverse
+func asyncGenWrappedValueTraverse(o Object, visit Visitor) error {
+	w, ok := o.(*AsyncGenWrappedValue)
+	if !ok || w.Value == nil {
+		return nil
+	}
+	return visit(w.Value)
+}
+
 func init() {
 	AsyncGeneratorType = NewType("async_generator", []*Type{objectType})
 	AsyncGeneratorType.Repr = asyncGenRepr
@@ -206,6 +256,10 @@ func init() {
 	AsyncGenAThrowType.Iter = func(o Object) (Object, error) { return o, nil }
 	AsyncGenAThrowType.IterNext = asyncGenAThrowNext
 	AsyncGenAThrowType.TpTraverse = asyncGenAThrowTraverse
+
+	AsyncGenWrappedValueType = NewType("async_generator_wrapped_value",
+		[]*Type{objectType})
+	AsyncGenWrappedValueType.TpTraverse = asyncGenWrappedValueTraverse
 
 	AddIterSlotWrappers(AsyncGenASendType)
 	AddIterSlotWrappers(AsyncGenAThrowType)
@@ -431,7 +485,23 @@ func asyncGenASendNext(o Object) (Object, error) {
 		v = None()
 	}
 	a.used = true
-	return a.gen.Send(v)
+	result, err := a.gen.Send(v)
+	if err != nil {
+		return nil, err
+	}
+	// async_gen_unwrap_value: a yielded _PyAsyncGenWrappedValue is the
+	// body returning normally from this asend step. Convert it into
+	// StopIteration(inner) so the await loop in the consuming coroutine
+	// stops and surfaces inner as the await expression's value.
+	//
+	// CPython: Objects/genobject.c:1743 async_gen_unwrap_value
+	if w, ok := result.(*AsyncGenWrappedValue); ok {
+		if AsyncGenStopIterationHook != nil {
+			return nil, AsyncGenStopIterationHook(w.Value)
+		}
+		return nil, ErrStopIteration
+	}
+	return result, nil
 }
 
 type asyncGenAThrow struct {

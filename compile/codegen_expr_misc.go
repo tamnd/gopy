@@ -27,7 +27,7 @@ func (c *Compiler) visitNamedExpr(e *ast.NamedExpr) error {
 // The enclosing scope must be function-like; module / class scope
 // rejects yield with a SyntaxError at compile time.
 //
-// CPython: Python/codegen.c:5223 codegen_yield
+// CPython: Python/codegen.c:3168 codegen_addop_yield
 func (c *Compiler) visitYield(e *ast.Yield) error {
 	l := loc(e)
 	if c.scope == nil || !c.scope.IsFunctionLike() {
@@ -37,6 +37,9 @@ func (c *Compiler) visitYield(e *ast.Yield) error {
 		c.addLoadConst(nil, l)
 	} else if err := c.visitExpr(e.Value); err != nil {
 		return err
+	}
+	if c.scope.Generator && c.scope.Coroutine {
+		c.addOpI(CALL_INTRINSIC_1, intrinsicAsyncGenWrap, l)
 	}
 	c.addOpI(YIELD_VALUE, 0, l)
 	return nil
