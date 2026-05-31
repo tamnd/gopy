@@ -166,6 +166,15 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	//
 	// CPython: Objects/moduleobject.c:88 module_init_dict
 	if key == "__dict__" {
+		// Borrowed slot handed to a caller that treats the result as a
+		// new strong reference (pushObject decrefs it later), so incref
+		// to keep the module's own ownership intact. Without this the
+		// caller's Decref drives the namespace dict toward refcount zero
+		// and dict_dealloc clears a live module's globals.
+		//
+		// CPython: Objects/moduleobject.c:147 module_getattro (Py_INCREF
+		// before returning the dict via the __dict__ getset)
+		Incref(m.dict)
 		return m.dict, nil
 	}
 	// PEP 649: __annotations__ on a module is lazy when the body

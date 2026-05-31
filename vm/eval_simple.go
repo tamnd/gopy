@@ -777,17 +777,37 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		npos := total - nkw
 		// Lay out args[] flat: positionals first, then keyword values
 		// in the same order as kwnames, matching the vectorcall ABI.
-		all := make([]objects.Object, total)
+		origArgs := make([]objects.Object, total)
 		for i := total - 1; i >= 0; i-- {
-			all[i] = e.popObject()
+			origArgs[i] = e.popObject()
 		}
 		selfOrNull := e.popObject()
 		callable := e.popObject()
+		all := origArgs
 		if selfOrNull != nil {
-			all = append([]objects.Object{selfOrNull}, all...)
+			all = append([]objects.Object{selfOrNull}, origArgs...)
 			npos++
 		}
 		out, cerr := objects.Vectorcall(callable, all, uint(npos), kwnames)
+		// DECREF_INPUTS: the bound callee increfs every argument it
+		// keeps (positional slots, keyword slots, and the **kwargs dict
+		// copy), so the references this handler popped off the stack are
+		// borrowed and must be released once the call returns. Without
+		// this the caller's stack reference outlives the call and keeps
+		// the argument's refcount above zero, so the cycle collector can
+		// never prove it unreachable and its weakrefs never fire.
+		//
+		// CPython: Python/bytecodes.c CALL_KW (DECREF_INPUTS at the tail)
+		objects.Decref(callable)
+		if selfOrNull != nil {
+			objects.Decref(selfOrNull)
+		}
+		for _, arg := range origArgs {
+			if arg != nil {
+				objects.Decref(arg)
+			}
+		}
+		objects.Decref(kwnamesObj)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -813,9 +833,27 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if ierr != nil {
 			return 0, true, ierr
 		}
-		_ = e.popObject() // NULL_or_self placeholder
+		selfOrNull := e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
 		out, cerr := objects.Call(callable, objects.NewTuple(argsSlice), kwargs)
+		// DECREF_INPUTS: the callee increfs the arguments it keeps, so
+		// the references popped off the stack here (callable, the
+		// self/NULL placeholder, the positional iterable, and the
+		// keyword dict) are borrowed and released once the call returns.
+		// Holding them would keep an argument's refcount above zero and
+		// block the cycle collector from proving it unreachable.
+		//
+		// CPython: Python/bytecodes.c CALL_FUNCTION_EX (DECREF_INPUTS tail)
+		objects.Decref(callable)
+		if selfOrNull != nil {
+			objects.Decref(selfOrNull)
+		}
+		if argsObj != nil {
+			objects.Decref(argsObj)
+		}
+		if kwargs != nil {
+			objects.Decref(kwargs)
+		}
 		if cerr != nil {
 			return 0, true, cerr
 		}

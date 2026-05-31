@@ -723,6 +723,18 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		extra := posArgs[bound:]
 		items := make([]objects.Object, len(extra))
 		copy(items, extra)
+		// The *args tuple keeps a reference to each extra positional, so
+		// it increfs them: the caller treats the argument stack as
+		// borrowed and releases it via DECREF_INPUTS once the call
+		// returns.
+		//
+		// CPython: Python/ceval.c initialize_locals (the *args tuple is
+		// built with PyTuple_SET_ITEM after Py_INCREF on each surplus arg)
+		for _, it := range items {
+			if it != nil {
+				objects.Incref(it)
+			}
+		}
 		f.SetLocal(npos, stackref.FromObject(objects.NewTuple(items)))
 	}
 	var kwSlot int
@@ -794,7 +806,14 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
 		}
-		f.SetLocal(idx, stackref.FromObject(v))
+		// The slot keeps its own reference. The keyword value reached us
+		// borrowed from the argument stack (CALL_KW / CALL_FUNCTION_EX
+		// release it via DECREF_INPUTS) or from the caller's tuple/dict
+		// on the tp_call path, so we incref rather than steal.
+		//
+		// CPython: Python/ceval.c initialize_locals (Py_INCREF before the
+		// localsplus store in the keyword bind loop)
+		f.SetLocal(idx, stackref.FromObjectNew(v))
 	}
 	// Inject raw-object entries directly into **kwargs dict.
 	// These have already been determined to have no varname match.

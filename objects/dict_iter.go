@@ -37,6 +37,11 @@ type dictIterObj struct {
 	pos      int
 	snapUsed int
 	kind     dictIterKind
+	// owns is true when this iterator holds a counted reference on src
+	// (the dictiter_new path). The transient walker dictiter_reduce
+	// builds for draining borrows src instead, so it leaves owns false
+	// and never touches the source dict's refcount.
+	owns bool
 }
 
 var (
@@ -50,12 +55,15 @@ func init() {
 
 	dictKeyIterType.Iter = identity
 	dictKeyIterType.IterNext = dictIterNextKey
+	dictKeyIterType.Dealloc = dictIterDealloc
 
 	dictValueIterType.Iter = identity
 	dictValueIterType.IterNext = dictIterNextValue
+	dictValueIterType.Dealloc = dictIterDealloc
 
 	dictItemIterType.Iter = identity
 	dictItemIterType.IterNext = dictIterNextItem
+	dictItemIterType.Dealloc = dictIterDealloc
 
 	AddIterSlotWrappers(dictKeyIterType)
 	AddIterSlotWrappers(dictValueIterType)
@@ -158,7 +166,14 @@ func dictIter(o Object) (Object, error) {
 }
 
 func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
-	it := &dictIterObj{src: d, snapUsed: d.used, kind: kind}
+	it := &dictIterObj{src: d, snapUsed: d.used, kind: kind, owns: true}
+	// Hold a strong reference to the dict for the iterator's lifetime so
+	// a dict whose only other owner is consumed (e.g. the temporary that
+	// `for k in globals()` iterates) cannot reach refcount zero and run
+	// dict_dealloc out from under the walk.
+	//
+	// CPython: Objects/dictobject.c:5132 dictiter_new (di_dict = Py_NEWREF(dict))
+	Incref(d)
 	switch kind {
 	case dictIterKeys:
 		it.init(dictKeyIterType)
@@ -168,6 +183,22 @@ func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
 		it.init(dictItemIterType)
 	}
 	return it
+}
+
+// dictIterDealloc drops the strong reference the iterator holds on its
+// source dict.
+//
+// CPython: Objects/dictobject.c:5147 dictiter_dealloc (Py_XDECREF(di->di_dict))
+func dictIterDealloc(o Object) {
+	it, ok := o.(*dictIterObj)
+	if !ok {
+		return
+	}
+	if it.owns && it.src != nil {
+		Decref(it.src)
+	}
+	it.src = nil
+	it.owns = false
 }
 
 // advance walks past dummy and empty slots until it finds the next
@@ -185,6 +216,10 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 		return nil, nil, ErrStopIteration
 	}
 	if it.snapUsed != it.src.used {
+		if it.owns {
+			Decref(it.src)
+			it.owns = false
+		}
 		it.src = nil
 		return nil, nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
 	}
