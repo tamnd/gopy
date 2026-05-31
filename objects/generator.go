@@ -716,28 +716,17 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) 
 		// CPython: Objects/genobject.c:511 _gen_throw (retval != NULL)
 		return fval, nil
 	}
-	if stopVal, isStop := genStopIterVal(ferr); isStop {
-		// Sub-iterator raised StopIteration: resume the outer generator
-		// body normally so it can continue past yield from.
-		//
-		// CPython: Objects/genobject.c:519 _gen_throw
-		//   (StopIteration → gen_send_ex(gen, retval2, 0, 0))
-		g.YieldFromTarget = nil
-		g.SendCh <- GenMsg{Val: stopVal, CallerFrame: callerFrame()}
-		msg := <-g.YieldCh
-		if msg.Err != nil {
-			g.closed = true
-			if errors.Is(msg.Err, ErrStopIteration) {
-				return nil, ErrStopIteration
-			}
-			return nil, msg.Err
-		}
-		return msg.Val, nil
-	}
-	// Sub-iterator raised another exception: throw it into the outer
-	// generator body.
+	// Sub-iterator raised something (StopIteration or otherwise): throw
+	// it into the outer body. CPython's _gen_throw at L536 always calls
+	// gen_send_ex(gen, Py_None, 1, 0) when the sub-iter returned NULL,
+	// regardless of the exception class. The yield-from exception table
+	// entry routes a thrown StopIteration to CLEANUP_THROW, which
+	// extracts .value and jumps past END_SEND. Sending the bare value
+	// via Val instead would re-enter the SEND loop with a now-closed
+	// sub-iterator and lose the carried value.
 	//
-	// CPython: Objects/genobject.c:528 _gen_throw (else: goto throw_here)
+	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
+	g.YieldFromTarget = nil
 	g.SendCh <- GenMsg{Err: ferr, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {

@@ -326,7 +326,7 @@ var opcodeArity = map[Opcode]arityEntry{
 	RERAISE:                           arity(1, 0),
 	INTERPRETER_EXIT:                  arity(1, 0),
 	END_ASYNC_FOR:                     arity(2, 0),
-	CLEANUP_THROW:                     arity(3, 1),
+	CLEANUP_THROW:                     arity(3, 2),
 	PUSH_EXC_INFO:                     arity(1, 2),
 	POP_EXCEPT:                        arity(1, 0),
 	WITH_EXCEPT_START:                 arity(4, 5),

@@ -234,13 +234,20 @@ func (c *Compiler) popExceptAndReraise() {
 //
 // CPython: Python/codegen.c:L471 codegen_add_yield_from
 func (c *Compiler) addYieldFromLoop(l ast.Pos) {
-	loop := c.newLabel()
-	end := c.newLabel()
-	c.useLabel(loop)
-	c.addOpJump(SEND, end, l)
+	send := c.newLabel()
+	fail := c.newLabel()
+	exit := c.newLabel()
+	c.useLabel(send)
+	c.addOpJump(SEND, exit, l)
+	// Virtual try/except so a StopIteration raised by YIELD_VALUE
+	// during a close or throw routes through CLEANUP_THROW.
+	c.addOpJump(SETUP_FINALLY, fail, l)
 	c.addOpI(YIELD_VALUE, 1, l)
+	c.addOp(POP_BLOCK, l)
 	c.addOpI(RESUME, resumeAfterAwait, l)
-	c.addOpJump(JUMP_BACKWARD, loop, l)
-	c.useLabel(end)
+	c.addOpJump(JUMP_NO_INTERRUPT, send, l)
+	c.useLabel(fail)
+	c.addOp(CLEANUP_THROW, l)
+	c.useLabel(exit)
 	c.addOp(END_SEND, l)
 }

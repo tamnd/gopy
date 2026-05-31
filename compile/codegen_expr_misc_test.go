@@ -91,9 +91,12 @@ func TestYieldFromEmitsSendLoop(t *testing.T) {
 		"GET_YIELD_FROM_ITER",
 		"LOAD_CONST", // None to prime SEND
 		"SEND",
+		"SETUP_FINALLY", // virtual try/except around YIELD_VALUE
 		"YIELD_VALUE",
+		"POP_BLOCK",
 		"RESUME",
-		"JUMP_BACKWARD",
+		"JUMP_NO_INTERRUPT",
+		"CLEANUP_THROW",
 		"END_SEND",
 	}
 	for _, op := range wantOps {
