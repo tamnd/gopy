@@ -121,41 +121,89 @@ func framelocalsproxyHasval(interp InterpreterFrame, code *Code, i int) bool {
 }
 
 // framelocalsproxyGetKeyIndex finds the LocalsPlus index for key.
+// Hashes the key first so an unhashable key surfaces as TypeError
+// (CPython returns -2 with the exception set). For exact str keys we
+// shortcut on Go string equality; otherwise we hash every local name
+// and fall back to RichCompareBool so str subclasses and __hash__/
+// __eq__ impostors land in the correct fast slot. Errors during
+// hashing or comparison propagate to the caller.
 // read controls whether the value or just the slot is required.
 // Returns the index, or -1 when the key has no live matching slot.
+// An error return signals an unhashable key or an __eq__ that raised,
+// which the caller must surface (CPython distinguishes -2 with a
+// pending exception from -1).
 //
 // CPython: Objects/frameobject.c:94 framelocalsproxy_getkeyindex
-func framelocalsproxyGetKeyIndex(f *Frame, key Object, read bool) int {
+func framelocalsproxyGetKeyIndex(f *Frame, key Object, read bool) (int, error) {
 	if f == nil || f.interp == nil {
-		return -1
+		return -1, nil
 	}
 	code := f.interp.FrameCode()
 	if code == nil {
-		return -1
+		return -1, nil
 	}
-	keyStr, ok := key.(*Unicode)
-	if !ok {
-		return -1
+	if _, err := Hash(key); err != nil {
+		return -2, err
 	}
-	keyName := keyStr.v
+	checkSlot := func(i int) (int, bool) {
+		if read {
+			if framelocalsproxyHasval(f.interp, code, i) {
+				return i, true
+			}
+			return -1, false
+		}
+		if code.LocalsplusKinds[i]&CoFastHidden == 0 {
+			return i, true
+		}
+		return -1, false
+	}
+	if keyStr, ok := key.(*Unicode); ok {
+		keyName := keyStr.v
+		found := false
+		for i, name := range code.LocalsplusNames {
+			if i >= len(code.LocalsplusKinds) {
+				break
+			}
+			if name != keyName {
+				continue
+			}
+			if idx, hit := checkSlot(i); hit {
+				return idx, nil
+			}
+			found = true
+		}
+		if found {
+			return -1, nil
+		}
+	}
+	keyHash, err := Hash(key)
+	if err != nil {
+		return -2, err
+	}
 	for i, name := range code.LocalsplusNames {
 		if i >= len(code.LocalsplusKinds) {
 			break
 		}
-		if name != keyName {
+		nameObj := NewStr(name)
+		nameHash, herr := Hash(nameObj)
+		if herr != nil {
+			return -2, herr
+		}
+		if nameHash != keyHash {
 			continue
 		}
-		if read {
-			if framelocalsproxyHasval(f.interp, code, i) {
-				return i
-			}
-		} else {
-			if code.LocalsplusKinds[i]&CoFastHidden == 0 {
-				return i
-			}
+		eq, cerr := RichCmpBool(nameObj, key, CompareEQ)
+		if cerr != nil {
+			return -2, cerr
+		}
+		if !eq {
+			continue
+		}
+		if idx, hit := checkSlot(i); hit {
+			return idx, nil
 		}
 	}
-	return -1
+	return -1, nil
 }
 
 // frameLocalsProxyGetItem implements proxy[key].
@@ -166,7 +214,10 @@ func frameLocalsProxyGetItem(self, key Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: FrameLocalsProxy expected")
 	}
-	i := framelocalsproxyGetKeyIndex(p.frame, key, true)
+	i, err := framelocalsproxyGetKeyIndex(p.frame, key, true)
+	if err != nil {
+		return nil, err
+	}
 	if i >= 0 {
 		code := p.frame.interp.FrameCode()
 		if val := framelocalsproxyGetval(p.frame.interp, code, i); val != nil {
@@ -193,7 +244,10 @@ func frameLocalsProxySetItem(self, key, value Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: FrameLocalsProxy expected")
 	}
-	i := framelocalsproxyGetKeyIndex(p.frame, key, false)
+	i, err := framelocalsproxyGetKeyIndex(p.frame, key, false)
+	if err != nil {
+		return err
+	}
 	if i >= 0 {
 		if value == nil {
 			return fmt.Errorf("ValueError: cannot remove local variables from FrameLocalsProxy")
@@ -268,7 +322,11 @@ func frameLocalsProxyContains(self, key Object) (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("TypeError: FrameLocalsProxy expected")
 	}
-	if i := framelocalsproxyGetKeyIndex(p.frame, key, true); i >= 0 {
+	i, err := framelocalsproxyGetKeyIndex(p.frame, key, true)
+	if err != nil {
+		return false, err
+	}
+	if i >= 0 {
 		return true, nil
 	}
 	if p.frame.extraLocals != nil {
@@ -385,6 +443,9 @@ func frameLocalsProxyRichCompare(a, b Object, op CompareOp) (Object, error) {
 }
 
 // frameLocalsProxyRepr renders the proxy as the dict view of its keys.
+// Py_ReprEnter / Py_ReprLeave guard cycles so a proxy that stores
+// itself under one of its keys renders as "{...}" instead of recursing
+// forever when the materialised dict tries to repr the same proxy.
 //
 // CPython: Objects/frameobject.c:512 framelocalsproxy_repr
 func frameLocalsProxyRepr(o Object) (string, error) {
@@ -392,6 +453,10 @@ func frameLocalsProxyRepr(o Object) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("TypeError: FrameLocalsProxy expected")
 	}
+	if ReprEnter(p) {
+		return "{...}", nil
+	}
+	defer ReprLeave(p)
 	d := frameLocalsProxyAsDict(p)
 	return Repr(d)
 }
@@ -457,9 +522,12 @@ func frameLocalsProxySetItemMethod(args []Object, _ map[string]Object) (Object, 
 	return None(), nil
 }
 
-func frameLocalsProxyKeysMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: keys() missing self")
+func frameLocalsProxyKeysMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: keys() takes no arguments (%d given)", len(args)-1)
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: keys() takes no keyword arguments")
 	}
 	p, ok := args[0].(*FrameLocalsProxy)
 	if !ok {
@@ -468,9 +536,12 @@ func frameLocalsProxyKeysMethod(args []Object, _ map[string]Object) (Object, err
 	return frameLocalsProxyKeysList(p), nil
 }
 
-func frameLocalsProxyValuesMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: values() missing self")
+func frameLocalsProxyValuesMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: values() takes no arguments (%d given)", len(args)-1)
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: values() takes no keyword arguments")
 	}
 	p, ok := args[0].(*FrameLocalsProxy)
 	if !ok {
@@ -479,9 +550,12 @@ func frameLocalsProxyValuesMethod(args []Object, _ map[string]Object) (Object, e
 	return frameLocalsProxyValuesList(p), nil
 }
 
-func frameLocalsProxyItemsMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: items() missing self")
+func frameLocalsProxyItemsMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: items() takes no arguments (%d given)", len(args)-1)
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: items() takes no keyword arguments")
 	}
 	p, ok := args[0].(*FrameLocalsProxy)
 	if !ok {
@@ -532,7 +606,11 @@ func frameLocalsProxyPopMethod(args []Object, _ map[string]Object) (Object, erro
 		return nil, fmt.Errorf("TypeError: FrameLocalsProxy expected")
 	}
 	key := args[1]
-	if i := framelocalsproxyGetKeyIndex(p.frame, key, false); i >= 0 {
+	i, err := framelocalsproxyGetKeyIndex(p.frame, key, false)
+	if err != nil {
+		return nil, err
+	}
+	if i >= 0 {
 		return nil, fmt.Errorf("ValueError: cannot remove local variables from FrameLocalsProxy")
 	}
 	if p.frame.extraLocals != nil {
@@ -567,6 +645,8 @@ func frameLocalsProxyUpdateMethod(args []Object, _ map[string]Object) (Object, e
 }
 
 // frameLocalsProxyMerge writes every (key, value) from other into self.
+// IterNext signals exhaustion via ErrStopIteration; we swallow that and
+// break, mirroring PyIter_Next's NULL-without-error contract.
 //
 // CPython: Objects/frameobject.c:321 framelocalsproxy_merge
 func frameLocalsProxyMerge(p *FrameLocalsProxy, other Object) error {
@@ -577,6 +657,9 @@ func frameLocalsProxyMerge(p *FrameLocalsProxy, other Object) error {
 	for {
 		k, err := IterNext(it)
 		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				break
+			}
 			return err
 		}
 		if k == nil {
@@ -593,9 +676,12 @@ func frameLocalsProxyMerge(p *FrameLocalsProxy, other Object) error {
 	return nil
 }
 
-func frameLocalsProxyCopyMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: copy() missing self")
+func frameLocalsProxyCopyMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: copy() takes no arguments (%d given)", len(args)-1)
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: copy() takes no keyword arguments")
 	}
 	p, ok := args[0].(*FrameLocalsProxy)
 	if !ok {
@@ -604,9 +690,17 @@ func frameLocalsProxyCopyMethod(args []Object, _ map[string]Object) (Object, err
 	return frameLocalsProxyAsDict(p), nil
 }
 
-func frameLocalsProxyReversedMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: __reversed__() missing self")
+// frameLocalsProxyReversedMethod returns the keys list reversed in
+// place. Returns a list (not an iterator) because PyList_Reverse on
+// the keys result is what CPython does.
+//
+// CPython: Objects/frameobject.c:866 framelocalsproxy_reversed
+func frameLocalsProxyReversedMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: __reversed__() takes no keyword arguments")
 	}
 	p, ok := args[0].(*FrameLocalsProxy)
 	if !ok {
@@ -618,7 +712,7 @@ func frameLocalsProxyReversedMethod(args []Object, _ map[string]Object) (Object,
 	for i := n - 1; i >= 0; i-- {
 		rev.Append(keys.Item(i))
 	}
-	return Iter(rev)
+	return rev, nil
 }
 
 func frameLocalsProxyLenMethod(args []Object, _ map[string]Object) (Object, error) {
