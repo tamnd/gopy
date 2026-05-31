@@ -13,7 +13,6 @@ package builtins
 import (
 	"fmt"
 	"io"
-	"os"
 	"sync"
 
 	"github.com/tamnd/gopy/errors"
@@ -84,7 +83,7 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
-	inputFn := objects.NewBuiltinFunction("input", Input(os.Stdin, defaultFile))
+	inputFn := objects.NewBuiltinFunction("input", Input)
 	if err := setBuiltin(dict, "input", inputFn); err != nil {
 		return nil, err
 	}

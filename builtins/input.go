@@ -1,86 +1,136 @@
-// Port of builtin_input_impl. The C version does a lot of work (sys
-// audit hook, encoding handshake with sys.stdout / sys.stdin, tty
-// detection so it can route through GNU readline) that gopy does not
-// yet have a place for. This implementation keeps the public shape:
-// optional prompt argument written to defaultOut, line read from
-// defaultIn with the trailing newline stripped, EOFError on a clean
-// EOF. The readline / encoding paths land with the io module port.
+// Port of builtin_input_impl. input() resolves sys.stdin / sys.stdout /
+// sys.stderr on every call, flushes stderr, writes the prompt to stdout,
+// and reads one line from stdin via its readline() method. gopy does not
+// ship GNU readline, so the interactive (tty) branch of the C function
+// is collapsed into the file path: every call routes through
+// sys.stdin.readline(), which is what PyFile_GetLine does for the
+// non-interactive case. The encoding handshake the tty branch performs
+// is unnecessary because gopy's text streams already hand back str.
 //
 // CPython: Python/bltinmodule.c:2327 builtin_input_impl
+// CPython: Objects/fileobject.c:54 PyFile_GetLine
 
 package builtins
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/tamnd/gopy/objects"
 )
 
-// Input returns the input(prompt=”) closure. defaultIn is the
-// reader the line gets pulled from (CPython uses sys.stdin);
-// defaultOut is the writer the prompt gets flushed to (CPython uses
-// sys.stdout).
+// Input implements input(prompt=None, /). The prompt, when supplied, is
+// written to sys.stdout; the line is read from sys.stdin with one
+// trailing newline stripped. A clean EOF raises EOFError; a missing or
+// None sys.stdin / stdout / stderr raises RuntimeError.
 //
 // CPython: Python/bltinmodule.c:2327 builtin_input_impl
-func Input(defaultIn io.Reader, defaultOut io.Writer) func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	return func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		if len(kwargs) != 0 {
-			return nil, fmt.Errorf("TypeError: input() takes no keyword arguments")
-		}
-		if len(args) > 1 {
-			return nil, fmt.Errorf("TypeError: input expected at most 1 argument, got %d", len(args))
-		}
-		if len(args) == 1 && !objects.IsNone(args[0]) {
-			s, err := objects.Str(args[0])
-			if err != nil {
-				return nil, err
-			}
-			if defaultOut != nil {
-				if _, err := io.WriteString(defaultOut, s); err != nil {
-					return nil, err
-				}
-				if f, ok := defaultOut.(interface{ Flush() error }); ok {
-					_ = f.Flush()
-				}
-			}
-		}
-		if defaultIn == nil {
-			return nil, fmt.Errorf("RuntimeError: lost sys.stdin")
-		}
-		line, err := readLine(defaultIn)
-		if errors.Is(err, io.EOF) && line == "" {
-			return nil, fmt.Errorf("EOFError: EOF when reading a line")
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
+func Input(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: input() takes no keyword arguments")
+	}
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: input expected at most 1 argument, got %d", len(args))
+	}
+
+	fin, err := requiredSysStream("stdin")
+	if err != nil {
+		return nil, err
+	}
+	fout, err := requiredSysStream("stdout")
+	if err != nil {
+		return nil, err
+	}
+	ferr, err := requiredSysStream("stderr")
+	if err != nil {
+		return nil, err
+	}
+
+	// First of all, flush stderr. Errors here are swallowed, matching
+	// the PyErr_Clear() after _PyFile_Flush(ferr).
+	flushStream(ferr)
+
+	// Fallback path: write the prompt to stdout, flush it, then pull a
+	// line off stdin. gopy always takes this path because it has no GNU
+	// readline binding for the interactive branch.
+	if len(args) == 1 {
+		if err := writeStream(fout, args[0]); err != nil {
 			return nil, err
 		}
-		line = strings.TrimSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\r")
-		return objects.NewStr(line), nil
 	}
+	flushStream(fout)
+
+	return fileGetLine(fin)
 }
 
-// readLine reads up to and including the next newline, the same way
-// PyOS_StdioReadline drains stdin one line at a time. Buffered readers
-// are reused across calls so a sequence of input() calls does not
-// drop bytes on the floor.
+// requiredSysStream reads sys.<name> and rejects a missing or None
+// value with RuntimeError "lost sys.<name>", mirroring
+// _PySys_GetRequiredAttr followed by the Py_None guard.
 //
-// CPython: Parser/myreadline.c PyOS_StdioReadline
-func readLine(r io.Reader) (string, error) {
-	br, ok := bufferedReaders[r]
-	if !ok {
-		br = bufio.NewReader(r)
-		bufferedReaders[r] = br
+// CPython: Python/bltinmodule.c:2337 builtin_input_impl stream checks
+func requiredSysStream(name string) (objects.Object, error) {
+	s := liveSysAttr(name)
+	if s == nil || objects.IsNone(s) {
+		return nil, fmt.Errorf("RuntimeError: lost sys.%s", name)
 	}
-	return br.ReadString('\n')
+	return s, nil
 }
 
-// bufferedReaders caches the bufio.Reader wrapping each io.Reader.
-// CPython has one stdin per process; gopy lets the test harness
-// supply its own reader, and each one needs its own buffer or the
-// next call would lose anything that bufio prefetched.
-var bufferedReaders = map[io.Reader]*bufio.Reader{}
+// flushStream calls stream.flush() and discards any error, the way the
+// C function wraps _PyFile_Flush in PyErr_Clear().
+func flushStream(stream objects.Object) {
+	flush, err := objects.GetAttr(stream, objects.NewStr("flush"))
+	if err != nil {
+		return
+	}
+	_, _ = objects.Call(flush, objects.NewTuple(nil), nil)
+}
+
+// writeStream writes str(prompt) to the stream via its write() method,
+// the Py_PRINT_RAW form of PyFile_WriteObject.
+//
+// CPython: Objects/fileobject.c:166 PyFile_WriteObject (Py_PRINT_RAW)
+func writeStream(stream, prompt objects.Object) error {
+	s, err := objects.Str(prompt)
+	if err != nil {
+		return err
+	}
+	write, err := objects.GetAttr(stream, objects.NewStr("write"))
+	if err != nil {
+		return err
+	}
+	_, err = objects.Call(write, objects.NewTuple([]objects.Object{objects.NewStr(s)}), nil)
+	return err
+}
+
+// fileGetLine calls stream.readline() and applies PyFile_GetLine's n<0
+// semantics: a non-string return is a TypeError, an empty line is the
+// EOFError, and a single trailing newline is stripped.
+//
+// CPython: Objects/fileobject.c:54 PyFile_GetLine (n < 0 branch)
+func fileGetLine(stream objects.Object) (objects.Object, error) {
+	readline, err := objects.GetAttr(stream, objects.NewStr("readline"))
+	if err != nil {
+		return nil, err
+	}
+	result, err := objects.Call(readline, objects.NewTuple(nil), nil)
+	if err != nil {
+		return nil, err
+	}
+	line, ok := result.(*objects.Unicode)
+	if !ok {
+		if _, isBytes := result.(*objects.Bytes); !isBytes {
+			return nil, fmt.Errorf("TypeError: object.readline() returned non-string")
+		}
+	}
+	if line == nil {
+		// bytes readline: leave the raw object untouched, matching the
+		// PyBytes branch which only resizes a trailing newline.
+		return result, nil
+	}
+	s := line.Value()
+	if len(s) == 0 {
+		return nil, fmt.Errorf("EOFError: EOF when reading a line")
+	}
+	return objects.NewStr(strings.TrimSuffix(s, "\n")), nil
+}

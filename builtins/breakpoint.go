@@ -68,8 +68,12 @@ func breakpointHook(args []objects.Object, kwargs map[string]objects.Object) (ob
 
 	module, err := importBreakpointModule(modulepath)
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "ImportError") ||
-			strings.HasPrefix(err.Error(), "ModuleNotFoundError") {
+		// ModuleNotFoundError is a subclass of ImportError, so either
+		// category ends the breakpoint with a warning. The import hook
+		// wraps the sentinel ("imp: ModuleNotFoundError: ..."), so match
+		// anywhere in the message rather than at the front.
+		if strings.Contains(err.Error(), "ImportError") ||
+			strings.Contains(err.Error(), "ModuleNotFoundError") {
 			return breakpointWarn(envar)
 		}
 		return nil, err
