@@ -312,6 +312,13 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 	if c.scope == nil || !c.scope.IsFunctionLike() {
 		return c.errorAt(l, "'return' outside function")
 	}
+	// `return value` inside an async generator (async def that also
+	// yields) is forbidden, mirroring CPython's codegen_return check.
+	//
+	// CPython: Python/codegen.c:2201 codegen_return
+	if s.Value != nil && c.scope.Coroutine && c.scope.Generator {
+		return c.errorAt(l, "'return' with value in async generator")
+	}
 	_, valueIsConst := s.Value.(*ast.Constant)
 	preserveTOS := s.Value != nil && !valueIsConst
 
