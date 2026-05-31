@@ -40,6 +40,16 @@ func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
 // CPython: Python/compile.c:353 _PyAST_Compile (cf->cf_flags merged into
 // st_future->ff_features)
 func CompileFlags(mod ast.Mod, filename string, optimize, flags int) (*Code, error) {
+	// optimize == -1 means "use the interpreter's optimization level".
+	// gopy has no -O switch yet, so that level is 0 (asserts kept,
+	// docstrings kept, __debug__ folds to True). Resolve it here so
+	// every downstream pass (preprocess __debug__ fold, assert removal,
+	// docstring stripping) sees a non-negative level.
+	//
+	// CPython: Python/compile.c:353 _PyAST_Compile (optimize == -1 -> config->optimization_level)
+	if optimize < 0 {
+		optimize = 0
+	}
 	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
 	// CPython: Python/ast.c:1047 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {

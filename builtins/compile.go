@@ -171,6 +171,16 @@ func compileSourceArg(o objects.Object) (string, []byte, error) {
 		copy(dup, b)
 		return "", dup, nil
 	}
+	// _Py_SourceAsString falls back to PyObject_GetBuffer for anything
+	// that is neither str nor a code/AST object, so a memoryview (or any
+	// buffer-protocol exporter) over source bytes compiles like bytes.
+	//
+	// CPython: Python/pythonrun.c:1572 _Py_SourceAsString (PyObject_GetBuffer)
+	if b, ok := objects.AsBytesLike(o); ok {
+		dup := make([]byte, len(b))
+		copy(dup, b)
+		return "", dup, nil
+	}
 	return "", nil, fmt.Errorf("TypeError: compile() arg 1 must be a string, bytes or AST object")
 }
 
@@ -265,6 +275,25 @@ const (
 	cfOptimizedAST = 0x8400
 )
 
+// cfValidMask is the union of flag bits compile() accepts:
+// PyCF_MASK (the CO_FUTURE_* bits) | PyCF_MASK_OBSOLETE (CO_NESTED) |
+// PyCF_COMPILE_MASK (the parse-control bits). Any bit outside this
+// union is a ValueError("compile(): unrecognised flags").
+//
+// CPython: Include/cpython/compile.h PyCF_MASK / PyCF_MASK_OBSOLETE / PyCF_COMPILE_MASK
+const (
+	// CO_FUTURE_* future-statement bits (Include/cpython/code.h).
+	pycfMask = 0x20000 | 0x40000 | 0x80000 | 0x100000 |
+		0x200000 | 0x400000 | 0x800000 | 0x1000000
+	// CO_NESTED (Include/cpython/code.h).
+	pycfMaskObsolete = 0x0010
+	// PyCF_DONT_IMPLY_DEDENT | PyCF_ONLY_AST | PyCF_TYPE_COMMENTS |
+	// PyCF_ALLOW_TOP_LEVEL_AWAIT | PyCF_ALLOW_INCOMPLETE_INPUT |
+	// PyCF_OPTIMIZED_AST (Include/cpython/compile.h).
+	pycfCompileMask = 0x0200 | 0x0400 | 0x1000 | 0x2000 | 0x4000 | 0x8400
+	cfValidMask     = pycfMask | pycfMaskObsolete | pycfCompileMask
+)
+
 // parseCompileFlags reads the optional flags arg. PyCF_ONLY_AST is now
 // accepted and triggers parse-only mode (no codegen). Other flag bits are
 // silently accepted for signature parity. Non-int types are coerced via
@@ -293,6 +322,13 @@ func parseCompileFlags(o objects.Object) (int, error) {
 	flags, err := intArg(o, "flags")
 	if err != nil {
 		return 0, err
+	}
+	// Reject any bit outside the recognised flag union before it can
+	// reach the parser / codegen.
+	//
+	// CPython: Python/bltinmodule.c:771 builtin_compile_impl (unrecognised flags)
+	if flags&^cfValidMask != 0 {
+		return 0, fmt.Errorf("ValueError: compile(): unrecognised flags")
 	}
 	return flags, nil
 }
