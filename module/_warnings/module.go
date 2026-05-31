@@ -1187,21 +1187,60 @@ func WarnUnawaitedAgenMethod(agen objects.Object, method objects.Object) {
 // WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine. CPython
 // formats the fallback message with cr_qualname, not the bare coro, so
 // users see "coroutine 'Module.func' was never awaited" instead of the
-// less-informative repr.
+// less-informative repr. When _warn_unawaited_coroutine itself raises
+// (e.g. filterwarnings("error") has been set so the RuntimeWarning is
+// upgraded to an exception, or warnings is broken), the exception is
+// routed through sys.unraisablehook with the canonical err_msg
+// "Exception ignored while finalizing coroutine <repr>".
 //
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 func WarnUnawaitedCoroutine(coro objects.Object) {
 	fn, _ := getWarningsAttr("_warn_unawaited_coroutine", true)
 	warned := false
+	var callErr error
 	if fn != nil {
-		if _, err := objects.Call(fn, objects.NewTuple([]objects.Object{coro}), nil); err == nil {
+		_, callErr = objects.Call(fn, objects.NewTuple([]objects.Object{coro}), nil)
+		// CPython: a successful call or an exception that matches
+		// RuntimeWarning (warning-as-error) both count as "warned".
+		// The exception case still drops into PyErr_FormatUnraisable
+		// below so the user sees what blew up.
+		if callErr == nil || excMatchesRuntimeWarning(callErr) {
 			warned = true
+		}
+	}
+	if callErr != nil {
+		if h := objects.WriteUnraisableHook; h != nil {
+			cRepr, _ := objects.Repr(coro)
+			h(coro, "Exception ignored while finalizing coroutine "+cRepr, callErr)
 		}
 	}
 	if !warned {
 		qualname := coroQualname(coro)
 		_ = WarnFormatSource(coro, errors.PyExc_RuntimeWarning, 1, "coroutine '%v' was never awaited", qualname)
 	}
+}
+
+// excMatchesRuntimeWarning reports whether err carries a RuntimeWarning
+// (or a subclass). Mirrors PyErr_ExceptionMatches(PyExc_RuntimeWarning)
+// inside _PyErr_WarnUnawaitedCoroutine.
+//
+// CPython: Python/_warnings.c:1602 _PyErr_WarnUnawaitedCoroutine
+func excMatchesRuntimeWarning(err error) bool {
+	re, ok := err.(*objects.RaisedError)
+	if !ok || re.Exc == nil {
+		return false
+	}
+	t := re.Exc.Type()
+	for t != nil {
+		if t.Name == "RuntimeWarning" {
+			return true
+		}
+		if len(t.Bases) == 0 {
+			return false
+		}
+		t = t.Bases[0]
+	}
+	return false
 }
 
 // coroQualname extracts a coroutine's cr_qualname, falling back to its
