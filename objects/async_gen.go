@@ -42,6 +42,16 @@ type AsyncGenerator struct {
 	// CPython: Objects/genobject.c:1617 ag_running PyMemberDef
 	Running atomic.Int32
 
+	// RunningAsync mirrors CPython's ag_running_async flag. It is
+	// set when an asend / athrow / aclose awaitable enters its ITER
+	// state and cleared when that awaitable resolves (StopAsyncIteration,
+	// StopIteration, GeneratorExit, or any error). The flag distinguishes
+	// "a Python-level await is in flight" from "the body byte-code is
+	// running", which is what Running tracks.
+	//
+	// CPython: Objects/genobject.c:1617 ag_running PyMemberDef (ag_running_async)
+	RunningAsync atomic.Int32
+
 	// Code is the code object for the async generator function.
 	//
 	// CPython: Include/cpython/genobject.h ag_code via _gen_getcode
@@ -347,12 +357,10 @@ func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'athrow' requires a 'async_generator' object")
 	}
-	if GenThrowHook == nil {
-		return nil, fmt.Errorf("RuntimeError: async_generator.athrow not available")
-	}
 	// CPython: Objects/genobject.c:1567 emits a DeprecationWarning when
-	// the deprecated (type, exc, tb) form is used. We then normalize the
-	// triple just like gen.throw.
+	// the deprecated (type, exc, tb) form is used. The actual exception
+	// validation is deferred to send time (async_gen_athrow_send) so
+	// running-state errors surface before "must be BaseException".
 	if len(args) > 2 {
 		if DeprecWarnHook != nil {
 			if werr := DeprecWarnHook("the (type, exc, tb) signature of athrow() is deprecated, use the single-arg signature instead."); werr != nil {
@@ -375,11 +383,7 @@ func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 		return g.Athrow(exc), nil
 	}
-	exc, err := GenThrowHook(args[1])
-	if err != nil {
-		return nil, err
-	}
-	return g.Athrow(exc), nil
+	return g.AthrowRaw(args[1]), nil
 }
 
 // asyncGenAcloseMethod implements async_generator.aclose().
@@ -397,10 +401,6 @@ func asyncGenAcloseMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 // asyncGenASendSendMethod implements async_generator_asend.send(arg).
-// Delegates to the IterNext driver which honors send semantics on the
-// asend awaitable; in INIT state CPython rejects non-None args, but
-// the awaitable's first-call behavior in gopy already mirrors that by
-// using the captured asend value the first time.
 //
 // CPython: Objects/genobject.c:1788 async_gen_asend_send
 func asyncGenASendSendMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -411,29 +411,49 @@ func asyncGenASendSendMethod(args []Object, _ map[string]Object) (Object, error)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'async_generator_asend' object")
 	}
-	if !a.used {
-		a.used = true
-		v := a.val
-		if v == nil {
-			v = None()
-		}
-		result, err := a.gen.Send(v)
-		if err != nil {
-			return nil, err
-		}
-		if w, ok := result.(*AsyncGenWrappedValue); ok {
-			if AsyncGenStopIterationHook != nil {
-				return nil, AsyncGenStopIterationHook(w.Value)
-			}
-			return nil, ErrStopIteration
-		}
-		return result, nil
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited __anext__()/asend()")
 	}
-	result, err := a.gen.Send(args[1])
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			return nil, fmt.Errorf("RuntimeError: anext(): asynchronous generator is already running")
+		}
+		// CPython: Objects/genobject.c:1807 — when arg is NULL or
+		// None, use the captured ags_sendval; otherwise pass arg
+		// through so the gen_send_ex2 FRAME_CREATED check rejects
+		// non-None on a just-started async generator.
+		v := args[1]
+		if v == nil || v == None() {
+			v = a.val
+			if v == nil {
+				v = None()
+			}
+		}
+		a.state = asyncAwaitIter
+		a.used = true
+		a.gen.RunningAsync.Store(1)
+		r, e := a.gen.Send(v)
+		return asyncGenASendDriveResult(a, r, e)
+	}
+	r, e := a.gen.Send(args[1])
+	return asyncGenASendDriveResult(a, r, e)
+}
+
+// asyncGenASendDriveResult unwraps the AsyncGenWrappedValue marker and
+// updates ag_running_async + asend state to mirror CPython's
+// async_gen_unwrap_value.
+//
+// CPython: Objects/genobject.c:1725 async_gen_unwrap_value
+func asyncGenASendDriveResult(a *asyncGenASend, result Object, err error) (Object, error) {
 	if err != nil {
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
 		return nil, err
 	}
 	if w, ok := result.(*AsyncGenWrappedValue); ok {
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
 		if AsyncGenStopIterationHook != nil {
 			return nil, AsyncGenStopIterationHook(w.Value)
 		}
@@ -457,6 +477,17 @@ func asyncGenASendThrowMethod(args []Object, _ map[string]Object) (Object, error
 	if GenThrowHook == nil {
 		return nil, fmt.Errorf("RuntimeError: async_generator_asend.throw not available")
 	}
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited __anext__()/asend()")
+	}
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			return nil, fmt.Errorf("RuntimeError: anext(): asynchronous generator is already running")
+		}
+		a.state = asyncAwaitIter
+		a.gen.RunningAsync.Store(1)
+	}
 	if len(args) > 2 {
 		if DeprecWarnHook != nil {
 			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
@@ -478,39 +509,22 @@ func asyncGenASendThrowMethod(args []Object, _ map[string]Object) (Object, error
 			return nil, err
 		}
 		a.used = true
-		result, terr := a.gen.Throw(exc)
-		if terr != nil {
-			return nil, terr
-		}
-		if w, ok := result.(*AsyncGenWrappedValue); ok {
-			if AsyncGenStopIterationHook != nil {
-				return nil, AsyncGenStopIterationHook(w.Value)
-			}
-			return nil, ErrStopIteration
-		}
-		return result, nil
+		r, e := a.gen.Throw(exc)
+		return asyncGenASendDriveResult(a, r, e)
 	}
 	exc, err := GenThrowHook(args[1])
 	if err != nil {
 		return nil, err
 	}
 	a.used = true
-	result, terr := a.gen.Throw(exc)
-	if terr != nil {
-		return nil, terr
-	}
-	if w, ok := result.(*AsyncGenWrappedValue); ok {
-		if AsyncGenStopIterationHook != nil {
-			return nil, AsyncGenStopIterationHook(w.Value)
-		}
-		return nil, ErrStopIteration
-	}
-	return result, nil
+	r, e := a.gen.Throw(exc)
+	return asyncGenASendDriveResult(a, r, e)
 }
 
 // asyncGenASendCloseMethod implements async_generator_asend.close().
-// CPython throws GeneratorExit and swallows the StopIteration that
-// the await-side raises. Returns None.
+// CPython throws GeneratorExit; if the body yields anything in
+// response it raises RuntimeError "coroutine ignored GeneratorExit".
+// StopIteration / StopAsyncIteration / GeneratorExit are swallowed.
 //
 // CPython: Objects/genobject.c:1870 async_gen_asend_close
 func asyncGenASendCloseMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -522,15 +536,44 @@ func asyncGenASendCloseMethod(args []Object, _ map[string]Object) (Object, error
 		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'async_generator_asend' object")
 	}
 	a.used = true
-	// Drive a GeneratorExit; ignore StopIteration / StopAsyncIteration
-	// / GeneratorExit as CPython does.
-	_, _ = a.gen.Throw(ErrGeneratorExit)
+	result, terr := a.gen.Throw(ErrGeneratorExit)
+	if terr != nil {
+		if asyncCloseSwallow(terr) {
+			return None(), nil
+		}
+		return nil, terr
+	}
+	if result != nil {
+		return nil, fmt.Errorf("RuntimeError: coroutine ignored GeneratorExit")
+	}
 	return None(), nil
 }
 
+// asyncCloseSwallow reports whether err is one of the sentinel
+// exceptions that close() should swallow: StopIteration,
+// StopAsyncIteration, or GeneratorExit. CPython does the same with
+// PyErr_ExceptionMatches in async_gen_asend_close /
+// async_gen_athrow_close.
+//
+// CPython: Objects/genobject.c:1870 async_gen_asend_close
+// CPython: Objects/genobject.c:2310 async_gen_athrow_close
+func asyncCloseSwallow(err error) bool {
+	if errors.Is(err, ErrStopIteration) ||
+		errors.Is(err, ErrStopAsyncIteration) ||
+		errors.Is(err, ErrGeneratorExit) {
+		return true
+	}
+	var re *RaisedError
+	if errors.As(err, &re) && re.Exc != nil {
+		switch re.Exc.Type().Name {
+		case "StopIteration", "StopAsyncIteration", "GeneratorExit":
+			return true
+		}
+	}
+	return false
+}
+
 // asyncGenAThrowSendMethod implements async_generator_athrow.send(arg).
-// First call drives the underlying throw; subsequent calls forward
-// to the generator's Send.
 //
 // CPython: Objects/genobject.c:2100 async_gen_athrow_send
 func asyncGenAThrowSendMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -540,6 +583,20 @@ func asyncGenAThrowSendMethod(args []Object, _ map[string]Object) (Object, error
 	a, ok := args[0].(*asyncGenAThrow)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'async_generator_athrow' object")
+	}
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited aclose()/athrow()")
+	}
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			if a.isClose {
+				return nil, fmt.Errorf("RuntimeError: aclose(): asynchronous generator is already running")
+			}
+			return nil, fmt.Errorf("RuntimeError: athrow(): asynchronous generator is already running")
+		}
+		a.state = asyncAwaitIter
+		a.gen.RunningAsync.Store(1)
 	}
 	return asyncGenAThrowDrive(a, args[1])
 }
@@ -557,6 +614,20 @@ func asyncGenAThrowThrowMethod(args []Object, _ map[string]Object) (Object, erro
 	}
 	if GenThrowHook == nil {
 		return nil, fmt.Errorf("RuntimeError: async_generator_athrow.throw not available")
+	}
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited aclose()/athrow()")
+	}
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			if a.isClose {
+				return nil, fmt.Errorf("RuntimeError: aclose(): asynchronous generator is already running")
+			}
+			return nil, fmt.Errorf("RuntimeError: athrow(): asynchronous generator is already running")
+		}
+		a.state = asyncAwaitIter
+		a.gen.RunningAsync.Store(1)
 	}
 	if len(args) > 2 {
 		if DeprecWarnHook != nil {
@@ -579,27 +650,41 @@ func asyncGenAThrowThrowMethod(args []Object, _ map[string]Object) (Object, erro
 			return nil, err
 		}
 		a.used = true
-		result, terr := a.gen.Throw(exc)
-		if terr != nil {
-			return nil, terr
-		}
-		return result, nil
+		r, e := a.gen.Throw(exc)
+		return asyncGenAThrowDriveResult(a, r, e)
 	}
 	exc, err := GenThrowHook(args[1])
 	if err != nil {
 		return nil, err
 	}
 	a.used = true
-	result, terr := a.gen.Throw(exc)
-	if terr != nil {
-		return nil, terr
+	r, e := a.gen.Throw(exc)
+	return asyncGenAThrowDriveResult(a, r, e)
+}
+
+// asyncGenAThrowDriveResult mirrors async_gen_unwrap_value for the
+// athrow awaitable. Errors and AsyncGenWrappedValue both close it.
+//
+// CPython: Objects/genobject.c:1725 async_gen_unwrap_value
+func asyncGenAThrowDriveResult(a *asyncGenAThrow, result Object, err error) (Object, error) {
+	if err != nil {
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
+		return nil, err
+	}
+	if w, ok := result.(*AsyncGenWrappedValue); ok && !a.isClose {
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
+		if AsyncGenStopIterationHook != nil {
+			return nil, AsyncGenStopIterationHook(w.Value)
+		}
+		return nil, ErrStopIteration
 	}
 	return result, nil
 }
 
 // asyncGenAThrowCloseMethod implements async_generator_athrow.close().
-// Marks the awaitable closed; we drive a GeneratorExit into the
-// generator and swallow the expected sentinel errors.
+// Throws GeneratorExit; same sentinel semantics as asend.close.
 //
 // CPython: Objects/genobject.c:2310 async_gen_athrow_close
 func asyncGenAThrowCloseMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -611,7 +696,16 @@ func asyncGenAThrowCloseMethod(args []Object, _ map[string]Object) (Object, erro
 		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'async_generator_athrow' object")
 	}
 	a.used = true
-	_, _ = a.gen.Throw(ErrGeneratorExit)
+	result, terr := a.gen.Throw(ErrGeneratorExit)
+	if terr != nil {
+		if asyncCloseSwallow(terr) {
+			return None(), nil
+		}
+		return nil, terr
+	}
+	if result != nil {
+		return nil, fmt.Errorf("RuntimeError: coroutine ignored GeneratorExit")
+	}
 	return None(), nil
 }
 
@@ -653,16 +747,45 @@ func asyncGenAThrowAwaitMethod(args []Object, _ map[string]Object) (Object, erro
 // CPython: Objects/genobject.c:2100 async_gen_athrow_send
 func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 	if a.used {
-		return nil, ErrStopAsyncIteration
+		// Subsequent send() forwards arg into the generator so awaited
+		// sub-coroutines keep receiving values. CPython does the same
+		// at Objects/genobject.c:2170 gen_iternext branch.
+		r, e := a.gen.Send(arg)
+		return asyncGenAThrowDriveResult(a, r, e)
 	}
 	a.used = true
 	if a.isClose {
-		if cerr := a.gen.Close(); cerr != nil {
-			return nil, cerr
+		r, e := a.gen.Throw(ErrGeneratorExit)
+		if e != nil {
+			if asyncCloseSwallow(e) {
+				a.state = asyncAwaitClosed
+				a.gen.RunningAsync.Store(0)
+				return nil, ErrStopAsyncIteration
+			}
+			return asyncGenAThrowDriveResult(a, r, e)
 		}
+		if r != nil {
+			return asyncGenAThrowDriveResult(a, r, nil)
+		}
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
 		return nil, ErrStopAsyncIteration
 	}
-	return a.gen.Throw(a.err)
+	if a.argExc != nil {
+		if GenThrowHook == nil {
+			return nil, fmt.Errorf("RuntimeError: async_generator.athrow not available")
+		}
+		exc, err := GenThrowHook(a.argExc)
+		if err != nil {
+			a.state = asyncAwaitClosed
+			a.gen.RunningAsync.Store(0)
+			return nil, err
+		}
+		r, e := a.gen.Throw(exc)
+		return asyncGenAThrowDriveResult(a, r, e)
+	}
+	r, e := a.gen.Throw(a.err)
+	return asyncGenAThrowDriveResult(a, r, e)
 }
 
 // asyncGenAiterMethod returns self.
@@ -721,17 +844,21 @@ func asyncGenASendTraverse(o Object, visit Visitor) error {
 	return nil
 }
 
-// asyncGenAThrowTraverse visits the wrapped generator. The pending
-// error is a Go error rather than a Python object, so it is not
-// reachable through the cycle GC. Mirrors async_gen_athrow_traverse.
+// asyncGenAThrowTraverse visits the wrapped generator and the captured
+// raw exception argument. Mirrors async_gen_athrow_traverse.
 //
 // CPython: Objects/genobject.c:2342 async_gen_athrow_traverse
 func asyncGenAThrowTraverse(o Object, visit Visitor) error {
 	a := o.(*asyncGenAThrow)
-	if a.gen == nil {
-		return nil
+	if a.gen != nil {
+		if err := visit(a.gen); err != nil {
+			return err
+		}
 	}
-	return visit(a.gen)
+	if a.argExc != nil {
+		return visit(a.argExc)
+	}
+	return nil
 }
 
 // NewAsyncGenerator creates an async generator with the given name.
@@ -909,6 +1036,18 @@ func (g *AsyncGenerator) Athrow(err error) Object {
 	return a
 }
 
+// AthrowRaw mirrors async_gen_athrow_new but stashes the user-supplied
+// exception object verbatim. Validation against BaseException is
+// deferred to the first send() call so the already-running RuntimeError
+// fires before "exceptions must be classes...".
+//
+// CPython: Objects/genobject.c:2375 async_gen_athrow_new
+func (g *AsyncGenerator) AthrowRaw(exc Object) Object {
+	a := &asyncGenAThrow{gen: g, argExc: exc}
+	a.init(AsyncGenAThrowType)
+	return a
+}
+
 // Aclose returns an awaitable that drives Close.
 //
 // CPython: Objects/genobject.c:L2317 async_gen_aclose
@@ -918,65 +1057,84 @@ func (g *AsyncGenerator) Aclose() Object {
 	return a
 }
 
+// asyncGenASend states mirror CPython's AwaitableState enum.
+//
+// CPython: Objects/genobject.c AwaitableState (INIT/ITER/CLOSED)
+const (
+	asyncAwaitInit   = 0
+	asyncAwaitIter   = 1
+	asyncAwaitClosed = 2
+)
+
 type asyncGenASend struct {
 	Header
-	gen  *AsyncGenerator
-	val  Object
-	used bool
+	gen   *AsyncGenerator
+	val   Object
+	state int
+	used  bool
 }
 
+// asyncGenASendNext is the IterNext slot. __next__ on the asend
+// awaitable is semantically `send(None)`; route through the send
+// state machine so running-async / closed errors fire correctly.
+//
+// CPython: Objects/genobject.c:1788 async_gen_asend_send
 func asyncGenASendNext(o Object) (Object, error) {
 	a := o.(*asyncGenASend)
-	v := a.val
-	if a.used {
-		// CPython forwards None on subsequent next() calls of the
-		// same wrapper because the originally-sent value has already
-		// been consumed.
-		v = None()
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited __anext__()/asend()")
 	}
-	a.used = true
-	result, err := a.gen.Send(v)
-	if err != nil {
-		return nil, err
-	}
-	// async_gen_unwrap_value: a yielded _PyAsyncGenWrappedValue is the
-	// body returning normally from this asend step. Convert it into
-	// StopIteration(inner) so the await loop in the consuming coroutine
-	// stops and surfaces inner as the await expression's value.
-	//
-	// CPython: Objects/genobject.c:1743 async_gen_unwrap_value
-	if w, ok := result.(*AsyncGenWrappedValue); ok {
-		if AsyncGenStopIterationHook != nil {
-			return nil, AsyncGenStopIterationHook(w.Value)
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			return nil, fmt.Errorf("RuntimeError: anext(): asynchronous generator is already running")
 		}
-		return nil, ErrStopIteration
+		v := a.val
+		if v == nil {
+			v = None()
+		}
+		a.state = asyncAwaitIter
+		a.used = true
+		a.gen.RunningAsync.Store(1)
+		r, e := a.gen.Send(v)
+		return asyncGenASendDriveResult(a, r, e)
 	}
-	return result, nil
+	r, e := a.gen.Send(None())
+	return asyncGenASendDriveResult(a, r, e)
 }
 
 type asyncGenAThrow struct {
 	Header
 	gen     *AsyncGenerator
 	err     error
+	argExc  Object
 	isClose bool
+	state   int
 	used    bool
 }
 
+// asyncGenAThrowNext is the IterNext slot. __next__ on the athrow
+// awaitable is semantically `send(None)`; route through the send
+// state machine so running-async / closed errors fire correctly.
+//
+// CPython: Objects/genobject.c:2100 async_gen_athrow_send
 func asyncGenAThrowNext(o Object) (Object, error) {
 	a := o.(*asyncGenAThrow)
-	if a.used {
-		return nil, ErrStopAsyncIteration
+	if a.state == asyncAwaitClosed {
+		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited aclose()/athrow()")
 	}
-	a.used = true
-	if a.isClose {
-		// Close converts the result into StopAsyncIteration on
-		// success so the awaiting consumer sees a clean end.
-		if cerr := a.gen.Close(); cerr != nil {
-			return nil, cerr
+	if a.state == asyncAwaitInit {
+		if a.gen.RunningAsync.Load() == 1 {
+			a.state = asyncAwaitClosed
+			if a.isClose {
+				return nil, fmt.Errorf("RuntimeError: aclose(): asynchronous generator is already running")
+			}
+			return nil, fmt.Errorf("RuntimeError: athrow(): asynchronous generator is already running")
 		}
-		return nil, ErrStopAsyncIteration
+		a.state = asyncAwaitIter
+		a.gen.RunningAsync.Store(1)
 	}
-	return a.gen.Throw(a.err)
+	return asyncGenAThrowDrive(a, None())
 }
 
 func asyncGenRepr(o Object) (string, error) {
