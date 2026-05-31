@@ -108,9 +108,19 @@ func writeUnraisable(obj objects.Object, errMsg string, errFromCaller error) {
 	if err != nil || hook == nil || hook == objects.None() {
 		return
 	}
-	// Save the caller's pending exception so the hook's own raise does
-	// not leak into the surrounding tstate slot.
-	saved := ts.SwapException(nil)
+	// Clear the unraisable exception from tstate before invoking the
+	// hook. CPython's PyErr_WriteUnraisable fetches the exception (which
+	// clears the active slot) before calling the hook, and never
+	// restores it because the unraisable IS the consumption. Without
+	// this clear, a yield-from close that wraps a sub-iter's
+	// __getattr__ ZeroDivisionError into unraisable would still leave
+	// ZeroDivisionError on tstate, so the GeneratorExit we then throw
+	// into the body races against the stale exception and propagates as
+	// the wrong thing to the caller.
+	//
+	// CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
+	// (the PyErr_FetchRaisedException at the top consumes the exception)
+	ts.SwapException(nil)
 	_, hookErr := objects.Call(hook, objects.NewTuple([]objects.Object{args}), nil)
 	if hookErr != nil {
 		// A hook that itself errors is unrecoverable. CPython falls back
@@ -119,7 +129,7 @@ func writeUnraisable(obj objects.Object, errMsg string, errFromCaller error) {
 		fmt.Fprintln(os.Stderr, "Exception ignored in sys.unraisablehook:")
 		fmt.Fprintln(os.Stderr, hookErr.Error())
 	}
-	ts.SetException(saved)
+	ts.SwapException(nil)
 }
 
 // liveMatchesErr reports whether the exception sitting on the thread
@@ -456,9 +466,19 @@ func genThrowForwardHook(genObj objects.Object, yf objects.Object, err error) (o
 			objects.NewTuple([]objects.Object{objects.NewStr(err.Error())}))
 	}
 
-	// Look up yf.throw; if absent, skip forwarding.
-	throwAttr, lookErr := objects.GetAttr(yf, objects.NewStr("throw"))
+	// Look up yf.throw via LookupAttr (PyObject_GetOptionalAttr).
+	// Missing attribute returns (nil, nil) and the caller falls back to
+	// throwing into the body directly. An error inside __getattr__ on the
+	// other hand becomes the propagating exception, overriding the
+	// originally-thrown one. This matches CPython's _gen_throw where the
+	// PyObject_LookupAttr branch returns -1 on attribute lookup failure.
+	//
+	// CPython: Objects/genobject.c:475 _gen_throw (PyObject_LookupAttr throw)
+	throwAttr, lookErr := objects.LookupAttr(yf, objects.NewStr("throw"))
 	if lookErr != nil {
+		return nil, lookErr
+	}
+	if throwAttr == nil {
 		return nil, err
 	}
 

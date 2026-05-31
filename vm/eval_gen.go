@@ -720,8 +720,13 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			}
 			val, nerr = objects.Call(sendAttr, objects.NewTuple([]objects.Object{v}), nil)
 		}
-		if retVal, isStop := stopIterRetval(nerr); isStop {
-			// Same discipline as the Generator path above.
+		if retVal, isStop := e.stopIterRetval(nerr); isStop {
+			// Same discipline as the Generator path above. Bare excSentinel
+			// (fmt.Errorf("StopIteration: 42")) carries no errors.Is chain
+			// back to ErrStopIteration, so e.stopIterRetval consults the
+			// live tstate exception as a fallback. Required for
+			// `yield from CustomIter` where __next__ raises StopIteration
+			// instead of returning NULL.
 			//
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
@@ -976,6 +981,61 @@ func (e *evalState) raiseExcFromObject(excVal objects.Object) error {
 // await result into the END_SEND slot.
 //
 // CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+func (e *evalState) stopIterRetval(err error) (objects.Object, bool) {
+	v, ok := stopIterRetval(err)
+	if ok {
+		return v, true
+	}
+	if err == nil {
+		return nil, false
+	}
+	if live := pyerrors.Occurred(e.ts); live != nil {
+		if isStopIterationException(live) {
+			val := stopIterationExcValue(live)
+			pyerrors.Clear(e.ts)
+			return val, true
+		}
+	}
+	return nil, false
+}
+
+// isStopIterationException reports whether exc's type is StopIteration
+// (or a subclass), matching PyErr_ExceptionMatches(PyExc_StopIteration).
+func isStopIterationException(exc *pyerrors.Exception) bool {
+	if exc == nil || exc.ExcType == nil {
+		return false
+	}
+	for cur := exc.ExcType; cur != nil; cur = primaryBase(cur) {
+		if cur.Name == "StopIteration" {
+			return true
+		}
+	}
+	return false
+}
+
+// primaryBase returns the first base of t, mirroring CPython's MRO walk
+// through tp_base.
+func primaryBase(t *objects.Type) *objects.Type {
+	if t == nil || len(t.Bases) == 0 {
+		return nil
+	}
+	return t.Bases[0]
+}
+
+// stopIterationExcValue returns the value carried by a StopIteration:
+// the dedicated StopValue slot when populated, else args[0], else None.
+//
+// CPython: Objects/exceptions.c:746 PyStopIterationObject.value
+func stopIterationExcValue(exc *pyerrors.Exception) objects.Object {
+	if exc.StopValue != nil {
+		return exc.StopValue
+	}
+	if exc.Args != nil && exc.Args.Len() > 0 {
+		return exc.Args.Item(0)
+	}
+	return objects.None()
+}
+
 func stopIterRetval(err error) (objects.Object, bool) {
 	if err == nil {
 		return nil, false

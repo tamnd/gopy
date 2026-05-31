@@ -675,23 +675,41 @@ func (g *Generator) Throw(err error) (Object, error) {
 	// Forward to the yield-from sub-iterator if present.
 	// CPython: Objects/genobject.c:469 _gen_throw (_PyGen_yf branch)
 	if yf := g.YieldFromTarget; yf != nil {
-		forwarded := true
-		var fval Object
-		var ferr error
-		switch v := yf.(type) {
-		case *Generator:
-			fval, ferr = v.Throw(err)
-		case *Coroutine:
-			fval, ferr = v.Throw(err)
-		default:
-			if GenThrowForwardHook != nil {
-				fval, ferr = GenThrowForwardHook(g, yf, err)
-			} else {
-				forwarded = false
+		// gen.throw() enters with close_on_genexit=1 (public throw
+		// always sets it). When the thrown exception is GeneratorExit
+		// the sub-iter is closed (its finally runs, raising "ignored
+		// GeneratorExit" if it swallows + yields), then the exit is
+		// re-raised into the outer body via throw_here below.
+		//
+		// CPython: Objects/genobject.c:475 _gen_throw (close_on_genexit branch)
+		if errors.Is(err, ErrGeneratorExit) || isGeneratorExitException(err) {
+			if e := GenCloseIter(yf); e != nil && !isCleanCloseError(e) {
+				g.YieldFromTarget = nil
+				g.closed = true
+				return nil, e
 			}
-		}
-		if forwarded {
-			return g.forwardThrowResult(fval, ferr)
+			g.YieldFromTarget = nil
+			// Fall through to throw_here: send the GeneratorExit into
+			// the outer body's yield from line via the channel.
+		} else {
+			forwarded := true
+			var fval Object
+			var ferr error
+			switch v := yf.(type) {
+			case *Generator:
+				fval, ferr = v.Throw(err)
+			case *Coroutine:
+				fval, ferr = v.Throw(err)
+			default:
+				if GenThrowForwardHook != nil {
+					fval, ferr = GenThrowForwardHook(g, yf, err)
+				} else {
+					forwarded = false
+				}
+			}
+			if forwarded {
+				return g.forwardThrowResult(fval, ferr)
+			}
 		}
 	}
 	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
@@ -874,6 +892,35 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 	}
 	return msg.Err
+}
+
+// isGeneratorExitException reports whether err carries a raised
+// GeneratorExit instance, as opposed to the bare ErrGeneratorExit
+// sentinel. _gen_throw's close_on_genexit branch keys on the type
+// matching PyExc_GeneratorExit regardless of which form raised it.
+//
+// CPython: Objects/genobject.c:475 _gen_throw (PyErr_GivenExceptionMatches)
+func isGeneratorExitException(err error) bool {
+	var re *RaisedError
+	if errors.As(err, &re) && re.Exc != nil {
+		t := re.Exc.Type()
+		for cur := t; cur != nil; cur = parentBase(cur) {
+			if cur.Name == "GeneratorExit" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parentBase returns the primary base of t (Bases[0]) or nil. Used to
+// walk the MRO when matching exception class names without importing
+// the errors package.
+func parentBase(t *Type) *Type {
+	if t == nil || len(t.Bases) == 0 {
+		return nil
+	}
+	return t.Bases[0]
 }
 
 // isCleanCloseError returns true when an error returned by
