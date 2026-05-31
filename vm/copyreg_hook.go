@@ -20,20 +20,37 @@ func init() {
 	objects.BuiltinLookup = builtinLookup
 }
 
-// builtinLookup retrieves the named object from the builtins module.
+// builtinLookup retrieves the named object the way _PyEval_GetBuiltin
+// does: from the running frame's f_builtins, not the builtins module.
+// A namespace that installs its own __builtins__ governs what iter /
+// reversed / getattr a reducer running under it resolves to, and a
+// missing name is AttributeError(name) (PyErr_SetObject). When the
+// frame uses gopy's implicit fallback (globals standing in for an
+// absent __builtins__) or there is no running frame, fall back to the
+// builtins module so internal reducers keep working.
 //
-// CPython: Python/bltinmodule.c:_PyEval_GetBuiltin
+// CPython: Python/bltinmodule.c:3083 _PyEval_GetBuiltin
+// CPython: Python/ceval.c PyEval_GetBuiltins (current frame f_builtins)
 func builtinLookup(name string) (objects.Object, error) {
-	mod, ok := imp.GetModule("builtins")
-	if !ok {
-		return nil, fmt.Errorf("AttributeError: builtins module not loaded")
+	var builtins objects.Object
+	if ts := currentThread(); ts != nil {
+		if f := frameStackFor(ts).Top(); f != nil && frameHasExplicitBuiltins(f) {
+			builtins = callerBuiltins(f)
+		}
 	}
-	v, err := mod.Dict().GetItem(objects.NewStr(name))
+	if builtins == nil {
+		mod, ok := imp.GetModule("builtins")
+		if !ok {
+			return nil, fmt.Errorf("AttributeError: %s", name)
+		}
+		builtins = mod.Dict()
+	}
+	v, found, err := objects.MappingGetOptionalItem(builtins, objects.NewStr(name))
 	if err != nil {
-		return nil, fmt.Errorf("AttributeError: builtins: %q not found: %w", name, err)
+		return nil, err
 	}
-	if v == nil {
-		return nil, fmt.Errorf("AttributeError: builtins: %q", name)
+	if !found {
+		return nil, fmt.Errorf("AttributeError: %s", name)
 	}
 	return v, nil
 }
