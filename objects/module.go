@@ -73,6 +73,34 @@ func init() {
 		}
 		return None(), nil
 	}))
+
+	// module.__dir__(): the keys of the module's __dict__, unless the
+	// dict itself defines __dir__. A __dict__ that is not a dictionary
+	// (a subclass can shadow it) raises TypeError.
+	//
+	// CPython: Objects/moduleobject.c:1190 module_dir
+	SetTypeDescr(ModuleType, "__dir__", NewMethodDescr(ModuleType, "__dir__", moduleDir))
+}
+
+// moduleDir backs module.__dir__.
+//
+// CPython: Objects/moduleobject.c:1190 module_dir
+func moduleDir(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __dir__() takes no arguments")
+	}
+	dict, err := GetAttr(args[0], NewStr("__dict__"))
+	if err != nil {
+		return nil, err
+	}
+	d, ok := dict.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: <module>.__dict__ is not a dictionary")
+	}
+	if dirfunc, _ := d.GetItem(NewStr("__dir__")); dirfunc != nil {
+		return Call(dirfunc, NewTuple(nil), nil)
+	}
+	return NewList(d.Keys()), nil
 }
 
 // NewModule creates an empty module with the given name in its __dict__.

@@ -27,6 +27,37 @@ func init() {
 	SetTypeDescr(typeType, "__subclasses__", NewMethodDescr(typeType, "__subclasses__", typeSubclassesMeth))
 	// CPython: Objects/typeobject.c:1254 type_mro — returns __mro__ as a list.
 	SetTypeDescr(typeType, "mro", NewMethodDescr(typeType, "mro", typeMroMeth))
+	// CPython: Objects/typeobject.c:5862 type___dir___impl
+	SetTypeDescr(typeType, "__dir__", NewMethodDescr(typeType, "__dir__", typeDirMeth))
+}
+
+// typeDirMeth implements type.__dir__(): the names reachable by merging
+// the class's own dict with every base's dict. Unlike object.__dir__ it
+// does not chase the metaclass, so dir(str) lists str's and object's
+// members but not type-level names like __mro__ or mro.
+//
+// CPython: Objects/typeobject.c:5862 type___dir___impl
+func typeDirMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__dir__' of 'type' object needs an argument")
+	}
+	t, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__dir__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	// merge_class_dict(dict, self): self's dict plus the recursive merge
+	// of every base. Walking the MRO covers the same set.
+	seen := map[string]struct{}{}
+	for _, base := range t.MRO {
+		for _, n := range descriptorNames(base) {
+			seen[n] = struct{}{}
+		}
+	}
+	items := make([]Object, 0, len(seen))
+	for n := range seen {
+		items = append(items, NewStr(n))
+	}
+	return NewList(items), nil
 }
 
 // typeSubclassesMeth implements type.__subclasses__() -> list.

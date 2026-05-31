@@ -83,6 +83,16 @@ func minMax(args []objects.Object, kwargs map[string]objects.Object, op objects.
 	if len(args) == 0 {
 		return nil, fmt.Errorf("TypeError: %s expected at least 1 argument, got 0", name)
 	}
+	// min/max accept only the "key" and "default" keywords; anything
+	// else is a TypeError, matching the PyArg_ParseTupleAndKeywords
+	// keyword list min_max uses.
+	//
+	// CPython: Python/bltinmodule.c:1845 min_max
+	for k := range kwargs {
+		if k != "key" && k != "default" {
+			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'", name, k)
+		}
+	}
 	keyFn, ok := kwargs["key"]
 	if ok && keyFn == objects.None() {
 		keyFn = nil

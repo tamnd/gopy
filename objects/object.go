@@ -438,7 +438,8 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 	}
 	self := args[0]
 	names := map[string]struct{}{}
-	// Instance __dict__ keys.
+	// Instance __dict__ keys. A __dict__ that is not a real dict is
+	// treated as empty, matching object___dir___impl.
 	if d, err := GetAttr(self, NewStr("__dict__")); err == nil {
 		if dict, ok := d.(*Dict); ok {
 			for _, k := range dict.Keys() {
@@ -448,10 +449,19 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 			}
 		}
 	}
-	// Names reachable through the type's MRO.
-	for _, t := range self.Type().MRO {
-		for _, n := range descriptorNames(t) {
-			names[n] = struct{}{}
+	// Merge in attrs reachable from __class__. The class is fetched with
+	// getattr, so the "__class__ in __slots__ but unset" trick makes the
+	// lookup raise AttributeError and the class names are skipped: dir()
+	// then reports only the instance dict.
+	//
+	// CPython: Objects/typeobject.c:7906 object___dir___impl
+	if cls, err := GetAttr(self, NewStr("__class__")); err == nil {
+		if t, ok := cls.(*Type); ok {
+			for _, base := range t.MRO {
+				for _, n := range descriptorNames(base) {
+					names[n] = struct{}{}
+				}
+			}
 		}
 	}
 	out := make([]string, 0, len(names))

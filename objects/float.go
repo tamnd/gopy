@@ -624,7 +624,7 @@ func floatDivmod(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bf == 0 {
-		return nil, errors.New("ZeroDivisionError: float divmod()")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	q := math.Floor(af / bf)
 	r := math.Mod(af, bf)
@@ -647,7 +647,7 @@ func floatTrueDiv(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bf == 0 {
-		return nil, errors.New("ZeroDivisionError: float division by zero")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	return NewFloat(af / bf), nil
 }
@@ -666,7 +666,7 @@ func floatFloorDiv(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bf == 0 {
-		return nil, errors.New("ZeroDivisionError: float floor division by zero")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	return NewFloat(math.Floor(af / bf)), nil
 }
@@ -684,7 +684,7 @@ func floatMod(a, b Object) (Object, error) {
 		return notImplemented(), nil
 	}
 	if bf == 0 {
-		return nil, errors.New("ZeroDivisionError: float modulo")
+		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
 	r := math.Mod(af, bf)
 	if r != 0 {

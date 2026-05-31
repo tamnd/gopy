@@ -1486,13 +1486,25 @@ func slotMpLength(o Object) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	i, ok := r.(*Int)
+	// _PyNumber_Index coerces the result through __index__, so a
+	// non-integer (e.g. 4.5) raises TypeError before any range check.
+	idx, err := NumberIndex(r)
+	if err != nil {
+		return 0, err
+	}
+	i, ok := idx.(*Int)
 	if !ok {
 		return 0, fmt.Errorf("TypeError: __len__ should return int, returned %s", r.Type().Name)
 	}
-	v, _ := i.Int64()
-	if v < 0 {
+	// The negative test runs before the ssize_t range check, matching
+	// slot_sq_length: a huge negative __len__ is reported as ValueError,
+	// not OverflowError.
+	if i.BigInt().Sign() < 0 {
 		return 0, fmt.Errorf("ValueError: __len__() should return >= 0")
+	}
+	v, fits := i.Int64()
+	if !fits {
+		return 0, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
 	}
 	return int(v), nil
 }

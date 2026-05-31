@@ -108,44 +108,13 @@ func Dir(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	if len(args) == 0 {
 		return dirLocals()
 	}
-	seen := map[string]struct{}{}
-	collect := func(d *objects.Dict) {
-		if d == nil {
-			return
-		}
-		for _, k := range d.Keys() {
-			if s, err := objects.Str(k); err == nil {
-				seen[s] = struct{}{}
-			}
-		}
-	}
-	switch v := args[0].(type) {
-	case *objects.Module:
-		collect(v.Dict())
-	case *objects.Type:
-		for _, name := range objects.TypeDescrNames(v) {
-			seen[name] = struct{}{}
-		}
-	case *objects.Instance:
-		collect(v.Dict())
-		for _, name := range objects.TypeDescrNames(v.Type()) {
-			seen[name] = struct{}{}
-		}
-	default:
-		for _, name := range objects.TypeDescrNames(v.Type()) {
-			seen[name] = struct{}{}
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for n := range seen {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]objects.Object, len(names))
-	for i, n := range names {
-		out[i] = objects.NewStr(n)
-	}
-	return objects.NewList(out), nil
+	// PyObject_Dir routes through _PyObject_LookupSpecial(obj, __dir__)
+	// then sorts the result. Each type's __dir__ (object's, type's,
+	// module's) handles the merge of instance dict and class names, so
+	// builtin_dir is a thin wrapper.
+	//
+	// CPython: Python/bltinmodule.c:1001 builtin_dir
+	return objects.Dir(args[0])
 }
 
 // dirLocals returns the running frame's local-scope keys, sorted.
