@@ -798,6 +798,19 @@ func getAwaitableIter(o objects.Object) (objects.Object, error) {
 	if _, ok := o.(*objects.Coroutine); ok {
 		return o, nil
 	}
+	// Generators flagged CO_ITERABLE_COROUTINE (via @types.coroutine)
+	// are awaitable directly; their __next__ drives the await machinery
+	// the same way a native coroutine does.
+	//
+	// CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter via
+	// gen_is_coroutine.
+	if g, ok := o.(*objects.Generator); ok {
+		if g.Code != nil {
+			if cd, ok2 := g.Code.(*objects.Code); ok2 && uint32(cd.Flags)&compile.CoIterableCoroutine != 0 {
+				return o, nil
+			}
+		}
+	}
 	t := o.Type()
 	if t.Async != nil && t.Async.Await != nil {
 		res, err := t.Async.Await(o)
@@ -814,7 +827,7 @@ func getAwaitableIter(o objects.Object) (objects.Object, error) {
 		}
 		return res, nil
 	}
-	return nil, fmt.Errorf("TypeError: object %s can't be used in 'await' expression", t.Name)
+	return nil, fmt.Errorf("TypeError: '%s' object can't be awaited", t.Name)
 }
 
 // isStopAsyncIteration reports whether o represents a StopAsyncIteration

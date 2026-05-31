@@ -79,7 +79,9 @@ func init() {
 	CoroutineType.Setattro = GenericSetAttr
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
 		"send":          coroSendMethod,
+		"throw":         coroThrowMethod,
 		"close":         coroCloseMethod,
+		"__await__":     coroAwaitMethod,
 		"__reduce__":    genReduceReject,
 		"__reduce_ex__": genReduceReject,
 	} {
@@ -214,6 +216,94 @@ func init() {
 	CoroAwaitType.IterNext = coroAwaitNext
 	CoroAwaitType.TpTraverse = coroAwaiterTraverse
 	AddIterSlotWrappers(CoroAwaitType)
+
+	// CPython's coroutine_wrapper exposes send/throw/close so callers
+	// driving a coroutine via its __await__ iterator can resume it the
+	// same way they would a generator.
+	//
+	// CPython: Objects/genobject.c:1466 coro_wrapper_methods
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"send":  coroWrapperSendMethod,
+		"throw": coroWrapperThrowMethod,
+		"close": coroWrapperCloseMethod,
+	} {
+		SetTypeDescr(CoroAwaitType, name, NewMethodDescr(CoroAwaitType, name, fn))
+	}
+}
+
+// coroWrapperSendMethod implements coroutine_wrapper.send(value): forwards
+// to the wrapped coroutine's Send.
+//
+// CPython: Objects/genobject.c:1457 coro_wrapper_send
+func coroWrapperSendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: send() takes exactly one argument")
+	}
+	w, ok := args[0].(*coroAwaiter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'coroutine_wrapper' object")
+	}
+	return w.coro.Send(args[1])
+}
+
+// coroWrapperThrowMethod implements coroutine_wrapper.throw.
+//
+// CPython: Objects/genobject.c:1461 coro_wrapper_throw
+func coroWrapperThrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: throw() requires an exception")
+	}
+	w, ok := args[0].(*coroAwaiter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'throw' requires a 'coroutine_wrapper' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: coroutine.throw not available")
+	}
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: coroutine.throw 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		return w.coro.Throw(exc)
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return w.coro.Throw(exc)
+}
+
+// coroWrapperCloseMethod implements coroutine_wrapper.close.
+//
+// CPython: Objects/genobject.c:1464 coro_wrapper_close
+func coroWrapperCloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: close() missing self argument")
+	}
+	w, ok := args[0].(*coroAwaiter)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'coroutine_wrapper' object")
+	}
+	if err := w.coro.Close(); err != nil {
+		return nil, err
+	}
+	return None(), nil
 }
 
 // coroTraverse mirrors gen_traverse for PyCoro_Type. cr_origin is
@@ -374,6 +464,66 @@ func coroCloseMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	return None(), nil
 }
+
+// coroThrowMethod dispatches coroutine.throw(exc) / throw(typ, val, tb).
+//
+// CPython: Objects/genobject.c:599 gen_throw (shared with coroutines)
+func coroThrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: throw() requires an exception")
+	}
+	c, ok := args[0].(*Coroutine)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'throw' requires a 'coroutine' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: coroutine.throw not available")
+	}
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: coroutine.throw 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		return c.Throw(exc)
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return c.Throw(exc)
+}
+
+// coroAwaitMethod dispatches coroutine.__await__(). CPython exposes the
+// am_await slot as a method-wrapper via slotdefs; gopy registers an
+// explicit method so attribute access surfaces the awaiter.
+//
+// CPython: Objects/genobject.c:1486 coro_await
+func coroAwaitMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __await__() missing self argument")
+	}
+	c, ok := args[0].(*Coroutine)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__await__' requires a 'coroutine' object")
+	}
+	return c.Await(), nil
+}
+
 
 // Await returns the iterator that drives this coroutine. CPython
 // returns a thin wrapper whose __next__ forwards to send(None).
