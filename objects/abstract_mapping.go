@@ -160,15 +160,15 @@ func MappingHasKeyString(o Object, key string) bool {
 	return MappingHasKey(o, NewStr(key))
 }
 
-// MappingKeys returns list(o.keys()). Dict gets a fast path that
-// reads its entry table directly; everything else dispatches through
-// a `o.keys()` method call and materializes the result via
-// SequenceList.
+// MappingKeys returns list(o.keys()). Only an exact dict takes the
+// fast path that reads its entry table directly; a dict subclass with
+// an overridden keys() (and every non-dict mapping) dispatches through
+// the keys() method, matching PyDict_CheckExact in PyMapping_Keys.
 //
 // CPython: Objects/abstract.c:2453 PyMapping_Keys
 func MappingKeys(o Object) (*List, error) {
-	if d, ok := o.(*Dict); ok {
-		return NewList(d.Keys()), nil
+	if IsExactDict(o) {
+		return NewList(o.(*Dict).Keys()), nil
 	}
 	return mappingMethodOutputAsList(o, "keys")
 }

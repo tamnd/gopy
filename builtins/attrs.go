@@ -127,14 +127,23 @@ func dirLocals() (objects.Object, error) {
 		return objects.NewList(nil), nil
 	}
 	_, locals := currentScope()
-	d, ok := locals.(*objects.Dict)
-	if !ok {
+	if locals == nil {
 		return objects.NewList(nil), nil
 	}
-	keys := d.Keys()
-	names := make([]string, 0, len(keys))
-	for _, k := range keys {
-		s, err := objects.Str(k)
+	// _dir_locals reads f_locals (which may be any mapping when the
+	// frame was set up by exec/eval with a custom locals object) and
+	// materializes its keys via PyMapping_Keys, then sorts. A plain
+	// dict takes the fast path inside MappingKeys; a custom mapping
+	// dispatches to its keys() method.
+	//
+	// CPython: Objects/object.c:2110 _dir_locals
+	keyList, err := objects.MappingKeys(locals)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, keyList.Len())
+	for i := 0; i < keyList.Len(); i++ {
+		s, err := objects.Str(keyList.Item(i))
 		if err != nil {
 			continue
 		}
