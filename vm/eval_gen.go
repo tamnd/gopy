@@ -426,9 +426,22 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			// RERAISE returns excSentinel (a plain fmt.Errorf) that loses
 			// the Python object; wrap it in RaisedError when the exception
 			// is still on the thread state.
-			if exc := pyerrors.Occurred(savedTS); exc != nil {
-				var re *objects.RaisedError
-				if !errors.As(runErr, &re) {
+			//
+			// When the body raises a Go error that propagates all the way
+			// out without any frame-level handler synthesizing a typed
+			// exception (e.g. an opcode arm setting pendingErr to a
+			// prefixed string when there is no try/except in the body),
+			// the thread state stays clear. Promote the Go error here so
+			// receivers see the right TypeError / RuntimeError / etc.,
+			// not a bare Exception with the prefixed message in args[0].
+			//
+			// CPython: Python/errors.c PyErr_NormalizeException
+			var re *objects.RaisedError
+			if !errors.As(runErr, &re) {
+				if exc := pyerrors.Occurred(savedTS); exc != nil {
+					runErr = objects.NewRaisedError(exc, runErr.Error())
+				} else {
+					exc := synthesizeException(runErr)
 					runErr = objects.NewRaisedError(exc, runErr.Error())
 				}
 			}
@@ -716,11 +729,23 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 }
 
 // execGetYieldFromIter ports GET_YIELD_FROM_ITER: if TOS is already a
-// generator or iterator, leave it. Otherwise call iter(TOS).
+// generator or iterator, leave it. Otherwise call iter(TOS). A coroutine
+// at TOS is rejected outright when the enclosing function is not itself
+// a coroutine / @types.coroutine generator, matching CPython's guard
+// against `yield from coro` inside a plain generator body.
 //
 // CPython: Python/bytecodes.c:3091 GET_YIELD_FROM_ITER
 func (e *evalState) execGetYieldFromIter() (genResult, error) {
 	iterable := e.popObject()
+	if _, isCoro := iterable.(*objects.Coroutine); isCoro {
+		flags := uint32(e.f.Code.Flags)
+		if flags&(compile.CoCoroutine|compile.CoIterableCoroutine) == 0 {
+			return genResult{ok: true}, fmt.Errorf(
+				"TypeError: cannot 'yield from' a coroutine object in a non-coroutine generator")
+		}
+		e.pushObject(iterable)
+		return genResult{next: e.advance(), ok: true}, nil
+	}
 	if _, isGen := iterable.(*objects.Generator); isGen {
 		e.pushObject(iterable)
 		return genResult{next: e.advance(), ok: true}, nil
@@ -779,7 +804,7 @@ func (e *evalState) execEndAsyncFor() (genResult, error) {
 	if isStopAsyncIteration(excVal) {
 		return genResult{next: e.advance(), ok: true}, nil
 	}
-	return genResult{ok: true}, excAsError(excVal)
+	return genResult{ok: true}, e.raiseExcFromObject(excVal)
 }
 
 // setRunningYieldFrom mirrors CPython's _PyGen_yf reflection by
@@ -863,6 +888,27 @@ func getAwaitableIter(o objects.Object) (objects.Object, error) {
 	return nil, fmt.Errorf("TypeError: '%s' object can't be awaited", t.Name)
 }
 
+// formatAwaitableError ports _PyEval_FormatAwaitableError: when
+// GET_AWAITABLE's oparg flags an `async with` context, the bare
+// "object X can't be used in 'await' expression" message gets replaced
+// with one that names the protocol method whose return value failed
+// the awaitable check.
+//
+// CPython: Python/ceval.c:3499 _PyEval_FormatAwaitableError
+func formatAwaitableError(typeName string, oparg uint32) error {
+	switch oparg {
+	case 1:
+		return fmt.Errorf(
+			"TypeError: 'async with' received an object from __aenter__ "+
+				"that does not implement __await__: %s", typeName)
+	case 2:
+		return fmt.Errorf(
+			"TypeError: 'async with' received an object from __aexit__ "+
+				"that does not implement __await__: %s", typeName)
+	}
+	return nil
+}
+
 // isStopAsyncIteration reports whether o represents a StopAsyncIteration
 // exception. CPython matches via PyErr_GivenExceptionMatches on
 // PyExc_StopAsyncIteration; gopy still keeps the sentinel error along
@@ -894,7 +940,23 @@ func (e *evalState) execCleanupThrow() (genResult, error) {
 		e.pushObject(stopIterationValue(excVal))
 		return genResult{next: e.advance(), ok: true}, nil
 	}
-	return genResult{ok: true}, excAsError(excVal)
+	return genResult{ok: true}, e.raiseExcFromObject(excVal)
+}
+
+// raiseExcFromObject installs a typed Python exception sitting on the
+// VM stack onto the thread state and returns the matching excSentinel,
+// mirroring how RERAISE re-raises a captured exception while preserving
+// its PyObject identity. END_ASYNC_FOR / CLEANUP_THROW must use this
+// helper instead of stringifying the exception, otherwise the type tag
+// is lost and the receiver only sees a bare Exception("TypeError(...)").
+//
+// CPython: Python/bytecodes.c RERAISE (PyErr_SetRaisedException)
+func (e *evalState) raiseExcFromObject(excVal objects.Object) error {
+	if pyExc, ok := excVal.(*pyerrors.Exception); ok {
+		pyerrors.Raise(e.ts, pyExc)
+		return excSentinel(pyExc)
+	}
+	return excAsError(excVal)
 }
 
 // stopIterRetval inspects err for a StopIteration crossing. Returns

@@ -1417,11 +1417,14 @@ func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 // for tailored error messages; gopy currently ignores it.
 //
 // CPython: Python/ceval.c:3525 _PyEval_GetAwaitable
-func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Object {
-	_ = opcode
+func (e *evalState) getAwaitable(iter objects.Object, oparg uint32) objects.Object {
 	out, err := getAwaitableIter(iter)
 	if err != nil {
-		e.pendingErr = err
+		if msg := formatAwaitableError(iter.Type().Name, oparg); msg != nil {
+			e.pendingErr = msg
+		} else {
+			e.pendingErr = err
+		}
 		return nil
 	}
 	return out
