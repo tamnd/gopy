@@ -38,11 +38,21 @@ func (c *Compiler) visitYield(e *ast.Yield) error {
 	} else if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
-	if c.scope.Generator && c.scope.Coroutine {
+	c.addopYield(l)
+	return nil
+}
+
+// addopYield emits the wrap intrinsic when the scope is an async
+// generator, then YIELD_VALUE. Centralises the codegen so the
+// comprehension elt-tail and the `yield` expression visit go through
+// the same path, mirroring CPython's ADDOP_YIELD macro.
+//
+// CPython: Python/codegen.c:3168 codegen_addop_yield
+func (c *Compiler) addopYield(l ast.Pos) {
+	if c.scope != nil && c.scope.Generator && c.scope.Coroutine {
 		c.addOpI(CALL_INTRINSIC_1, intrinsicAsyncGenWrap, l)
 	}
 	c.addOpI(YIELD_VALUE, 0, l)
-	return nil
 }
 
 // visitYieldFrom lowers `yield from x` to GET_YIELD_FROM_ITER plus a

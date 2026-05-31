@@ -167,10 +167,19 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 	innerUnit.Name = name
 	innerUnit.Argcount = 1
 	innerUnit.Flags |= CoOptimized | CoNewLocals
-	if kind == compGenExp {
+	// Mirror compute_code_flags: a comprehension whose inner scope is
+	// both generator and coroutine becomes CO_ASYNC_GENERATOR; a sync
+	// genexpr is CO_GENERATOR; any other coroutine inside the
+	// comprehension (set / list / dict comp inside an async def) is
+	// CO_COROUTINE alone.
+	//
+	// CPython: Python/compile.c:1379 compute_code_flags
+	switch {
+	case kind == compGenExp && innerScope.Coroutine:
+		innerUnit.Flags |= CoAsyncGenerator
+	case kind == compGenExp:
 		innerUnit.Flags |= CoGenerator
-	}
-	if innerScope.Coroutine {
+	case innerScope.Coroutine:
 		innerUnit.Flags |= CoCoroutine
 	}
 
@@ -316,7 +325,8 @@ func (c *Compiler) emitCompTail(kind compKind, depth int, elt, val ast.Expr) err
 		if err := c.visitExpr(elt); err != nil {
 			return err
 		}
-		c.addOpI(YIELD_VALUE, 0, loc(elt))
+		// CPython: Python/codegen.c:4478 ADDOP_YIELD in comp_genexp tail.
+		c.addopYield(loc(elt))
 		c.addOp(POP_TOP, loc(elt))
 	case compListComp:
 		if err := c.visitExpr(elt); err != nil {
