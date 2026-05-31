@@ -34,6 +34,13 @@ type InterpreterFrame interface {
 	FrameBuiltins() Object
 	FrameLocals() Object
 	FrameBack() InterpreterFrame
+	// FrameSetBack rewires f_back to back (nil to unlink). A forwarded
+	// gen/coro throw uses this to relink the delegating frames into the
+	// running call chain while the leaf executes, then unlinks them,
+	// matching _gen_throw's frame->previous = prev / = NULL bracket.
+	//
+	// CPython: Objects/genobject.c:496 _gen_throw (frame->previous)
+	FrameSetBack(back InterpreterFrame)
 	FrameLasti() int
 	FrameNumLocals() int
 	FrameFastLocal(i int) Object

@@ -163,7 +163,12 @@ func (s *FrameSnapshot) FrameBack() InterpreterFrame {
 	}
 	return s.Back
 }
-func (s *FrameSnapshot) FrameNumLocals() int { return s.NumLocals }
+
+// FrameSetBack rewires the snapshot's f_back. A snapshot is detached
+// from the live call chain, so this is a plain store used only to keep
+// the InterpreterFrame interface uniform.
+func (s *FrameSnapshot) FrameSetBack(back InterpreterFrame) { s.Back = back }
+func (s *FrameSnapshot) FrameNumLocals() int                { return s.NumLocals }
 func (s *FrameSnapshot) FrameFastLocal(i int) Object {
 	if i < 0 || i >= s.NumLocals || i >= len(s.LocalsPlus) {
 		return nil

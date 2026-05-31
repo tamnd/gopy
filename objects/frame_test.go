@@ -21,13 +21,14 @@ type fakeInterpFrame struct {
 	frees    []Object
 }
 
-func (f *fakeInterpFrame) FrameCode() *Code            { return f.code }
-func (f *fakeInterpFrame) FrameGlobals() Object        { return f.globals }
-func (f *fakeInterpFrame) FrameBuiltins() Object       { return f.builtins }
-func (f *fakeInterpFrame) FrameLocals() Object         { return f.locals }
-func (f *fakeInterpFrame) FrameBack() InterpreterFrame { return f.back }
-func (f *fakeInterpFrame) FrameLasti() int             { return f.lasti }
-func (f *fakeInterpFrame) FrameNumLocals() int         { return len(f.fast) }
+func (f *fakeInterpFrame) FrameCode() *Code                { return f.code }
+func (f *fakeInterpFrame) FrameGlobals() Object            { return f.globals }
+func (f *fakeInterpFrame) FrameBuiltins() Object           { return f.builtins }
+func (f *fakeInterpFrame) FrameLocals() Object             { return f.locals }
+func (f *fakeInterpFrame) FrameBack() InterpreterFrame     { return f.back }
+func (f *fakeInterpFrame) FrameSetBack(b InterpreterFrame) { f.back = b }
+func (f *fakeInterpFrame) FrameLasti() int                 { return f.lasti }
+func (f *fakeInterpFrame) FrameNumLocals() int             { return len(f.fast) }
 func (f *fakeInterpFrame) FrameFastLocal(i int) Object {
 	return f.fast[i]
 }

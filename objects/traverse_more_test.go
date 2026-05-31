@@ -77,19 +77,20 @@ type fakeInterp struct {
 	back                      InterpreterFrame
 }
 
-func (f *fakeInterp) FrameCode() *Code            { return nil }
-func (f *fakeInterp) FrameGlobals() Object        { return f.globals }
-func (f *fakeInterp) FrameBuiltins() Object       { return f.builtins }
-func (f *fakeInterp) FrameLocals() Object         { return f.locals }
-func (f *fakeInterp) FrameBack() InterpreterFrame { return f.back }
-func (f *fakeInterp) FrameLasti() int             { return 0 }
-func (f *fakeInterp) FrameNumLocals() int         { return len(f.fast) }
-func (f *fakeInterp) FrameFastLocal(i int) Object { return f.fast[i] }
-func (f *fakeInterp) FrameNumCells() int          { return len(f.cells) }
-func (f *fakeInterp) FrameCellLocal(i int) Object { return f.cells[i] }
-func (f *fakeInterp) FrameNumFrees() int          { return len(f.frees) }
-func (f *fakeInterp) FrameFreeLocal(i int) Object { return f.frees[i] }
-func (f *fakeInterp) FrameFunc() Object           { return nil }
+func (f *fakeInterp) FrameCode() *Code                { return nil }
+func (f *fakeInterp) FrameGlobals() Object            { return f.globals }
+func (f *fakeInterp) FrameBuiltins() Object           { return f.builtins }
+func (f *fakeInterp) FrameLocals() Object             { return f.locals }
+func (f *fakeInterp) FrameBack() InterpreterFrame     { return f.back }
+func (f *fakeInterp) FrameSetBack(b InterpreterFrame) { f.back = b }
+func (f *fakeInterp) FrameLasti() int                 { return 0 }
+func (f *fakeInterp) FrameNumLocals() int             { return len(f.fast) }
+func (f *fakeInterp) FrameFastLocal(i int) Object     { return f.fast[i] }
+func (f *fakeInterp) FrameNumCells() int              { return len(f.cells) }
+func (f *fakeInterp) FrameCellLocal(i int) Object     { return f.cells[i] }
+func (f *fakeInterp) FrameNumFrees() int              { return len(f.frees) }
+func (f *fakeInterp) FrameFreeLocal(i int) Object     { return f.frees[i] }
+func (f *fakeInterp) FrameFunc() Object               { return nil }
 func (f *fakeInterp) FrameClearLocals() {
 	f.fast = nil
 	f.cells = nil

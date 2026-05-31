@@ -502,6 +502,27 @@ func errReuseAwaited() error {
 //
 // CPython: Objects/genobject.c:L466 _gen_throw
 func (c *Coroutine) Throw(err error) (Object, error) {
+	return c.throwWithCaller(err, callerFrame())
+}
+
+// ownFrame returns the coroutine body's own interpreter frame so a
+// forwarded throw can stamp it as the awaited sub-target's f_back,
+// matching the chain the await/send path builds. See Generator.ownFrame.
+//
+// CPython: Objects/genobject.c:489 _gen_throw (tstate->current_frame = frame)
+func (c *Coroutine) ownFrame() InterpreterFrame {
+	if f, ok := c.GiFrame.(*Frame); ok && f != nil {
+		return f.Interp()
+	}
+	return nil
+}
+
+// throwWithCaller is the body of Throw with the resume frame threaded
+// explicitly so a forwarded throw keeps cr_frame.f_back identical to the
+// await/send path.
+//
+// CPython: Objects/genobject.c:466 _gen_throw
+func (c *Coroutine) throwWithCaller(err error, caller InterpreterFrame) (Object, error) {
 	if err == nil {
 		return nil, errors.New("TypeError: throw() requires an exception")
 	}
@@ -522,11 +543,22 @@ func (c *Coroutine) Throw(err error) (Object, error) {
 		forwarded := true
 		var fval Object
 		var ferr error
+		// Link this coroutine's frame into the running call chain for the
+		// duration of the forwarded throw, then unlink it. This mirrors
+		// _gen_throw bracketing frame->previous = prev / current_frame =
+		// frame around the recursion so the resumed leaf sees the full
+		// await chain in its f_back, then restores the suspended state.
+		//
+		// CPython: Objects/genobject.c:493 _gen_throw (frame linking)
+		my := c.ownFrame()
+		if my != nil {
+			my.FrameSetBack(caller)
+		}
 		switch v := yf.(type) {
 		case *Generator:
-			fval, ferr = v.Throw(err)
+			fval, ferr = v.throwWithCaller(err, my)
 		case *Coroutine:
-			fval, ferr = v.Throw(err)
+			fval, ferr = v.throwWithCaller(err, my)
 		default:
 			if GenThrowForwardHook != nil {
 				fval, ferr = GenThrowForwardHook(nil, yf, err)
@@ -534,11 +566,14 @@ func (c *Coroutine) Throw(err error) (Object, error) {
 				forwarded = false
 			}
 		}
+		if my != nil {
+			my.FrameSetBack(nil)
+		}
 		if forwarded {
-			return c.forwardThrowResult(fval, ferr)
+			return c.forwardThrowResult(fval, ferr, caller)
 		}
 	}
-	c.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
+	c.SendCh <- GenMsg{Err: err, CallerFrame: caller}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -552,13 +587,13 @@ func (c *Coroutine) Throw(err error) (Object, error) {
 // branches in _gen_throw after the yf.throw() call.
 //
 // CPython: Objects/genobject.c:511 _gen_throw (retval / StopIteration branches)
-func (c *Coroutine) forwardThrowResult(fval Object, ferr error) (Object, error) {
+func (c *Coroutine) forwardThrowResult(fval Object, ferr error, caller InterpreterFrame) (Object, error) {
 	if ferr == nil {
 		return fval, nil
 	}
 	if stopVal, isStop := genStopIterVal(ferr); isStop {
 		c.YieldFromTarget = nil
-		c.SendCh <- GenMsg{Val: stopVal, CallerFrame: callerFrame()}
+		c.SendCh <- GenMsg{Val: stopVal, CallerFrame: caller}
 		msg := <-c.YieldCh
 		if msg.Err != nil {
 			c.closed = true
@@ -566,7 +601,7 @@ func (c *Coroutine) forwardThrowResult(fval Object, ferr error) (Object, error) 
 		}
 		return msg.Val, nil
 	}
-	c.SendCh <- GenMsg{Err: ferr, CallerFrame: callerFrame()}
+	c.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true

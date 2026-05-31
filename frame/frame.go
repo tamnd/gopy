@@ -418,6 +418,23 @@ func (f *Frame) FrameBack() objects.InterpreterFrame {
 	return f.Previous
 }
 
+// FrameSetBack rewires f_back. A nil argument (or an interface holding a
+// nil *Frame) unlinks the frame, matching _gen_throw's
+// frame->previous = NULL restore after a forwarded throw returns.
+//
+// CPython: Objects/genobject.c:496 _gen_throw (frame->previous)
+func (f *Frame) FrameSetBack(back objects.InterpreterFrame) {
+	if back == nil {
+		f.Previous = nil
+		return
+	}
+	if p, ok := back.(*Frame); ok {
+		f.Previous = p
+		return
+	}
+	f.Previous = nil
+}
+
 // FrameLasti returns the offset of the next instruction.
 func (f *Frame) FrameLasti() int { return f.InstrPtr }
 

@@ -643,6 +643,23 @@ func callerFrame() InterpreterFrame {
 	return CurrentFrameHook()
 }
 
+// ownFrame returns the generator body's own interpreter frame, used as
+// the f_back stamped onto a sub-iterator when a throw is forwarded
+// through yield from. gen.throw() unwinds the delegation chain on the
+// throwing goroutine via nested Go calls, so callerFrame() there is the
+// throwing frame, not the delegating generator. Passing this frame down
+// keeps the resumed sub-iterator's f_back identical to what the send()
+// path builds, so traceback.extract_stack() reports the same depth from
+// throw() as from send().
+//
+// CPython: Objects/genobject.c:489 _gen_throw (tstate->current_frame = frame)
+func (g *Generator) ownFrame() InterpreterFrame {
+	if f, ok := g.GiFrame.(*Frame); ok && f != nil {
+		return f.Interp()
+	}
+	return nil
+}
+
 // Throw raises err inside the generator at its current YIELD_VALUE
 // suspension point. If the generator is suspended inside yield from,
 // the throw is first forwarded to the sub-iterator. If the generator
@@ -651,6 +668,16 @@ func callerFrame() InterpreterFrame {
 //
 // CPython: Objects/genobject.c:L466 _gen_throw
 func (g *Generator) Throw(err error) (Object, error) {
+	return g.throwWithCaller(err, callerFrame())
+}
+
+// throwWithCaller is the body of Throw with the resume frame threaded
+// explicitly. Public Throw passes the throwing goroutine's current
+// frame; a forwarded throw from a delegating generator/coroutine passes
+// the delegator's own frame so the f_back chain matches the send() path.
+//
+// CPython: Objects/genobject.c:466 _gen_throw
+func (g *Generator) throwWithCaller(err error, caller InterpreterFrame) (Object, error) {
 	if err == nil {
 		return nil, errors.New("TypeError: throw() requires an exception")
 	}
@@ -705,11 +732,20 @@ func (g *Generator) Throw(err error) (Object, error) {
 			forwarded := true
 			var fval Object
 			var ferr error
+			// Link this generator's frame into the running call chain for
+			// the forwarded throw, then unlink, so the resumed leaf reports
+			// the full yield-from chain in its f_back.
+			//
+			// CPython: Objects/genobject.c:493 _gen_throw (frame linking)
+			my := g.ownFrame()
+			if my != nil {
+				my.FrameSetBack(caller)
+			}
 			switch v := yf.(type) {
 			case *Generator:
-				fval, ferr = v.Throw(err)
+				fval, ferr = v.throwWithCaller(err, my)
 			case *Coroutine:
-				fval, ferr = v.Throw(err)
+				fval, ferr = v.throwWithCaller(err, my)
 			default:
 				if GenThrowForwardHook != nil {
 					fval, ferr = GenThrowForwardHook(g, yf, err)
@@ -717,13 +753,16 @@ func (g *Generator) Throw(err error) (Object, error) {
 					forwarded = false
 				}
 			}
+			if my != nil {
+				my.FrameSetBack(nil)
+			}
 			g.Running.Store(0)
 			if forwarded {
-				return g.forwardThrowResult(fval, ferr)
+				return g.forwardThrowResult(fval, ferr, caller)
 			}
 		}
 	}
-	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: caller}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -737,7 +776,7 @@ func (g *Generator) Throw(err error) (Object, error) {
 // branches in _gen_throw after the yf.throw() call.
 //
 // CPython: Objects/genobject.c:511 _gen_throw (retval / StopIteration branches)
-func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) {
+func (g *Generator) forwardThrowResult(fval Object, ferr error, caller InterpreterFrame) (Object, error) {
 	if ferr == nil {
 		// Sub-iterator yielded fval. Return it directly as the outer
 		// generator's yielded value without entering the body.
@@ -756,7 +795,7 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error) (Object, error) 
 	//
 	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
 	g.YieldFromTarget = nil
-	g.SendCh <- GenMsg{Err: ferr, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true

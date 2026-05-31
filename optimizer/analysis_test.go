@@ -86,6 +86,7 @@ func (s *stubFrame) FrameGlobals() objects.Object               { return s.globa
 func (s *stubFrame) FrameBuiltins() objects.Object              { return s.builtins }
 func (s *stubFrame) FrameLocals() objects.Object                { return nil }
 func (s *stubFrame) FrameBack() objects.InterpreterFrame        { return nil }
+func (s *stubFrame) FrameSetBack(objects.InterpreterFrame)      {}
 func (s *stubFrame) FrameLasti() int                            { return 0 }
 func (s *stubFrame) FrameNumLocals() int                        { return 0 }
 func (s *stubFrame) FrameFastLocal(int) objects.Object          { return nil }
