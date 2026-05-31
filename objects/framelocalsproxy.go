@@ -40,6 +40,10 @@ func init() {
 		SetItem: frameLocalsProxySetItem,
 		DelItem: frameLocalsProxyDelItem,
 	}
+	frameLocalsProxyType.Number = &NumberMethods{
+		Or:        frameLocalsProxyOr,
+		InPlaceOr: frameLocalsProxyInPlaceOr,
+	}
 	frameLocalsProxyType.Sequence = &SequenceMethods{
 		Contains: frameLocalsProxyContains,
 	}
@@ -665,11 +669,18 @@ func frameLocalsProxyUpdateMethod(args []Object, _ map[string]Object) (Object, e
 }
 
 // frameLocalsProxyMerge writes every (key, value) from other into self.
-// IterNext signals exhaustion via ErrStopIteration; we swallow that and
-// break, mirroring PyIter_Next's NULL-without-error contract.
+// CPython restricts other to dict or FrameLocalsProxy; anything else
+// returns -1 and the caller converts that to TypeError. We mirror that
+// rejection here so update([1, 2]) raises TypeError rather than
+// IndexError from a downstream GetItem.
 //
 // CPython: Objects/frameobject.c:321 framelocalsproxy_merge
 func frameLocalsProxyMerge(p *FrameLocalsProxy, other Object) error {
+	if _, isDict := other.(*Dict); !isDict {
+		if _, isProxy := other.(*FrameLocalsProxy); !isProxy {
+			return errMergeUnsupported
+		}
+	}
 	it, err := Iter(other)
 	if err != nil {
 		return err
@@ -694,6 +705,94 @@ func frameLocalsProxyMerge(p *FrameLocalsProxy, other Object) error {
 		}
 	}
 	return nil
+}
+
+// errMergeUnsupported is the sentinel update() / |= raise when handed a
+// non-dict, non-FrameLocalsProxy operand. Matches CPython's update()
+// error message; |= masks it to its own TypeError.
+//
+// CPython: Objects/frameobject.c:729 framelocalsproxy_update
+var errMergeUnsupported = fmt.Errorf("TypeError: update() argument must be dict or another FrameLocalsProxy")
+
+// frameLocalsProxyOr implements __or__: builds a fresh dict from self
+// and updates it from other. Returns NotImplemented when other is not
+// a dict / FrameLocalsProxy so the binary-op machinery can try the
+// reflected operand.
+//
+// CPython: Objects/frameobject.c:540 framelocalsproxy_or
+func frameLocalsProxyOr(self, other Object) (Object, error) {
+	if _, isDict := other.(*Dict); !isDict {
+		if _, isProxy := other.(*FrameLocalsProxy); !isProxy {
+			return NotImplemented(), nil
+		}
+	}
+	p, ok := self.(*FrameLocalsProxy)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	result := frameLocalsProxyAsDict(p)
+	if err := dictUpdateFrom(result, other); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// frameLocalsProxyInPlaceOr implements __ior__: merges other into self
+// in place. Returns NotImplemented on type mismatch so |= falls back.
+//
+// CPython: Objects/frameobject.c:565 framelocalsproxy_inplace_or
+func frameLocalsProxyInPlaceOr(self, other Object) (Object, error) {
+	if _, isDict := other.(*Dict); !isDict {
+		if _, isProxy := other.(*FrameLocalsProxy); !isProxy {
+			return NotImplemented(), nil
+		}
+	}
+	p, ok := self.(*FrameLocalsProxy)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if err := frameLocalsProxyMerge(p, other); err != nil {
+		return NotImplemented(), nil
+	}
+	return p, nil
+}
+
+// dictUpdateFrom copies every (key, value) from src into dst. Used by
+// frameLocalsProxyOr to mirror PyDict_Update on the freshly-allocated
+// result dict.
+//
+// CPython: Objects/dictobject.c PyDict_Update
+func dictUpdateFrom(dst *Dict, src Object) error {
+	if d, ok := src.(*Dict); ok {
+		for _, k := range d.Keys() {
+			v, err := d.GetItem(k)
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				continue
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if p, ok := src.(*FrameLocalsProxy); ok {
+		keys := frameLocalsProxyKeysList(p)
+		for i := 0; i < keys.Len(); i++ {
+			k := keys.Item(i)
+			v, err := frameLocalsProxyGetItem(p, k)
+			if err != nil {
+				return err
+			}
+			if err := dst.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("TypeError: dict update from non-mapping")
 }
 
 func frameLocalsProxyCopyMethod(args []Object, kwargs map[string]Object) (Object, error) {

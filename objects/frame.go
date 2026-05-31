@@ -282,6 +282,18 @@ func frameGetAttr(o Object, name Object) (Object, error) {
 	}
 	switch n.v {
 	case "f_locals":
+		// Class bodies, module bodies, and exec frames carry an explicit
+		// locals dict; CPython returns that dict directly so writes via
+		// f_locals[name] = v flow to the namespace without going through
+		// FrameLocalsProxy's fast-locals slot machinery. Fast-local
+		// frames have Locals == nil; for those, wrap in a proxy.
+		//
+		// CPython: Objects/frameobject.c:1297 PyFrame_GetLocals
+		if f.interp != nil {
+			if loc := f.interp.FrameLocals(); loc != nil {
+				return loc, nil
+			}
+		}
 		return NewFrameLocalsProxy(f), nil
 	case "f_globals":
 		if g := f.Globals(); g != nil {
@@ -479,10 +491,25 @@ func visitInterp(ip InterpreterFrame, visit Visitor) error {
 
 // NewFrame wraps interp in a Python-level frame object. interp is
 // the live activation record; the wrapper holds it as an interface so
-// objects/ does not import frame/.
+// objects/ does not import frame/. CPython's PyFrameObject is unique
+// per activation record (lazily attached), so when a wrapper has
+// already been registered for this iframe we return it instead of
+// allocating a parallel one. This keeps extraLocals shared across
+// sys._getframe() / locals() / f_locals readers within the same call.
 //
 // CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
 func NewFrame(interp InterpreterFrame) *Frame {
+	if interp != nil {
+		if existing, ok := interp.(interface {
+			FrameWrapper() Object
+		}); ok {
+			if w := existing.FrameWrapper(); w != nil {
+				if fw, ok2 := w.(*Frame); ok2 {
+					return fw
+				}
+			}
+		}
+	}
 	f := &Frame{
 		interp:     interp,
 		traceLines: true,

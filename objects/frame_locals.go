@@ -72,6 +72,23 @@ func FrameFastToLocals(f *Frame) (*Dict, error) {
 			return nil, err
 		}
 	}
+	// Merge in keys spilled into the wrapper's extra-locals dict by
+	// FrameLocalsProxy writes that did not match any fast slot, so
+	// locals() reflects f_locals[name] = v for non-fast names.
+	//
+	// CPython: Objects/frameobject.c:2199 frame_get_var (the
+	// f_extra_locals branch at the end).
+	if f.extraLocals != nil {
+		for _, k := range f.extraLocals.Keys() {
+			v, err := f.extraLocals.GetItem(k)
+			if err != nil || v == nil {
+				continue
+			}
+			if err := out.SetItem(k, v); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return out, nil
 }
 

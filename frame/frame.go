@@ -552,6 +552,20 @@ func (f *Frame) FrameRegisterWrapper(w objects.Object) {
 	f.Wrappers = append(f.Wrappers, w)
 }
 
+// FrameWrapper returns the previously-registered Python-level wrapper
+// for this activation record, or nil if no wrapper has been minted yet.
+// objects.NewFrame reads this to avoid creating a duplicate PyFrameObject
+// equivalent so f_locals readers share the same extraLocals dict.
+//
+// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+// PyFrameObject pointer cached on the activation record).
+func (f *Frame) FrameWrapper() objects.Object {
+	if len(f.Wrappers) == 0 {
+		return nil
+	}
+	return f.Wrappers[0]
+}
+
 // FrameTakeOwnership snapshots the activation record's LocalsPlus into
 // the frame's own backing store so a subsequent FrameClearLocals (the
 // body's natural unwind on GeneratorExit) does not break reads through
