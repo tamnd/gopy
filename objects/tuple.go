@@ -200,7 +200,7 @@ func tupleMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	idx, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
 	}
 	n, ok := idx.(*Int)
 	if !ok {

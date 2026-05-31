@@ -71,6 +71,7 @@ var CoroutineType *Type
 // CPython: Objects/genobject.c:L1500 _PyCoroWrapper_Type
 var CoroAwaitType *Type
 
+//nolint:gocyclo // coroutine type-registration table: flat sequence of attribute/descriptor installs
 func init() {
 	CoroutineType = NewType("coroutine", []*Type{objectType})
 	CoroutineType.Repr = coroRepr
@@ -696,7 +697,6 @@ func coroAwaitMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	return c.Await(), nil
 }
-
 
 // Await returns the iterator that drives this coroutine. CPython
 // returns a thin wrapper whose __next__ forwards to send(None).

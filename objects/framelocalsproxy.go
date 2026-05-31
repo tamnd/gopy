@@ -186,6 +186,8 @@ func framelocalsproxyHasval(interp InterpreterFrame, code *Code, i int) bool {
 // pending exception from -1).
 //
 // CPython: Objects/frameobject.c:94 framelocalsproxy_getkeyindex
+//
+//nolint:gocognit,gocyclo // mirrors framelocalsproxy_getkeyindex: fast-name scan plus hidden/extra-slot fallbacks
 func framelocalsproxyGetKeyIndex(f *Frame, key Object, read bool) (int, error) {
 	if f == nil || f.interp == nil {
 		return -1, nil
@@ -497,7 +499,7 @@ func frameLocalsProxyRichCompare(a, b Object, op CompareOp) (Object, error) {
 // frameLocalsProxyRepr renders the proxy as the dict view of its keys.
 // Py_ReprEnter / Py_ReprLeave guard cycles so a proxy that stores
 // itself under one of its keys renders as "{...}" instead of recursing
-// forever when the materialised dict tries to repr the same proxy.
+// forever when the materialized dict tries to repr the same proxy.
 //
 // CPython: Objects/frameobject.c:512 framelocalsproxy_repr
 func frameLocalsProxyRepr(o Object) (string, error) {
@@ -780,7 +782,7 @@ func frameLocalsProxyInPlaceOr(self, other Object) (Object, error) {
 		return NotImplemented(), nil
 	}
 	if err := frameLocalsProxyMerge(p, other); err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // framelocalsproxy_inplace_or returns NotImplemented when the merge fails
 	}
 	return p, nil
 }

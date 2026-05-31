@@ -108,7 +108,8 @@ func isStopAsyncIteration(err error) bool {
 	if err == nil {
 		return false
 	}
-	if re, ok := err.(*RaisedError); ok && re.Exc != nil {
+	var re *RaisedError
+	if errors.As(err, &re) && re.Exc != nil {
 		t := re.Exc.Type()
 		for t != nil {
 			if t.Name == "StopAsyncIteration" {

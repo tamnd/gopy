@@ -43,7 +43,7 @@ func (c *Compiler) visitYield(e *ast.Yield) error {
 }
 
 // addopYield emits the wrap intrinsic when the scope is an async
-// generator, then YIELD_VALUE. Centralises the codegen so the
+// generator, then YIELD_VALUE. Centralizes the codegen so the
 // comprehension elt-tail and the `yield` expression visit go through
 // the same path, mirroring CPython's ADDOP_YIELD macro.
 //

@@ -146,7 +146,7 @@ func listMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	idx, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
 	}
 	n, ok := idx.(*Int)
 	if !ok {
@@ -229,18 +229,23 @@ func listRichCmpMethod(name string, op CompareOp) func(args []Object, _ map[stri
 func listEqMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__eq__", CompareEQ)(args, kw)
 }
+
 func listNeMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__ne__", CompareNE)(args, kw)
 }
+
 func listLtMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__lt__", CompareLT)(args, kw)
 }
+
 func listLeMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__le__", CompareLE)(args, kw)
 }
+
 func listGtMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__gt__", CompareGT)(args, kw)
 }
+
 func listGeMethod(args []Object, kw map[string]Object) (Object, error) {
 	return listRichCmpMethod("__ge__", CompareGE)(args, kw)
 }

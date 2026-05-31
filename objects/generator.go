@@ -818,7 +818,7 @@ func (g *Generator) Close() error {
 // to sub-iterator), and the normal "throw GeneratorExit, swallow exit" walk.
 // Splitting them out duplicates the frame-release dance; keep cohesion.
 //
-//nolint:gocognit // unified shutdown state machine, mirrors gen_close in CPython
+//nolint:gocognit,gocyclo // unified shutdown state machine, mirrors gen_close in CPython
 func (g *Generator) closeWith(ignoredMsg string) error {
 	if g.closed {
 		return nil

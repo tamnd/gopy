@@ -1596,7 +1596,7 @@ func strMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
@@ -1622,7 +1622,7 @@ func strRMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {

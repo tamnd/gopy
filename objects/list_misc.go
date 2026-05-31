@@ -164,6 +164,8 @@ func (l *List) Copy() *List {
 // bpo-38588 fixed in CPython.
 //
 // CPython: Objects/listobject.c:3396 list_richcompare_impl
+//
+//nolint:gocyclo // mirrors list_richcompare_impl: per-op dispatch plus live-size element walk
 func listRichCmp(a, b Object, op CompareOp) (Object, error) {
 	al, ok := a.(*List)
 	if !ok {

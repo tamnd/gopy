@@ -26,6 +26,8 @@ package objects
 // CPython's "missing key" semantics.
 //
 // CPython: Objects/frameobject.c:2199 frame_get_var
+//
+//nolint:gocognit,gocyclo // mirrors frame_get_var: one branch per localsplus kind (fast / cell / free / hidden)
 func FrameFastToLocals(f *Frame) (*Dict, error) {
 	out := NewDict()
 	if f == nil {

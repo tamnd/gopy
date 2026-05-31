@@ -635,8 +635,6 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 // for-loop's iterator.
 //
 // CPython: Python/bytecodes.c:1297 _SEND
-//
-//nolint:gocognit,gocyclo // mirrors _SEND opcode: gen/coro/async-gen routing, fastpath, blocking SendCh, exception handoff
 func (e *evalState) execSend(oparg uint32) (genResult, error) {
 	v := e.popObject()
 	recvRef := e.peek(0)

@@ -188,6 +188,8 @@ func init() {
 // RuntimeError rather than tearing locals out from under it.
 //
 // CPython: Objects/frameobject.c:1994 frame_clear_impl
+//
+//nolint:gocognit,gocyclo // mirrors frame_clear_impl: generator/coroutine/async-gen owner branching plus thread-stack guard
 func frameClear(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: clear() missing self argument")
@@ -287,6 +289,8 @@ func frameIsOnCurrentStack(f *Frame) bool {
 // f_code, f_back, f_lineno, f_lasti, f_trace.
 //
 // CPython: Objects/frameobject.c:790 frame_getattro / per-attribute getsets
+//
+//nolint:gocognit,gocyclo // mirrors frame_getattro: one branch per f_* getset attribute
 func frameGetAttr(o Object, name Object) (Object, error) {
 	f, ok := o.(*Frame)
 	if !ok {
