@@ -37,6 +37,48 @@ func ReprLeave(o Object) {
 	delete(reprDepth, objectID(o))
 }
 
+// cRecursionLimit bounds nested C-level slot calls (repr, str) the way
+// CPython's c_stack_soft_limit bounds the native call stack. CPython 3.14
+// measures the real machine stack pointer against a soft limit
+// (_Py_MakeRecCheck), but gopy runs these slots on the Go stack where the
+// pointer is not portably reachable, so we count nesting depth instead.
+// This mirrors the pre-stack-pointer c_recursion_remaining design whose
+// Py_C_RECURSION_LIMIT was 8000 on most platforms; deeply self-nested
+// containers (repr of a list 150k deep) hit it and raise RecursionError
+// rather than overflowing the goroutine stack.
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+const cRecursionLimit = 8000
+
+// cRecursionRemaining is the live budget. It is a package global to match
+// the existing reprDepth cycle tracker: gopy's GIL-style cooperative model
+// runs object slots one logical thread at a time, so a single counter is
+// consistent with that design.
+var cRecursionRemaining = cRecursionLimit
+
+// enterRecursiveCall decrements the C-recursion budget and returns a
+// RecursionError when it is exhausted. where names the operation for the
+// message (" while getting the repr of an object"). The caller must pair a
+// successful enter with leaveRecursiveCall, normally via defer.
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+// CPython: Python/ceval.c:1012 _Py_CheckRecursiveCall
+func enterRecursiveCall(where string) error {
+	cRecursionRemaining--
+	if cRecursionRemaining <= 0 {
+		cRecursionRemaining++
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded%s", where)
+	}
+	return nil
+}
+
+// leaveRecursiveCall returns one unit of C-recursion budget.
+//
+// CPython: Include/internal/pycore_ceval.h:233 _Py_LeaveRecursiveCallTstate
+func leaveRecursiveCall() {
+	cRecursionRemaining++
+}
+
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.
 //
@@ -45,6 +87,15 @@ func Repr(o Object) (string, error) {
 	if o == nil {
 		return "<nil>", nil
 	}
+	// PyObject_Repr guards tp_repr with the C-recursion check so a type
+	// whose repr loops (or a deeply self-nested container) raises instead
+	// of overflowing the native stack.
+	//
+	// CPython: Objects/object.c:777 PyObject_Repr
+	if err := enterRecursiveCall(" while getting the repr of an object"); err != nil {
+		return "", err
+	}
+	defer leaveRecursiveCall()
 	if r := o.Type().Repr; r != nil {
 		return r(o)
 	}
@@ -122,6 +173,13 @@ func Str(o Object) (string, error) {
 	if o == nil {
 		return "<nil>", nil
 	}
+	// PyObject_Str guards tp_str with the same C-recursion check as repr.
+	//
+	// CPython: Objects/object.c:822 PyObject_Str
+	if err := enterRecursiveCall(" while getting the str of an object"); err != nil {
+		return "", err
+	}
+	defer leaveRecursiveCall()
 	if s := o.Type().Str; s != nil {
 		return s(o)
 	}
