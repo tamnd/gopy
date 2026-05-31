@@ -50,6 +50,13 @@ func Import(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 	if err != nil {
 		return nil, err
 	}
+	// _sanity_check rejects an empty absolute module name before any
+	// finder runs. The level < 0 case is screened in parseImportArgs.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1380 _sanity_check
+	if parsed.name == "" && parsed.level == 0 {
+		return nil, fmt.Errorf("ValueError: Empty module name")
+	}
 	if currentImporter == nil {
 		return nil, fmt.Errorf("ImportError: __import__ not configured")
 	}
@@ -208,10 +215,16 @@ func pkgnameFromGlobals(globals objects.Object) string {
 	if dictStringEntry(d, "__path__") != "" {
 		return name
 	}
+	// _calc___package__ computes __name__.rpartition('.')[0] when the
+	// module is not a package. For a top-level name like "__main__" that
+	// is the empty string, so a level>0 import from it has no anchor and
+	// _sanity_check raises ImportError.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__
 	if dot := strings.LastIndex(name, "."); dot >= 0 {
 		return name[:dot]
 	}
-	return name
+	return ""
 }
 
 // dictStringEntry reads dict[key] and returns its string value, or ""

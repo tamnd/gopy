@@ -1161,12 +1161,20 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 
 	switch op {
 	case compile.LOAD_NAME:
-		if v, ok := lookupIn(e.f.Locals, keyObj); ok {
+		// PyMapping_GetOptionalItem semantics: a non-dict locals mapping
+		// whose __getitem__ raises KeyError reads as "absent" (and the
+		// KeyError is cleared so it cannot leak past a later NameError);
+		// any other error propagates.
+		//
+		// CPython: Python/bytecodes.c LOAD_NAME
+		v, found, err := e.loadFromScope(e.f.Locals, keyObj)
+		if err != nil {
+			return nil, err
+		}
+		if found {
 			// Borrowed reference from the locals dict. Use FromObjectNew
 			// so the stack owns its own strong reference; the CALL /
 			// STORE_NAME / Close consumers balance with Decref.
-			//
-			// CPython: Python/bytecodes.c LOAD_NAME
 			e.push(stackref.FromObjectNew(v))
 			return v, nil
 		}
@@ -1178,7 +1186,9 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		// above, so an insert_superinstructions fold to LOAD_GLOBAL with
 		// bit 0 set is a no-op for the stack.
 		var v objects.Object
-		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
+		if w, found, err := e.loadFromScope(e.f.Globals, keyObj); err != nil {
+			return nil, err
+		} else if found {
 			v = w
 		} else {
 			// CPython: Python/bytecodes.c LOAD_GLOBAL, when builtins is not
@@ -1500,6 +1510,43 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 		return nil, false
 	}
 	return v, true
+}
+
+// loadFromScope reads key from a LOAD_NAME / LOAD_GLOBAL scope with
+// PyMapping_GetOptionalItem semantics: an exact dict takes the fast
+// path; for any other mapping a KeyError means "absent" (and the
+// exception the nested __getitem__ recorded on the thread state is
+// cleared so it cannot leak past a later NameError), while every other
+// error propagates. eval('b', g, M()) where M.__getitem__ raises
+// KeyError must therefore surface NameError, not KeyError.
+//
+// CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
+func (e *evalState) loadFromScope(scope, key objects.Object) (objects.Object, bool, error) {
+	if scope == nil {
+		return nil, false, nil
+	}
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		if u, ok := key.(*objects.Unicode); ok {
+			v, err := d.GetItemKnownHash(u, u.HashCached())
+			if err != nil {
+				return nil, false, nil
+			}
+			return v, true, nil
+		}
+		v, err := d.GetItem(key)
+		if err != nil {
+			return nil, false, nil
+		}
+		return v, true, nil
+	}
+	v, found, err := objects.MappingGetOptionalItem(scope, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		pyerrors.Clear(e.ts)
+	}
+	return v, found, nil
 }
 
 func storeIn(scope objects.Object, key, value objects.Object) error {

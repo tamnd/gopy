@@ -231,10 +231,16 @@ func (e *evalState) commonConsts() [state.NumCommonConstants]objects.Object {
 //
 // CPython: Python/ceval.c:2789 _PyEval_LoadName
 func (e *evalState) loadName(name objects.Object) objects.Object {
-	if v, ok := lookupIn(e.f.Locals, name); ok {
+	if v, found, err := e.loadFromScope(e.f.Locals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
 		return v
 	}
-	if v, ok := lookupIn(e.f.Globals, name); ok {
+	if v, found, err := e.loadFromScope(e.f.Globals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
 		return v
 	}
 	if v, found, err := objects.MappingGetOptionalItem(e.f.Builtins, name); err != nil {
