@@ -24,6 +24,8 @@
 
 package objects
 
+import "runtime"
+
 // FrameSnapshot captures the fields traceback / inspect consumers
 // read off a frame at the moment of capture. When LocalsPlus is
 // populated (the take_ownership case) FrameLocalsProxy reads continue
@@ -94,7 +96,14 @@ func SnapshotFrame(src InterpreterFrame) *FrameSnapshot {
 // SnapshotFrameWithLocals is the take_ownership-equivalent: it copies
 // the activation record's LocalsPlus (fast locals, cells, frees, and
 // live stack) into the snapshot so FrameLocalsProxy reads continue to
-// work after the live activation record is cleared.
+// work after the live activation record is cleared. Each captured
+// object is Incref'd so the source frame's Close path (which Decrefs
+// every stackref it owns) cannot drop the refcount to zero and fire
+// weakref clears before the snapshot's consumers are done.
+//
+// The matching Decref runs from a runtime finalizer when the snapshot
+// itself becomes unreachable, or earlier from FrameClearLocals when
+// frame.clear() walks the snapshot directly.
 //
 // CPython: Objects/frameobject.c:1138 take_ownership
 func SnapshotFrameWithLocals(src InterpreterFrame) *FrameSnapshot {
@@ -127,6 +136,18 @@ func SnapshotFrameWithLocals(src InterpreterFrame) *FrameSnapshot {
 	for i := 0; i < nStack; i++ {
 		s.LocalsPlus[nLocals+nCells+nFrees+i] = src.FrameStackItem(i)
 	}
+	for _, v := range s.LocalsPlus {
+		if v != nil {
+			Incref(v)
+		}
+	}
+	runtime.SetFinalizer(s, func(s *FrameSnapshot) {
+		for _, v := range s.LocalsPlus {
+			if v != nil {
+				Decref(v)
+			}
+		}
+	})
 	return s
 }
 
@@ -199,8 +220,12 @@ func (s *FrameSnapshot) FrameStackItem(i int) Object {
 
 func (s *FrameSnapshot) FrameClearLocals() {
 	for i := range s.LocalsPlus {
-		s.LocalsPlus[i] = nil
+		if s.LocalsPlus[i] != nil {
+			Decref(s.LocalsPlus[i])
+			s.LocalsPlus[i] = nil
+		}
 	}
+	runtime.SetFinalizer(s, nil)
 }
 
 // FrameTakeOwnership is a no-op on a snapshot: the snapshot already

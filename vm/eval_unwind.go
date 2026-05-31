@@ -466,8 +466,14 @@ func (e *evalState) attachFrameTraceback() {
 	// Snapshot the live activation record so tb.tb_frame.f_code stays
 	// readable after the frame returns and its chunk-arena slot gets
 	// recycled. CPython does not need this because PyFrameObject is
-	// reference-counted; gopy reuses interpreter-frame storage.
-	snap := objects.SnapshotFrame(e.f)
+	// reference-counted; gopy reuses interpreter-frame storage. Include
+	// LocalsPlus so tb.tb_frame.f_locals reflects the locals at the
+	// raise site (matches CPython, where the traceback's frame keeps a
+	// strong reference to its activation record's fast locals until
+	// frame.clear() releases them).
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	snap := objects.SnapshotFrameWithLocals(e.f)
 	tb := &traceback.Traceback{
 		Entry:   entry,
 		Next:    exc.TB,

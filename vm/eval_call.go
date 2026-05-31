@@ -213,13 +213,16 @@ func frameIsLiveOnCurrentStack(w *objects.Frame) bool {
 	// interp is a *FrameSnapshot built at unwind time (tb_frame). The
 	// snapshot remembers SrcFrame so we can still test stack membership.
 	var want *frame.Frame
+	var wantCode *objects.Code
 	switch ip := w.Interp().(type) {
 	case *frame.Frame:
 		want = ip
+		wantCode = ip.FrameCode()
 	case *objects.FrameSnapshot:
 		if src, ok := ip.SrcFrame.(*frame.Frame); ok {
 			want = src
 		}
+		wantCode = ip.Code
 	}
 	if want == nil {
 		return false
@@ -229,9 +232,24 @@ func frameIsLiveOnCurrentStack(w *objects.Frame) bool {
 		return false
 	}
 	for f := frameStackFor(ts).Top(); f != nil; f = f.Previous {
-		if f == want {
-			return true
+		if f != want {
+			continue
 		}
+		// Pointer match alone is not enough: the chunk arena recycles
+		// Frame slots on Pop, so a long-since-returned activation
+		// record can share a pointer with whatever frame later
+		// reoccupied that slot. Compare Code identity too: a snapshot
+		// remembers the Code at snapshot time, and the live slot's
+		// Code becomes the new push's Code after recycling. Different
+		// Code => stale match => not on the current stack.
+		//
+		// CPython: Include/internal/pycore_frame.h _PyInterpreterFrame
+		// (each push writes f_executable / f_code into the slot, so the
+		// equivalent comparison is implicit there)
+		if wantCode != nil && f.FrameCode() != wantCode {
+			return false
+		}
+		return true
 	}
 	return false
 }

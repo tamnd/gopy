@@ -33,7 +33,24 @@ func init() {
 	frameLocalsProxyType.Repr = frameLocalsProxyRepr
 	frameLocalsProxyType.RichCmp = frameLocalsProxyRichCompare
 	frameLocalsProxyType.Iter = frameLocalsProxyIter
-	frameLocalsProxyType.Call = frameLocalsProxyCall
+	frameLocalsProxyType.TpNew = frameLocalsProxyTpNew
+	// __new__ slot wrapper so cls.__new__(cls, ...) routes through
+	// TpNew rather than falling back to objectNewBuiltin (which would
+	// allocate an *Instance and bypass the frame-argument check). This
+	// is also how copy.copy / copy.deepcopy / pickle hit the no-arg
+	// rejection.
+	//
+	// CPython: Objects/typeobject.c:9952 tp_new_wrapper / add_tp_new_wrapper
+	SetTypeDescr(frameLocalsProxyType, "__new__", NewBuiltinFunction("FrameLocalsProxy.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: FrameLocalsProxy.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: FrameLocalsProxy.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return frameLocalsProxyTpNew(cls, args[1:], kwargs)
+	}))
 	frameLocalsProxyType.Mapping = &MappingMethods{
 		Length:  frameLocalsProxyLen,
 		GetItem: frameLocalsProxyGetItem,
@@ -90,12 +107,15 @@ func NewFrameLocalsProxy(f *Frame) *FrameLocalsProxy {
 	return p
 }
 
-// frameLocalsProxyCall implements tp_new for FrameLocalsProxy. Builds
-// a proxy from a frame argument; rejects keyword args and non-frame
-// positional args, mirroring CPython's framelocalsproxy_new.
+// frameLocalsProxyTpNew is FrameLocalsProxy's tp_new. Builds a proxy
+// from a single frame argument; rejects keyword args and non-frame
+// positional args, mirroring CPython's framelocalsproxy_new. The
+// no-arg form raises TypeError, which is what makes copy.copy /
+// copy.deepcopy / pickle of an f_locals proxy fail with TypeError
+// (the reduce machinery hits cls.__new__(cls) with no extras).
 //
 // CPython: Objects/frameobject.c:418 framelocalsproxy_new
-func frameLocalsProxyCall(_ Object, args []Object, kwargs map[string]Object) (Object, error) {
+func frameLocalsProxyTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
 	if len(kwargs) != 0 {
 		return nil, fmt.Errorf("TypeError: FrameLocalsProxy takes no keyword arguments")
 	}
