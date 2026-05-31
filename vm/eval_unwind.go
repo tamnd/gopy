@@ -463,21 +463,19 @@ func (e *evalState) attachFrameTraceback() {
 		name = co.Qualname
 	}
 	entry := traceback.Entry{File: co.Filename, Line: line, Name: name}
-	// Snapshot the live activation record so tb.tb_frame.f_code stays
-	// readable after the frame returns and its chunk-arena slot gets
-	// recycled. CPython does not need this because PyFrameObject is
-	// reference-counted; gopy reuses interpreter-frame storage. Include
-	// LocalsPlus so tb.tb_frame.f_locals reflects the locals at the
-	// raise site (matches CPython, where the traceback's frame keeps a
-	// strong reference to its activation record's fast locals until
-	// frame.clear() releases them).
+	// Wrap the live activation record so tb.tb_frame reads the iframe's
+	// current state (notably f_lineno) until the frame returns. NewFrame
+	// auto-registers as a wrapper, so chunk.Pop will SnapshotFrameWithLocals
+	// the iframe and SwapInterp the wrapper before the chunk slot recycles.
+	// This keeps the catch-site frame's f_lineno live (CPython behavior)
+	// while still preserving locals across the natural return of unwinding
+	// frames.
 	//
-	// CPython: Objects/frameobject.c:1138 take_ownership
-	snap := objects.SnapshotFrameWithLocals(e.f)
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
 	tb := &traceback.Traceback{
 		Entry:   entry,
 		Next:    exc.TB,
-		TbFrame: objects.NewFrame(snap),
+		TbFrame: objects.NewFrame(e.f),
 		TbLasti: off,
 	}
 	tb.Init(traceback.Type)
