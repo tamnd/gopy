@@ -346,8 +346,9 @@ func NumberDivmod(a, b Object) (Object, error) {
 	return numberBinary(a, b, "divmod()", func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Divmod })
 }
 
-// NumberInPlaceAdd is a += b. Falls through to sq_concat / sq_inplace_concat
-// on LHS when the number protocol doesn't apply.
+// NumberInPlaceAdd is a += b. Falls through to sq_inplace_concat /
+// sq_concat on LHS when the number protocol doesn't apply, mirroring
+// CPython's preference for the mutating slot when both are present.
 //
 // CPython: Objects/abstract.c:1297 PyNumber_InPlaceAdd
 func NumberInPlaceAdd(a, b Object) (Object, error) {
@@ -360,8 +361,13 @@ func NumberInPlaceAdd(a, b Object) (Object, error) {
 	if out != nil {
 		return out, nil
 	}
-	if s := a.Type().Sequence; s != nil && s.Concat != nil {
-		return s.Concat(a, b)
+	if s := a.Type().Sequence; s != nil {
+		if s.InPlaceConcat != nil {
+			return s.InPlaceConcat(a, b)
+		}
+		if s.Concat != nil {
+			return s.Concat(a, b)
+		}
 	}
 	return nil, binopTypeError(a, b, "+=")
 }
@@ -375,8 +381,9 @@ func NumberInPlaceSubtract(a, b Object) (Object, error) {
 		func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Subtract })
 }
 
-// NumberInPlaceMultiply is a *= b. Falls through to sq_repeat /
-// sq_inplace_repeat as PyNumber_InPlaceMultiply does.
+// NumberInPlaceMultiply is a *= b. Falls through to sq_inplace_repeat /
+// sq_repeat as PyNumber_InPlaceMultiply does, preferring the mutating
+// slot on LHS.
 //
 // CPython: Objects/abstract.c:1320 PyNumber_InPlaceMultiply
 func NumberInPlaceMultiply(a, b Object) (Object, error) {
@@ -389,12 +396,21 @@ func NumberInPlaceMultiply(a, b Object) (Object, error) {
 	if out != nil {
 		return out, nil
 	}
-	if s := a.Type().Sequence; s != nil && s.Repeat != nil {
-		count, err := indexAsInt(b)
-		if err != nil {
-			return nil, err
+	if s := a.Type().Sequence; s != nil {
+		if s.InPlaceRepeat != nil {
+			count, err := indexAsInt(b)
+			if err != nil {
+				return nil, err
+			}
+			return s.InPlaceRepeat(a, count)
 		}
-		return s.Repeat(a, count)
+		if s.Repeat != nil {
+			count, err := indexAsInt(b)
+			if err != nil {
+				return nil, err
+			}
+			return s.Repeat(a, count)
+		}
 	}
 	if s := b.Type().Sequence; s != nil && s.Repeat != nil {
 		count, err := indexAsInt(a)

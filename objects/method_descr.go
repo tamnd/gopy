@@ -115,6 +115,9 @@ func methodDescrCall(o Object, args []Object, kwargs map[string]Object) (Object,
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)
 	}
+	if err := methodDescrCheckArity(d, len(args)-1, len(kwargs)); err != nil {
+		return nil, err
+	}
 	return d.fn(args, kwargs)
 }
 
@@ -132,11 +135,17 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)
 	}
+	nkw := 0
+	if kwnames != nil {
+		nkw = kwnames.Len()
+	}
+	if err := methodDescrCheckArity(d, nargs-1, nkw); err != nil {
+		return nil, err
+	}
 	pos := make([]Object, nargs)
 	copy(pos, args[:nargs])
 	var kwargs map[string]Object
-	if kwnames != nil && kwnames.Len() > 0 {
-		nkw := kwnames.Len()
+	if nkw > 0 {
 		kwargs = make(map[string]Object, nkw)
 		for i := 0; i < nkw; i++ {
 			name, err := Str(kwnames.Item(i))
@@ -147,4 +156,38 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 		}
 	}
 	return d.fn(pos, kwargs)
+}
+
+// methodDescrCheckArity enforces the METH_NOARGS / METH_O calling
+// conventions: NOARGS rejects any extra positional arguments and
+// any keyword arguments, while METH_O requires exactly one
+// positional argument (and zero keyword arguments). nargs counts
+// only user-supplied positional arguments (receiver already
+// excluded). Mirrors method_check_args + method_vectorcall_NOARGS /
+// method_vectorcall_O.
+//
+// CPython: Objects/descrobject.c:330 method_vectorcall_NOARGS
+// CPython: Objects/descrobject.c:360 method_vectorcall_O
+func methodDescrCheckArity(d *MethodDescr, nargs, nkw int) error {
+	switch d.conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod) {
+	case MethNoArgs:
+		if nkw > 0 {
+			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+		}
+		if nargs != 0 {
+			return fmt.Errorf("TypeError: %s() takes no arguments (%d given)", d.name, nargs)
+		}
+	case MethO:
+		if nkw > 0 {
+			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+		}
+		if nargs != 1 {
+			return fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", d.name, nargs)
+		}
+	case MethFastcall:
+		if nkw > 0 {
+			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+		}
+	}
+	return nil
 }
