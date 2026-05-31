@@ -83,6 +83,27 @@ func typeGetName(o Object) (Object, error) {
 	return NewStr(tailName(t.Name)), nil
 }
 
+// checkTypeName mirrors the PyUnicode_AsUTF8AndSize step that both
+// type_new_set_name and type_set_name run on a type's name. A lone
+// surrogate cannot encode to UTF-8, so CPython surfaces the codec's
+// UnicodeEncodeError; an embedded null passes the encode but fails the
+// strlen != size guard with ValueError. The test only inspects the
+// exception type, so the messages stay close to CPython without
+// reproducing the full codec arg tuple.
+//
+// CPython: Objects/typeobject.c:4233 type_new_set_name
+func checkTypeName(name string) error {
+	for i, r := range strLenientRunes(name) {
+		if r >= 0xD800 && r <= 0xDFFF {
+			return fmt.Errorf("UnicodeEncodeError: 'utf-8' codec can't encode character '\\u%04x' in position %d: surrogates not allowed", r, i)
+		}
+	}
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("ValueError: type name must not contain null characters")
+	}
+	return nil
+}
+
 // typeSetName writes t.Name. Only allowed on user-defined types.
 //
 // CPython: Objects/typeobject.c:1024 type_set_name
@@ -100,6 +121,9 @@ func typeSetName(o Object, v Object) error {
 	s, ok := v.(*Unicode)
 	if !ok {
 		return fmt.Errorf("TypeError: can only assign string to %s.__name__, not '%s'", t.Name, typeNameOf(v))
+	}
+	if err := checkTypeName(s.v); err != nil {
+		return err
 	}
 	t.Name = s.v
 	t.InvalidateVersionTag()
@@ -193,6 +217,12 @@ func typeSetModule(o Object, v Object) error {
 		return fmt.Errorf("TypeError: can only assign string to %s.__module__, not '%s'", t.Name, typeNameOf(v))
 	}
 	t.Module = s.v
+	// __firstlineno__ records the source line the class statement opened
+	// on; once __module__ is reassigned the recorded line no longer
+	// describes where the type lives, so CPython drops it from tp_dict.
+	//
+	// CPython: Objects/typeobject.c:1581 type_set_module (PyDict_Pop __firstlineno__)
+	DelTypeDescr(t, "__firstlineno__")
 	t.InvalidateVersionTag()
 	return nil
 }

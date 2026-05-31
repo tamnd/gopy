@@ -98,6 +98,16 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 //
 // CPython: Objects/typeobject.c:4153 type_new
 func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Object, meta *Type) (*Type, error) {
+	// type_new_set_name runs PyUnicode_AsUTF8AndSize on the name: a lone
+	// surrogate cannot encode to UTF-8 (UnicodeEncodeError) and an
+	// embedded null trips the strlen != size guard (ValueError). Validate
+	// up front so type('A\x00B', ...) / type('A\udcdcB', ...) raise here
+	// instead of silently building a malformed type.
+	//
+	// CPython: Objects/typeobject.c:4233 type_new_set_name
+	if err := checkTypeName(name); err != nil {
+		return nil, err
+	}
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
@@ -146,6 +156,16 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 		if !has {
 			t.Module = CallerModuleName()
 		}
+	}
+	// type_new_set_ht_name defaults ht_qualname to ht_name when the
+	// namespace omits __qualname__. Stamping it now (rather than letting
+	// typeGetQualname fall back to t.Name on every read) keeps qualname
+	// independent of later __name__ assignments, matching CPython where
+	// type_set_name touches ht_name only.
+	//
+	// CPython: Objects/typeobject.c:4300 type_new_set_ht_name
+	if t.Qualname == "" {
+		t.Qualname = name
 	}
 	// NewType already ran inheritSlotsAllMRO when the namespace was not
 	// yet populated, so typeOverridesHash could not see __hash__. If the
@@ -358,8 +378,7 @@ func processClassNamespace(t *Type, ns *Dict) error {
 	if err := installSlots(t, ns); err != nil {
 		return err
 	}
-	copyNamespaceToType(t, ns)
-	return nil
+	return copyNamespaceToType(t, ns)
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type
@@ -372,7 +391,7 @@ func processClassNamespace(t *Type, ns *Dict) error {
 //
 // CPython: Objects/typeobject.c:4526 type_new_set_attrs
 // CPython: Objects/typeobject.c:4372 type_new_classmethod
-func copyNamespaceToType(t *Type, ns *Dict) {
+func copyNamespaceToType(t *Type, ns *Dict) error {
 	for _, k := range ns.Keys() {
 		s, ok := k.(*Unicode)
 		if !ok || s.v == "__slots__" {
@@ -392,9 +411,15 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 				t.Module = u.v
 			}
 		case "__qualname__":
-			if u, ok := v.(*Unicode); ok {
-				t.Qualname = u.v
+			// type_new_set_ht_name rejects a non-str __qualname__ in the
+			// namespace with TypeError before it ever reaches tp_dict.
+			//
+			// CPython: Objects/typeobject.c:4289 type_new_set_ht_name
+			u, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: type __qualname__ must be a str, not %s", typeNameOf(v))
 			}
+			t.Qualname = u.v
 			// __qualname__ is also stored on the type via the getset
 			// path (typeSetQualname), so do not also stash a raw descr
 			// for it: the descr table would shadow the getset.
@@ -439,6 +464,7 @@ func copyNamespaceToType(t *Type, ns *Dict) {
 		}
 		SetTypeDescr(t, s.v, v)
 	}
+	return nil
 }
 
 // FormatNoteHook lets the errors package attach a __notes__ string to
