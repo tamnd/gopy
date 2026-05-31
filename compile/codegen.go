@@ -299,6 +299,15 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	switch sc.Type {
 	case symtable.ModuleBlock:
 		u.Flags = 0
+		// PyCF_ALLOW_TOP_LEVEL_AWAIT: a module whose body awaits is a
+		// coroutine. A module can never be a generator (yield at module
+		// scope is a syntax error), so the coroutine bit stands alone.
+		//
+		// CPython: Python/codegen.c compute_code_flags (ste_coroutine on
+		// the module entry sets CO_COROUTINE)
+		if sc.Coroutine {
+			u.Flags |= CoCoroutine
+		}
 	case symtable.FunctionBlock:
 		u.Flags = CoOptimized | CoNewLocals
 		if sc.Method {

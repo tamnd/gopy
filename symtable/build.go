@@ -261,12 +261,16 @@ func (b *builder) recordDirective(name string, loc ast.Pos) error {
 }
 
 // allowsTopLevelAwait mirrors PyCF_ALLOW_TOP_LEVEL_AWAIT at module
-// scope. v0.5 of gopy does not surface that flag yet; this helper is
-// stubbed to false but kept in place so future wiring is local.
+// scope. compile() folds the flag into ff_features, so it is true only
+// when that bit is set and the current block is the module body. Inside
+// a function (or a comprehension scope) the normal await/async
+// validation applies, exactly as in CPython.
 //
 // CPython: Python/symtable.c:L1831 allows_top_level_await
 func (b *builder) allowsTopLevelAwait() bool {
-	return false
+	return b.future != nil &&
+		b.future.Bits&future.AllowTopLevelAwait != 0 &&
+		b.cur.Type == ModuleBlock
 }
 
 // isAsyncDef reports whether the current block is an async function

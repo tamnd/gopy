@@ -62,7 +62,7 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	if parsed.flags&(cfOnlyAST|cfOptimizedAST) != 0 {
 		return parseOnlyResult(mod, &parsed)
 	}
-	cco, err := compile.Compile(mod, parsed.filename, parsed.optimize)
+	cco, err := compile.CompileFlags(mod, parsed.filename, parsed.optimize, parsed.flags)
 	if err != nil {
 		return nil, err
 	}
