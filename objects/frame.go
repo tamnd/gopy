@@ -210,8 +210,9 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 	if gowner != nil {
 		// FRAME_OWNED_BY_GENERATOR. Running == 1 mirrors FRAME_EXECUTING;
 		// started && !closed && !Running mirrors FRAME_STATE_SUSPENDED.
-		// A finished generator (closed) drops through to
-		// FrameClearLocals just as CPython falls into _PyGen_Finalize.
+		// Anything else (FRAME_CREATED or FRAME_COMPLETED) falls into
+		// _PyGen_Finalize, which warns about a never-awaited coroutine
+		// and runs close() on suspended-but-not-resumed generators.
 		//
 		// CPython: Objects/frameobject.c:1997 frame_clear_impl
 		// (FRAME_OWNED_BY_GENERATOR branch)
@@ -224,13 +225,28 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
 			}
 		case *Coroutine:
+			if g.Running.Load() == 1 {
+				return nil, fmt.Errorf("RuntimeError: cannot clear an executing frame")
+			}
 			if g.started && !g.closed {
 				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
 			}
 		case *AsyncGenerator:
+			if g.Running.Load() == 1 {
+				return nil, fmt.Errorf("RuntimeError: cannot clear an executing frame")
+			}
 			if g.started && !g.closed {
 				return nil, fmt.Errorf("RuntimeError: cannot clear a suspended frame")
 			}
+		}
+		// Drop into _PyGen_Finalize: warns about a never-awaited
+		// coroutine, runs close() on a still-suspended async generator,
+		// and is a no-op for a generator that already ran to completion.
+		//
+		// CPython: Objects/frameobject.c:2005 frame_clear_impl
+		// (calls _PyGen_Finalize before tearing locals down)
+		if t := gowner.Type(); t != nil && t.Finalize != nil {
+			t.Finalize(gowner)
 		}
 	} else if frameIsOnCurrentStack(f) {
 		// FRAME_OWNED_BY_THREAD: the frame is currently live on this
