@@ -73,14 +73,14 @@ func SetItem(o, key, value objects.Object) error {
 	return fmt.Errorf("%w: %q does not support item assignment", ErrTypeError, o.Type().Name)
 }
 
-// Add dispatches a + b through the numeric slots. Falls back to b's
-// reflected slot when a returns NotImplemented.
+// Add dispatches a + b through PyNumber_Add: the numeric slots first
+// (with reflected fallback), then sq_concat on the left operand. The
+// sequence fallback is what lets sum([[1], [2]], []) concatenate lists,
+// matching builtin_sum which calls PyNumber_Add directly.
 //
-// CPython: Objects/abstract.c:L971 PyNumber_Add
+// CPython: Objects/abstract.c:1128 PyNumber_Add
 func Add(a, b objects.Object) (objects.Object, error) {
-	return binaryOp(a, b, "+", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
-		return n.Add
-	})
+	return objects.NumberAdd(a, b)
 }
 
 // Subtract dispatches a - b.

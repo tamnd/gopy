@@ -28,8 +28,18 @@ func Sum(args []objects.Object, kwargs map[string]objects.Object) (objects.Objec
 	if v, ok := kwargs["start"]; ok {
 		start = v
 	}
+	// CPython rejects str, bytes, and bytearray start values up front so
+	// that sum() never silently builds the wrong kind of concatenation.
+	//
+	// CPython: Python/bltinmodule.c:2686 builtin_sum_impl
 	if start.Type() == objects.StrType() {
 		return nil, fmt.Errorf("TypeError: sum() can't sum strings [use ''.join(seq) instead]")
+	}
+	if _, ok := start.(*objects.Bytes); ok {
+		return nil, fmt.Errorf("TypeError: sum() can't sum bytes [use b''.join(seq) instead]")
+	}
+	if _, ok := start.(*objects.ByteArray); ok {
+		return nil, fmt.Errorf("TypeError: sum() can't sum bytearray [use b''.join(seq) instead]")
 	}
 
 	it, err := abstract.Iter(args[0])

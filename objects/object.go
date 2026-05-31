@@ -623,11 +623,20 @@ func objectGetDict(o Object) (Object, error) {
 		}
 		return v.dict, nil
 	case *Int:
+		// The builtin int type has no tp_dictoffset, so (42).__dict__
+		// must raise AttributeError. Only an int subclass declaring a
+		// dict gets the lazily-allocated attribute store.
+		if !v.Type().HasDict {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
+		}
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}
 		return v.attrs, nil
 	case *Unicode:
+		if !v.Type().HasDict {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
+		}
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}

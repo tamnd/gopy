@@ -297,6 +297,18 @@ func lookupSpecial(o Object, name string) (Object, error) {
 	return descr, nil
 }
 
+// LookupSpecial is the exported form of lookupSpecial: a TYPE-level MRO
+// lookup of a dunder method, bound to the instance via DescrGet. It
+// returns (nil, nil) when the type does not define the method, so an
+// instance attribute of the same name is deliberately ignored. Callers
+// dispatching builtins like round() through __round__ need this so that
+// per-instance dunder assignments do not satisfy the slot.
+//
+// CPython: Objects/typeobject.c:1776 _PyObject_LookupSpecial
+func LookupSpecial(o Object, name string) (Object, error) {
+	return lookupSpecial(o, name)
+}
+
 // Hash returns the hash of o. Errors with errUnhashable when the
 // type has no Hash slot. Mirrors PyObject_Hash.
 //

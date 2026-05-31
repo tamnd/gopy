@@ -19,18 +19,18 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// Round implements round(number[, ndigits]).
+// Round implements round(number, ndigits=None). Both arguments are
+// positional-or-keyword, matching the clinic signature; CPython then
+// dispatches through number.__round__, so any type defining the special
+// method works, not just int and float.
 //
 // CPython: Python/bltinmodule.c:2601 builtin_round_impl
-func Round(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return nil, fmt.Errorf("TypeError: round expected 1 or 2 arguments, got %d", len(args))
+func Round(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	number, ndigits, err := bindRoundArgs(args, kwargs)
+	if err != nil {
+		return nil, err
 	}
-	ndigits := objects.None()
-	if len(args) == 2 {
-		ndigits = args[1]
-	}
-	switch v := args[0].(type) {
+	switch v := number.(type) {
 	case *objects.Bool:
 		return roundInt(&v.Int, ndigits)
 	case *objects.Int:
@@ -38,7 +38,65 @@ func Round(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 	case *objects.Float:
 		return roundFloat(v.Float64(), ndigits)
 	}
-	return nil, fmt.Errorf("TypeError: type %s doesn't define __round__ method", args[0].Type().Name)
+	// Generic delegation: _PyObject_LookupSpecial(number, "__round__").
+	// The lookup is TYPE-level only, so a __round__ assigned to the
+	// instance (rather than the class) does not satisfy the slot, matching
+	// CPython where t.__round__ = lambda: ... still raises TypeError.
+	// None ndigits calls __round__() with no args, otherwise __round__(ndigits).
+	//
+	// CPython: Python/bltinmodule.c:2613 builtin_round_impl
+	round, lookErr := objects.LookupSpecial(number, "__round__")
+	if lookErr != nil {
+		return nil, lookErr
+	}
+	if round == nil {
+		return nil, fmt.Errorf("TypeError: type %s doesn't define __round__ method", number.Type().Name)
+	}
+	if objects.IsNone(ndigits) {
+		return objects.CallNoArgs(round)
+	}
+	return objects.CallOneArg(round, ndigits)
+}
+
+// bindRoundArgs maps the positional/keyword arguments onto (number,
+// ndigits), rejecting duplicates and unknown keywords the way the
+// clinic-generated parser does.
+//
+// CPython: Python/clinic/bltinmodule.c.h builtin_round
+func bindRoundArgs(args []objects.Object, kwargs map[string]objects.Object) (number, ndigits objects.Object, err error) {
+	ndigits = objects.None()
+	if len(args) > 2 {
+		return nil, nil, fmt.Errorf("TypeError: round expected at most 2 arguments, got %d", len(args))
+	}
+	ndigitsSet := false
+	if len(args) >= 1 {
+		number = args[0]
+	}
+	if len(args) >= 2 {
+		ndigits = args[1]
+		ndigitsSet = true
+	}
+	for k, v := range kwargs {
+		switch k {
+		case "number":
+			if number != nil {
+				return nil, nil, fmt.Errorf("TypeError: argument for round() given by name ('number') and position (1)")
+			}
+			number = v
+		case "ndigits":
+			if ndigitsSet {
+				return nil, nil, fmt.Errorf("TypeError: argument for round() given by name ('ndigits') and position (2)")
+			}
+			ndigits = v
+			ndigitsSet = true
+		default:
+			return nil, nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for round()", k)
+		}
+	}
+	if number == nil {
+		return nil, nil, fmt.Errorf("TypeError: round() missing required argument 'number' (pos 1)")
+	}
+	return number, ndigits, nil
 }
 
 // roundInt mirrors int___round___impl. With None or no ndigits the
