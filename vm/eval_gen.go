@@ -259,6 +259,16 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		genFrameObj.SetOwner(c)
 		savedFrame.GenOwner = c
 		yieldCh, sendCh = c.YieldCh, c.SendCh
+		// cr_origin: capture a traceback-style tuple of the caller chain
+		// when sys.set_coroutine_origin_tracking_depth is non-zero. The
+		// new coroutine's own frame is incomplete, so start the walk at
+		// its previous frame (the caller).
+		//
+		// CPython: Objects/genobject.c:966 make_gen (cr_origin block),
+		// Objects/genobject.c:1369 compute_cr_origin
+		if e.ts != nil && e.ts.CoroutineOriginTrackingDepth > 0 {
+			c.CrOrigin = computeCrOrigin(e.f.Previous, e.ts.CoroutineOriginTrackingDepth)
+		}
 		retVal = c
 	case flags&compile.CoAsyncGenerator != 0:
 		ag := objects.NewAsyncGeneratorWithQualname(name, qualname)
@@ -1083,4 +1093,33 @@ func excObjectErr(o objects.Object) error {
 		return objects.ErrStopIteration
 	}
 	return nil
+}
+
+// computeCrOrigin builds the cr_origin tuple captured at coroutine
+// creation: walks up to depth frames from start (the coroutine's caller)
+// and yields a tuple of (filename, lineno, name) per frame, in
+// most-recent-first order. Returns an empty tuple when start is nil.
+//
+// CPython: Objects/genobject.c:1369 compute_cr_origin
+func computeCrOrigin(start *frame.Frame, depth int) objects.Object {
+	if start == nil || depth <= 0 {
+		return objects.NewTuple(nil)
+	}
+	rows := make([]objects.Object, 0, depth)
+	for f := start; f != nil && len(rows) < depth; f = f.Previous {
+		code := f.FrameCode()
+		if code == nil {
+			break
+		}
+		line := 0
+		if pos, ok := objects.CoAddr2Location(code, f.FrameLasti()); ok {
+			line = pos.Line
+		}
+		rows = append(rows, objects.NewTuple([]objects.Object{
+			objects.NewStr(code.Filename),
+			objects.NewInt(int64(line)),
+			objects.NewStr(code.Name),
+		}))
+	}
+	return objects.NewTuple(rows)
 }

@@ -409,6 +409,19 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "set_int_max_str_digits", objects.NewBuiltinFunction("set_int_max_str_digits", setIntMaxStrDigits)); err != nil {
 		return nil, err
 	}
+	// sys.get_coroutine_origin_tracking_depth /
+	// sys.set_coroutine_origin_tracking_depth track how many traceback
+	// frames to capture when a coroutine is created. asyncio uses these
+	// to surface where an unawaited coroutine originated.
+	//
+	// CPython: Python/sysmodule.c:1379 sys_set_coroutine_origin_tracking_depth_impl,
+	// Python/sysmodule.c:1402 sys_get_coroutine_origin_tracking_depth_impl
+	if err := setItem(md, "get_coroutine_origin_tracking_depth", objects.NewBuiltinFunction("get_coroutine_origin_tracking_depth", getCoroutineOriginTrackingDepth)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_coroutine_origin_tracking_depth", objects.NewBuiltinFunction("set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth)); err != nil {
+		return nil, err
+	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
 	// stack. depth=0 is the immediate caller's frame.
 	//

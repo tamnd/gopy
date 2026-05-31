@@ -71,6 +71,8 @@ func Bind(d *objects.Dict, ts *state.Thread) error {
 		{"intern", makeIntern(ts)},
 		{"get_int_max_str_digits", getIntMaxStrDigits},
 		{"set_int_max_str_digits", setIntMaxStrDigits},
+		{"get_coroutine_origin_tracking_depth", getCoroutineOriginTrackingDepth},
+		{"set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth},
 	}
 	for _, h := range helpers {
 		if err := setItem(d, h.name, objects.NewBuiltinFunction(h.name, h.fn)); err != nil {
@@ -165,6 +167,59 @@ func setIntMaxStrDigits(args []objects.Object, _ map[string]objects.Object) (obj
 		return nil, fmt.Errorf("ValueError: set_int_max_str_digits() limit must be 0 or >= 640")
 	}
 	intMaxStrDigits.Store(int32(v))
+	return objects.None(), nil
+}
+
+// resolveThread returns ts when supplied, otherwise falls back to
+// CurrentThreadHook. inittab-built sys (no ts) routes through the hook
+// the vm installs once the interpreter starts; Bind passes ts directly.
+func resolveThread(ts *state.Thread) *state.Thread {
+	if ts != nil {
+		return ts
+	}
+	if CurrentThreadHook != nil {
+		return CurrentThreadHook()
+	}
+	return nil
+}
+
+// getCoroutineOriginTrackingDepth ports
+// sys.get_coroutine_origin_tracking_depth() -> int. CPython reads the
+// per-thread depth via _PyEval_GetCoroutineOriginTrackingDepth.
+//
+// CPython: Python/sysmodule.c:1402 sys_get_coroutine_origin_tracking_depth_impl
+// CPython: Python/ceval.c:2690 _PyEval_GetCoroutineOriginTrackingDepth
+func getCoroutineOriginTrackingDepth(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	ts := resolveThread(nil)
+	if ts == nil {
+		return objects.NewInt(0), nil
+	}
+	return objects.NewInt(int64(ts.CoroutineOriginTrackingDepth)), nil
+}
+
+// setCoroutineOriginTrackingDepth ports
+// sys.set_coroutine_origin_tracking_depth(depth). Negative depths raise
+// ValueError, matching CPython.
+//
+// CPython: Python/sysmodule.c:1379 sys_set_coroutine_origin_tracking_depth_impl
+// CPython: Python/ceval.c:2677 _PyEval_SetCoroutineOriginTrackingDepth
+func setCoroutineOriginTrackingDepth(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: set_coroutine_origin_tracking_depth() takes exactly one argument (%d given)", len(args))
+	}
+	iv, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	v, _ := iv.Int64()
+	if v < 0 {
+		return nil, fmt.Errorf("ValueError: depth must be >= 0")
+	}
+	ts := resolveThread(nil)
+	if ts == nil {
+		return objects.None(), nil
+	}
+	ts.CoroutineOriginTrackingDepth = int(v)
 	return objects.None(), nil
 }
 

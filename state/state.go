@@ -162,6 +162,14 @@ type Thread struct {
 	//
 	// CPython: Include/cpython/pystate.h:128 tracing
 	Tracing int
+
+	// CoroutineOriginTrackingDepth is how many traceback frames to
+	// capture on coroutine creation, set by
+	// sys.set_coroutine_origin_tracking_depth. Depth 0 disables
+	// capture; cr_origin then reads None.
+	//
+	// CPython: Include/cpython/pystate.h:185 coroutine_origin_tracking_depth
+	CoroutineOriginTrackingDepth int
 }
 
 // HandledException returns the currently-handled exception (the one a
