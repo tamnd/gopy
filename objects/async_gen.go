@@ -294,6 +294,32 @@ func init() {
 	} {
 		SetTypeDescr(AsyncGeneratorType, name, NewMethodDescr(AsyncGeneratorType, name, fn))
 	}
+
+	// async_generator_asend.send / throw / close / __await__ rows.
+	//
+	// CPython: Objects/genobject.c:1903 async_gen_asend_methods
+	// CPython: Objects/genobject.c:1911 async_gen_asend_as_async (am_await)
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"send":      asyncGenASendSendMethod,
+		"throw":     asyncGenASendThrowMethod,
+		"close":     asyncGenASendCloseMethod,
+		"__await__": asyncGenASendAwaitMethod,
+	} {
+		SetTypeDescr(AsyncGenASendType, name, NewMethodDescr(AsyncGenASendType, name, fn))
+	}
+
+	// async_generator_athrow.send / throw / close / __await__ rows.
+	//
+	// CPython: Objects/genobject.c:2345 async_gen_athrow_methods
+	// CPython: Objects/genobject.c:2358 async_gen_athrow_as_async (am_await)
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"send":      asyncGenAThrowSendMethod,
+		"throw":     asyncGenAThrowThrowMethod,
+		"close":     asyncGenAThrowCloseMethod,
+		"__await__": asyncGenAThrowAwaitMethod,
+	} {
+		SetTypeDescr(AsyncGenAThrowType, name, NewMethodDescr(AsyncGenAThrowType, name, fn))
+	}
 }
 
 // asyncGenAsendMethod implements async_generator.asend(value).
@@ -312,7 +338,7 @@ func asyncGenAsendMethod(args []Object, _ map[string]Object) (Object, error) {
 
 // asyncGenAthrowMethod implements async_generator.athrow(exc).
 //
-// CPython: Objects/genobject.c:2272 async_gen_athrow
+// CPython: Objects/genobject.c:1564 async_gen_athrow
 func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: athrow() requires an exception")
@@ -323,6 +349,31 @@ func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	if GenThrowHook == nil {
 		return nil, fmt.Errorf("RuntimeError: async_generator.athrow not available")
+	}
+	// CPython: Objects/genobject.c:1567 emits a DeprecationWarning when
+	// the deprecated (type, exc, tb) form is used. We then normalize the
+	// triple just like gen.throw.
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of athrow() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: async_generator.athrow 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		return g.Athrow(exc), nil
 	}
 	exc, err := GenThrowHook(args[1])
 	if err != nil {
@@ -343,6 +394,275 @@ func asyncGenAcloseMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor 'aclose' requires a 'async_generator' object")
 	}
 	return g.Aclose(), nil
+}
+
+// asyncGenASendSendMethod implements async_generator_asend.send(arg).
+// Delegates to the IterNext driver which honors send semantics on the
+// asend awaitable; in INIT state CPython rejects non-None args, but
+// the awaitable's first-call behavior in gopy already mirrors that by
+// using the captured asend value the first time.
+//
+// CPython: Objects/genobject.c:1788 async_gen_asend_send
+func asyncGenASendSendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: send() takes exactly one argument (%d given)", len(args)-1)
+	}
+	a, ok := args[0].(*asyncGenASend)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'async_generator_asend' object")
+	}
+	if !a.used {
+		a.used = true
+		v := a.val
+		if v == nil {
+			v = None()
+		}
+		result, err := a.gen.Send(v)
+		if err != nil {
+			return nil, err
+		}
+		if w, ok := result.(*AsyncGenWrappedValue); ok {
+			if AsyncGenStopIterationHook != nil {
+				return nil, AsyncGenStopIterationHook(w.Value)
+			}
+			return nil, ErrStopIteration
+		}
+		return result, nil
+	}
+	result, err := a.gen.Send(args[1])
+	if err != nil {
+		return nil, err
+	}
+	if w, ok := result.(*AsyncGenWrappedValue); ok {
+		if AsyncGenStopIterationHook != nil {
+			return nil, AsyncGenStopIterationHook(w.Value)
+		}
+		return nil, ErrStopIteration
+	}
+	return result, nil
+}
+
+// asyncGenASendThrowMethod implements async_generator_asend.throw(typ).
+// The 3-arg form emits a DeprecationWarning matching gen.throw.
+//
+// CPython: Objects/genobject.c:1833 async_gen_asend_throw
+func asyncGenASendThrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: throw() requires an exception")
+	}
+	a, ok := args[0].(*asyncGenASend)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'throw' requires a 'async_generator_asend' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: async_generator_asend.throw not available")
+	}
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: async_generator_asend.throw 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		a.used = true
+		result, terr := a.gen.Throw(exc)
+		if terr != nil {
+			return nil, terr
+		}
+		if w, ok := result.(*AsyncGenWrappedValue); ok {
+			if AsyncGenStopIterationHook != nil {
+				return nil, AsyncGenStopIterationHook(w.Value)
+			}
+			return nil, ErrStopIteration
+		}
+		return result, nil
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	a.used = true
+	result, terr := a.gen.Throw(exc)
+	if terr != nil {
+		return nil, terr
+	}
+	if w, ok := result.(*AsyncGenWrappedValue); ok {
+		if AsyncGenStopIterationHook != nil {
+			return nil, AsyncGenStopIterationHook(w.Value)
+		}
+		return nil, ErrStopIteration
+	}
+	return result, nil
+}
+
+// asyncGenASendCloseMethod implements async_generator_asend.close().
+// CPython throws GeneratorExit and swallows the StopIteration that
+// the await-side raises. Returns None.
+//
+// CPython: Objects/genobject.c:1870 async_gen_asend_close
+func asyncGenASendCloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: close() missing self argument")
+	}
+	a, ok := args[0].(*asyncGenASend)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'async_generator_asend' object")
+	}
+	a.used = true
+	// Drive a GeneratorExit; ignore StopIteration / StopAsyncIteration
+	// / GeneratorExit as CPython does.
+	_, _ = a.gen.Throw(ErrGeneratorExit)
+	return None(), nil
+}
+
+// asyncGenAThrowSendMethod implements async_generator_athrow.send(arg).
+// First call drives the underlying throw; subsequent calls forward
+// to the generator's Send.
+//
+// CPython: Objects/genobject.c:2100 async_gen_athrow_send
+func asyncGenAThrowSendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: send() takes exactly one argument (%d given)", len(args)-1)
+	}
+	a, ok := args[0].(*asyncGenAThrow)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'async_generator_athrow' object")
+	}
+	return asyncGenAThrowDrive(a, args[1])
+}
+
+// asyncGenAThrowThrowMethod implements async_generator_athrow.throw(typ).
+//
+// CPython: Objects/genobject.c:2233 async_gen_athrow_throw
+func asyncGenAThrowThrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: throw() requires an exception")
+	}
+	a, ok := args[0].(*asyncGenAThrow)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'throw' requires a 'async_generator_athrow' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: async_generator_athrow.throw not available")
+	}
+	if len(args) > 2 {
+		if DeprecWarnHook != nil {
+			if werr := DeprecWarnHook("the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead."); werr != nil {
+				return nil, werr
+			}
+		}
+		if GenThrowTripleHook == nil {
+			return nil, fmt.Errorf("RuntimeError: async_generator_athrow.throw 3-arg form not available")
+		}
+		var val, tb Object
+		if len(args) > 2 {
+			val = args[2]
+		}
+		if len(args) > 3 {
+			tb = args[3]
+		}
+		exc, err := GenThrowTripleHook(args[1], val, tb)
+		if err != nil {
+			return nil, err
+		}
+		a.used = true
+		result, terr := a.gen.Throw(exc)
+		if terr != nil {
+			return nil, terr
+		}
+		return result, nil
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	a.used = true
+	result, terr := a.gen.Throw(exc)
+	if terr != nil {
+		return nil, terr
+	}
+	return result, nil
+}
+
+// asyncGenAThrowCloseMethod implements async_generator_athrow.close().
+// Marks the awaitable closed; we drive a GeneratorExit into the
+// generator and swallow the expected sentinel errors.
+//
+// CPython: Objects/genobject.c:2310 async_gen_athrow_close
+func asyncGenAThrowCloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: close() missing self argument")
+	}
+	a, ok := args[0].(*asyncGenAThrow)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'async_generator_athrow' object")
+	}
+	a.used = true
+	_, _ = a.gen.Throw(ErrGeneratorExit)
+	return None(), nil
+}
+
+// asyncGenASendAwaitMethod returns the asend awaitable (self) so
+// `await asend_obj` drives it. CPython's am_await slot returns
+// Py_NewRef(self); we mirror that via __await__.
+//
+// CPython: Objects/genobject.c:1911 async_gen_asend_as_async
+func asyncGenASendAwaitMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __await__() missing self argument")
+	}
+	if _, ok := args[0].(*asyncGenASend); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__await__' requires a 'async_generator_asend' object")
+	}
+	Incref(args[0])
+	return args[0], nil
+}
+
+// asyncGenAThrowAwaitMethod returns the athrow awaitable (self) so
+// `await athrow_obj` drives it.
+//
+// CPython: Objects/genobject.c:2358 async_gen_athrow_as_async
+func asyncGenAThrowAwaitMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __await__() missing self argument")
+	}
+	if _, ok := args[0].(*asyncGenAThrow); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__await__' requires a 'async_generator_athrow' object")
+	}
+	Incref(args[0])
+	return args[0], nil
+}
+
+// asyncGenAThrowDrive is the shared body of send() / __next__ on the
+// athrow awaitable. The first call throws the captured error or
+// GeneratorExit (aclose mode); subsequent calls forward arg via Send.
+//
+// CPython: Objects/genobject.c:2100 async_gen_athrow_send
+func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
+	if a.used {
+		return nil, ErrStopAsyncIteration
+	}
+	a.used = true
+	if a.isClose {
+		if cerr := a.gen.Close(); cerr != nil {
+			return nil, cerr
+		}
+		return nil, ErrStopAsyncIteration
+	}
+	return a.gen.Throw(a.err)
 }
 
 // asyncGenAiterMethod returns self.
