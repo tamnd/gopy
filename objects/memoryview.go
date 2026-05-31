@@ -24,6 +24,14 @@ type MemoryView struct {
 	readonly bool
 	format   string
 	itemsize int
+	// exporter is the bytearray this view was opened on, if any. The
+	// view holds one of the bytearray's ob_exports for its lifetime so
+	// the bytearray cannot be re-sized while the view is live; release()
+	// (or GC) drops it.
+	//
+	// CPython: Objects/memoryobject.c mbuf_release / bytearray_releasebuffer
+	exporter *ByteArray
+	released bool
 }
 
 // MemoryViewType is the type singleton for memoryview.
@@ -103,7 +111,8 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *ByteArray:
-		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1}
+		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, exporter: s}
+		s.ExportInc()
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *MemoryView:
@@ -485,8 +494,19 @@ func memoryViewReleaseMethod(args []Object, _ map[string]Object) (Object, error)
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: release() missing self")
 	}
-	if _, ok := args[0].(*MemoryView); !ok {
+	m, ok := args[0].(*MemoryView)
+	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'release' requires a 'memoryview' object")
+	}
+	// Drop the export held on the source bytearray (idempotent: a
+	// second release() is a no-op in CPython too).
+	//
+	// CPython: Objects/memoryobject.c:1325 memoryview_release_impl
+	if !m.released {
+		m.released = true
+		if m.exporter != nil {
+			m.exporter.ExportDec()
+		}
 	}
 	return None(), nil
 }

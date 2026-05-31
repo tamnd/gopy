@@ -18,6 +18,40 @@ import (
 type ByteArray struct {
 	VarHeader
 	v []byte
+	// exports counts the live buffer views over v (memoryview windows,
+	// and the in-flight join that locks its separator). While positive
+	// the buffer cannot change length, matching CPython's ob_exports.
+	//
+	// CPython: Objects/bytearrayobject.c ob_exports
+	exports int
+}
+
+// ExportInc / ExportDec adjust the live-export count. A buffer consumer
+// (memoryview, bytearray.join) raises the count for the lifetime of its
+// view so a concurrent resize is rejected.
+//
+// CPython: Objects/bytearrayobject.c:1228 bytearray_getbuffer / bytearray_releasebuffer
+func (b *ByteArray) ExportInc() { b.exports++ }
+
+// ExportDec drops one live export, never below zero.
+//
+// CPython: Objects/bytearrayobject.c:1247 bytearray_releasebuffer
+func (b *ByteArray) ExportDec() {
+	if b.exports > 0 {
+		b.exports--
+	}
+}
+
+// checkResize is the ob_exports guard PyByteArray_Resize applies before
+// any length change: a bytearray with live exports cannot be re-sized.
+// A resize that leaves the length unchanged is always allowed.
+//
+// CPython: Objects/bytearrayobject.c:147 PyByteArray_Resize
+func (b *ByteArray) checkResize(newLen int) error {
+	if b.exports > 0 && newLen != len(b.v) {
+		return errors.New("BufferError: Existing exports of data: object cannot be re-sized")
+	}
+	return nil
 }
 
 // ByteArrayType is the type singleton for bytearray.
@@ -201,6 +235,9 @@ func (b *ByteArray) Append(v int) error {
 	if v < 0 || v > 255 {
 		return errors.New("ValueError: byte must be in range(0, 256)")
 	}
+	if err := b.checkResize(len(b.v) + 1); err != nil {
+		return err
+	}
 	b.v = append(b.v, byte(v))
 	b.size = int64(len(b.v))
 	return nil
@@ -209,9 +246,13 @@ func (b *ByteArray) Append(v int) error {
 // Extend concatenates the bytes from src.
 //
 // CPython: Objects/bytearrayobject.c:2299 bytearray_extend
-func (b *ByteArray) Extend(src []byte) {
+func (b *ByteArray) Extend(src []byte) error {
+	if err := b.checkResize(len(b.v) + len(src)); err != nil {
+		return err
+	}
 	b.v = append(b.v, src...)
 	b.size = int64(len(b.v))
+	return nil
 }
 
 // Insert places v at position where, shifting later bytes right.
@@ -221,6 +262,9 @@ func (b *ByteArray) Extend(src []byte) {
 func (b *ByteArray) Insert(where int, v int) error {
 	if v < 0 || v > 255 {
 		return errors.New("ValueError: byte must be in range(0, 256)")
+	}
+	if err := b.checkResize(len(b.v) + 1); err != nil {
+		return err
 	}
 	n := len(b.v)
 	if where < 0 {
@@ -254,6 +298,9 @@ func (b *ByteArray) Pop(i int) (int, error) {
 	if i < 0 || i >= n {
 		return 0, errors.New("IndexError: pop index out of range")
 	}
+	if err := b.checkResize(n - 1); err != nil {
+		return 0, err
+	}
 	v := b.v[i]
 	b.v = append(b.v[:i], b.v[i+1:]...)
 	b.size = int64(len(b.v))
@@ -263,9 +310,13 @@ func (b *ByteArray) Pop(i int) (int, error) {
 // Clear truncates the buffer to zero length.
 //
 // CPython: Objects/bytearrayobject.c:2191 bytearray_clear
-func (b *ByteArray) Clear() {
+func (b *ByteArray) Clear() error {
+	if err := b.checkResize(0); err != nil {
+		return err
+	}
 	b.v = b.v[:0]
 	b.size = 0
+	return nil
 }
 
 // Reverse reverses bytes in place.
@@ -425,6 +476,9 @@ func byteArrayIConcat(a, b Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: can't concat %s to %s", b.Type().Name, a.Type().Name)
 	}
+	if err := self.checkResize(len(self.v) + len(vb)); err != nil {
+		return nil, err
+	}
 	self.v = append(self.v, vb...)
 	self.size = int64(len(self.v))
 	return self, nil
@@ -461,6 +515,9 @@ func byteArrayIRepeat(o Object, n int) (Object, error) {
 	}
 	mysize := len(self.v)
 	size := mysize * n
+	if err := self.checkResize(size); err != nil {
+		return nil, err
+	}
 	out := make([]byte, size)
 	for i := 0; i < n; i++ {
 		copy(out[i*mysize:], self.v)

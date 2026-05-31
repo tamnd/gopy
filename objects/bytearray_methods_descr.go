@@ -141,7 +141,9 @@ func bytearrayExtendMethod() methodFn {
 			return nil, err
 		}
 		if buf, ok := asBytesLike(args[1]); ok {
-			b.Extend(buf)
+			if err := b.Extend(buf); err != nil {
+				return nil, err
+			}
 			return None(), nil
 		}
 		// CPython: Objects/bytearrayobject.c:2329 bytearray_extend calls
@@ -262,7 +264,9 @@ func bytearrayClearMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		b.Clear()
+		if err := b.Clear(); err != nil {
+			return nil, err
+		}
 		return None(), nil
 	}
 }

@@ -367,6 +367,16 @@ func joinMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
+		// Lock the separator's buffer for the whole join: bytearray.join
+		// bumps ob_exports so an iterator that mutates the receiver
+		// mid-iteration (e.g. self.clear()) raises BufferError instead
+		// of corrupting the in-flight read.
+		//
+		// CPython: Objects/bytearrayobject.c:2370 bytearray_join (ob_exports)
+		if ba, ok := args[0].(*ByteArray); ok {
+			ba.ExportInc()
+			defer ba.ExportDec()
+		}
 		items, err := IterToSlice(args[1])
 		if err != nil {
 			return nil, err
