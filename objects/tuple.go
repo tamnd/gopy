@@ -381,15 +381,34 @@ func tupleConcat(a, b Object) (Object, error) {
 	return NewTuple(out), nil
 }
 
-// tupleRepeat is sq_repeat for tuple: t * n builds a new tuple.
+// tupleRepeat is sq_repeat for tuple: t * n builds a new tuple. Two
+// short circuits mirror CPython tuple_repeat: (a) for an exact tuple
+// (not a subclass), n==1 or input==0 returns the same object since
+// tuples are immutable; (b) otherwise n<=0 returns the singleton empty
+// tuple. Multiplying past PY_SSIZE_T_MAX raises MemoryError.
 //
-// CPython: Objects/tupleobject.c:L641 tuplerepeat
-func tupleRepeat(o Object, n int) (Object, error) {
+// CPython: Objects/tupleobject.c:533 tuple_repeat
+func tupleRepeat(o Object, n int) (rv Object, rerr error) {
 	t := o.(*Tuple)
-	if n <= 0 || len(t.items) == 0 {
+	input := len(t.items)
+	if input == 0 || n == 1 {
+		if t.Type() == TupleType {
+			return t, nil
+		}
+	}
+	if input == 0 || n <= 0 {
 		return emptyTuple, nil
 	}
-	out := make([]Object, 0, len(t.items)*n)
+	if input > int(^uint(0)>>1)/n {
+		return nil, fmt.Errorf("MemoryError")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			rv = nil
+			rerr = fmt.Errorf("MemoryError")
+		}
+	}()
+	out := make([]Object, 0, input*n)
 	for i := 0; i < n; i++ {
 		out = append(out, t.items...)
 	}
