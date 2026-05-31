@@ -100,6 +100,7 @@ func (s *stubFrame) FrameStackItem(int) objects.Object          { return nil }
 func (s *stubFrame) FrameFunc() objects.Object                  { return s.fn }
 func (s *stubFrame) FrameClearLocals()                          {}
 func (s *stubFrame) FrameTakeOwnership()                        {}
+func (s *stubFrame) FrameGenOwner() objects.Object              { return nil }
 
 // TestRemoveGlobals_RewritesGuardToCheckFunction confirms that the
 // first _GUARD_GLOBALS_VERSION on a fresh trace becomes _CHECK_FUNCTION

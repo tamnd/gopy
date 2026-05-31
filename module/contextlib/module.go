@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -333,6 +334,23 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	var re *objects.RaisedError
 	if errors.As(thrErr, &re) && re.Exc == valArg {
 		return objects.NewBool(false), nil
+	}
+	// CPython: Lib/contextlib.py:178 except RuntimeError as exc.
+	// PEP 479 wraps a StopIteration that escaped the generator into a
+	// RuntimeError whose __cause__ is the original StopIteration. When
+	// the user raised StopIteration inside the with-block, the throw
+	// path bounces it back through the generator body and the wrap
+	// triggers. Detect that shape and let the original StopIteration
+	// propagate instead of the synthetic RuntimeError.
+	if re != nil {
+		excObj, _ := re.Exc.(*pyerrors.Exception)
+		if excObj != nil && pyerrors.Match(excObj, pyerrors.PyExc_RuntimeError) {
+			if origExc, ok := valArg.(*pyerrors.Exception); ok &&
+				pyerrors.Match(origExc, pyerrors.PyExc_StopIteration) &&
+				excObj.Cause == valArg {
+				return objects.NewBool(false), nil
+			}
+		}
 	}
 	// Different exception from the generator — re-raise.
 	return nil, thrErr

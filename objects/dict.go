@@ -495,6 +495,7 @@ func dictSubclassGetAttr(o Object, name Object) (Object, error) {
 	// Instance attrs from d.attrs.
 	if d.attrs != nil {
 		if v, err := d.attrs.GetItem(name); err == nil {
+			Incref(v)
 			return v, nil
 		}
 	}
