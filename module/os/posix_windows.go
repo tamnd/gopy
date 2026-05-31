@@ -13,9 +13,14 @@ import (
 	"fmt"
 	goos "os"
 	"syscall"
+	"unsafe"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// procGetHandleInformation resolves kernel32!GetHandleInformation, which
+// the std syscall package does not export (only SetHandleInformation).
+var procGetHandleInformation = syscall.NewLazyDLL("kernel32.dll").NewProc("GetHandleInformation")
 
 // osClose closes a file descriptor.
 //
@@ -140,6 +145,53 @@ func osDup(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.NewInt(int64(newHandle)), nil
+}
+
+// osGetInheritable returns whether the handle will be inherited by
+// child processes. On Windows that is the HANDLE_FLAG_INHERIT bit read
+// off GetHandleInformation.
+//
+// CPython: Modules/posixmodule.c:9531 os_get_inheritable_impl
+func osGetInheritable(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: get_inheritable() missing required argument: 'fd'")
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	var flags uint32
+	// The std syscall package exports SetHandleInformation but not the
+	// Get half, so GetHandleInformation is resolved from kernel32 directly.
+	r, _, callErr := procGetHandleInformation.Call(uintptr(syscall.Handle(fdVal)), uintptr(unsafe.Pointer(&flags)))
+	if r == 0 {
+		return nil, fmt.Errorf("OSError: %w", callErr)
+	}
+	return objects.NewBool(flags&syscall.HANDLE_FLAG_INHERIT != 0), nil
+}
+
+// osSetInheritable sets or clears the handle's inheritable flag through
+// SetHandleInformation.
+//
+// CPython: Modules/posixmodule.c:9554 os_set_inheritable_impl
+func osSetInheritable(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: set_inheritable() takes exactly 2 arguments (%d given)", len(args))
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	var flag uint32
+	if objects.IsTrue(args[1]) {
+		flag = syscall.HANDLE_FLAG_INHERIT
+	}
+	if err := syscall.SetHandleInformation(syscall.Handle(fdVal), syscall.HANDLE_FLAG_INHERIT, flag); err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	return objects.None(), nil
 }
 
 // osPipe creates a pipe and returns (read_fd, write_fd).
