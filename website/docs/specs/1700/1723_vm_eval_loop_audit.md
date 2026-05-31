@@ -21,7 +21,7 @@ that tree.
 
 ---
 
-## Current test status (audit date: 2026-05-29)
+## Current test status (audit date: 2026-05-31)
 
 | Test | Result | Spec-1700 mark |
 |------|--------|----------------|
@@ -34,19 +34,27 @@ that tree.
 | test_with | OK | done |
 | test_contains | OK | done |
 | test_typechecks | OK | done |
-| test_extcall | FAILED (1 failure) | ready |
-| test_frame | FAILED (17 failures, 9 errors) | ready |
-| test_eval | file not vendored | ready |
+| test_extcall | FAILED (1 doctest — module-name harness artifact, P12.5) | ready |
+| test_frame | FAILED (1 failure, 1 error — P12.4 PEP 709, P11 refcount) | ready |
+| test_eval | file not vendored (P9) | ready |
 | test_pow | OK | done |
-| test_yield_from | FAILED (12 failures, 8 errors) | ready |
-| test_coroutines | FAILED (25 failures, 29 errors) | ready |
-| test_asyncgen | FAILED (3 failures, 80 errors) | ready |
+| test_yield_from | OK (43 pass) | done |
+| test_coroutines | FAILED (7 failures, 1 error — P12.3 throw frames, P11 refcount, asyncio) | ready |
+| test_asyncgen | FAILED (3 failures, 54 errors — asyncio event loop, spec 1711) | ready |
 | test_generator_stop | OK | done |
 | test_generators | OK (59 pass, 1 skip) | done |
-| test_iter | FAILED (1 failure) — tracked in spec 1722 P5 | ready |
-| test_iterlen | FAILED (18 failures) | ready |
-| test_index | FAILED (1 failure, 20 errors) | ready |
+| test_iter | OK (57 pass, 2 skip) | done |
+| test_iterlen | OK (22 pass) | done |
+| test_index | OK (55 pass) | done |
 | test_isinstance | OK | done |
+
+Recursion-limit enforcement (P12.1, P12.2) flipped `test_repr_deep` across
+`list_tests` / `mapping_tests` / `test_dict` and removed the Go stack-overflow
+crash on unbounded recursion. The remaining red files reduce to four causes:
+PEP 709 inlined comprehensions (P12.4), throw-path frame linking (P12.3),
+getrefcount / weakref-reclaim exactness (P11, a GC-model gap), and the asyncio
+event loop (spec 1711). `test_extcall`'s one failure is a harness module-naming
+artifact (P12.5), not a behavioural gap.
 
 ---
 
@@ -557,6 +565,86 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 
 ---
 
+## P12 — Recursion limit enforcement
+
+CPython enforces two recursion budgets. The Python budget
+(`py_recursion_remaining`) is decremented at every frame entry
+(`start_frame` in `_PyEval_EvalFrameDefault`, via `_Py_EnterRecursivePy`
+in `Python/ceval_macros.h:337` and `_Py_CheckRecursiveCallPy` in
+`Python/ceval.c:1027`). The C budget guards nested native slot calls
+(repr, str, comparison) in `PyObject_Repr` / `PyObject_Str`
+(`Objects/object.c:777` / `:822`, via `_Py_EnterRecursiveCallTstate` in
+`Include/internal/pycore_ceval.h:222`).
+
+### P12.1 — Python recursion limit on the specialized call arms (shipped)
+
+The generic `CALL` path in `vm/eval_call.go` guards `FrameStack.Depth()`
+against `sys.RecursionLimit()` before every `stack.Push`. The fast
+`CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS`
+(`vm/eval_specialized_call.go`) and `CALL_ALLOC_AND_ENTER_INIT`
+(`vm/eval_specialized_call_alloc_init.go`) arms push frames directly and
+skipped that check, so any recursive function the specializer promoted to
+the fast arm ran until the Go stack overflowed instead of raising
+`RecursionError`. Both arms now repeat the guard before their direct
+`stack.Push`, citing `Python/bytecodes.c:4010 _PUSH_FRAME` and the
+`start_frame` recursion check.
+
+### P12.2 — C recursion limit on repr / str (shipped)
+
+`repr()` / `str()` of a deeply self-nested container recursed on the Go
+stack unbounded (`test_repr_deep` in `list_tests`, `mapping_tests`,
+`test_dict` nests 150k-200k deep and asserts `RecursionError`). gopy now
+counts nesting depth in `objects.Repr` / `objects.Str` against a budget
+(`enterRecursiveCall` / `leaveRecursiveCall`), mirroring the pre-stack-pointer
+`c_recursion_remaining` / `Py_C_RECURSION_LIMIT` design. CPython 3.14
+switched to a machine-stack-pointer check (`_Py_MakeRecCheck`), which is not
+portably reachable from Go, so the counter is the behavioural equivalent.
+
+### P12.3 — Throw stack-frame linking (pending)
+
+`test_stack_in_coroutine_throw` (`test_coroutines`) asserts the visible
+`traceback.extract_stack()` depth is identical when a coroutine chain
+`a -> b -> c` is resumed via `send` versus `throw`. gopy reports 18 frames
+on `send` and 16 on `throw`. Root cause: `Generator.Throw` /
+`Coroutine.Throw` forward the throw down the `YieldFromTarget` chain by
+recursively calling `Throw` on the *caller's* goroutine, so the
+`CallerFrame` stamped into the resumed body (`callerFrame()`) is the test's
+frame rather than the delegating coroutine's frame. The innermost frame's
+`f_back` therefore skips the two delegators. The send path links correctly
+because each delegation runs on its own body goroutine. **Fix:** thread the
+delegating generator's own body frame (its `GiFrame` iframe) as the
+forwarded `CallerFrame` instead of `callerFrame()`. CPython:
+`Objects/genobject.c:248 gen_send_ex2` (`previous_frame` set on resume),
+`Objects/genobject.c:466 _gen_throw` (yf forwarding).
+
+### P12.4 — PEP 709 inlined comprehensions (pending)
+
+`test_write_with_hidden` (`test_frame`) captures `sys._getframe().f_locals`
+*inside* a list comprehension and expects writes through the proxy to land
+on the enclosing function's fast locals. This only works when the
+comprehension is inlined into the enclosing frame (PEP 709, 3.12+), so that
+`sys._getframe()` returns the enclosing frame and the iteration variable
+occupies a `CO_FAST_HIDDEN` slot alongside the function's own. gopy still
+compiles list/set/dict comprehensions as separate `<listcomp>` code objects
+(pre-3.12 behaviour), so `sys._getframe()` returns the dead comprehension
+frame. **Fix:** port the inlined-comprehension subsystem:
+`Python/symtable.c:802 inline_comprehension` (symbol merge, hidden vars,
+`DEF_COMP_CELL`), and the codegen push/pop in `Python/compile.c:1019`
+(`u_in_inlined_comp`, `u_fasthidden`). This is a large symtable + codegen
+port and is tracked separately so it does not land as a partial slice.
+
+### P12.5 — `test_extcall` module-name doctest (harness artifact)
+
+`test_extcall` doctests embed `test.test_extcall.f()` in expected
+`TypeError` text. CPython's regrtest imports the file as `test.test_extcall`,
+so `f.__module__` carries the `test.` package prefix that
+`_PyObject_FunctionStr` (`Objects/object.c:973`) renders. gopy's harness runs
+the file top-level as `test_extcall`, so it correctly renders
+`test_extcall.f()`. The difference is the module's import name under the two
+harnesses, not a behavioural gap in gopy's funcstr formatting.
+
+---
+
 ## Checklist
 
 ### Tests to flip to done
@@ -636,6 +724,14 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 - [ ] P11.3 Verify `handle_resurrected_objects` flow on generator resurrect.
 - [ ] P11.4 `sys.unraisablehook` deallocator-context format string matches CPython.
 
+### P12 — Recursion limit enforcement
+
+- [x] P12.1 Python recursion limit on `CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS` / `CALL_ALLOC_AND_ENTER_INIT` fast arms.
+- [x] P12.2 C recursion limit on `objects.Repr` / `objects.Str` (`test_repr_deep`).
+- [ ] P12.3 Throw-path frame linking so `traceback.extract_stack()` matches `send` (`test_stack_in_coroutine_throw`).
+- [ ] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
+- [x] P12.5 `test_extcall` module-name diagnosed as harness artifact (no code change).
+
 ### Spec 1700 rows advanced
 
 | Test | Before | After | Unblocked by |
@@ -650,14 +746,14 @@ and `objects/refcount.go Decref`, ensure the err_msg passed to
 | test_contains | ready | done | existing pass |
 | test_typechecks | ready | done | existing pass |
 | test_generators | ready | done | P1 shipped |
-| test_coroutines | ready | ready | P1 shipped, P3 pending |
-| test_asyncgen | ready | ready | P1 shipped, P3 pending |
-| test_yield_from | ready | ready | P1 shipped, P8 pending |
+| test_coroutines | ready | ready | P1 shipped; P12.3 + P11 + asyncio pending |
+| test_asyncgen | ready | ready | P1 shipped; asyncio event loop pending (spec 1711) |
+| test_yield_from | ready | done | P1 + P8 shipped |
 | test_generator_stop | ready | done | existing pass |
 | test_pow | ready | done | P2 shipped |
-| test_frame | ready | ready | P4 |
+| test_frame | ready | ready | P12.4 (PEP 709) + P11 pending |
 | test_isinstance | ready | done | P5 shipped |
-| test_index | ready | ready | P6 |
-| test_iterlen | ready | ready | P7 |
-| test_extcall | ready | ready | P10 |
+| test_index | ready | done | P6 shipped |
+| test_iterlen | ready | done | P7 shipped |
+| test_extcall | ready | ready | P12.5 harness artifact |
 | test_eval | ready | ready | P9 |
