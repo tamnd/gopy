@@ -683,7 +683,10 @@ func (g *Generator) Throw(err error) (Object, error) {
 		//
 		// CPython: Objects/genobject.c:475 _gen_throw (close_on_genexit branch)
 		if errors.Is(err, ErrGeneratorExit) || isGeneratorExitException(err) {
-			if e := GenCloseIter(yf); e != nil && !isCleanCloseError(e) {
+			g.Running.Store(1)
+			e := GenCloseIter(yf)
+			g.Running.Store(0)
+			if e != nil && !isCleanCloseError(e) {
 				g.YieldFromTarget = nil
 				g.closed = true
 				return nil, e
@@ -692,6 +695,13 @@ func (g *Generator) Throw(err error) (Object, error) {
 			// Fall through to throw_here: send the GeneratorExit into
 			// the outer body's yield from line via the channel.
 		} else {
+			// Mark outer as FRAME_EXECUTING while the throw is forwarded
+			// to yf. gi_running visible to the sub-iter's throw handler
+			// matches CPython, and a re-entrant send/throw on outer
+			// raises ValueError "generator already executing".
+			//
+			// CPython: Objects/genobject.c:466 _gen_throw (FRAME_EXECUTING)
+			g.Running.Store(1)
 			forwarded := true
 			var fval Object
 			var ferr error
@@ -707,6 +717,7 @@ func (g *Generator) Throw(err error) (Object, error) {
 					forwarded = false
 				}
 			}
+			g.Running.Store(0)
 			if forwarded {
 				return g.forwardThrowResult(fval, ferr)
 			}
@@ -845,10 +856,19 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 	// CPython: Objects/genobject.c:424 gen_close (err==0 gate)
 	throwErr := ErrGeneratorExit
 	if yf := g.YieldFromTarget; yf != nil {
-		if e := GenCloseIter(yf); e != nil {
-			if !isCleanCloseError(e) {
-				throwErr = e
-			}
+		// Mark the outer generator as running while gen_close_iter
+		// drives the sub-iterator. This matches CPython's
+		// gen->gi_frame_state = FRAME_EXECUTING around gen_close_iter
+		// in gen_close, so a user-defined yf.close() that touches
+		// outer.gi_running sees True (and a re-entrant next/send/throw
+		// on outer raises ValueError "generator already executing").
+		//
+		// CPython: Objects/genobject.c:421 gen_close (FRAME_EXECUTING)
+		g.Running.Store(1)
+		e := GenCloseIter(yf)
+		g.Running.Store(0)
+		if e != nil && !isCleanCloseError(e) {
+			throwErr = e
 		}
 		g.YieldFromTarget = nil
 	}
