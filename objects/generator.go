@@ -826,12 +826,26 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 	// yield-from / await chain leaves the inner finally unrun: CPython
 	// solves it via _PyGen_yf inside gen_close.
 	//
-	// CPython: Objects/genobject.c:445 gen_close (gen_close_iter call)
+	// CPython: Objects/genobject.c:405 gen_close (gen_close_iter call)
+	//
+	// If the inner generator's close raises a non-GeneratorExit /
+	// non-StopIteration exception, that exception becomes the pending
+	// throw for the outer body, mirroring CPython's "if (err == 0)
+	// PyErr_SetNone(PyExc_GeneratorExit)" gate at L424: when err is
+	// non-zero the pending exception from the sub-iter is forwarded as
+	// the gen_send_ex throw.
+	//
+	// CPython: Objects/genobject.c:424 gen_close (err==0 gate)
+	throwErr := ErrGeneratorExit
 	if yf := g.YieldFromTarget; yf != nil {
-		_ = GenCloseIter(yf)
+		if e := GenCloseIter(yf); e != nil {
+			if !isCleanCloseError(e) {
+				throwErr = e
+			}
+		}
 		g.YieldFromTarget = nil
 	}
-	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: throwErr, CallerFrame: callerFrame()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {
@@ -871,6 +885,34 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 	}
 	return msg.Err
+}
+
+// isCleanCloseError returns true when an error returned by
+// GenCloseIter represents a clean shutdown (GeneratorExit or
+// StopIteration). Anything else is a "real" exception that gen_close
+// must forward as the throw exception for the outer body.
+//
+// CPython: Objects/genobject.c:442 gen_close (PyErr_ExceptionMatches
+// GeneratorExit / StopIteration filter).
+func isCleanCloseError(e error) bool {
+	if errors.Is(e, ErrGeneratorExit) || errors.Is(e, ErrStopIteration) {
+		return true
+	}
+	// CloseReturnValue wraps a StopIteration return-value from the
+	// sub-iterator's close. CPython's gen_close_iter discards the
+	// returned object and returns 0 (clean) at Objects/genobject.c:344.
+	var crv *CloseReturnValue
+	if errors.As(e, &crv) {
+		return true
+	}
+	var re *RaisedError
+	if errors.As(e, &re) && re.Exc != nil {
+		name := re.Exc.Type().Name
+		if name == "GeneratorExit" || name == "StopIteration" {
+			return true
+		}
+	}
+	return false
 }
 
 // GenCloseIter mirrors CPython's gen_close_iter: a yield-from target
