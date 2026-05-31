@@ -59,6 +59,14 @@ var state = func() *warningsState {
 
 func init() {
 	_ = imp.AppendInittab(moduleName, buildModule)
+	// Wire the coroutine never-awaited finalize path into the warnings
+	// module so an un-driven coroutine that hits GC surfaces a
+	// RuntimeWarning instead of being silently dropped. objects/
+	// declares the hook variable to avoid pulling _warnings into the
+	// objects package's dependency graph.
+	//
+	// CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
+	objects.WarnUnawaitedCoroutineHook = WarnUnawaitedCoroutine
 }
 
 // buildModule materializes the _warnings module dict.
@@ -931,6 +939,12 @@ func warnBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objec
 	if len(args) >= 4 {
 		source = args[3]
 	}
+	if v, ok := kwargs["message"]; ok {
+		message = v
+	}
+	if v, ok := kwargs["category"]; ok {
+		category = v
+	}
 	if v, ok := kwargs["stacklevel"]; ok {
 		if n, ok := v.(*objects.Int); ok {
 			x, _ := n.Int64()
@@ -1170,7 +1184,10 @@ func WarnUnawaitedAgenMethod(agen objects.Object, method objects.Object) {
 	_ = WarnFormatSource(agen, errors.PyExc_RuntimeWarning, 1, "coroutine method %v of %v was never awaited", method, agen)
 }
 
-// WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine.
+// WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine. CPython
+// formats the fallback message with cr_qualname, not the bare coro, so
+// users see "coroutine 'Module.func' was never awaited" instead of the
+// less-informative repr.
 //
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 func WarnUnawaitedCoroutine(coro objects.Object) {
@@ -1182,8 +1199,25 @@ func WarnUnawaitedCoroutine(coro objects.Object) {
 		}
 	}
 	if !warned {
-		_ = WarnFormatSource(coro, errors.PyExc_RuntimeWarning, 1, "coroutine '%v' was never awaited", coro)
+		qualname := coroQualname(coro)
+		_ = WarnFormatSource(coro, errors.PyExc_RuntimeWarning, 1, "coroutine '%v' was never awaited", qualname)
 	}
+}
+
+// coroQualname extracts a coroutine's cr_qualname, falling back to its
+// name and then its repr. Matches CPython's PyCoroObject->cr_qualname
+// access in _PyErr_WarnUnawaitedCoroutine.
+func coroQualname(coro objects.Object) string {
+	if c, ok := coro.(*objects.Coroutine); ok {
+		if c.Qualname != "" {
+			return c.Qualname
+		}
+		return c.Name
+	}
+	if r, err := objects.Repr(coro); err == nil {
+		return r
+	}
+	return "<coroutine>"
 }
 
 // WarningsFini drops every entry of the active state, mirroring

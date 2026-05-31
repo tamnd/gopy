@@ -66,6 +66,14 @@ var (
 // CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
 var WriteUnraisableHook func(obj Object, errMsg string, err error)
 
+// WarnUnawaitedCoroutineHook routes a never-awaited coroutine through
+// warnings._warn_unawaited_coroutine so the consumer sees a
+// RuntimeWarning that names the coroutine's qualname. objects/ stays
+// independent of the warnings module via this indirection.
+//
+// CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
+var WarnUnawaitedCoroutineHook func(coro Object)
+
 // Instance backs a Python-level object whose type is a user-defined
 // class. Header.typ is the class; dict holds per-instance attributes
 // (nil when the class declared __slots__ without __dict__); slots

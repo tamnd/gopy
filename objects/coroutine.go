@@ -228,6 +228,15 @@ func init() {
 	// CPython: Objects/genobject.c:1244 (PyCoro_Type tp_traverse = gen_traverse)
 	CoroutineType.TpTraverse = coroTraverse
 
+	// tp_finalize: when an un-awaited coroutine becomes unreachable, the
+	// cycle collector invokes this slot. A coroutine that has never been
+	// resumed (started == false) emits a RuntimeWarning naming the
+	// qualname; one suspended mid-await is closed so its finally clauses
+	// run. Mirrors _PyGen_Finalize's CO_COROUTINE branches.
+	//
+	// CPython: Objects/genobject.c:87 _PyGen_Finalize (PyCoro_CheckExact)
+	CoroutineType.Finalize = coroFinalize
+
 	CoroAwaitType = NewType("coroutine_wrapper", []*Type{objectType})
 	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }
 	CoroAwaitType.IterNext = coroAwaitNext
@@ -323,6 +332,49 @@ func coroWrapperCloseMethod(args []Object, _ map[string]Object) (Object, error) 
 		return nil, err
 	}
 	return None(), nil
+}
+
+// coroFinalize is the tp_finalize slot for coroutine objects. Mirrors
+// the PyCoro_CheckExact arms of _PyGen_Finalize: a coroutine in the
+// FRAME_CREATED state (never sent into) emits a RuntimeWarning naming
+// the qualname; any other suspended coroutine is closed so its finally
+// blocks run.
+//
+// CPython: Objects/genobject.c:87 _PyGen_Finalize (CO_COROUTINE branches)
+func coroFinalize(o Object) {
+	c, ok := o.(*Coroutine)
+	if !ok {
+		return
+	}
+	if c.closed {
+		return
+	}
+	// A running coroutine cannot be finalized for the same reason as
+	// the Generator equivalent: closeWith would deadlock if the body
+	// is currently executing. genFinalize documents the issue in
+	// detail; the protection here is identical.
+	if c.Running.Load() == 1 {
+		return
+	}
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	if !c.started {
+		if h := WarnUnawaitedCoroutineHook; h != nil {
+			h(c)
+		}
+	} else {
+		cRepr, _ := Repr(c)
+		if cerr := c.Close(); cerr != nil {
+			if h := WriteUnraisableHook; h != nil {
+				h(c, "Exception ignored while closing coroutine "+cRepr, cerr)
+			}
+		}
+	}
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
 }
 
 // coroTraverse mirrors gen_traverse for PyCoro_Type. cr_origin is
