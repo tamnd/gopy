@@ -418,9 +418,15 @@ func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 	// CPython: Python/bltinmodule.c:846
 	// syntax_check_only = ((flags & PyCF_OPTIMIZED_AST) == PyCF_ONLY_AST)
 	syntaxCheckOnly := (parsed.flags & cfOptimizedAST) == cfOnlyAST
+	// optimize == -1 resolves to the interpreter's level (0 here) the
+	// same way _PyAST_Compile resolves it for the codegen path, so
+	// __debug__ folds to True under PyCF_OPTIMIZED_AST without an -O flag.
+	//
+	// CPython: Python/compile.c:353 _PyAST_Compile (optimize == -1)
+	optimize := max(parsed.optimize, 0)
 	ast.Preprocess(mod, ast.PreprocessOptions{
 		Filename:        parsed.filename,
-		OptimizeLevel:   parsed.optimize,
+		OptimizeLevel:   optimize,
 		SyntaxCheckOnly: syntaxCheckOnly,
 	})
 	return astModToObject(mod), nil

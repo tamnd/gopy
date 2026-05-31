@@ -47,9 +47,7 @@ func CompileFlags(mod ast.Mod, filename string, optimize, flags int) (*Code, err
 	// docstring stripping) sees a non-negative level.
 	//
 	// CPython: Python/compile.c:353 _PyAST_Compile (optimize == -1 -> config->optimization_level)
-	if optimize < 0 {
-		optimize = 0
-	}
+	optimize = max(optimize, 0)
 	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
 	// CPython: Python/ast.c:1047 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
