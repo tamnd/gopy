@@ -441,6 +441,16 @@ func NewCoroutineWithQualname(name, qualname string) *Coroutine {
 	return c
 }
 
+// IsSuspendedYieldFrom reports whether the coroutine is currently
+// suspended yielding from a sub-awaitable, matching CPython's
+// _PyGen_yf(coro) != NULL on a PyCoro_CheckExact instance, i.e. frame
+// state FRAME_SUSPENDED_YIELD_FROM. The same predicate backs cr_await.
+//
+// CPython: Objects/genobject.c:374 _PyGen_yf (FRAME_SUSPENDED_YIELD_FROM)
+func (c *Coroutine) IsSuspendedYieldFrom() bool {
+	return c.YieldFromTarget != nil && c.started && !c.closed && c.Running.Load() == 0
+}
+
 // MarkFinished records that the coroutine body has run to completion
 // so subsequent Send/Throw/Close are no-ops and inspect.getcoroutinestate
 // reports CORO_CLOSED. Mirrors Generator.MarkFinished.

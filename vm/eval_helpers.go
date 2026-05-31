@@ -1236,9 +1236,29 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 	if _, isAG := iter.(*objects.AsyncGenerator); !isAG {
 		wrapped, werr := getAwaitableIter(next)
 		if werr != nil {
-			e.pendingErr = fmt.Errorf(
+			// Mirror _PyErr_FormatFromCause: lift the underlying failure
+			// off the thread state, chain it under a TypeError that names
+			// the offender, and reinstall the TypeError. Without the
+			// Clear+Raise dance, handleException sees the inner exception
+			// already pinned on the thread state and never installs the
+			// TypeError, so `err.__cause__` stays unset upstream.
+			//
+			// CPython: Python/ceval.c:3593 _PyEval_GetANext
+			// CPython: Python/errors.c:1438 _PyErr_FormatFromCause
+			cause := pyerrors.Occurred(e.ts)
+			if cause == nil {
+				cause = synthesizeException(werr)
+			}
+			pyerrors.Clear(e.ts)
+			msg := fmt.Sprintf(
 				"TypeError: 'async for' received an invalid object from __anext__: %s",
 				next.Type().Name)
+			exc := pyerrors.New(pyerrors.PyExc_TypeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+			exc.Cause = cause
+			exc.Context = cause
+			exc.Suppress = true
+			pyerrors.Raise(e.ts, exc)
+			e.pendingErr = objects.NewRaisedError(exc, msg)
 			return nil
 		}
 		next = wrapped
@@ -1425,6 +1445,23 @@ func (e *evalState) getAwaitable(iter objects.Object, oparg uint32) objects.Obje
 		} else {
 			e.pendingErr = err
 		}
+		return nil
+	}
+	// Awaited-already gate: when the returned iter is a coroutine that is
+	// already suspended yielding from another awaitable, refuse to drive
+	// it from a second parent. Mirrors CPython's _PyGen_yf(iter) != NULL
+	// branch which captures the FRAME_SUSPENDED_YIELD_FROM state. The
+	// suspended-yield-from predicate uses the same gates as cr_await:
+	// started, not closed, not running, and a pending YieldFromTarget.
+	//
+	// CPython: Python/ceval.c:3649 _PyEval_GetAwaitable (PyCoro_CheckExact branch)
+	if c, ok := out.(*objects.Coroutine); ok && c.IsSuspendedYieldFrom() {
+		exc := pyerrors.New(pyerrors.PyExc_RuntimeError,
+			objects.NewTuple([]objects.Object{
+				objects.NewStr("coroutine is being awaited already"),
+			}))
+		pyerrors.Raise(e.ts, exc)
+		e.pendingErr = objects.NewRaisedError(exc, "coroutine is being awaited already")
 		return nil
 	}
 	return out
