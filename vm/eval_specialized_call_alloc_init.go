@@ -83,6 +83,7 @@ func (e *evalState) fastCallAllocAndEnterInit(oparg uint32) (int, bool, error) {
 	}
 	inst := objects.NewInstance(cls)
 	stack := frameStackFor(e.ts)
+	forceGenPrev(stack)
 	f2 := stack.Push(co, init.Globals, init.Builtins, init)
 	f2.SetLocal(0, stackref.FromObject(inst))
 	for i := range argc {

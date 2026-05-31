@@ -21,6 +21,30 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// forceGenPrev wires the next stack.Push to use the running generator's
+// saved frame as f_back instead of the FrameStack top. Generator frames
+// live in activeEvalFrames (not on the FrameStack), so a regular function
+// called from a generator body would otherwise inherit f_back from
+// whatever the main goroutine pushed before the generator was resumed,
+// dropping the generator out of sys._getframe() walks.
+//
+// CPython: pycore_frame.h _PyThreadState_PushFrame uses tstate->current_frame
+// which is updated to the gen/coro/asyncgen frame on resume.
+func forceGenPrev(stack *frame.FrameStack) {
+	g := goid()
+	v, ok := activeEvalFrames.Load(g)
+	if !ok {
+		return
+	}
+	d, ok2 := genEntryDepths.Load(g)
+	if !ok2 || stack.Depth() != d.(int) {
+		return
+	}
+	if gf, ok3 := v.(*frame.Frame); ok3 {
+		stack.ForcedPrev = gf
+	}
+}
+
 // activeThreads maps a goroutine ID to the *state.Thread Eval is
 // running on that goroutine. Mirrors what CPython gets from
 // PyThreadState_GET, just keyed off the Go scheduler instead of an
@@ -350,6 +374,16 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	if stack.Depth() >= sys.RecursionLimit() {
 		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
 	}
+	// When the caller is a generator body, the saved frame is registered in
+	// activeEvalFrames but is not on the FrameStack. Force the new frame's
+	// f_back to the generator's saved frame so sys._getframe() walks
+	// through nested generator activations rather than skipping straight to
+	// whatever frame the main goroutine left on top.
+	//
+	// CPython: pycore_frame.h _PyThreadState_PushFrame sets
+	// frame->previous = tstate->current_frame, and current_frame is the
+	// innermost gen/coro/asyncgen frame when one is running.
+	forceGenPrev(stack)
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
@@ -674,6 +708,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 	if stack.Depth() >= sys.RecursionLimit() {
 		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
 	}
+	forceGenPrev(stack)
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
