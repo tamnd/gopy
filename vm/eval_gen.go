@@ -487,6 +487,8 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 // The sent value becomes the result of the yield expression.
 //
 // CPython: Python/bytecodes.c:1370 YIELD_VALUE
+//
+//nolint:gocognit // single block mirrors CPython's YIELD_VALUE arm: gen/coro/async-gen split + send-channel handshake
 func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	if e.genYield == nil {
 		return genResult{ok: true}, fmt.Errorf("vm: YIELD_VALUE outside generator context")

@@ -1470,37 +1470,6 @@ func strListFromGoSlice(parts []string) Object {
 	return NewList(items)
 }
 
-func allDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func isAlpha(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-}
-
-func allAlpha(s string) bool {
-	for _, r := range s {
-		if !isAlpha(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func allAlnum(s string) bool {
-	for _, r := range s {
-		if !isAlpha(r) && (r < '0' || r > '9') {
-			return false
-		}
-	}
-	return true
-}
-
 func allSpace(s string) bool {
 	for _, r := range s {
 		if !IsSpaceRune(r) {

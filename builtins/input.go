@@ -129,7 +129,7 @@ func fileGetLine(stream objects.Object) (objects.Object, error) {
 		return result, nil
 	}
 	s := line.Value()
-	if len(s) == 0 {
+	if s == "" {
 		return nil, fmt.Errorf("EOFError: EOF when reading a line")
 	}
 	return objects.NewStr(strings.TrimSuffix(s, "\n")), nil

@@ -82,15 +82,15 @@ type AsyncGenerator struct {
 	YieldFromTarget Object
 }
 
-func (a *AsyncGenerator) GetExcHandled() Object  { return a.ExcHandled }
-func (a *AsyncGenerator) SetExcHandled(o Object) { a.ExcHandled = o }
-func (a *AsyncGenerator) GetCallerExc() Object   { return a.CallerExc }
-func (a *AsyncGenerator) SetCallerExc(o Object)  { a.CallerExc = o }
-func (a *AsyncGenerator) ExcDepthVal() int       { return a.ExcDepth }
-func (a *AsyncGenerator) IncExcDepth()           { a.ExcDepth++ }
-func (a *AsyncGenerator) DecExcDepth() {
-	if a.ExcDepth > 0 {
-		a.ExcDepth--
+func (g *AsyncGenerator) GetExcHandled() Object  { return g.ExcHandled }
+func (g *AsyncGenerator) SetExcHandled(o Object) { g.ExcHandled = o }
+func (g *AsyncGenerator) GetCallerExc() Object   { return g.CallerExc }
+func (g *AsyncGenerator) SetCallerExc(o Object)  { g.CallerExc = o }
+func (g *AsyncGenerator) ExcDepthVal() int       { return g.ExcDepth }
+func (g *AsyncGenerator) IncExcDepth()           { g.ExcDepth++ }
+func (g *AsyncGenerator) DecExcDepth() {
+	if g.ExcDepth > 0 {
+		g.ExcDepth--
 	}
 }
 

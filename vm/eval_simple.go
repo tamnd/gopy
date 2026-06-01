@@ -1546,13 +1546,15 @@ func (e *evalState) loadFromScope(scope, key objects.Object) (objects.Object, bo
 		if u, ok := key.(*objects.Unicode); ok {
 			v, err := d.GetItemKnownHash(u, u.HashCached())
 			if err != nil {
-				return nil, false, nil
+				// A miss on an exact dict is "name not found", not an
+				// error to propagate; the caller turns it into NameError.
+				return nil, false, nil //nolint:nilerr // dict miss is not-found, not an error
 			}
 			return v, true, nil
 		}
 		v, err := d.GetItem(key)
 		if err != nil {
-			return nil, false, nil
+			return nil, false, nil //nolint:nilerr // dict miss is not-found, not an error
 		}
 		return v, true, nil
 	}

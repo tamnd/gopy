@@ -93,6 +93,11 @@ linters:
         - name: var-declaration
     misspell:
       locale: US
+      # CPython's compile() raises "unrecognised flags" with the British
+      # spelling; we keep the error text byte-for-byte for parity.
+      ignore-rules:
+        - unrecognised
+        - recognised
     gosec:
       excludes:
         # uint32 -> uint8 narrowing is intentional in pysync byte-flag
@@ -652,6 +657,27 @@ linters:
           - gocognit
           - gocyclo
           - nakedret
+      # minMax ports min_max from Python/bltinmodule.c: the default/key
+      # kwarg handling plus the single-arg-iterable vs varargs split is
+      # the branch tree that matches the upstream builtin.
+      - path: builtins/aggregate\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # copyNamespaceToType and installSlots mirror type_new_set_attrs and
+      # fixup_slot_dispatchers from Objects/typeobject.c: the per-dunder
+      # slot-wiring branches are the parity unit with CPython.
+      - path: objects/usertype\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # tryImport mirrors import_name plus _PyEval_ImportFrom from
+      # Python/ceval.c: the fromlist / submodule / fallback branches are the
+      # parity unit with CPython's import machinery.
+      - path: vm/eval_import\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:

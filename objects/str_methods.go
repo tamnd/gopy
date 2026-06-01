@@ -1056,7 +1056,7 @@ func StrIsAlnum(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !(IsAlphaRune(r) || IsDecimalRune(r) || IsDigitRune(r) || IsNumericRune(r)) {
+		if !IsAlphaRune(r) && !IsDecimalRune(r) && !IsDigitRune(r) && !IsNumericRune(r) {
 			return false
 		}
 	}
