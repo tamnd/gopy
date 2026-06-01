@@ -1066,9 +1066,15 @@ func GenCloseIter(yf Object) error {
 	case *AsyncGenerator:
 		return v.Close()
 	}
+	// PyObject_GetOptionalAttr semantics: a missing close attribute is
+	// not an error, so the sub-iterator simply has nothing to close. Only
+	// a lookup that raises something other than AttributeError is reported
+	// as unraisable; a plain AttributeError means the attribute is absent.
+	//
+	// CPython: Objects/genobject.c:412 gen_close_iter (PyObject_GetOptionalAttr)
 	closeFn, err := GetAttr(yf, NewStr("close"))
 	if err != nil {
-		if WriteUnraisableHook != nil {
+		if !isAttributeError(err) && WriteUnraisableHook != nil {
 			WriteUnraisableHook(yf, "Exception ignored while closing iterator", err)
 		}
 		return nil
