@@ -433,6 +433,14 @@ func fileMethod(fi *File, name string) Object {
 		return NewBuiltinFunction("readline", func(args []Object, _ map[string]Object) (Object, error) {
 			return fileReadlineCall(fi, args)
 		})
+	case "readlines":
+		return NewBuiltinFunction("readlines", func(args []Object, _ map[string]Object) (Object, error) {
+			return fileReadlinesCall(fi, args)
+		})
+	case "writelines":
+		return NewBuiltinFunction("writelines", func(args []Object, _ map[string]Object) (Object, error) {
+			return fileWritelinesCall(fi, args)
+		})
 	case "write":
 		return NewBuiltinFunction("write", func(args []Object, _ map[string]Object) (Object, error) {
 			return fileWriteCall(fi, args)
@@ -525,6 +533,81 @@ func fileReadlineCall(fi *File, args []Object) (Object, error) {
 		return nil, err
 	}
 	return fi.Readline(size)
+}
+
+// fileReadlinesCall implements IOBase.readlines(hint=-1): read lines via
+// readline until EOF and collect them. A positive hint stops once the
+// accumulated line lengths reach it, so a partial last line is still
+// included; hint <= 0 (or omitted) reads everything.
+//
+// CPython: Modules/_io/iobase.c:600 _io__IOBase_readlines_impl
+func fileReadlinesCall(fi *File, args []Object) (Object, error) {
+	hint, err := optionalSize(args, "readlines")
+	if err != nil {
+		return nil, err
+	}
+	if err := fi.requireRead(); err != nil {
+		return nil, err
+	}
+	lines := []Object{}
+	length := 0
+	for {
+		line, lerr := fi.readline(-1)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if isEmptyLine(line, fi.binary) {
+			break
+		}
+		lines = append(lines, line)
+		if hint > 0 {
+			length += lineLen(line, fi.binary)
+			if length >= hint {
+				break
+			}
+		}
+	}
+	return NewList(lines), nil
+}
+
+// lineLen returns the length readlines accounts against its hint: byte
+// count in binary mode, character count in text mode.
+func lineLen(o Object, binary bool) int {
+	if binary {
+		return o.(*Bytes).Len()
+	}
+	return o.(*Unicode).Length()
+}
+
+// fileWritelinesCall implements IOBase.writelines(lines): write each
+// item of the iterable in turn. Unlike print it adds no separators, so
+// callers embed their own newlines.
+//
+// CPython: Modules/_io/iobase.c:660 _io__IOBase_writelines
+func fileWritelinesCall(fi *File, args []Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: writelines() takes exactly one argument (%d given)", len(args))
+	}
+	if err := fi.requireWrite(); err != nil {
+		return nil, err
+	}
+	it, err := Iter(args[0])
+	if err != nil {
+		return nil, err
+	}
+	for {
+		item, nerr := IterNext(it)
+		if errors.Is(nerr, ErrStopIteration) {
+			break
+		}
+		if nerr != nil {
+			return nil, nerr
+		}
+		if _, werr := fi.Write(item); werr != nil {
+			return nil, werr
+		}
+	}
+	return None(), nil
 }
 
 func fileWriteCall(fi *File, args []Object) (Object, error) {
