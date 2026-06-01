@@ -382,9 +382,21 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	var cellNames []string
 	var freeNames []string
 	for name, flags := range sc.Symbols {
-		switch flags.Scope() {
-		case symtable.Cell:
+		// dictbytype(ste_symbols, CELL, DEF_COMP_CELL, 0): a name lands in
+		// u_cellvars when its scope is CELL or it is an inlined-comprehension
+		// cell (DEF_COMP_CELL). The hidden loop variable of an inlined
+		// comprehension that a nested function captures is a cell in the
+		// enclosing code object even though the name's own scope resolved to
+		// a global/name binding (e.g. a same-named global referenced
+		// elsewhere in the parent), so it must be pre-allocated here so deref
+		// offsets stay stable regardless of emission order.
+		//
+		// CPython: Python/compile.c:605 u_cellvars = dictbytype(..., CELL, DEF_COMP_CELL, 0)
+		if flags.Scope() == symtable.Cell || flags&symtable.DefCompCell != 0 {
 			cellNames = append(cellNames, name)
+			continue
+		}
+		switch flags.Scope() {
 		case symtable.Free:
 			freeNames = append(freeNames, name)
 		default:
