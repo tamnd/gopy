@@ -321,10 +321,31 @@ func frameLocalsProxySetItem(self, key, value Object) error {
 			}
 		}
 		if cell != nil {
+			// CPython: Py_XINCREF(value); PyCell_SetTakeRef(cell, value).
+			// The cell takes a new owning reference to value and drops the
+			// reference it held on the previous contents. Without the incref
+			// the proxy would adopt the caller's stack reference, which
+			// STORE_SUBSCR then closes, leaving the cell pointing at a value
+			// whose only reference just went away.
+			Incref(value)
+			old := cell.Contents
 			cell.Contents = value
+			if old != nil {
+				Decref(old)
+			}
 			return nil
 		}
+		// CPython: fast[i] = PyStackRef_FromPyObjectNew(value) after closing
+		// the old slot. The identity guard mirrors CPython skipping the
+		// store when value is already the slot's object.
+		if value == oldVal {
+			return nil
+		}
+		Incref(value)
 		p.frame.interp.FrameSetLocalsPlusItem(i, value)
+		if oldVal != nil {
+			Decref(oldVal)
+		}
 		return nil
 	}
 	if value == nil {
