@@ -869,6 +869,14 @@ func dictIterOverridden(t *Type) bool {
 	return base != sub
 }
 
+// DictIterOverridden exposes the dict_merge tp_iter gate to the builtins
+// package so the dict() constructor can mirror PyDict_Merge: a subclass that
+// overrides __iter__ (OrderedDict walks its linked list) must merge through
+// keys() so the copy preserves the subclass's iteration order.
+//
+// CPython: Objects/dictobject.c:2901 dict_merge
+func DictIterOverridden(t *Type) bool { return dictIterOverridden(t) }
+
 func dictMergeFromDict(dst, src *Dict) error {
 	for _, k := range src.Keys() {
 		v, err := src.GetItem(k)

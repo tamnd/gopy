@@ -61,7 +61,11 @@ func init() {
 			if setErr != nil {
 				return nil, setErr
 			}
-			return d, nil
+			// type_dict wraps the namespace in a read-only mappingproxy so
+			// callers cannot mutate a class's tp_dict through __dict__.
+			// CPython: Objects/typeobject.c:1064 type_dict returns
+			// PyDictProxy_New(type->tp_dict).
+			return NewMappingProxy(d)
 		},
 		nil,
 	))
@@ -170,7 +174,10 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 		if setErr != nil {
 			return nil, setErr
 		}
-		return d, nil
+		// type_dict hands back a read-only mappingproxy, not the bare
+		// namespace, so a class's tp_dict cannot be mutated through
+		// __dict__. CPython: Objects/typeobject.c:1064 type_dict.
+		return NewMappingProxy(d)
 	}
 
 	metaAttr, _ := LookupDescriptor(metatype, nameStr)

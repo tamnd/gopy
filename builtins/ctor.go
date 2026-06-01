@@ -922,8 +922,12 @@ func DictCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	}
 	out := objects.NewDict()
 	if len(args) == 1 {
-		if d, ok := args[0].(*objects.Dict); ok {
+		if d, ok := args[0].(*objects.Dict); ok && !objects.DictIterOverridden(d.Type()) {
 			if err := mergeDict(out, d); err != nil {
+				return nil, err
+			}
+		} else if dictHasKeys(args[0]) {
+			if err := mergeMappingInto(out, args[0]); err != nil {
 				return nil, err
 			}
 		} else {
@@ -954,7 +958,7 @@ func bindDictCtor(t *objects.Type) {
 		}
 		d := args[0].(*objects.Dict)
 		if len(args) == 2 {
-			if src, ok := args[1].(*objects.Dict); ok {
+			if src, ok := args[1].(*objects.Dict); ok && !objects.DictIterOverridden(src.Type()) {
 				if err := mergeDict(d, src); err != nil {
 					return nil, err
 				}
