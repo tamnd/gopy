@@ -241,12 +241,22 @@ func (i *Instance) SlotAt(idx int) Object {
 // index is out of range so the caller can fall back. Used by the
 // STORE_ATTR_SLOT fast-path arm to skip the descriptor protocol.
 //
+// The caller transfers its reference to value (steal semantics), so
+// the slot is not incref'd here. Any value already in the slot is
+// released, mirroring _STORE_ATTR_SLOT's Py_XDECREF(old_value) after
+// it steals the new value into the member offset.
+//
 // CPython: Objects/descrobject.c:200 member_set (inline access path)
+// CPython: Python/bytecodes.c:2540 _STORE_ATTR_SLOT
 func (i *Instance) SetSlotAt(idx int, value Object) bool {
 	if idx < 0 || idx >= len(i.slots) {
 		return false
 	}
+	old := i.slots[idx]
 	i.slots[idx] = value
+	if old != nil {
+		Decref(old)
+	}
 	return true
 }
 
