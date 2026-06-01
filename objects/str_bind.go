@@ -1594,13 +1594,19 @@ func strMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__mul__' requires a 'str' object")
 	}
+	// str.__mul__ is the sq_repeat slot wrapped by wrap_indexargfunc, which
+	// coerces the count through PyNumber_AsSsize_t and raises TypeError when
+	// the argument has no __index__. That differs from the nb_multiply
+	// operator path, which returns NotImplemented; the bound method raises.
+	//
+	// CPython: Objects/typeobject.c wrap_indexargfunc / Objects/abstract.c PyNumber_AsSsize_t
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
+		return nil, err
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return NotImplemented(), nil
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", args[1].Type().Name)
 	}
 	nv, fits := ni.Int64()
 	if !fits {
@@ -1620,13 +1626,17 @@ func strRMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__rmul__' requires a 'str' object")
 	}
+	// Like __mul__, str.__rmul__ wraps sq_repeat and raises TypeError for a
+	// non-index argument rather than returning NotImplemented.
+	//
+	// CPython: Objects/typeobject.c wrap_indexargfunc / Objects/abstract.c PyNumber_AsSsize_t
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
+		return nil, err
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return NotImplemented(), nil
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", args[1].Type().Name)
 	}
 	nv, fits := ni.Int64()
 	if !fits {
