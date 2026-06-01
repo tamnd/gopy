@@ -111,6 +111,18 @@ func init() {
 	AddIterSlotWrappers(dictReverseValueIterType)
 	AddIterSlotWrappers(dictReverseItemIterType)
 
+	// dictiterobject keeps a strong reference to its dict, so it has to be
+	// GC-tracked and traversable or a cycle through the dict (a dict whose
+	// key holds the iterator) never gets collected.
+	//
+	// CPython: Objects/dictobject.c:5167 dictiter_traverse
+	for _, t := range []*Type{
+		dictKeyIterType, dictValueIterType, dictItemIterType,
+		dictReverseKeyIterType, dictReverseValueIterType, dictReverseItemIterType,
+	} {
+		t.TpTraverse = dictIterTraverse
+	}
+
 	dictReduceFn := func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -221,6 +233,29 @@ func dictIter(o Object) (Object, error) {
 	return newDictIter(o.(*Dict), dictIterKeys), nil
 }
 
+// dictIterTraverse visits the iterator's source dict so the cyclic
+// collector can find a cycle that runs through it.
+//
+// CPython: Objects/dictobject.c:5167 dictiter_traverse
+func dictIterTraverse(o Object, visit Visitor) error {
+	it := o.(*dictIterObj)
+	if it.src == nil {
+		return nil
+	}
+	return visit(it.src)
+}
+
+// dictViewTraverse visits the view's source dict.
+//
+// CPython: Objects/dictobject.c:6087 dictview_traverse
+func dictViewTraverse(o Object, visit Visitor) error {
+	v := o.(*dictView)
+	if v.src == nil {
+		return nil
+	}
+	return visit(v.src)
+}
+
 func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
 	it := &dictIterObj{src: d, snapUsed: d.used, snapStruct: d.structVersion, length: d.used, kind: kind, owns: true}
 	// Hold a strong reference to the dict for the iterator's lifetime so
@@ -237,6 +272,9 @@ func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
 		it.init(dictValueIterType)
 	case dictIterItems:
 		it.init(dictItemIterType)
+	}
+	if h := GCTrackHook; h != nil {
+		h(it)
 	}
 	return it
 }
@@ -273,6 +311,9 @@ func newDictIterReversed(d *Dict, kind dictIterKind) *dictIterObj {
 		it.init(dictReverseValueIterType)
 	case dictIterItems:
 		it.init(dictReverseItemIterType)
+	}
+	if h := GCTrackHook; h != nil {
+		h(it)
 	}
 	return it
 }
@@ -334,6 +375,7 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 				return it.src.slotKey(slot), it.src.slotValue(slot), nil
 			}
 		}
+		it.release()
 		return nil, nil, ErrStopIteration
 	}
 	for it.pos < len(it.src.order) {
@@ -346,7 +388,22 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 			return it.src.slotKey(slot), it.src.slotValue(slot), nil
 		}
 	}
+	it.release()
 	return nil, nil, ErrStopIteration
+}
+
+// release drops the iterator's strong reference to its dict the moment
+// iteration is exhausted, so the dict can be freed even while the
+// iterator object lingers (held, say, by a StopIteration traceback).
+//
+// CPython: Objects/dictobject.c:5219 dictiter_iternextkey (Py_DECREF(d)
+// then di->di_dict = NULL on the exhaustion path)
+func (it *dictIterObj) release() {
+	if it.owns && it.src != nil {
+		Decref(it.src)
+		it.owns = false
+	}
+	it.src = nil
 }
 
 // consume accounts for one yielded entry. Finding a live entry after
@@ -459,6 +516,10 @@ func init() {
 	for _, vt := range []*Type{dictKeysViewType, dictValuesViewType, dictItemsViewType} {
 		SetTypeDescr(vt, "__reversed__", NewMethodDescr(vt, "__reversed__", dictViewReversed))
 		SetTypeDescr(vt, "mapping", NewGetSetDescr("mapping", dictViewMappingGet, nil))
+		// A view keeps its backing dict alive, so it joins the cycle and
+		// must be traversable. CPython: Objects/dictobject.c:6087
+		// dictview_traverse.
+		vt.TpTraverse = dictViewTraverse
 	}
 	// isdisjoint is only defined on the set-like views (keys, items).
 	//
@@ -518,6 +579,9 @@ func dictViewIsDisjoint(args []Object, _ map[string]Object) (Object, error) {
 func (d *Dict) KeysView() Object {
 	v := &dictView{src: d, kind: dictIterKeys}
 	v.init(dictKeysViewType)
+	if h := GCTrackHook; h != nil {
+		h(v)
+	}
 	return v
 }
 
@@ -527,6 +591,9 @@ func (d *Dict) KeysView() Object {
 func (d *Dict) ValuesView() Object {
 	v := &dictView{src: d, kind: dictIterValues}
 	v.init(dictValuesViewType)
+	if h := GCTrackHook; h != nil {
+		h(v)
+	}
 	return v
 }
 
@@ -536,6 +603,9 @@ func (d *Dict) ValuesView() Object {
 func (d *Dict) ItemsView() Object {
 	v := &dictView{src: d, kind: dictIterItems}
 	v.init(dictItemsViewType)
+	if h := GCTrackHook; h != nil {
+		h(v)
+	}
 	return v
 }
 
