@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/errors"
+	_warnings "github.com/tamnd/gopy/module/_warnings"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -268,25 +269,17 @@ func dictHasNonNone(d *objects.Dict, key string) bool {
 	return true
 }
 
-// emitImportWarning routes message through warnings.warn(message,
-// ImportWarning) so the emission walks the live filter list and any
-// recording context manager (catch_warnings / assertWarns).
+// emitImportWarning routes message through the _warnings machinery
+// under ImportWarning so the emission walks the live filter list and
+// any recording context manager (catch_warnings / assertWarns). Like
+// CPython's _calc___package__ it calls _warnings directly rather than
+// re-entering the import hook for "warnings"; the C _warnings module is
+// always loaded, so the fallback warning cannot itself trip the import
+// it is reporting on.
 //
-// CPython: Python/_warnings.c PyErr_WarnFormat(PyExc_ImportWarning, ...)
+// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__ (_warnings.warn ImportWarning, stacklevel=3)
 func emitImportWarning(message string) error {
-	mod, err := importBreakpointModule("warnings")
-	if err != nil {
-		return err
-	}
-	warn, err := objects.GetAttr(mod, objects.NewStr("warn"))
-	if err != nil {
-		return err
-	}
-	_, err = objects.Call(warn, objects.NewTuple([]objects.Object{
-		objects.NewStr(message),
-		errors.PyExc_ImportWarning,
-	}), nil)
-	return err
+	return _warnings.WarnEx(errors.PyExc_ImportWarning, message, 3)
 }
 
 // dictStringEntry reads dict[key] and returns its string value, or ""

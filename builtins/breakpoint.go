@@ -17,6 +17,7 @@ import (
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
+	_warnings "github.com/tamnd/gopy/module/_warnings"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -119,24 +120,16 @@ func breakpointWarn(envar string) (objects.Object, error) {
 	return objects.None(), nil
 }
 
-// emitRuntimeWarning calls warnings.warn(message, RuntimeWarning) so the
-// emission walks the live filter list and any recording context manager.
+// emitRuntimeWarning routes message through the _warnings machinery
+// under RuntimeWarning so the emission walks the live filter list and
+// any recording context manager. Like CPython's sys_breakpointhook it
+// calls PyErr_WarnFormat (the C _warnings entry) rather than re-entering
+// the import hook for "warnings", so the warning path stays independent
+// of whatever import the breakpoint hook was trying to resolve.
 //
-// CPython: Python/_warnings.c PyErr_WarnFormat(PyExc_RuntimeWarning, ...)
+// CPython: Python/sysmodule.c:658 sys_breakpointhook (PyErr_WarnFormat PyExc_RuntimeWarning, stacklevel=1)
 func emitRuntimeWarning(message string) error {
-	mod, err := importBreakpointModule("warnings")
-	if err != nil {
-		return err
-	}
-	warn, err := objects.GetAttr(mod, objects.NewStr("warn"))
-	if err != nil {
-		return err
-	}
-	_, err = objects.Call(warn, objects.NewTuple([]objects.Object{
-		objects.NewStr(message),
-		errors.PyExc_RuntimeWarning,
-	}), nil)
-	return err
+	return _warnings.WarnEx(errors.PyExc_RuntimeWarning, message, 1)
 }
 
 // pythonBreakpointEnv reads PYTHONBREAKPOINT from os.environ. gopy's
