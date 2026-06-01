@@ -992,6 +992,16 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setHandledException(exc_value.AsObject())
 		}
 		e.drop(1)
+		// Leaving one of this generator's own except blocks: drop its
+		// gi_exc_state nesting count so a later yield outside every handler
+		// records a NULL exc_value and the resume falls back to the caller's
+		// chain. Nested plain-function calls run in their own evalState
+		// (genRunning nil), so only the generator's own handlers count here.
+		//
+		// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info pop)
+		if es, ok := e.genRunning.(objects.GenExcState); ok {
+			es.DecExcDepth()
+		}
 		return e.advance(), nil
 	case compile.POP_TOP:
 		value := e.peek(0)
@@ -1014,6 +1024,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		e.push(prev_exc)
 		e.push(new_exc)
+		// Entering one of this generator's own except blocks: bump its
+		// gi_exc_state nesting count so a yield inside the handler saves the
+		// generator's handled exception (ExcHandled) rather than letting the
+		// resume fall back to the caller's chain.
+		//
+		// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
+		if es, ok := e.genRunning.(objects.GenExcState); ok {
+			es.IncExcDepth()
+		}
 		return e.advance(), nil
 	case compile.PUSH_NULL:
 		var res stackref.Ref
