@@ -1064,11 +1064,12 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: setdefault expected 1 to 2 arguments, got %d", len(args)-1)
 	}
 	d := args[0].(*Dict)
-	v, err := d.GetItem(args[1])
-	if err == nil {
-		return v, nil
-	}
-	if !errors.Is(err, errKeyNotFound) {
+	// setdefault hashes (and compares) the key exactly once: it threads a
+	// single PyObject_Hash through the lookup and the insert.
+	//
+	// CPython: Objects/dictobject.c:4376 dict_setdefault_ref_lock_held
+	h, err := dictKeyHash(args[1])
+	if err != nil {
 		return nil, err
 	}
 	var dflt Object
@@ -1077,10 +1078,7 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 	} else {
 		dflt = None()
 	}
-	if err := d.SetItem(args[1], dflt); err != nil {
-		return nil, err
-	}
-	return dflt, nil
+	return dictSetDefault(d, h, args[1], dflt)
 }
 
 // dictFromKeysMethod backs dict.fromkeys(iterable[, value]).

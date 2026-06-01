@@ -108,6 +108,44 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	return nil
 }
 
+// dictSetDefault is the single-lookup form behind dict.setdefault. It
+// probes once: a hit returns the stored value, a miss inserts dflt at
+// the reusable slot the same probe already found, so the key's __hash__
+// and __eq__ each run exactly once (Issue #13521). A split dict
+// materializes to combined first so the insert lands in the local table.
+//
+// CPython: Objects/dictobject.c:4400 dict_setdefault_ref_lock_held
+func dictSetDefault(d *Dict, h int64, key, dflt Object) (Object, error) {
+	if d.sharedKeys != nil {
+		d.ensureCombined()
+	}
+	if loadAtCapacity(d.fill, len(d.entries)) {
+		if err := dictResize(d, growthRate(d)); err != nil {
+			return nil, err
+		}
+	}
+	idx, found, err := d.lookup(h, key)
+	if err != nil {
+		return nil, err
+	}
+	slot := &d.entries[idx]
+	if found {
+		return slot.value, nil
+	}
+	if !slot.dummy {
+		d.fill++
+	}
+	*slot = dictEntry{hash: h, key: key, value: dflt, used: true}
+	Incref(dflt)
+	d.order = append(d.order, idx)
+	d.used++
+	d.structVersion++
+	d.downgradeKindOnInsert(key)
+	d.invalidateKeysVersion()
+	notifyDictEvent(DictEventAdded, d, key, dflt)
+	return dflt, nil
+}
+
 // dictInsertSplit handles inserts on a split dict. Three cases:
 //
 //   - key already in shared set AND already has a value for this
