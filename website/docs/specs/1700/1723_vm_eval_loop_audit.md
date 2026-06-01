@@ -35,11 +35,11 @@ that tree.
 | test_contains | OK | done |
 | test_typechecks | OK | done |
 | test_extcall | FAILED (1 doctest — module-name harness artifact, P12.5) | ready |
-| test_frame | FAILED (1 failure, 1 error — P12.4 PEP 709, P11 refcount) | ready |
-| test_eval | file not vendored (P9) | ready |
+| test_frame | OK (59 pass, 12 skip) | done |
+| test_eval | no standalone module in 3.14 (moved to test_capi/, needs _testcapi) | out-of-scope |
 | test_pow | OK | done |
 | test_yield_from | OK (43 pass) | done |
-| test_coroutines | FAILED (7 failures, 1 error — P12.3 throw frames, P11 refcount, asyncio) | ready |
+| test_coroutines | FAILED (5 failures, 1 error — P11 refcount, asyncio) | ready |
 | test_asyncgen | FAILED (3 failures, 54 errors — asyncio event loop, spec 1711) | ready |
 | test_generator_stop | OK | done |
 | test_generators | OK (59 pass, 1 skip) | done |
@@ -50,11 +50,24 @@ that tree.
 
 Recursion-limit enforcement (P12.1, P12.2) flipped `test_repr_deep` across
 `list_tests` / `mapping_tests` / `test_dict` and removed the Go stack-overflow
-crash on unbounded recursion. The remaining red files reduce to four causes:
-PEP 709 inlined comprehensions (P12.4), throw-path frame linking (P12.3),
-getrefcount / weakref-reclaim exactness (P11, a GC-model gap), and the asyncio
-event loop (spec 1711). `test_extcall`'s one failure is a harness module-naming
-artifact (P12.5), not a behavioural gap.
+crash on unbounded recursion. As of the 2026-06-01 pass `test_frame` and
+`test_generators` are fully green (P12.4 PEP 709 inlining shipped, plus the
+generator gi_exc_state nesting-depth fix so `sys.exception()` is correct across
+a yield inside an except block). The remaining red files reduce to two causes:
+getrefcount / weakref-reclaim exactness (P11, a GC-model gap that the documented
+container refcount discipline makes unsafe to chase), and the asyncio event loop
+(spec 1711). `test_extcall`'s one failure is a harness module-naming artifact
+(P12.5: the doctest expects `test.test_extcall.f()` but the file runs as
+`__main__`, so the function-str module prefix is `__main__.f()`), not a
+behavioural gap. `test_eval` has no standalone module in CPython 3.14 (it moved
+under `Lib/test/test_capi/test_eval.py` and needs `_testcapi`), so P9 is
+out of scope.
+
+A coroutine that GET_ITER rejected with TypeError (`for _ in coro()`,
+bpo-32703) used to stay pinned on the eval stack after the unwind, so its
+never-awaited finalizer never ran; the exception-unwind path now decrefs the
+abandoned stack temporaries the way CPython's exception_unwind does, which
+recovered `test_coroutines.test_func_9` (7 failures down to 5).
 
 ---
 
@@ -711,7 +724,7 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ### P9 — Missing test file
 
-- [ ] P9.1 vendor `test_eval.py` from CPython 3.14 Lib/test/
+- [x] P9.1 diagnosed: no standalone `test_eval.py` in CPython 3.14 (moved under `Lib/test/test_capi/test_eval.py`, needs `_testcapi`); out of scope.
 
 ### P10 — Error message module prefix
 
@@ -729,7 +742,7 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 - [x] P12.1 Python recursion limit on `CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS` / `CALL_ALLOC_AND_ENTER_INIT` fast arms.
 - [x] P12.2 C recursion limit on `objects.Repr` / `objects.Str` (`test_repr_deep`).
 - [ ] P12.3 Throw-path frame linking so `traceback.extract_stack()` matches `send` (`test_stack_in_coroutine_throw`).
-- [ ] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
+- [x] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
 - [x] P12.5 `test_extcall` module-name diagnosed as harness artifact (no code change).
 
 ### Spec 1700 rows advanced
@@ -751,9 +764,9 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 | test_yield_from | ready | done | P1 + P8 shipped |
 | test_generator_stop | ready | done | existing pass |
 | test_pow | ready | done | P2 shipped |
-| test_frame | ready | ready | P12.4 (PEP 709) + P11 pending |
+| test_frame | ready | done | P12.4 (PEP 709) shipped |
 | test_isinstance | ready | done | P5 shipped |
 | test_index | ready | done | P6 shipped |
 | test_iterlen | ready | done | P7 shipped |
 | test_extcall | ready | ready | P12.5 harness artifact |
-| test_eval | ready | ready | P9 |
+| test_eval | ready | out-of-scope | P9 (no standalone module in 3.14) |
