@@ -480,11 +480,6 @@ func (e *evalState) pop() stackref.Ref { return e.f.PopStack() }
 // peek returns the value at depth from the top (0 = top).
 func (e *evalState) peek(depth int) stackref.Ref { return e.f.PeekStack(depth) }
 
-// setPeek writes r at depth from the top. Mirrors CPython's POKE,
-// used by generated dispatch arms to commit a value back to a
-// passthrough slot before STACK_SHRINK runs.
-func (e *evalState) setPeek(depth int, r stackref.Ref) { e.f.SetPeekStack(depth, r) }
-
 // setPeekRaw writes r at depth from the top without releasing the
 // slot's prior occupant. Generated arms use it to commit passthrough
 // inputs (SWAP, COPY) back to the stack: the value is a live reference

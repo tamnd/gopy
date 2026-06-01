@@ -55,8 +55,10 @@ func (c *Compiler) tweakInlinedComprehensionScopes(comp *symtable.Entry, state *
 		// comprehension, handle it with the in-comprehension scope while
 		// the body is compiled; if it is free inside, no special handling
 		// (it is *_DEREF either way).
+		// The middle term is CPython's !(scope == CELL && outsc == FREE),
+		// written here with De Morgan's law as (scope != CELL || outsc != FREE).
 		if (scope != outsc && scope != symtable.Free &&
-			!(scope == symtable.Cell && outsc == symtable.Free)) || inClassBlock {
+			(scope != symtable.Cell || outsc != symtable.Free)) || inClassBlock {
 			if state.tempSymbols == nil {
 				state.tempSymbols = map[string]symtable.SymbolFlags{}
 			}

@@ -226,13 +226,14 @@ func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	case opLoad:
 		// In a class body, a deref load goes through
 		// LOAD_LOCALS + LOAD_FROM_DICT_OR_DEREF so a class-level
-		// `locals()["x"] = ...` can shadow the closure cell. Comprehensions
-		// inlined into the class body keep plain LOAD_DEREF, but gopy does
-		// not inline comprehensions today so the inlined-comp branch is
-		// inert here.
+		// `locals()["x"] = ...` can shadow the closure cell. A comprehension
+		// inlined into the class body is no longer executing the class
+		// namespace, so its deref loads use plain LOAD_DEREF; the
+		// in-inlined-comp guard skips the class-dict indirection for them.
 		//
-		// CPython: Python/codegen.c:3215 codegen_nameop (ClassBlock arm)
-		if c.scope.Type == symtable.ClassBlock {
+		// CPython: Python/codegen.c:3215 codegen_nameop (ClassBlock arm,
+		// gated on !_PyCompile_IsInInlinedComp)
+		if c.scope.Type == symtable.ClassBlock && c.unit().InInlinedComp == 0 {
 			c.seq().Addop(LOAD_LOCALS, 0, l)
 			op = LOAD_FROM_DICT_OR_DEREF
 		} else {
