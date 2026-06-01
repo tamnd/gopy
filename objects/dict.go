@@ -878,6 +878,13 @@ func dictIterOverridden(t *Type) bool {
 func DictIterOverridden(t *Type) bool { return dictIterOverridden(t) }
 
 func dictMergeFromDict(dst, src *Dict) error {
+	// dict_dict_merge snapshots the source's live count and rechecks it
+	// after every insert: an insert into dst can fire a key's __eq__,
+	// which may clear or grow src mid-merge. CPython raises rather than
+	// iterate a table that shifted under it.
+	//
+	// CPython: Objects/dictobject.c:3981 dict_dict_merge
+	origSize := src.used
 	for _, k := range src.Keys() {
 		v, err := src.GetItem(k)
 		if err != nil {
@@ -885,6 +892,9 @@ func dictMergeFromDict(dst, src *Dict) error {
 		}
 		if err := dst.SetItem(k, v); err != nil {
 			return err
+		}
+		if origSize != src.used {
+			return fmt.Errorf("RuntimeError: dict mutated during update")
 		}
 	}
 	return nil
