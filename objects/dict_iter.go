@@ -676,12 +676,21 @@ func otherToSet(o Object) (*Set, error) {
 	}
 }
 
+// dictViewBinop backs the set-algebra operators on dict views. The nb_*
+// slots are symmetric in CPython: dictviews_or/and/xor/sub convert the
+// FIRST operand to a set and then fold the second in, so a reflected
+// call like {2} | d.keys() (set.__or__ returns NotImplemented, then the
+// view's slot fires with the set on the left) still produces the union.
+// Either operand may be the view; the slot only declines when neither is.
+//
+// CPython: Objects/dictobject.c:6230 dictviews_or (and siblings)
 func dictViewBinop(a, b Object, op func(left, right *Set) (*Set, error)) (Object, error) {
-	v, ok := a.(*dictView)
-	if !ok {
+	_, aView := a.(*dictView)
+	_, bView := b.(*dictView)
+	if !aView && !bView {
 		return NotImplemented(), nil
 	}
-	left, err := dictViewToSet(v)
+	left, err := otherToSet(a)
 	if err != nil {
 		return nil, err
 	}
