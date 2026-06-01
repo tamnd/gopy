@@ -94,6 +94,41 @@ func FrameFastToLocals(f *Frame) (*Dict, error) {
 	return out, nil
 }
 
+// FrameHasHiddenLocals reports whether the frame carries PEP 709 hidden
+// fast locals: the isolated iteration variables of an inlined
+// comprehension, flagged CO_FAST_HIDDEN, that currently hold a value.
+// _PyFrame_GetLocals uses this to decide whether a non-optimized
+// (module / class) frame can hand back its namespace dict directly or
+// must expose a proxy that also surfaces the hidden slots.
+//
+// CPython: Objects/frameobject.c:2248 _PyFrame_HasHiddenLocals
+func FrameHasHiddenLocals(f *Frame) bool {
+	if f == nil {
+		return false
+	}
+	interp := f.interp
+	code := interp.FrameCode()
+	if code == nil {
+		return false
+	}
+	for i, kind := range code.LocalsplusKinds {
+		if kind&CoFastHidden == 0 {
+			continue
+		}
+		val := interp.FrameLocalsPlusItem(i)
+		if val == nil {
+			continue
+		}
+		// A hidden slot that aliases a cell name only counts when the
+		// cell actually holds a value, matching framelocalsproxy_getval.
+		if cell, ok := val.(*Cell); ok && (cell == nil || cell.Contents == nil) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // frameFastToLocalsLegacy is the pre-3.11 split walk over
 // Varnames/Cellvars/Freevars. Used only when LocalsplusNames/Kinds is
 // empty (test fixtures and bare-bones code objects).

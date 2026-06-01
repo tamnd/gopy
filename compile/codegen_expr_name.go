@@ -188,7 +188,19 @@ func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 	pool := poolNames
 	switch mode {
 	case opLoad:
-		c.addOpName(LOAD_NAME, &pool, name, l)
+		// A NAME-optype load emitted from inside an inlined comprehension
+		// folded into a class body uses LOAD_GLOBAL instead of LOAD_NAME:
+		// the comprehension does not see the class namespace, so a name
+		// that is not local to the comprehension resolves against globals
+		// rather than the class dict.
+		//
+		// CPython: Python/codegen.c codegen_nameop COMPILE_OP_NAME Load
+		// (ste_type == ClassBlock && _PyCompile_IsInInlinedComp -> LOAD_GLOBAL)
+		if c.scope.Type == symtable.ClassBlock && c.unit().InInlinedComp > 0 {
+			c.addOpName(LOAD_GLOBAL, &pool, name, l)
+		} else {
+			c.addOpName(LOAD_NAME, &pool, name, l)
+		}
 	case opStore:
 		c.addOpName(STORE_NAME, &pool, name, l)
 	case opDelete:

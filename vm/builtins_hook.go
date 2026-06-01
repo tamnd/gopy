@@ -550,6 +550,23 @@ func currentScope() (objects.Object, objects.Object) {
 		return ip.FrameGlobals(), ip.FrameLocals()
 	}
 	if f.Locals != nil {
+		// Module / class scope. CPython hands back the namespace dict
+		// directly unless the frame carries PEP 709 hidden locals (the
+		// isolated iteration variables of an inlined comprehension), in
+		// which case _PyFrame_GetLocals returns a write-through proxy and
+		// _PyEval_GetFrameLocals snapshots it. That snapshot is exactly
+		// the fast-slot + extra-locals walk FrameFastToLocals performs,
+		// so locals()/vars() inside the comprehension can see the loop
+		// variable.
+		//
+		// CPython: Objects/frameobject.c:2271 _PyFrame_GetLocals
+		// CPython: Python/ceval.c:2842 _PyEval_GetFrameLocals
+		wrapped := objects.NewFrame(f)
+		if objects.FrameHasHiddenLocals(wrapped) {
+			if d, err := objects.FrameFastToLocals(wrapped); err == nil {
+				return f.Globals, d
+			}
+		}
 		return f.Globals, f.Locals
 	}
 	d, err := objects.FrameFastToLocals(objects.NewFrame(f))
