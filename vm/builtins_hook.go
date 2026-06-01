@@ -29,6 +29,23 @@ func init() {
 	objects.GenThrowForwardHook = genThrowForwardHook
 	objects.GenAttachFrameTBHook = genAttachFrameTBHook
 	objects.WriteUnraisableHook = writeUnraisable
+	objects.KeyErrorHook = keyErrorWithKey
+}
+
+// keyErrorWithKey builds a KeyError whose single argument is the missing
+// key object, wrapped in a RaisedError so the eval-loop unwind path
+// preserves the instance (and its args) instead of re-parsing a message
+// string. This is what lets `except KeyError as e: e.args[0]` recover
+// the actual key, and keeps a tuple key a tuple rather than its repr.
+//
+// CPython: Objects/dictobject.c:147 set_key_error (PyErr_SetObject(KeyError, key))
+func keyErrorWithKey(key objects.Object) error {
+	exc := pyerrors.New(pyerrors.PyExc_KeyError, objects.NewTuple([]objects.Object{key}))
+	msg := "KeyError: "
+	if r, err := objects.Repr(key); err == nil {
+		msg += r
+	}
+	return objects.NewRaisedError(exc, msg)
 }
 
 // writeUnraisable routes an exception that cannot be propagated through

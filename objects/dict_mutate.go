@@ -163,7 +163,7 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 //
 // CPython: Objects/dictobject.c:2790 delitem_common
 func dictDelete(d *Dict, key Object) error {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return err
 	}

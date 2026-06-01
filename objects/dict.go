@@ -210,7 +210,21 @@ func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	d := args[0].(*Dict)
 	v, err := d.GetItem(args[1])
-	if err == nil && v != nil {
+	if err != nil {
+		// Only a genuine miss falls back to the default. A TypeError from
+		// an unhashable key or an exception raised by a key's __eq__ must
+		// propagate, matching dict_get_impl which returns NULL on error.
+		//
+		// CPython: Objects/dictobject.c:4290 dict_get_impl
+		if !errors.Is(err, errKeyNotFound) {
+			return nil, err
+		}
+		if len(args) == 3 {
+			return args[2], nil
+		}
+		return None(), nil
+	}
+	if v != nil {
 		return v, nil
 	}
 	if len(args) == 3 {
@@ -312,9 +326,27 @@ func (d *Dict) ForEachWithHash(fn func(key Object, hash int64) error) error {
 
 // SetItem inserts or replaces key. Mirrors PyDict_SetItem.
 //
+// dictKeyHash hashes key for a dict operation, wrapping a TypeError from
+// an unhashable key in the "cannot use '<type>' as a dict key (<exc>)"
+// message dict_unhashable_type produces in 3.14. A custom __hash__ that
+// raises something other than TypeError propagates unchanged.
+//
+// CPython: Objects/dictobject.c:2352 dict_unhashable_type
+func dictKeyHash(key Object) (int64, error) {
+	h, err := Hash(key)
+	if err == nil {
+		return h, nil
+	}
+	inner, ok := strings.CutPrefix(err.Error(), "TypeError: ")
+	if !ok {
+		return 0, err
+	}
+	return 0, fmt.Errorf("TypeError: cannot use '%s' as a dict key (%s)", key.Type().Name, inner)
+}
+
 // CPython: Objects/dictobject.c:1985 PyDict_SetItem
 func (d *Dict) SetItem(key, value Object) error {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return err
 	}
@@ -325,7 +357,7 @@ func (d *Dict) SetItem(key, value Object) error {
 //
 // CPython: Objects/dictobject.c:L1925 PyDict_GetItemWithError
 func (d *Dict) GetItem(key Object) (Object, error) {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +413,7 @@ func (d *Dict) DelItem(key Object) error {
 //
 // CPython: Objects/dictobject.c:L2495 PyDict_Contains
 func (d *Dict) Contains(key Object) (bool, error) {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return false, err
 	}
@@ -437,11 +469,7 @@ func dictMappingGet(o, key Object) (Object, error) {
 					return CallOneArg(missingFn, key)
 				}
 			}
-			repr, rerr := Repr(key)
-			if rerr != nil {
-				repr = "?"
-			}
-			return nil, fmt.Errorf("KeyError: %s", repr)
+			return nil, raiseKeyError(key)
 		}
 		return nil, err
 	}
@@ -570,7 +598,10 @@ func dictDelItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	d := args[0].(*Dict)
 	if err := d.DelItem(args[1]); err != nil {
-		return nil, fmt.Errorf("KeyError: %v", args[1])
+		if errors.Is(err, errKeyNotFound) {
+			return nil, raiseKeyError(args[1])
+		}
+		return nil, err
 	}
 	return None(), nil
 }
@@ -751,8 +782,7 @@ func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) == 3 {
 				return args[2], nil
 			}
-			repr, _ := Repr(args[1])
-			return nil, fmt.Errorf("KeyError: %s", repr)
+			return nil, raiseKeyError(args[1])
 		}
 		return nil, err
 	}
@@ -874,7 +904,19 @@ func dictMergeFromPairs(dst *Dict, src Object) error {
 			}
 			return err
 		}
-		pair, err := IterToSlice(v)
+		// PySequence_Fast carries the literal "object is not iterable"
+		// message, and on a TypeError dict_merge_from_seq2 attaches a
+		// note pinning the failing element index.
+		//
+		// CPython: Objects/dictobject.c:3823 merge_from_seq2_lock_held
+		fast, err := SequenceFast(v, "object is not iterable")
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "TypeError:") && FormatNoteHook != nil {
+				FormatNoteHook(fmt.Sprintf("Cannot convert dictionary update sequence element #%d to a sequence", i))
+			}
+			return err
+		}
+		pair, err := IterToSlice(fast)
 		if err != nil {
 			return err
 		}

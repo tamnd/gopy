@@ -1,6 +1,9 @@
 package objects
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // IsStopIteration reports whether err is a StopIteration: either the
 // ErrStopIteration sentinel raised by built-in iterators or a Python
@@ -52,6 +55,34 @@ var errIndexOutOfRange = ErrIndexOutOfRange
 //
 // CPython: Objects/exceptions.c:L2261 PyExc_KeyError
 var errKeyNotFound = errors.New("KeyError: key not found")
+
+// KeyErrorHook builds a Go error that the vm unwind path promotes to a
+// PyExc_KeyError carrying key as its single argument. CPython's
+// dict_subscript raises KeyError(key) with the actual key object, so
+// `except KeyError as e: e.args[0]` recovers the missing key (and a
+// tuple key stays a tuple instead of being flattened to its repr).
+// objects cannot import the errors package, so the vm layer installs
+// this hook in its init.
+//
+// CPython: Objects/dictobject.c:2247 dict_subscript (set_key_error(key))
+var KeyErrorHook func(key Object) error
+
+// raiseKeyError returns the structured KeyError(key) when the vm hook is
+// installed, falling back to the repr-based sentinel message otherwise
+// (the hook is always present in a running interpreter; the fallback
+// only matters for objects-only unit tests).
+//
+// CPython: Objects/dictobject.c:147 set_key_error
+func raiseKeyError(key Object) error {
+	if KeyErrorHook != nil {
+		return KeyErrorHook(key)
+	}
+	repr, err := Repr(key)
+	if err != nil {
+		repr = "?"
+	}
+	return fmt.Errorf("KeyError: %s", repr)
+}
 
 // ExceptionInstance is the structural interface a Python exception
 // object satisfies so packages outside errors/ can read its type and

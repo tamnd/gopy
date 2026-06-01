@@ -1789,8 +1789,12 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 		return t.Sequence.Contains(haystack, needle)
 	}
 	if d, ok := haystack.(*objects.Dict); ok {
-		v, _ := d.GetItem(needle)
-		return v != nil, nil
+		// dict.__contains__ runs the hash lookup, so an unhashable needle
+		// raises TypeError and a key whose __eq__ raises propagates that
+		// exception instead of silently reporting "not found".
+		//
+		// CPython: Objects/dictobject.c:2495 PyDict_Contains
+		return d.Contains(needle)
 	}
 	it, ierr := objects.Iter(haystack)
 	if ierr != nil {

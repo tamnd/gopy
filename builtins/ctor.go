@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 
 	"github.com/tamnd/gopy/abstract"
 	"github.com/tamnd/gopy/codecs"
@@ -1166,7 +1167,15 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 		if err != nil {
 			return err
 		}
-		pair, err := drainIterable(v)
+		// CPython: Objects/dictobject.c:3823 merge_from_seq2_lock_held
+		fast, err := objects.SequenceFast(v, "object is not iterable")
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "TypeError:") && objects.FormatNoteHook != nil {
+				objects.FormatNoteHook(fmt.Sprintf("Cannot convert dictionary update sequence element #%d to a sequence", i))
+			}
+			return err
+		}
+		pair, err := drainIterable(fast)
 		if err != nil {
 			return err
 		}
