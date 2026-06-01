@@ -18,6 +18,7 @@ import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/getopt"
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/gc"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
 	"github.com/tamnd/gopy/pythonrun"
@@ -334,6 +335,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 		return rc
 	}
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
 	return rc
 }
@@ -362,6 +364,7 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	// runpy._run_module_as_main(modName) on the Python side.
 	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
 	return rc
 }
@@ -405,6 +408,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 	} else {
 		rc = pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
 	}
+	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
 	return rc
 }

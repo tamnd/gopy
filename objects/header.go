@@ -139,3 +139,19 @@ func (h *Header) MakeImmortal() {
 func (h *Header) IsImmortal() bool {
 	return h.refcnt >= ImmortalRefcnt
 }
+
+// Finalized reports whether tp_finalize has already run on this object.
+// The interpreter-shutdown sweep reads it to avoid calling __del__ twice
+// on an object that was already finalized through Decref.
+//
+// CPython: Include/internal/pycore_object.h _PyGC_FINALIZED
+func (h *Header) Finalized() bool {
+	return h.finalized
+}
+
+// SetFinalized stamps the object as finalized so a later sweep skips it.
+//
+// CPython: Include/internal/pycore_object.h _PyGC_SET_FINALIZED
+func (h *Header) SetFinalized() {
+	h.finalized = true
+}
