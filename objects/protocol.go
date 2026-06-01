@@ -112,15 +112,11 @@ func ReprObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __repr__ directly and return the Object.
 	if o.Type().IsUser {
-		meth, err := lookupSpecial(o, "__repr__")
+		result, ok, err := callDunderNoArgObject(o, "__repr__")
 		if err != nil {
 			return nil, err
 		}
-		if meth != nil {
-			result, err := Call(meth, NewTuple(nil), nil)
-			if err != nil {
-				return nil, err
-			}
+		if ok {
 			if !IsSubtype(result.Type(), strType) {
 				return nil, fmt.Errorf("TypeError: __repr__ returned non-string (type %s)", result.Type().Name)
 			}
@@ -144,15 +140,11 @@ func StrObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __str__ directly and return the Object.
 	if o.Type().IsUser {
-		meth, err := lookupSpecial(o, "__str__")
+		result, ok, err := callDunderNoArgObject(o, "__str__")
 		if err != nil {
 			return nil, err
 		}
-		if meth != nil {
-			result, err := Call(meth, NewTuple(nil), nil)
-			if err != nil {
-				return nil, err
-			}
+		if ok {
 			if !IsSubtype(result.Type(), strType) {
 				return nil, fmt.Errorf("TypeError: __str__ returned non-string (type %s)", result.Type().Name)
 			}
@@ -295,6 +287,44 @@ func lookupSpecial(o Object, name string) (Object, error) {
 		return dg(descr, o, o.Type())
 	}
 	return descr, nil
+}
+
+// callDunderNoArgObject looks up a no-argument dunder through the type
+// MRO and calls it, returning (result, found, err). found is false when
+// the type does not define the method, so the caller can fall back to a
+// Go-level slot. It carries CPython's lookup_maybe_method optimization:
+// a method-like descriptor (method_descriptor / function) is invoked
+// unbound with self threaded in as the first positional argument, so no
+// temporary bound method is built; a non-method descriptor is bound via
+// __get__ and the resulting object is Decref'd after the call, matching
+// CPython's Py_DECREF(func). Without that release the bound method holds
+// a strong reference to self forever and the cycle collector can never
+// reclaim the instance (the set-subclass weakref leak).
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+// CPython: Objects/typeobject.c:8235 slot_tp_repr (Py_DECREF(func))
+func callDunderNoArgObject(o Object, name string) (Object, bool, error) {
+	descr, _ := LookupDescriptor(o.Type(), name)
+	if descr == nil {
+		return nil, false, nil
+	}
+	if isMethodLike(descr) {
+		res, err := callUnboundNoArg(true, descr, o)
+		return res, true, err
+	}
+	fn := descr
+	if dg := descr.Type().DescrGet; dg != nil {
+		bound, err := dg(descr, o, o.Type())
+		if err != nil {
+			return nil, true, err
+		}
+		fn = bound
+	}
+	res, err := callUnboundNoArg(false, fn, o)
+	if fn != descr {
+		Decref(fn)
+	}
+	return res, true, err
 }
 
 // LookupSpecial is the exported form of lookupSpecial: a TYPE-level MRO

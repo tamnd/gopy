@@ -1380,11 +1380,22 @@ func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8174 slot_tp_call
 func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(callable, "__call__")
+	fn, unbound, err := lookupMaybeMethod(callable, "__call__")
 	if err != nil {
 		return nil, err
 	}
-	posArgs := NewTuple(args)
+	// When the descriptor is method-like, lookup_maybe_method skips the
+	// temporary bound method and we prepend self ourselves
+	// (_PyObject_Call_Prepend). Otherwise __get__ already produced a bound
+	// object that owns one reference, released by Decref below exactly as
+	// CPython's Py_DECREF(meth) does so the callable does not pin self.
+	//
+	// CPython: Objects/typeobject.c:8174 slot_tp_call
+	callArgs := args
+	if unbound {
+		callArgs = append([]Object{callable}, args...)
+	}
+	posArgs := NewTuple(callArgs)
 	var kwDict *Dict
 	if len(kwargs) > 0 {
 		kwDict = NewDict()
@@ -1392,7 +1403,42 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 			_ = kwDict.SetItem(NewStr(k), v)
 		}
 	}
-	return Call(fn, posArgs, kwDict)
+	res, callErr := Call(fn, posArgs, kwDict)
+	if h := GCUntrackHook; h != nil {
+		h(posArgs)
+	}
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
+}
+
+// slotDunderNoArg is the shared port of the slot_tp_* dispatchers that
+// call a no-argument dunder: look the method up through
+// lookup_maybe_method, invoke it through call_unbound_noarg, then
+// release the looked-up callable. The unbound flag carries CPython's
+// no-temporary-PyMethodObject optimization: when the descriptor is
+// method-like (a method_descriptor or plain function), no bound method
+// is built and self is threaded in as the lone positional argument, so
+// nothing needs releasing. When the descriptor is a non-method (a
+// data descriptor whose __get__ returns a fresh bound object), that
+// object was created with one reference, so Decref balances it exactly
+// as CPython's Py_DECREF(func) does. Skipping the Decref here is the
+// leak that kept set subclasses pinned: the bound method held a strong
+// reference to self forever, so the cycle collector never saw the
+// instance go unreachable.
+//
+// CPython: Objects/typeobject.c:8235 slot_tp_repr (Py_DECREF(func) after call)
+func slotDunderNoArg(o Object, name string) (Object, error) {
+	fn, unbound, err := lookupMaybeMethod(o, name)
+	if err != nil {
+		return nil, err
+	}
+	res, callErr := callUnboundNoArg(unbound, fn, o)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // slotTpRepr is the generic tp_repr dispatcher: __repr__(self) and
@@ -1400,11 +1446,7 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 //
 // CPython: Objects/typeobject.c:8235 slot_tp_repr
 func slotTpRepr(o Object) (string, error) {
-	fn, err := lookupMethodOnSelf(o, "__repr__")
-	if err != nil {
-		return "", err
-	}
-	r, err := Call(fn, NewTuple(nil), nil)
+	r, err := slotDunderNoArg(o, "__repr__")
 	if err != nil {
 		return "", err
 	}
@@ -1419,11 +1461,7 @@ func slotTpRepr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8252 slot_tp_str
 func slotTpStr(o Object) (string, error) {
-	fn, err := lookupMethodOnSelf(o, "__str__")
-	if err != nil {
-		return "", err
-	}
-	r, err := Call(fn, NewTuple(nil), nil)
+	r, err := slotDunderNoArg(o, "__str__")
 	if err != nil {
 		return "", err
 	}
@@ -1439,11 +1477,7 @@ func slotTpStr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8266 slot_tp_hash
 func slotTpHash(o Object) (int64, error) {
-	fn, err := lookupMethodOnSelf(o, "__hash__")
-	if err != nil {
-		return 0, err
-	}
-	r, err := Call(fn, NewTuple(nil), nil)
+	r, err := slotDunderNoArg(o, "__hash__")
 	if err != nil {
 		return 0, err
 	}
@@ -1459,18 +1493,14 @@ func slotTpHash(o Object) (int64, error) {
 //
 // CPython: Objects/typeobject.c:8400 slot_tp_iter
 func slotTpIter(o Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__iter__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple(nil), nil)
+	return slotDunderNoArg(o, "__iter__")
 }
 
 // slotTpIterNext dispatches to __next__.
 //
 // CPython: Objects/typeobject.c:8421 slot_tp_iternext
 func slotTpIterNext(o Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__next__")
+	fn, unbound, err := lookupMaybeMethod(o, "__next__")
 	if err != nil {
 		// CPython: Objects/typeobject.c:8421 slot_tp_iternext — when
 		// __next__ is absent (deleted after class creation), the slot
@@ -1479,7 +1509,11 @@ func slotTpIterNext(o Object) (Object, error) {
 		// that bypassed FOR_ITER also see a sensible error.
 		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", o.Type().Name)
 	}
-	return Call(fn, NewTuple(nil), nil)
+	res, callErr := callUnboundNoArg(unbound, fn, o)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // slotTpFinalize dispatches to the user's __del__. Errors raised by
