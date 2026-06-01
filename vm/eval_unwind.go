@@ -360,8 +360,19 @@ func (e *evalState) handleException(err error) bool {
 	// exception that propagates up through several frames carries one
 	// entry per frame regardless of whether any of them caught it.
 	//
-	// CPython: Python/ceval.c exception_unwind (PyTraceBack_Here call)
-	e.attachFrameTraceback()
+	// RERAISE is the exception: it jumps straight to exception_unwind,
+	// bypassing the `error` label's PyTraceBack_Here, so a re-raised
+	// exception keeps the tb it already carries instead of gaining a
+	// fresh (and, for a with-cleanup site, line-0) frame entry. A
+	// multi-manager `with` re-raises once per cleanup block, so without
+	// this guard each block stamps a duplicate frame.
+	//
+	// CPython: Python/ceval.c exception_unwind (PyTraceBack_Here call);
+	// Python/bytecodes.c RERAISE (goto exception_unwind, no tb-here)
+	var rr *reraiseError
+	if !errors.As(err, &rr) {
+		e.attachFrameTraceback()
+	}
 	if co == nil || len(co.ExceptionTable) == 0 {
 		return false
 	}

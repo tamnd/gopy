@@ -744,7 +744,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		if pyExc, ok := exc.(*pyerrors.Exception); ok {
 			pyerrors.Raise(e.ts, pyExc)
-			return 0, true, excSentinel(pyExc)
+			return 0, true, &reraiseError{exc: pyExc}
 		}
 		return 0, true, fmt.Errorf("%s", objectRepr(exc))
 
@@ -1963,6 +1963,22 @@ func normalizeCause(cause objects.Object) (*pyerrors.Exception, error) {
 		return nil, nil
 	}
 	return normalizeRaise(cause)
+}
+
+// reraiseError marks an error that originated from the RERAISE opcode.
+// CPython's RERAISE jumps straight to exception_unwind, bypassing the
+// `error` label's PyTraceBack_Here, so the unwind loop must not prepend
+// a fresh traceback entry for it. The exception already carries the tb
+// from its original raise site; a with-statement cleanup that re-raises
+// must not stamp a second (and line-0) frame entry over it.
+//
+// CPython: Python/bytecodes.c RERAISE (goto exception_unwind)
+type reraiseError struct {
+	exc *pyerrors.Exception
+}
+
+func (r *reraiseError) Error() string {
+	return excSentinel(r.exc).Error()
 }
 
 // excSentinel returns the Go error the unwind loop sees once the
