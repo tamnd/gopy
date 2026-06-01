@@ -635,12 +635,16 @@ bytes via `memoryview.ToBytes()`.
 
 - [x] P6.1 `os.write` accept `memoryview`
 
+### P7 — `str` repr
+
+- [x] P7.1 `unicode_repr` decodes through `strLenientRunes` so a lone surrogate stored as 3-byte pseudo-UTF-8 escapes as one `\udXXX` (non-printable) instead of three `�`; fixes `test_builtin.test_ascii` (`ascii(s) == repr(s)`).
+
 ### Spec 1700 rows to advance
 
 | Test | Current state (2026-05-29) | Unblocked by |
 |------|---------------------------|--------------|
 | test_float | crash (fractions) | P1.1 |
-| test_builtin | crash (fractions) | P1.1 |
+| test_builtin | done (P1.1 + str surrogate repr) | — |
 | test_compare | done (1722 audit) | — |
 | test_numeric_tower | crash (fractions) | P1.1 |
 | test_bytes | crash (string_tests) | P1.2 |
