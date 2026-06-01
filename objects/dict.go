@@ -462,10 +462,18 @@ func dictMappingGet(o, key Object) (Object, error) {
 	v, err := d.GetItem(key)
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
-			// For dict subclasses, invoke __missing__ before raising KeyError.
+			// For dict subclasses, invoke __missing__ before raising
+			// KeyError. dict_subscript uses _PyObject_LookupSpecial, a
+			// type-level lookup, so an instance variable named
+			// __missing__ has no effect (test_missing case F).
+			//
 			// CPython: Objects/dictobject.c:2242 (non-exact dict __missing__ path)
 			if d.Type() != DictType {
-				if missingFn, merr := GetAttr(o, NewStr("__missing__")); merr == nil && missingFn != nil {
+				missingFn, merr := LookupSpecial(o, "__missing__")
+				if merr != nil {
+					return nil, merr
+				}
+				if missingFn != nil {
 					return CallOneArg(missingFn, key)
 				}
 			}
@@ -1078,18 +1086,32 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 	} else {
 		value = None()
 	}
-	out := NewDict()
-	// Set/frozenset fast path: reuse cached hashes to avoid calling __hash__
-	// on each key again.
+	// _PyDict_FromKeys builds the result by calling cls(), so a dict
+	// subclass produces an instance of that subclass and a class whose
+	// __new__ returns a foreign mapping (collections.UserDict) is honored
+	// too. The set/dict fast paths only fire on an empty exact dict.
 	//
-	// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
-	if ss, ok := args[1].(*Set); ok {
-		for _, e := range ss.Entries() {
-			if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
-				return nil, err
+	// CPython: Objects/dictobject.c:3924 _PyDict_FromKeys
+	cls := args[0]
+	d, err := CallNoArgs(cls)
+	if err != nil {
+		return nil, err
+	}
+	out, exact := d.(*Dict)
+	exact = exact && out.Type() == DictType && out.Len() == 0
+	if exact {
+		// Set/frozenset fast path: reuse cached hashes to avoid calling
+		// __hash__ on each key again.
+		//
+		// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
+		if ss, ok := args[1].(*Set); ok {
+			for _, e := range ss.Entries() {
+				if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
+					return nil, err
+				}
 			}
+			return out, nil
 		}
-		return out, nil
 	}
 	it, err := Iter(args[1])
 	if err != nil {
@@ -1103,11 +1125,15 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := out.SetItem(k, value); err != nil {
+		if exact {
+			if err := out.SetItem(k, value); err != nil {
+				return nil, err
+			}
+		} else if err := SetItem(d, k, value); err != nil {
 			return nil, err
 		}
 	}
-	return out, nil
+	return d, nil
 }
 
 // dictPopItemMethod backs dict.popitem().

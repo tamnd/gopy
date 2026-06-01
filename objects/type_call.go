@@ -440,7 +440,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	}
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	if cls == typeType {
 		return typeMetaCall(args, kwmap)
@@ -481,7 +485,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	inst, err := cls.TpNew(cls, args, kwmap)
 	if err != nil {
@@ -511,7 +519,11 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	newArgs := make([]Object, len(args)+1)
 	newArgs[0] = cls
