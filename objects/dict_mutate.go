@@ -99,6 +99,7 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	Incref(value)
 	d.order = append(d.order, idx)
 	d.used++
+	d.structVersion++
 	d.downgradeKindOnInsert(key)
 	d.invalidateKeysVersion()
 	// CPython fires ADDED at the same site once the new entry is in
@@ -150,6 +151,7 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 	d.splitValues[idx] = value
 	d.order = append(d.order, idx)
 	d.used++
+	d.structVersion++
 	d.invalidateKeysVersion()
 	notifyDictEvent(DictEventAdded, d, key, value)
 	return nil
@@ -197,6 +199,7 @@ func dictDelete(d *Dict, key Object) error {
 		}
 	}
 	d.used--
+	d.structVersion++
 	d.invalidateKeysVersion()
 	// CPython fires DELETED from delitem_common (dictobject.c:2872).
 	// Pass nil for value (the old value isn't part of the contract).

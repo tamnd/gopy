@@ -36,7 +36,20 @@ type dictIterObj struct {
 	src      *Dict
 	pos      int
 	snapUsed int
-	kind     dictIterKind
+	// snapStruct pins the dict's structVersion at construction. A
+	// delete+reinsert leaves ma_used unchanged so the snapUsed check
+	// alone misses it; comparing structVersion catches any change to
+	// the entry table during the walk.
+	snapStruct uint64
+	// length mirrors di->len: the count of entries the iterator still
+	// expects to yield. dictiter_iternextkey decrements it on each hit
+	// and, if it finds an entry once length has reached 0, raises
+	// "dictionary keys changed during iteration" (a delete+reinsert that
+	// keeps ma_used unchanged but shuffles the entry table).
+	//
+	// CPython: Objects/dictobject.c:5279 (the di->len == 0 branch)
+	length int
+	kind   dictIterKind
 	// reversed walks it.src.order from the tail toward the head, mirroring
 	// the dict_reversekeyiterator family. pos counts down from the last
 	// order slot to 0 instead of up from 0 to len(order).
@@ -115,7 +128,7 @@ func init() {
 		// The unpickled iterator will be a list_iterator, not a dict
 		// iterator — this matches CPython's documented behavior.
 		items := []Object{}
-		tmp := &dictIterObj{src: it.src, pos: it.pos, snapUsed: it.snapUsed, kind: it.kind, reversed: it.reversed}
+		tmp := &dictIterObj{src: it.src, pos: it.pos, snapUsed: it.snapUsed, snapStruct: it.snapStruct, length: it.length, kind: it.kind, reversed: it.reversed}
 		tmp.init(it.Type())
 		for {
 			var v Object
@@ -209,7 +222,7 @@ func dictIter(o Object) (Object, error) {
 }
 
 func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
-	it := &dictIterObj{src: d, snapUsed: d.used, kind: kind, owns: true}
+	it := &dictIterObj{src: d, snapUsed: d.used, snapStruct: d.structVersion, length: d.used, kind: kind, owns: true}
 	// Hold a strong reference to the dict for the iterator's lifetime so
 	// a dict whose only other owner is consumed (e.g. the temporary that
 	// `for k in globals()` iterates) cannot reach refcount zero and run
@@ -250,7 +263,7 @@ func dictReversedMethod(args []Object, _ map[string]Object) (Object, error) {
 }
 
 func newDictIterReversed(d *Dict, kind dictIterKind) *dictIterObj {
-	it := &dictIterObj{src: d, snapUsed: d.used, kind: kind, owns: true, reversed: true}
+	it := &dictIterObj{src: d, snapUsed: d.used, snapStruct: d.structVersion, length: d.used, kind: kind, owns: true, reversed: true}
 	it.pos = len(d.order) - 1
 	Incref(d)
 	switch kind {
@@ -302,11 +315,22 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 		it.src = nil
 		return nil, nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
 	}
+	if it.snapStruct != it.src.structVersion {
+		if it.owns {
+			Decref(it.src)
+			it.owns = false
+		}
+		it.src = nil
+		return nil, nil, fmt.Errorf("RuntimeError: dictionary keys changed during iteration")
+	}
 	if it.reversed {
 		for it.pos >= 0 {
 			slot := it.src.order[it.pos]
 			it.pos--
 			if it.src.slotIsLive(slot) {
+				if err := it.consume(); err != nil {
+					return nil, nil, err
+				}
 				return it.src.slotKey(slot), it.src.slotValue(slot), nil
 			}
 		}
@@ -316,10 +340,32 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 		slot := it.src.order[it.pos]
 		it.pos++
 		if it.src.slotIsLive(slot) {
+			if err := it.consume(); err != nil {
+				return nil, nil, err
+			}
 			return it.src.slotKey(slot), it.src.slotValue(slot), nil
 		}
 	}
 	return nil, nil, ErrStopIteration
+}
+
+// consume accounts for one yielded entry. Finding a live entry after
+// di->len has already reached zero means the table grew via a
+// delete+reinsert that left ma_used unchanged, so the size-change check
+// did not fire; CPython reports this as a keys-changed RuntimeError.
+//
+// CPython: Objects/dictobject.c:5279 (the di->len == 0 branch)
+func (it *dictIterObj) consume() error {
+	if it.length == 0 {
+		if it.owns {
+			Decref(it.src)
+			it.owns = false
+		}
+		it.src = nil
+		return fmt.Errorf("RuntimeError: dictionary keys changed during iteration")
+	}
+	it.length--
+	return nil
 }
 
 func dictIterNextKey(o Object) (Object, error) {

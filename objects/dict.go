@@ -69,6 +69,17 @@ type Dict struct {
 	// CPython: Include/internal/pycore_dict.h DICT_WATCHED_MUTATION_BITS
 	mutationCount uint32
 
+	// structVersion bumps on every structural change to the entry table
+	// (an inserted or deleted key), but not on a value-only replacement.
+	// dict iterators snapshot it and bail with RuntimeError if it moves
+	// mid-walk. CPython gets the same coverage for free from its
+	// append-only dk_entries table plus the di->len counter; gopy
+	// compacts d.order on delete, so a delete+reinsert that leaves
+	// ma_used unchanged needs this explicit version to be caught.
+	//
+	// CPython: Objects/dictobject.c:5237 dictiter_iternextkey_lock_held
+	structVersion uint64
+
 	// watcherTag mirrors CPython's _ma_watcher_tag. Bits 0..7 (one per
 	// DICT_MAX_WATCHERS slot) flag which watchers have subscribed via
 	// PyDict_Watch. Notification iterates the set bits and dispatches
