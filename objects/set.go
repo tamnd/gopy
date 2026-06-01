@@ -88,9 +88,16 @@ func init() {
 	SetType.Dealloc = setDealloc
 	SetType.Getattro = GenericGetAttr
 	SetType.Setattro = GenericSetAttr
-	// HasDict enables per-instance attribute storage for set subclasses.
-	// CPython: Objects/setobject.c:2567 PySet_Type (tp_dictoffset != 0)
-	SetType.HasDict = true
+	// set instances carry a weakref list but no __dict__: PySet_Type sets
+	// tp_weaklistoffset to offsetof(PySetObject, weakreflist) and leaves
+	// tp_dictoffset at 0. A plain set subclass still gains a managed dict
+	// through configureManagedDict's no-__slots__ path, so HasWeakref is
+	// what set itself contributes, and it leaves may_add_dict open so a
+	// subclass can name __dict__ in __slots__.
+	//
+	// CPython: Objects/setobject.c:2611 PySet_Type (tp_weaklistoffset set,
+	// tp_dictoffset 0)
+	SetType.HasWeakref = true
 	SetType.Number = &NumberMethods{
 		And:        setAnd,
 		Or:         setOr,
@@ -173,9 +180,12 @@ func init() {
 	FrozensetType.Dealloc = setDealloc
 	FrozensetType.Getattro = GenericGetAttr
 	FrozensetType.Setattro = GenericSetAttr
-	// HasDict enables per-instance attribute storage for frozenset subclasses.
-	// CPython: Objects/setobject.c:2658 PyFrozenSet_Type (tp_dictoffset != 0)
-	FrozensetType.HasDict = true
+	// frozenset matches set: a weakref list, no __dict__. PyFrozenSet_Type
+	// sets tp_weaklistoffset and leaves tp_dictoffset at 0.
+	//
+	// CPython: Objects/setobject.c:2703 PyFrozenSet_Type (tp_weaklistoffset
+	// set, tp_dictoffset 0)
+	FrozensetType.HasWeakref = true
 	FrozensetType.Number = &NumberMethods{
 		And:      setAnd,
 		Or:       setOr,
