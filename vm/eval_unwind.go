@@ -384,14 +384,25 @@ func (e *evalState) handleException(err error) bool {
 	exc := pyerrors.Occurred(e.ts)
 	pyerrors.Clear(e.ts)
 
-	// Unconditionally restore the stack depth to the value recorded in
-	// the exception table entry. CPython always sets the stack pointer
-	// here; only reducing it was a bug (StackTop could be below
-	// entry.depth if the exception fired before any pushes in the try
-	// body).
+	// Restore the stack depth to the value recorded in the exception
+	// table entry. When the current top is above the handler depth, the
+	// slots in between are temporaries the try body pushed and never
+	// consumed; CPython's exception_unwind pops each one with Py_XDECREF
+	// before jumping to the handler. DropStack closes each slot, so
+	// references those temporaries owned (e.g. a coroutine GET_ITER
+	// rejected with TypeError) are released here instead of being pinned
+	// as a phantom GC root that blocks finalization. When the top is at
+	// or below the handler depth (the exception fired before the try
+	// body pushed anything), there is nothing to release and we just set
+	// the pointer.
 	//
-	// CPython: Python/ceval.c exception_unwind `_PyFrame_SetStackPointer`
-	e.f.StackTop = entry.depth
+	// CPython: Python/ceval.c exception_unwind (the `while (stack_pointer
+	// > new_top) PyStackRef_XCLOSE(POP())` loop before `goto handle`)
+	if e.f.StackTop > entry.depth {
+		e.f.DropStack(e.f.StackTop - entry.depth)
+	} else {
+		e.f.StackTop = entry.depth
+	}
 
 	// For SETUP_WITH / SETUP_CLEANUP regions, push the bytecode lasti
 	// in code-units. The with-statement teardown reads it to resume at
