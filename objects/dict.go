@@ -757,6 +757,19 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	//
 	// CPython: Objects/dictobject.c:2979 PyDict_Clear
 	notifyDictEvent(DictEventCleared, d, nil, nil)
+	d.clearContents()
+	return None(), nil
+}
+
+// clearContents drops every key/value reference the dict owns and
+// resets the table to empty. Shared between dict.clear() and the
+// throwaway-kwargs release path. dictInsert increfs values (and
+// stores keys, which for kwargs and attribute dicts are interned
+// strings whose Decref is a no-op), so releasing both here balances
+// the insert path.
+//
+// CPython: Objects/dictobject.c:2979 PyDict_Clear (clear_keys loop)
+func (d *Dict) clearContents() {
 	if d.sharedKeys != nil {
 		// Split-table: decref all per-instance values, reset values array.
 		for i, v := range d.splitValues {
@@ -784,7 +797,31 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	d.used = 0
 	d.fill = 0
 	d.invalidateKeysVersion()
-	return None(), nil
+}
+
+// DecrefThrowawayKwargs releases the temporary keyword dict the eval
+// loop builds for a CALL_FUNCTION_EX (BUILD_MAP followed by DICT_MERGE).
+// Dropping the call's reference normally leaves the dict at refcount
+// zero, but gopy dicts carry no synchronous tp_dealloc, so the values
+// the merge incref'd into it would stay pinned by a refcount no
+// container actually holds. The cycle collector cannot help: those
+// values are still reachable from the caller's live locals when the
+// throwaway dict dies, so it never classifies them as garbage and the
+// pin never lifts.
+//
+// Clearing is gated on the dict reaching refcount zero, which at this
+// call site is a precise signal that nothing else references it (the
+// compiler builds this dict solely for the unpack). A dict that some
+// other caller still holds keeps a positive refcount and is left
+// untouched.
+//
+// CPython: Objects/dictobject.c:2768 dict_dealloc (PyDict_Clear on the
+// final decref of the keyword dict CALL_FUNCTION_EX owns)
+func DecrefThrowawayKwargs(d *Dict) {
+	Decref(d)
+	if d.Hdr().Refcnt() == 0 {
+		d.clearContents()
+	}
 }
 
 // dictPopMethod backs dict.pop(key[, default]).

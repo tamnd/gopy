@@ -926,7 +926,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			objects.Decref(argsObj)
 		}
 		if kwargs != nil {
-			objects.Decref(kwargs)
+			// The keyword dict here is the throwaway BUILD_MAP + DICT_MERGE
+			// built for this unpack. Releasing it must also drop the values
+			// the merge incref'd into it; gopy dicts have no synchronous
+			// tp_dealloc, so do it explicitly once the final reference goes.
+			objects.DecrefThrowawayKwargs(kwargs)
 		}
 		if cerr != nil {
 			return 0, true, cerr
