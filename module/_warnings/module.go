@@ -67,6 +67,12 @@ func init() {
 	//
 	// CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 	objects.WarnUnawaitedCoroutineHook = WarnUnawaitedCoroutine
+	// Wire the async-generator asend/athrow/aclose never-awaited finalize
+	// path. A wrapper created but never iterated surfaces a RuntimeWarning
+	// naming the method and the agen qualname.
+	//
+	// CPython: Python/_warnings.c:1558 _PyErr_WarnUnawaitedAgenMethod
+	objects.WarnUnawaitedAgenMethodHook = WarnUnawaitedAgenMethod
 }
 
 // buildModule materializes the _warnings module dict.
@@ -1175,13 +1181,21 @@ func WarnExplicitWithSourceline(category *objects.Type, text, filenameStr string
 	return err
 }
 
-// WarnUnawaitedAgenMethod ports _PyErr_WarnUnawaitedAgenMethod. gopy
-// does not yet ship async generators; the entry point is exposed so
-// callers can wire it once Modules/_asyncio lands.
+// WarnUnawaitedAgenMethod ports _PyErr_WarnUnawaitedAgenMethod. The
+// asend/athrow/aclose wrapper finalizer calls this when the awaitable
+// was created but never iterated. CPython formats the message with the
+// repr of the method name and the repr of the async generator's
+// ag_qualname, so the consumer sees "coroutine method 'asend' of
+// '<qualname>' was never awaited".
 //
 // CPython: Python/_warnings.c:1558 _PyErr_WarnUnawaitedAgenMethod
 func WarnUnawaitedAgenMethod(agen objects.Object, method objects.Object) {
-	_ = WarnFormatSource(agen, errors.PyExc_RuntimeWarning, 1, "coroutine method %v of %v was never awaited", method, agen)
+	methodRepr, _ := objects.Repr(method)
+	qnRepr := methodRepr
+	if ag, ok := agen.(*objects.AsyncGenerator); ok {
+		qnRepr, _ = objects.Repr(objects.NewStr(ag.Qualname))
+	}
+	_ = WarnFormatSource(agen, errors.PyExc_RuntimeWarning, 1, "coroutine method %s of %s was never awaited", methodRepr, qnRepr)
 }
 
 // WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine. CPython

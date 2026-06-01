@@ -292,6 +292,11 @@ func init() {
 	AsyncGenASendType.Async = &AsyncMethods{
 		Await: func(o Object) (Object, error) { Incref(o); return o, nil },
 	}
+	// tp_finalize: an asend awaitable that is collected while still in
+	// the INIT state was never awaited; warn so the bug surfaces.
+	//
+	// CPython: Objects/genobject.c:1894 async_gen_asend_finalize
+	AsyncGenASendType.Finalize = asyncGenASendFinalize
 
 	AsyncGenAThrowType = NewType("async_generator_athrow",
 		[]*Type{objectType})
@@ -304,6 +309,11 @@ func init() {
 	AsyncGenAThrowType.Async = &AsyncMethods{
 		Await: func(o Object) (Object, error) { Incref(o); return o, nil },
 	}
+	// tp_finalize: an athrow/aclose awaitable collected while still in
+	// the INIT state was never awaited; warn naming athrow or aclose.
+	//
+	// CPython: Objects/genobject.c:2335 async_gen_athrow_finalize
+	AsyncGenAThrowType.Finalize = asyncGenAThrowFinalize
 
 	AsyncGenWrappedValueType = NewType("async_generator_wrapped_value",
 		[]*Type{objectType})
@@ -1185,4 +1195,55 @@ func asyncGenAThrowNext(o Object) (Object, error) {
 func asyncGenRepr(o Object) (string, error) {
 	g := o.(*AsyncGenerator)
 	return fmt.Sprintf("<async_generator object %s at %p>", g.Name, g), nil
+}
+
+// asyncGenASendFinalize is the tp_finalize slot for the asend awaitable.
+// A wrapper that was created but never iterated (still in the INIT
+// state) is one the consumer forgot to await, so emit the
+// never-awaited RuntimeWarning naming the 'asend' method and the parent
+// async generator's qualname.
+//
+// CPython: Objects/genobject.c:1894 async_gen_asend_finalize
+func asyncGenASendFinalize(o Object) {
+	a, ok := o.(*asyncGenASend)
+	if !ok || a.state != asyncAwaitInit {
+		return
+	}
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	if h := WarnUnawaitedAgenMethodHook; h != nil {
+		h(a.gen, NewStr("asend"))
+	}
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
+}
+
+// asyncGenAThrowFinalize is the tp_finalize slot for the athrow/aclose
+// awaitable. As with asend, a wrapper still in INIT was never awaited.
+// CPython reports 'athrow' when args were supplied and 'aclose'
+// otherwise; gopy tracks that distinction with the isClose flag.
+//
+// CPython: Objects/genobject.c:2335 async_gen_athrow_finalize
+func asyncGenAThrowFinalize(o Object) {
+	a, ok := o.(*asyncGenAThrow)
+	if !ok || a.state != asyncAwaitInit {
+		return
+	}
+	method := "athrow"
+	if a.isClose {
+		method = "aclose"
+	}
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	if h := WarnUnawaitedAgenMethodHook; h != nil {
+		h(a.gen, NewStr(method))
+	}
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
 }

@@ -74,6 +74,15 @@ var WriteUnraisableHook func(obj Object, errMsg string, err error)
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 var WarnUnawaitedCoroutineHook func(coro Object)
 
+// WarnUnawaitedAgenMethodHook routes a never-awaited async-generator
+// asend/athrow/aclose awaitable through warnings so the consumer sees a
+// RuntimeWarning of the form "coroutine method 'asend' of '<qualname>'
+// was never awaited". The wrapper's tp_finalize calls this when the
+// awaitable was created but never iterated.
+//
+// CPython: Python/_warnings.c:1558 _PyErr_WarnUnawaitedAgenMethod
+var WarnUnawaitedAgenMethodHook func(agen Object, method Object)
+
 // Instance backs a Python-level object whose type is a user-defined
 // class. Header.typ is the class; dict holds per-instance attributes
 // (nil when the class declared __slots__ without __dict__); slots
