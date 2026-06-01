@@ -621,15 +621,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		v := e.popObject()
 		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
 		if !ok {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("LIST_EXTEND: target not a list")
 		}
 		items, eerr := iterToSlice(v)
 		if eerr != nil {
+			// CPython closes the iterable on the error path too, before
+			// raising. popObject stole the stack reference, so this arm
+			// owns it and has to release it here as well.
+			objects.Decref(v)
 			return 0, true, eerr
 		}
 		for _, it := range items {
 			l.Append(it)
 		}
+		// PyStackRef_CLOSE(iterable_st): popObject stole the source
+		// iterable's stack reference, so the arm owns it and must drop it
+		// once its items have been copied into the target list. Leaving it
+		// pinned keeps the iterable alive as a cycle-collector root, and
+		// its traverse then repins every element so a weakref never fires.
+		//
+		// CPython: Python/bytecodes.c:2023 LIST_EXTEND (PyStackRef_CLOSE)
+		objects.Decref(v)
 		return e.advance(), true, nil
 
 	case compile.DICT_MERGE:
@@ -644,12 +657,25 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
+			objects.Decref(src)
 			return 0, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
 		callable := e.peek(int(oparg) + 2).AsObject()
+		// DECREF_INPUTS: popObject stole the source mapping's stack
+		// reference, so this arm owns it and must release it once the
+		// merge has copied the entries into the kwargs dict (each value
+		// was incref'd on insertion). CPython closes `update` on both the
+		// success and the format-error paths; without the release the
+		// source mapping's refcount never returns to zero and the cycle
+		// collector cannot reclaim it or anything it holds.
+		//
+		// CPython: Python/bytecodes.c:2122 DICT_MERGE (PyStackRef_CLOSE(update))
 		if merr := dictMergeKwargs(d, src); merr != nil {
-			return 0, true, formatKwargsError(callable, merr)
+			err := formatKwargsError(callable, merr)
+			objects.Decref(src)
+			return 0, true, err
 		}
+		objects.Decref(src)
 		return e.advance(), true, nil
 
 	case compile.BUILD_SET:
@@ -672,13 +698,24 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 
 	case compile.CALL_INTRINSIC_1:
 		v := e.popObject()
+		// PyStackRef_CLOSE(value): the intrinsic only borrows its input,
+		// so this arm owns the popped reference and releases it on every
+		// exit. Skipping the release pins the input as a cycle-collector
+		// root (a list built for LIST_TO_TUPLE, the operand of an unary
+		// intrinsic), and its traverse then keeps every element alive so
+		// a weakref to one never fires.
+		//
+		// CPython: Python/bytecodes.c:1148 CALL_INTRINSIC_1 (PyStackRef_CLOSE)
 		if int(oparg) >= len(intrinsicsUnary) {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
 		}
 		// IMPORT_STAR needs the current frame's locals, which the generic
 		// intrinsic signature doesn't carry. Route it directly.
 		if oparg == intrinsics.UnaryImportStarID {
-			if ierr := e.importStar(v); ierr != nil {
+			ierr := e.importStar(v)
+			objects.Decref(v)
+			if ierr != nil {
 				return 0, true, ierr
 			}
 			e.pushObject(objects.None())
@@ -686,9 +723,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		fn := intrinsicsUnary[oparg]
 		if fn == nil {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, v)
+		objects.Decref(v)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -698,14 +737,25 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 	case compile.CALL_INTRINSIC_2:
 		rhs := e.popObject()
 		lhs := e.popObject()
+		// DECREF_INPUTS(): both operands are borrowed by the intrinsic, so
+		// the arm owns the two popped references and releases them on every
+		// exit, matching CALL_INTRINSIC_1 above.
+		//
+		// CPython: Python/bytecodes.c:1159 CALL_INTRINSIC_2 (DECREF_INPUTS)
 		if int(oparg) >= len(intrinsicsBinary) {
+			objects.Decref(rhs)
+			objects.Decref(lhs)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: oparg %d out of range", oparg)
 		}
 		fn := intrinsicsBinary[oparg]
 		if fn == nil {
+			objects.Decref(rhs)
+			objects.Decref(lhs)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, lhs, rhs)
+		objects.Decref(rhs)
+		objects.Decref(lhs)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -852,7 +902,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		selfOrNull := e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
-		out, cerr := objects.Call(callable, objects.NewTuple(argsSlice), kwargs)
+		// NewTuple holds the unpacked positional arguments for the call.
+		// It starts at refcount 1 and is owned right here, so it has to be
+		// released once the call returns. Leaving it pinned keeps the
+		// tuple alive as a cycle-collector root, and its traverse then
+		// repins every unpacked argument so a weakref to one never fires.
+		argsTuple := objects.NewTuple(argsSlice)
+		out, cerr := objects.Call(callable, argsTuple, kwargs)
+		objects.Decref(argsTuple)
 		// DECREF_INPUTS: the callee increfs the arguments it keeps, so
 		// the references popped off the stack here (callable, the
 		// self/NULL placeholder, the positional iterable, and the
