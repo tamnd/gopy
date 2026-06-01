@@ -692,25 +692,95 @@ func dictViewBinop(a, b Object, op func(left, right *Set) (*Set, error)) (Object
 	return op(left, right)
 }
 
-// dictKeysViewRichCmp implements set-like comparisons for dict_keys views.
-// Mirrors CPython's dictviews_richcompare: converts both operands to sets
-// and compares them.
+// allContainedIn reports whether every element yielded by self is
+// contained in other, using the generic containment protocol so the
+// other operand's __contains__ (sq_contains) runs. For an items view
+// that means dictitems_contains, which richcompares the stored value
+// and therefore propagates a value's __eq__ exception rather than
+// swallowing it the way a set-conversion would.
 //
-// CPython: Objects/dictobject.c:6447 dictviews_richcompare
+// CPython: Objects/dictobject.c:6037 all_contained_in
+func allContainedIn(self, other Object) (bool, error) {
+	it, err := Iter(self)
+	if err != nil {
+		return false, err
+	}
+	for {
+		next, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				return true, nil
+			}
+			return false, err
+		}
+		ok, err := Contains(other, next)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+}
+
+// dictKeysViewRichCmp implements set-like comparisons for dict_keys and
+// dict_items views. EQ/NE compare by length then containment (not set
+// conversion) so an items view compares values through richcompare;
+// the ordering operators map to subset/superset via all_contained_in.
+//
+// CPython: Objects/dictobject.c:6061 dictview_richcompare
 func dictKeysViewRichCmp(a, b Object, op CompareOp) (Object, error) {
-	v, ok := a.(*dictView)
-	if !ok {
+	if _, ok := a.(*dictView); !ok {
 		return NotImplemented(), nil
 	}
-	aSet, err := dictViewToSet(v)
+	// Only sets, frozensets, and other set-like views are comparable.
+	if _, isView := b.(*dictView); !isView {
+		bt := b.Type()
+		if bt != SetType && bt != FrozensetType {
+			return NotImplemented(), nil
+		}
+	}
+	lenSelf, err := Length(a)
 	if err != nil {
 		return nil, err
 	}
-	bSet, err := otherToSet(b)
+	lenOther, err := Length(b)
 	if err != nil {
-		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to set
+		return nil, err
 	}
-	return setRichCmp(aSet, bSet, op)
+	ok := false
+	switch op {
+	case CompareEQ, CompareNE:
+		if lenSelf == lenOther {
+			ok, err = allContainedIn(a, b)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if op == CompareNE {
+			ok = !ok
+		}
+	case CompareLT:
+		if lenSelf < lenOther {
+			ok, err = allContainedIn(a, b)
+		}
+	case CompareLE:
+		if lenSelf <= lenOther {
+			ok, err = allContainedIn(a, b)
+		}
+	case CompareGT:
+		if lenSelf > lenOther {
+			ok, err = allContainedIn(b, a)
+		}
+	case CompareGE:
+		if lenSelf >= lenOther {
+			ok, err = allContainedIn(b, a)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok), nil
 }
 
 func dictKeysViewAnd(a, b Object) (Object, error) {
