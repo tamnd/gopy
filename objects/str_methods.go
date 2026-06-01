@@ -18,8 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/tamnd/gopy/unicodetype"
 )
 
 // asUnicode pulls the Go string out of a *Unicode object. Returns
@@ -656,73 +657,155 @@ func StrRStrip(s, chars string) string {
 	return strings.TrimRight(s, chars)
 }
 
-// Case operations. Go's strings package routes through unicode case
-// mappings, which match CPython for the vast majority of inputs.
-// Edge cases like the Greek final-sigma in lower() are subtly
-// different and tracked in 1677-D.
+// Case operations. These are faithful ports of unicodeobject.c's
+// do_upper / do_lower / do_title / do_swapcase / do_capitalize /
+// do_casefold over the unicodetype tables, so full (1->N) mappings
+// (German sharp s, ligatures, Greek iota-subscript) and the Greek
+// final-sigma context rule match CPython rather than Go's strings
+// package (which only does simple per-rune mapping).
 //
-// CPython: Objects/unicodeobject.c:L12559 unicode_lower_impl
-// CPython: Objects/unicodeobject.c:L11042 unicode_upper_impl
-func StrLower(s string) string { return strings.ToLower(s) }
-func StrUpper(s string) string { return strings.ToUpper(s) }
+// CPython: Objects/unicodeobject.c:10207 case_operation
 
-// StrCaseFold approximates str.casefold via lowercasing.
+// handleCapitalSigma resolves U+03A3 to its lowercase form, picking
+// the final form U+03C2 when sigma ends a word (the Final_Sigma
+// context) and U+03C3 otherwise.
 //
-// CPython: Objects/unicodeobject.c:L11122 unicode_casefold_impl
-func StrCaseFold(s string) string { return strings.ToLower(s) }
-
-// StrSwapCase swaps each character's case.
-//
-// CPython: Objects/unicodeobject.c:L11130 unicode_swapcase_impl
-func StrSwapCase(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch {
-		case unicode.IsUpper(r):
-			out = append(out, unicode.ToLower(r))
-		case unicode.IsLower(r):
-			out = append(out, unicode.ToUpper(r))
-		default:
-			out = append(out, r)
+// CPython: Objects/unicodeobject.c:10039 handle_capital_sigma
+func handleCapitalSigma(rs []rune, i int) rune {
+	var c rune
+	j := i - 1
+	for ; j >= 0; j-- {
+		c = rs[j]
+		if !IsCaseIgnorableRune(c) {
+			break
 		}
+	}
+	finalSigma := j >= 0 && IsCasedRune(c)
+	if finalSigma {
+		j = i + 1
+		for ; j < len(rs); j++ {
+			c = rs[j]
+			if !IsCaseIgnorableRune(c) {
+				break
+			}
+		}
+		finalSigma = j == len(rs) || !IsCasedRune(c)
+	}
+	if finalSigma {
+		return 0x3C2
+	}
+	return 0x3C3
+}
+
+// lowerUcs4 writes the lowercase mapping of rs[i] into mapped,
+// handling the U+03A3 final-sigma special case.
+//
+// CPython: Objects/unicodeobject.c:10068 lower_ucs4
+func lowerUcs4(rs []rune, i int, c rune, mapped []rune) int {
+	if c == 0x3A3 {
+		mapped[0] = handleCapitalSigma(rs, i)
+		return 1
+	}
+	return unicodetype.ToLowerFull(c, mapped)
+}
+
+func StrLower(s string) string {
+	rs := []rune(s)
+	out := make([]rune, 0, len(rs))
+	var mapped [3]rune
+	for i, c := range rs {
+		n := lowerUcs4(rs, i, c, mapped[:])
+		out = append(out, mapped[:n]...)
 	}
 	return string(out)
 }
 
-// StrCapitalize ports str.capitalize: first character upper, rest
-// lower. Empty string is unchanged.
+func StrUpper(s string) string {
+	rs := []rune(s)
+	out := make([]rune, 0, len(rs))
+	var mapped [3]rune
+	for _, c := range rs {
+		n := unicodetype.ToUpperFull(c, mapped[:])
+		out = append(out, mapped[:n]...)
+	}
+	return string(out)
+}
+
+// StrCaseFold ports str.casefold via the full folding table.
 //
-// CPython: Objects/unicodeobject.c:L11107 unicode_capitalize_impl
+// CPython: Objects/unicodeobject.c:10162 do_casefold
+func StrCaseFold(s string) string {
+	out := make([]rune, 0, len(s))
+	var mapped [3]rune
+	for _, c := range s {
+		n := unicodetype.ToFoldedFull(c, mapped[:])
+		out = append(out, mapped[:n]...)
+	}
+	return string(out)
+}
+
+// StrSwapCase swaps each character's case.
+//
+// CPython: Objects/unicodeobject.c:10104 do_swapcase
+func StrSwapCase(s string) string {
+	rs := []rune(s)
+	out := make([]rune, 0, len(rs))
+	var mapped [3]rune
+	for i, c := range rs {
+		var n int
+		switch {
+		case IsUpperRune(c):
+			n = lowerUcs4(rs, i, c, mapped[:])
+		case IsLowerRune(c):
+			n = unicodetype.ToUpperFull(c, mapped[:])
+		default:
+			n = 1
+			mapped[0] = c
+		}
+		out = append(out, mapped[:n]...)
+	}
+	return string(out)
+}
+
+// StrCapitalize ports str.capitalize: titlecase the first character,
+// lowercase the rest. Empty string is unchanged.
+//
+// CPython: Objects/unicodeobject.c:10080 do_capitalize
 func StrCapitalize(s string) string {
 	if s == "" {
 		return s
 	}
 	rs := []rune(s)
-	rs[0] = unicode.ToUpper(rs[0])
+	out := make([]rune, 0, len(rs))
+	var mapped [3]rune
+	n := unicodetype.ToTitleFull(rs[0], mapped[:])
+	out = append(out, mapped[:n]...)
 	for i := 1; i < len(rs); i++ {
-		rs[i] = unicode.ToLower(rs[i])
+		n = lowerUcs4(rs, i, rs[i], mapped[:])
+		out = append(out, mapped[:n]...)
 	}
-	return string(rs)
+	return string(out)
 }
 
-// StrTitle ports str.title: first character of each word uppercased,
-// the rest lowercased. Word boundaries are runs of cased characters.
+// StrTitle ports str.title: the first cased character of each word is
+// titlecased, the rest lowercased. Word boundaries are runs of cased
+// characters.
 //
-// CPython: Objects/unicodeobject.c:L11091 unicode_title_impl
+// CPython: Objects/unicodeobject.c:10179 do_title
 func StrTitle(s string) string {
-	out := make([]rune, 0, len(s))
-	prevCased := false
-	for _, r := range s {
-		isCased := unicode.IsUpper(r) || unicode.IsLower(r) || unicode.IsTitle(r)
-		switch {
-		case isCased && !prevCased:
-			out = append(out, unicode.ToUpper(r))
-		case isCased:
-			out = append(out, unicode.ToLower(r))
-		default:
-			out = append(out, r)
+	rs := []rune(s)
+	out := make([]rune, 0, len(rs))
+	var mapped [3]rune
+	previousIsCased := false
+	for i, c := range rs {
+		var n int
+		if previousIsCased {
+			n = lowerUcs4(rs, i, c, mapped[:])
+		} else {
+			n = unicodetype.ToTitleFull(c, mapped[:])
 		}
-		prevCased = isCased
+		out = append(out, mapped[:n]...)
+		previousIsCased = IsCasedRune(c)
 	}
 	return string(out)
 }
@@ -874,44 +957,47 @@ func StrIsASCII(s string) bool {
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12134 unicode_islower_impl
 func StrIsLower(s string) bool {
 	hasCased := false
 	for _, r := range s {
-		if unicode.IsUpper(r) || unicode.IsTitle(r) {
+		if IsUpperRune(r) || IsTitleRune(r) {
 			return false
 		}
-		if unicode.IsLower(r) {
+		if IsLowerRune(r) {
 			hasCased = true
 		}
 	}
 	return hasCased
 }
 
+// CPython: Objects/unicodeobject.c:12164 unicode_isupper_impl
 func StrIsUpper(s string) bool {
 	hasCased := false
 	for _, r := range s {
-		if unicode.IsLower(r) || unicode.IsTitle(r) {
+		if IsLowerRune(r) || IsTitleRune(r) {
 			return false
 		}
-		if unicode.IsUpper(r) {
+		if IsUpperRune(r) {
 			hasCased = true
 		}
 	}
 	return hasCased
 }
 
+// CPython: Objects/unicodeobject.c:12246 unicode_istitle_impl
 func StrIsTitle(s string) bool {
 	prevCased := false
 	hasCased := false
 	for _, r := range s {
 		switch {
-		case unicode.IsUpper(r) || unicode.IsTitle(r):
+		case IsUpperRune(r) || IsTitleRune(r):
 			if prevCased {
 				return false
 			}
 			prevCased = true
 			hasCased = true
-		case unicode.IsLower(r):
+		case IsLowerRune(r):
 			if !prevCased {
 				return false
 			}
@@ -951,87 +1037,94 @@ func StrIsSpace(s string) bool {
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12054 unicode_isalpha_impl
 func StrIsAlpha(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsLetter(r) {
+		if !IsAlphaRune(r) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12305 unicode_isalnum_impl
 func StrIsAlnum(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsNumber(r) {
+		if !(IsAlphaRune(r) || IsDecimalRune(r) || IsDigitRune(r) || IsNumericRune(r)) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12085 unicode_isdecimal_impl
 func StrIsDecimal(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsDigit(r) {
+		if !IsDecimalRune(r) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12104 unicode_isdigit_impl
 func StrIsDigit(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsDigit(r) && !unicode.IsNumber(r) {
+		if !IsDigitRune(r) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12345 unicode_isnumeric_impl
 func StrIsNumeric(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsNumber(r) && !unicode.IsDigit(r) {
+		if !IsNumericRune(r) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12386 unicode_isidentifier_impl
 func StrIsIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, r := range s {
 		if i == 0 {
-			if !unicode.IsLetter(r) && r != '_' {
+			if !IsXIDStartRune(r) {
 				return false
 			}
 			continue
 		}
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+		if !IsXIDContinueRune(r) {
 			return false
 		}
 	}
 	return true
 }
 
+// CPython: Objects/unicodeobject.c:12421 unicode_isprintable_impl
 func StrIsPrintable(s string) bool {
 	for _, r := range s {
-		if !unicode.IsPrint(r) && r != ' ' {
+		if !IsPrintableRune(r) {
 			return false
 		}
 	}
