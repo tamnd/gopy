@@ -26,7 +26,7 @@ type SeqIter struct {
 var SeqIterType = NewType("iterator", []*Type{objectType})
 
 func init() {
-	SeqIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	SeqIterType.Iter = SelfIter
 	SeqIterType.IterNext = seqIterNext
 	AddIterSlotWrappers(SeqIterType)
 }
@@ -143,7 +143,7 @@ type CallIter struct {
 var CallIterType = NewType("callable_iterator", []*Type{objectType})
 
 func init() {
-	CallIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	CallIterType.Iter = SelfIter
 	CallIterType.IterNext = callIterNext
 	AddIterSlotWrappers(CallIterType)
 }

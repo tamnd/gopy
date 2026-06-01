@@ -392,7 +392,7 @@ type memoryViewIterator struct {
 var memoryViewIterType = NewType("memory_iterator", []*Type{objectType})
 
 func init() {
-	memoryViewIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	memoryViewIterType.Iter = SelfIter
 	memoryViewIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*memoryViewIterator)
 		if it.pos >= it.src.Len() {

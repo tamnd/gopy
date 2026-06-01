@@ -276,7 +276,7 @@ func init() {
 	CoroutineType.Finalize = coroFinalize
 
 	CoroAwaitType = NewType("coroutine_wrapper", []*Type{objectType})
-	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }
+	CoroAwaitType.Iter = SelfIter
 	CoroAwaitType.IterNext = coroAwaitNext
 	CoroAwaitType.TpTraverse = coroAwaiterTraverse
 	AddIterSlotWrappers(CoroAwaitType)

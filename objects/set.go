@@ -845,7 +845,7 @@ func setIterDealloc(o Object) {
 
 func init() {
 	setIterType.Dealloc = setIterDealloc
-	setIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	setIterType.Iter = SelfIter
 	setIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*setIterator)
 		if it.usedAt < 0 {

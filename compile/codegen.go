@@ -103,6 +103,14 @@ type Unit struct {
 	// a non-(-1) CondIdx so the __annotate__ function can guard their inclusion.
 	// Mirrors CPython's Python/compile.c:64 u_in_conditional_block.
 	InConditionalBlock int
+	// InInlinedComp is the nesting depth of inlined comprehensions whose
+	// body is currently being emitted into this unit. Used to compute the
+	// in_class_block flag (a comprehension directly in a class body
+	// isolates its locals, but one nested inside another inlined comp does
+	// not re-isolate).
+	//
+	// CPython: Python/compile.c:70 compiler_unit.u_in_inlined_comp
+	InInlinedComp int
 	// Private is the enclosing class name used for PEP 8 private name
 	// mangling. Set when entering a class scope and inherited by nested
 	// function / comprehension scopes so `self.__x` inside a method

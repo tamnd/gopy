@@ -485,6 +485,13 @@ func (e *evalState) peek(depth int) stackref.Ref { return e.f.PeekStack(depth) }
 // passthrough slot before STACK_SHRINK runs.
 func (e *evalState) setPeek(depth int, r stackref.Ref) { e.f.SetPeekStack(depth, r) }
 
+// setPeekRaw writes r at depth from the top without releasing the
+// slot's prior occupant. Generated arms use it to commit passthrough
+// inputs (SWAP, COPY) back to the stack: the value is a live reference
+// being relocated, not a fresh output replacing a consumed input, so
+// closing the prior occupant would drop a reference still in use.
+func (e *evalState) setPeekRaw(depth int, r stackref.Ref) { e.f.PokeStack(depth, r) }
+
 // drop pops n stack entries without binding them to locals; mirrors
 // CPython's STACK_SHRINK(n).
 func (e *evalState) drop(n int) { e.f.DropStack(n) }

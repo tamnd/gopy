@@ -29,7 +29,7 @@ type Enumerate struct {
 var EnumerateType = NewType("enumerate", []*Type{objectType})
 
 func init() {
-	EnumerateType.Iter = func(o Object) (Object, error) { return o, nil }
+	EnumerateType.Iter = SelfIter
 	EnumerateType.IterNext = enumerateNext
 	AddIterSlotWrappers(EnumerateType)
 }
@@ -98,7 +98,7 @@ type Reversed struct {
 var ReversedType = NewType("reversed", []*Type{objectType})
 
 func init() {
-	ReversedType.Iter = func(o Object) (Object, error) { return o, nil }
+	ReversedType.Iter = SelfIter
 	ReversedType.IterNext = reversedNext
 	AddIterSlotWrappers(ReversedType)
 }

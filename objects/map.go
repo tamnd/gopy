@@ -31,7 +31,7 @@ type Map struct {
 var MapType = NewType("map", []*Type{objectType})
 
 func init() {
-	MapType.Iter = func(o Object) (Object, error) { return o, nil }
+	MapType.Iter = SelfIter
 	MapType.IterNext = mapNext
 	AddIterSlotWrappers(MapType)
 	SetTypeDescr(MapType, "__reduce__", NewMethodDescr(MapType, "__reduce__", mapReduce))

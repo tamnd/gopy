@@ -23,7 +23,7 @@ type rangeIterator struct {
 var rangeIterType = NewType("range_iterator", []*Type{objectType})
 
 func init() {
-	rangeIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	rangeIterType.Iter = SelfIter
 	rangeIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*rangeIterator)
 		c := it.cur.v.Cmp(&it.stop.v)

@@ -117,12 +117,16 @@ func Callable(o Object) bool {
 }
 
 // SelfIter mirrors PyObject_SelfIter: the canonical tp_iter
-// implementation for iterators that act as their own iterator.
-// CPython hands back a new strong reference; gopy returns the same
-// object since references are tracked by the Go GC.
+// implementation for iterators that act as their own iterator. Like
+// CPython it hands back a *new* strong reference, so GET_ITER (which
+// closes the consumed iterable slot and stores the stolen result) stays
+// balanced when the iterator is its own iterator. Skipping the incref
+// here would let the iterator drop to refcount zero the moment GET_ITER
+// releases the iterable, running its Dealloc out from under the walk.
 //
 // CPython: Objects/object.c:1548 PyObject_SelfIter
 func SelfIter(o Object) (Object, error) {
+	Incref(o)
 	return o, nil
 }
 

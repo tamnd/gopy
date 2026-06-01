@@ -766,7 +766,7 @@ type listIterator struct {
 var listIterType = NewType("list_iterator", []*Type{objectType})
 
 func init() {
-	listIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	listIterType.Iter = SelfIter
 	listIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listIterator)
 		if it.src == nil {
@@ -878,7 +878,7 @@ var listRevIterType = NewType("list_reverseiterator", []*Type{objectType})
 
 //nolint:gocognit // method-descriptor registration table for the list type; flat sequence of SetTypeDescr calls
 func init() {
-	listRevIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	listRevIterType.Iter = SelfIter
 	listRevIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listRevIterator)
 		if it.src == nil || it.index < 0 {

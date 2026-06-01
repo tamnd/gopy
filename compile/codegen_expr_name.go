@@ -65,6 +65,16 @@ func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 		if inFunc {
 			return c.emitFastLocal(mangled, mode, l)
 		}
+		// Non-function scope (module or class body). A name that has been
+		// temporarily promoted to a fast local while emitting an inlined
+		// comprehension (FastHidden value True) uses FAST ops so the
+		// comprehension's locals stay isolated from the enclosing
+		// namespace; otherwise module/class locals use NAME ops.
+		//
+		// CPython: Python/compile.c:986 compiler_nameop LOCAL optype
+		if active, ok := c.unit().FastHidden[mangled]; ok && active {
+			return c.emitFastLocal(mangled, mode, l)
+		}
 		return c.emitNamed(mangled, mode, l)
 	case symtable.Cell, symtable.Free:
 		// In a CanSeeClassScope block (type alias body, generic scope),

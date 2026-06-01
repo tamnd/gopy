@@ -24,25 +24,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 	switch op {
 	case compile.BUILD_INTERPOLATION:
 		value := e.peek(1 + int(oparg&1))
+		_ = value
 		str := e.peek(int(oparg & 1))
+		_ = str
 		format := e.peekSliceBottomFirst(0, int(oparg&1))
-		value_o := value.AsObject()
-		str_o := str.AsObject()
-		conversion := int(oparg >> 2)
-		var format_o objects.Object
-		if oparg&1 != 0 {
-			format_o = format[0].AsObject()
-		} else {
-			format_o = objects.NewStr("")
-		}
-		interp_o, err := objects.NewInterpolation(value_o, str_o, conversion, format_o)
-		if err != nil {
-			e.pendingErr = err
-			return 0, e.error("error")
-		}
-		e.drop(2 + int(oparg&1))
-		e.push(stackref.FromObject(interp_o))
-		return e.advance(), nil
+		_ = format
+		// body bail: PyObject interpolation_o rhs: unexpected token "_PyInterpolation_Build" in expression
+		// outputs: interpolation
+		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.BUILD_LIST:
 		values := e.peekSliceBottomFirst(0, int(oparg))
 		_ = values
@@ -142,8 +131,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = interpolations_o
 		template_o := e.templateBuild(strings_o, interpolations_o)
 		_ = template_o
-		interpolations.Close()
-		strings.Close()
+		// interpolations consumed input dropped by stack shrink
+		// strings consumed input dropped by stack shrink
 		if template_o == nil {
 			return 0, e.error("error")
 		}
@@ -173,7 +162,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var res stackref.Ref
 		res_o := e.callIntrinsic1(oparg, value.AsObject())
 		_ = res_o
-		value.Close()
+		// value consumed input dropped by stack shrink
 		if res_o == nil {
 			return 0, e.error("error")
 		}
@@ -226,13 +215,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		}
 		res := e.exceptionMatches(left_o, right_o)
 		_ = res
-		right.Close()
+		// right consumed input dropped by stack shrink
 		if res != 0 {
 			b = stackref.True
 		} else {
 			b = stackref.False
 		}
-		e.setPeek(1, left)
+		e.setPeekRaw(1, left)
 		e.drop(1)
 		e.push(b)
 		return e.advance(), nil
@@ -253,9 +242,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		// outputs: result
 		return 0, opcodeNotImplemented(op) // body pending (B6)
 	case compile.COPY:
-		// CPython: Python/ceval.c COPY: push a dup of stack[-(oparg)].
-		// Do NOT setPeek on the source slot - it is still owned by the stack.
-		top := e.peek(int(oparg - 1)).Dup()
+		bottom := e.peek(int(oparg - 1))
+		_ = bottom
+		var top stackref.Ref
+		top = bottom.Dup()
+		e.setPeekRaw(int(oparg-1), bottom)
 		e.push(top)
 		return e.advance(), nil
 	case compile.COPY_FREE_VARS:
@@ -268,7 +259,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = name
 		err := e.objectDelAttr(owner.AsObject(), name)
 		_ = err
-		owner.Close()
+		// owner consumed input dropped by stack shrink
 		if err != 0 {
 			return 0, e.error("error")
 		}
@@ -283,7 +274,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setPendingErr("_PyEval_FormatExcUnbound")
 			return 0, e.error("error")
 		}
-		objects.Decref(oldobj)
+		// Py_DECREF: no-op under GC
 		return e.advance(), nil
 	case compile.DELETE_FAST:
 		v := e.localAt(int(oparg))
@@ -357,12 +348,12 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = err
 		if err < 0 {
 			e.setPendingErr("_PyEval_FormatKwargsError")
-			update.Close()
+			// update consumed input dropped by stack shrink
 			return 0, e.error("error")
 		}
-		update.Close()
-		e.setPeek(1+1+1+int(oparg-1)+1, callable)
-		e.setPeek(int(oparg-1)+1, dict)
+		// update consumed input dropped by stack shrink
+		e.setPeekRaw(1+1+1+int(oparg-1)+1, callable)
+		e.setPeekRaw(int(oparg-1)+1, dict)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.DICT_UPDATE:
@@ -382,17 +373,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			if matches {
 				e.setPendingErr("TypeError")
 			}
-			update.Close()
+			// update consumed input dropped by stack shrink
 			return 0, e.error("error")
 		}
-		update.Close()
-		e.setPeek(int(oparg-1)+1, dict)
+		// update consumed input dropped by stack shrink
+		e.setPeekRaw(int(oparg-1)+1, dict)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.END_FOR:
 		value := e.peek(0)
 		_ = value
-		value.Close()
+		// value consumed input dropped by stack shrink
 		e.drop(1)
 		return e.advance(), nil
 	case compile.END_SEND:
@@ -402,7 +393,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = value
 		var val stackref.Ref
 		val = value
-		receiver.Close()
+		// receiver consumed input dropped by stack shrink
 		e.drop(1 + 1)
 		e.push(val)
 		return e.advance(), nil
@@ -429,7 +420,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if !objects.IsExactStr(value_o) {
 			res_o := e.objectFormat(value_o, nil)
 			_ = res_o
-			value.Close()
+			// value consumed input dropped by stack shrink
 			if res_o == nil {
 				return 0, e.error("error")
 			}
@@ -472,7 +463,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			return 0, e.error("error")
 		}
 		awaitable = stackref.FromObject(awaitable_o)
-		e.setPeek(0, aiter)
+		e.setPeekRaw(0, aiter)
 		e.push(awaitable)
 		return e.advance(), nil
 	case compile.GET_AWAITABLE:
@@ -481,7 +472,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var iter stackref.Ref
 		iter_o := e.getAwaitable(iterable.AsObject(), oparg)
 		_ = iter_o
-		iterable.Close()
+		// iterable consumed input dropped by stack shrink
 		if iter_o == nil {
 			return 0, e.error("error")
 		}
@@ -491,12 +482,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		return e.advance(), nil
 	case compile.GET_ITER:
 		iterable := e.peek(0)
+		_ = iterable
+		var iter stackref.Ref
 		iter_o := e.objectGetIter(iterable.AsObject())
+		_ = iter_o
+		// iterable consumed input dropped by stack shrink
 		if iter_o == nil {
-			e.drop(1)
 			return 0, e.error("error")
 		}
-		e.setPeek(0, stackref.FromObject(iter_o))
+		iter = stackref.FromObject(iter_o)
+		e.drop(1)
+		e.push(iter)
 		return e.advance(), nil
 	case compile.GET_LEN:
 		obj := e.peek(0)
@@ -513,7 +509,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			return 0, e.error("error")
 		}
 		len = stackref.FromObject(len_o)
-		e.setPeek(0, obj)
+		e.setPeekRaw(0, obj)
 		e.push(len)
 		return e.advance(), nil
 	case compile.GET_YIELD_FROM_ITER:
@@ -534,7 +530,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			return 0, e.error("error")
 		}
 		res = stackref.FromObject(res_o)
-		e.setPeek(0, from)
+		e.setPeekRaw(0, from)
 		e.push(res)
 		return e.advance(), nil
 	case compile.IMPORT_NAME:
@@ -567,8 +563,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 				return 0, e.error("error")
 			}
 		}
-		value.Close()
-		e.setPeek(1, receiver)
+		// value consumed input dropped by stack shrink
+		e.setPeekRaw(1, receiver)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.INSTRUMENTED_END_SEND:
@@ -587,7 +583,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			}
 		}
 		val = value
-		receiver.Close()
+		// receiver consumed input dropped by stack shrink
 		e.drop(1 + 1)
 		e.push(val)
 		return e.advance(), nil
@@ -611,7 +607,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 	case compile.INSTRUMENTED_POP_ITER:
 		iter := e.peek(0)
 		_ = iter
-		iter.Close()
+		// iter consumed input dropped by stack shrink
 		e.drop(1)
 		return e.advance(), nil
 	case compile.INSTRUMENTED_POP_JUMP_IF_FALSE:
@@ -632,7 +628,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = jump
 		if jump {
 		} else {
-			value.Close()
+			// value consumed input dropped by stack shrink
 		}
 		e.drop(1)
 		return e.advance(), nil
@@ -643,7 +639,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		jump := !value.IsNone()
 		_ = jump
 		if jump {
-			value.Close()
+			// value consumed input dropped by stack shrink
 		} else {
 		}
 		e.drop(1)
@@ -694,7 +690,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if err < 0 {
 			return 0, e.error("error")
 		}
-		e.setPeek(int(oparg-1)+1, list)
+		e.setPeekRaw(int(oparg-1)+1, list)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.LIST_EXTEND:
@@ -813,7 +809,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		v_o, err := e.mappingGetOptionalItem(mod_or_class_dict.AsObject(), name)
 		_ = err
 		_ = v_o
-		mod_or_class_dict.Close()
+		// mod_or_class_dict consumed input dropped by stack shrink
 		if err < 0 {
 			return 0, e.error("error")
 		}
@@ -873,16 +869,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if v_o == nil {
 			return 0, e.error("error")
 		}
-		// loadName returns a borrowed reference from the locals /
-		// globals / builtins dict. PyStackRef_FromPyObjectNew bumps the
-		// refcount so the stack owns its own strong reference; consumers
-		// (CALL arg-cleanup, STORE_FAST/NAME Close, etc.) will balance it
-		// with Decref. Using the steal variant drained the refcount on
-		// every dict load and stranded generator finalize.
-		//
-		// CPython: Python/bytecodes.c LOAD_NAME (PyMapping_GetOptionalItem
-		// returns a new ref; PyStackRef_FromPyObjectSteal wraps it)
-		v = stackref.FromObjectNew(v_o)
+		v = stackref.FromObject(v_o)
 		e.push(v)
 		return e.advance(), nil
 	case compile.LOAD_SMALL_INT:
@@ -925,7 +912,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if err != 0 {
 			return 0, e.error("error")
 		}
-		e.setPeek(int(oparg-1)+1+1, dict_st)
+		e.setPeekRaw(int(oparg-1)+1+1, dict_st)
 		e.drop(1 + 1)
 		return e.advance(), nil
 	case compile.MATCH_CLASS:
@@ -962,8 +949,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			return 0, e.error("error")
 		}
 		values_or_none = stackref.FromObject(values_or_none_o)
-		e.setPeek(1, subject)
-		e.setPeek(0, keys)
+		e.setPeekRaw(1, subject)
+		e.setPeekRaw(0, keys)
 		e.push(values_or_none)
 		return e.advance(), nil
 	case compile.MATCH_MAPPING:
@@ -977,7 +964,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		} else {
 			res = stackref.False
 		}
-		e.setPeek(0, subject)
+		e.setPeekRaw(0, subject)
 		e.push(res)
 		return e.advance(), nil
 	case compile.MATCH_SEQUENCE:
@@ -991,7 +978,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		} else {
 			res = stackref.False
 		}
-		e.setPeek(0, subject)
+		e.setPeekRaw(0, subject)
 		e.push(res)
 		return e.advance(), nil
 	case compile.NOP:
@@ -1005,19 +992,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setHandledException(exc_value.AsObject())
 		}
 		e.drop(1)
-		// Track the suspendable's own except-block nesting so yield/resume
-		// knows whether it has an active own exception. Applies to
-		// generators, coroutines, and async generators alike.
-		//
-		// CPython: Python/bytecodes.c:1420 POP_EXCEPT (tstate->exc_info write)
-		if es, ok := e.genRunning.(objects.GenExcState); ok {
-			es.DecExcDepth()
-		}
 		return e.advance(), nil
 	case compile.POP_TOP:
 		value := e.peek(0)
 		_ = value
-		value.Close()
+		// value consumed input dropped by stack shrink
 		e.drop(1)
 		return e.advance(), nil
 	case compile.PUSH_EXC_INFO:
@@ -1035,13 +1014,6 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		e.push(prev_exc)
 		e.push(new_exc)
-		// Track the suspendable's own except-block nesting depth. Applies
-		// to generators, coroutines, and async generators alike.
-		//
-		// CPython: Python/bytecodes.c:3579 PUSH_EXC_INFO (tstate->exc_info write)
-		if es, ok := e.genRunning.(objects.GenExcState); ok {
-			es.IncExcDepth()
-		}
 		return e.advance(), nil
 	case compile.PUSH_NULL:
 		var res stackref.Ref
@@ -1110,7 +1082,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		if err != 0 {
 			return 0, e.error("error")
 		}
-		e.setPeek(int(oparg-1)+1, set)
+		e.setPeekRaw(int(oparg-1)+1, set)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.SET_FUNCTION_ATTRIBUTE:
@@ -1128,11 +1100,11 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = iterable
 		err := e.setUpdate(set.AsObject(), iterable.AsObject())
 		_ = err
-		iterable.Close()
+		// iterable consumed input dropped by stack shrink
 		if err < 0 {
 			return 0, e.error("error")
 		}
-		e.setPeek(int(oparg-1)+1, set)
+		e.setPeekRaw(int(oparg-1)+1, set)
 		e.drop(1)
 		return e.advance(), nil
 	case compile.STORE_DEREF:
@@ -1144,13 +1116,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		return e.advance(), nil
 	case compile.STORE_FAST:
-		value := e.pop()
+		value := e.peek(0)
+		_ = value
 		tmp := e.localAt(int(oparg))
+		_ = tmp
 		e.setLocal(int(oparg), value)
 		tmp.Close()
+		e.drop(1)
 		return e.advance(), nil
 	case compile.STORE_FAST_LOAD_FAST:
-		value1 := e.pop()
+		value1 := e.peek(0)
+		_ = value1
 		var value2 stackref.Ref
 		oparg1 := oparg >> 4
 		_ = oparg1
@@ -1161,11 +1137,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.setLocal(int(oparg1), value1)
 		value2 = e.localAt(int(oparg2)).Dup()
 		tmp.Close()
+		e.drop(1)
 		e.push(value2)
 		return e.advance(), nil
 	case compile.STORE_FAST_STORE_FAST:
-		value1 := e.pop()
-		value2 := e.pop()
+		value2 := e.peek(1)
+		_ = value2
+		value1 := e.peek(0)
+		_ = value1
 		oparg1 := oparg >> 4
 		_ = oparg1
 		oparg2 := oparg & 15
@@ -1177,6 +1156,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		tmp = e.localAt(int(oparg2))
 		e.setLocal(int(oparg2), value2)
 		tmp.Close()
+		e.drop(1 + 1)
 		return e.advance(), nil
 	case compile.STORE_GLOBAL:
 		v := e.peek(0)
@@ -1185,7 +1165,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = name
 		err := e.dictSetItem(e.globals(), name, v.AsObject())
 		_ = err
-		v.Close()
+		// v consumed input dropped by stack shrink
 		if err != 0 {
 			return 0, e.error("error")
 		}
@@ -1202,7 +1182,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = err
 		if ns == nil {
 			e.setPendingErr("SystemError")
-			v.Close()
+			// v consumed input dropped by stack shrink
 			return 0, e.error("error")
 		}
 		if objects.IsExactDict(ns) {
@@ -1210,7 +1190,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		} else {
 			err = e.objectSetItem(ns, name, v.AsObject())
 		}
-		v.Close()
+		// v consumed input dropped by stack shrink
 		if err != 0 {
 			return 0, e.error("error")
 		}
@@ -1225,8 +1205,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		_ = temp
 		bottom = top
 		top = temp
-		e.setPeek(int(oparg-2)+1, bottom)
-		e.setPeek(0, top)
+		e.setPeekRaw(int(oparg-2)+1, bottom)
+		e.setPeekRaw(0, top)
 		return e.advance(), nil
 	case compile.UNARY_INVERT:
 		value := e.peek(0)
@@ -1234,7 +1214,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var res stackref.Ref
 		res_o := e.pyNumberInvert(value.AsObject())
 		_ = res_o
-		value.Close()
+		// value consumed input dropped by stack shrink
 		if res_o == nil {
 			return 0, e.error("error")
 		}
@@ -1248,7 +1228,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var res stackref.Ref
 		res_o := e.pyNumberNegative(value.AsObject())
 		_ = res_o
-		value.Close()
+		// value consumed input dropped by stack shrink
 		if res_o == nil {
 			return 0, e.error("error")
 		}

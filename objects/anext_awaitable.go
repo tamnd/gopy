@@ -222,7 +222,7 @@ func anextAwaitableTraverse(o Object, visit Visitor) error {
 
 func init() {
 	AnextAwaitableType = NewType("anext_awaitable", []*Type{objectType})
-	AnextAwaitableType.Iter = func(o Object) (Object, error) { return o, nil }
+	AnextAwaitableType.Iter = SelfIter
 	AnextAwaitableType.IterNext = anextAwaitableIterNext
 	AnextAwaitableType.TpTraverse = anextAwaitableTraverse
 	AnextAwaitableType.Async = &AsyncMethods{

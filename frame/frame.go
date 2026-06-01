@@ -315,6 +315,19 @@ func (f *Frame) SetPeekStack(depth int, r stackref.Ref) {
 	f.LocalsPlus[i] = r
 }
 
+// PokeStack writes r into the slot at depth from the top without
+// touching the prior occupant's refcount. This is the faithful POKE:
+// it relocates a live reference rather than replacing a consumed one.
+// Passthrough writebacks (SWAP, COPY) use it because the value being
+// written is a live input being moved, and the slot's prior occupant
+// is itself a live input relocated elsewhere in the same instruction;
+// closing it here would double-free.
+//
+// CPython: Python/ceval_macros.h POKE macro (stack_pointer[-(depth)] = ref).
+func (f *Frame) PokeStack(depth int, r stackref.Ref) {
+	f.LocalsPlus[f.StackBase+f.StackTop-1-depth] = r
+}
+
 // DropStack removes the top n stack entries, closing each slot's
 // stackref before nulling it. Closing matches CPython's pattern of
 // DECREF_INPUTS followed by STACK_SHRINK: the stack pointer adjusts

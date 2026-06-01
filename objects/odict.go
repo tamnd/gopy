@@ -422,7 +422,7 @@ type odictIterObj struct {
 var odictKeyIterType = NewType("odict_keyiterator", []*Type{objectType})
 
 func init() {
-	odictKeyIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	odictKeyIterType.Iter = SelfIter
 	odictKeyIterType.IterNext = odictIterNextKey
 	AddIterSlotWrappers(odictKeyIterType)
 }

@@ -333,7 +333,7 @@ type strIterator struct {
 var strIterType = NewType("str_iterator", []*Type{objectType})
 
 func init() {
-	strIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	strIterType.Iter = SelfIter
 	strIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*strIterator)
 		if it.src == nil || it.pos >= it.src.length {

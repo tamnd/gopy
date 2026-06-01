@@ -74,7 +74,7 @@ var (
 )
 
 func init() {
-	identity := func(o Object) (Object, error) { return o, nil }
+	identity := SelfIter
 
 	dictKeyIterType.Iter = identity
 	dictKeyIterType.IterNext = dictIterNextKey

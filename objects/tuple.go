@@ -437,7 +437,7 @@ func init() {
 		it.pos++
 		return v, nil
 	}
-	tupleIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	tupleIterType.Iter = SelfIter
 	AddIterSlotWrappers(tupleIterType)
 	// CPython: Objects/tupleobject.c:1132 tupleiter_reduce
 	SetTypeDescr(tupleIterType, "__reduce__", NewMethodDescr(tupleIterType, "__reduce__",

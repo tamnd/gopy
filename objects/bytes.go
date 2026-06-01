@@ -192,7 +192,7 @@ type bytesIterator struct {
 var bytesIterType = NewType("bytes_iterator", []*Type{objectType})
 
 func init() {
-	bytesIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	bytesIterType.Iter = SelfIter
 	bytesIterType.IterNext = bytesIterNext
 	AddIterSlotWrappers(bytesIterType)
 	// CPython: Objects/bytesobject.c:2858 bytes_iter_reduce
