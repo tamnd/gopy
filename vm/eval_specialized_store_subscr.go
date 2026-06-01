@@ -43,9 +43,14 @@ func (e *evalState) fastStoreSubscrListInt(oparg uint32) (int, bool) {
 	}
 	value := e.peek(2).AsObject()
 	lst.SetItem(int(idx), value)
-	e.pop()
-	e.pop()
-	e.pop()
+	// Stack is (value, container, sub) with sub on top. listSetItem
+	// steals the value, so that stack reference transfers into the list;
+	// the integer index and the container reference are released.
+	// CPython: _STORE_SUBSCR_LIST_INT closes sub and list, value lands in
+	// the slot.
+	e.pop().Close() // sub (int index)
+	e.pop().Close() // container (list)
+	e.pop()         // value: adopted by the list
 	_ = oparg
 	return e.cacheAdvance(compile.STORE_SUBSCR), true
 }
@@ -65,9 +70,14 @@ func (e *evalState) fastStoreSubscrDict(oparg uint32) (int, bool, error) {
 	if err := d.SetItem(sub, value); err != nil {
 		return 0, true, err
 	}
-	e.pop()
-	e.pop()
-	e.pop()
+	// Stack is (value, container, sub) with sub on top. dictInsert steals
+	// the key (so the sub stack reference transfers into the dict) and
+	// increfs its own copy of the value, so the container and value stack
+	// references are released. CPython: _STORE_SUBSCR_DICT closes dict and
+	// value, the key lands in the table.
+	e.pop()         // sub (key): adopted by the dict
+	e.pop().Close() // container (dict)
+	e.pop().Close() // value
 	_ = oparg
 	return e.cacheAdvance(compile.STORE_SUBSCR), true, nil
 }

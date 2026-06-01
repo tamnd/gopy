@@ -379,10 +379,27 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.cacheAdvance(compile.UNPACK_SEQUENCE), true, nil
 
 	case compile.STORE_SUBSCR:
-		key := e.popObject()
-		container := e.popObject()
-		v := e.popObject()
-		if serr := setItem(container, key, v); serr != nil {
+		keyR := e.pop()
+		containerR := e.pop()
+		valueR := e.pop()
+		keepKey, keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
+		// CPython's STORE_SUBSCR runs DECREF_INPUTS on container, sub, and
+		// value after the store, whether it succeeded or raised. gopy's
+		// container ownership contracts are not uniform: an exact dict
+		// increfs the value it keeps but steals the key (dictInsert), and
+		// an exact list steals the value. keepKey / keepValue report which
+		// input the container adopted so we leave that stack reference in
+		// place and release the rest.
+		//
+		// CPython: Python/bytecodes.c STORE_SUBSCR DECREF_INPUTS
+		containerR.Close()
+		if !keepKey {
+			keyR.Close()
+		}
+		if !keepValue {
+			valueR.Close()
+		}
+		if serr != nil {
 			return 0, true, serr
 		}
 		return e.cacheAdvance(compile.STORE_SUBSCR), true, nil
@@ -1825,6 +1842,40 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 // readiness; gopy does the walk on each call instead.
 //
 // CPython: Objects/abstract.c PyObject_SetItem
+// storeSubscr performs container[key] = value and reports whether the
+// container adopted ownership of the key and/or value reference, so the
+// STORE_SUBSCR arm can release exactly the inputs CPython's
+// DECREF_INPUTS would. gopy's container storage contracts are not
+// uniform: an exact dict increfs the value it stores but steals the key
+// (dictInsert), an exact list steals the value it stores (listSetItem),
+// and every other path (user __setitem__, bytearray, dict/list
+// subclasses) treats its arguments as borrowed. keepKey / keepValue
+// stay false unless the container took the matching reference.
+//
+// CPython: Python/bytecodes.c STORE_SUBSCR
+func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool, err error) {
+	if objects.IsExactDict(container) {
+		if serr := setItem(container, key, value); serr != nil {
+			return false, false, serr
+		}
+		// dictInsert steals the key reference and increfs its own copy of
+		// the value, so the key transfers into the dict and the value
+		// stack reference is released by the caller.
+		return true, false, nil
+	}
+	if objects.IsExactList(container) {
+		if serr := setItem(container, key, value); serr != nil {
+			return false, false, serr
+		}
+		// listSetItem steals the value; the integer index is not stored.
+		return false, true, nil
+	}
+	if serr := setItem(container, key, value); serr != nil {
+		return false, false, serr
+	}
+	return false, false, nil
+}
+
 func setItem(container, key, value objects.Object) error {
 	mp, sq := mappingAndSequence(container.Type())
 	if mp != nil && mp.SetItem != nil {
