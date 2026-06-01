@@ -159,8 +159,14 @@ func dictSetDefault(d *Dict, h int64, key, dflt Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:1832 insert_split_key
 func dictInsertSplit(d *Dict, h int64, key, value Object) error {
+	// insertdict only takes the split fast path for an exact str
+	// (PyUnicode_CheckExact). A str subclass such as MyStr matches an
+	// existing shared key under __eq__ but must be stored as the subclass
+	// instance, so it materializes to combined and inserts there (gh-143189).
+	//
+	// CPython: Objects/dictobject.c:1898 insertdict
 	u, isUnicode := key.(*Unicode)
-	if !isUnicode {
+	if !isUnicode || key.Type() != StrType() {
 		d.ensureCombined()
 		return dictInsert(d, h, key, value)
 	}
