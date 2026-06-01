@@ -37,6 +37,12 @@ type dictIterObj struct {
 	pos      int
 	snapUsed int
 	kind     dictIterKind
+	// reversed walks it.src.order from the tail toward the head, mirroring
+	// the dict_reversekeyiterator family. pos counts down from the last
+	// order slot to 0 instead of up from 0 to len(order).
+	//
+	// CPython: Objects/dictobject.c:5408 dict___reversed___impl
+	reversed bool
 	// owns is true when this iterator holds a counted reference on src
 	// (the dictiter_new path). The transient walker dictiter_reduce
 	// builds for draining borrows src instead, so it leaves owns false
@@ -48,6 +54,10 @@ var (
 	dictKeyIterType   = NewType("dict_keyiterator", []*Type{objectType})
 	dictValueIterType = NewType("dict_valueiterator", []*Type{objectType})
 	dictItemIterType  = NewType("dict_itemiterator", []*Type{objectType})
+
+	dictReverseKeyIterType   = NewType("dict_reversekeyiterator", []*Type{objectType})
+	dictReverseValueIterType = NewType("dict_reversevalueiterator", []*Type{objectType})
+	dictReverseItemIterType  = NewType("dict_reverseitemiterator", []*Type{objectType})
 )
 
 func init() {
@@ -65,9 +75,28 @@ func init() {
 	dictItemIterType.IterNext = dictIterNextItem
 	dictItemIterType.Dealloc = dictIterDealloc
 
+	// Reverse iterators share the same slots; advance() walks the order
+	// list backward when it.reversed is set.
+	//
+	// CPython: Objects/dictobject.c:5408 dict___reversed___impl
+	dictReverseKeyIterType.Iter = identity
+	dictReverseKeyIterType.IterNext = dictIterNextKey
+	dictReverseKeyIterType.Dealloc = dictIterDealloc
+
+	dictReverseValueIterType.Iter = identity
+	dictReverseValueIterType.IterNext = dictIterNextValue
+	dictReverseValueIterType.Dealloc = dictIterDealloc
+
+	dictReverseItemIterType.Iter = identity
+	dictReverseItemIterType.IterNext = dictIterNextItem
+	dictReverseItemIterType.Dealloc = dictIterDealloc
+
 	AddIterSlotWrappers(dictKeyIterType)
 	AddIterSlotWrappers(dictValueIterType)
 	AddIterSlotWrappers(dictItemIterType)
+	AddIterSlotWrappers(dictReverseKeyIterType)
+	AddIterSlotWrappers(dictReverseValueIterType)
+	AddIterSlotWrappers(dictReverseItemIterType)
 
 	dictReduceFn := func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 1 {
@@ -86,7 +115,7 @@ func init() {
 		// The unpickled iterator will be a list_iterator, not a dict
 		// iterator — this matches CPython's documented behavior.
 		items := []Object{}
-		tmp := &dictIterObj{src: it.src, pos: it.pos, snapUsed: it.snapUsed, kind: it.kind}
+		tmp := &dictIterObj{src: it.src, pos: it.pos, snapUsed: it.snapUsed, kind: it.kind, reversed: it.reversed}
 		tmp.init(it.Type())
 		for {
 			var v Object
@@ -128,6 +157,9 @@ func init() {
 	SetTypeDescr(dictKeyIterType, "__reduce__", NewMethodDescr(dictKeyIterType, "__reduce__", dictReduceFn))
 	SetTypeDescr(dictValueIterType, "__reduce__", NewMethodDescr(dictValueIterType, "__reduce__", dictReduceFn))
 	SetTypeDescr(dictItemIterType, "__reduce__", NewMethodDescr(dictItemIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictReverseKeyIterType, "__reduce__", NewMethodDescr(dictReverseKeyIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictReverseValueIterType, "__reduce__", NewMethodDescr(dictReverseValueIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictReverseItemIterType, "__reduce__", NewMethodDescr(dictReverseItemIterType, "__reduce__", dictReduceFn))
 
 	// CPython: Objects/dictobject.c:5300 dictiter_len
 	// Returns 0 if the dict was mutated (size mismatch) so callers don't
@@ -144,9 +176,17 @@ func init() {
 			return NewInt(0), nil
 		}
 		remaining := 0
-		for p := it.pos; p < len(it.src.order); p++ {
-			if it.src.slotIsLive(it.src.order[p]) {
-				remaining++
+		if it.reversed {
+			for p := it.pos; p >= 0; p-- {
+				if it.src.slotIsLive(it.src.order[p]) {
+					remaining++
+				}
+			}
+		} else {
+			for p := it.pos; p < len(it.src.order); p++ {
+				if it.src.slotIsLive(it.src.order[p]) {
+					remaining++
+				}
 			}
 		}
 		return NewInt(int64(remaining)), nil
@@ -154,6 +194,9 @@ func init() {
 	SetTypeDescr(dictKeyIterType, "__length_hint__", NewMethodDescr(dictKeyIterType, "__length_hint__", dictLenHintFn))
 	SetTypeDescr(dictValueIterType, "__length_hint__", NewMethodDescr(dictValueIterType, "__length_hint__", dictLenHintFn))
 	SetTypeDescr(dictItemIterType, "__length_hint__", NewMethodDescr(dictItemIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictReverseKeyIterType, "__length_hint__", NewMethodDescr(dictReverseKeyIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictReverseValueIterType, "__length_hint__", NewMethodDescr(dictReverseValueIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictReverseItemIterType, "__length_hint__", NewMethodDescr(dictReverseItemIterType, "__length_hint__", dictLenHintFn))
 }
 
 // dictIter is the type-level Iter slot that DictType registers in
@@ -181,6 +224,42 @@ func newDictIter(d *Dict, kind dictIterKind) *dictIterObj {
 		it.init(dictValueIterType)
 	case dictIterItems:
 		it.init(dictItemIterType)
+	}
+	return it
+}
+
+// newDictIterReversed builds a tail-to-head walker. pos starts at the
+// last order slot so advance() yields entries in reverse insertion
+// order. An empty dict gives pos == -1, which advance() reports as
+// immediate StopIteration.
+//
+// CPython: Objects/dictobject.c:5408 dict___reversed___impl
+// dictReversedMethod implements dict.__reversed__(): a reverse key
+// iterator over the dict.
+//
+// CPython: Objects/dictobject.c:5408 dict___reversed___impl
+func dictReversedMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments")
+	}
+	d, ok := args[0].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reversed__' requires a 'dict' object")
+	}
+	return newDictIterReversed(d, dictIterKeys), nil
+}
+
+func newDictIterReversed(d *Dict, kind dictIterKind) *dictIterObj {
+	it := &dictIterObj{src: d, snapUsed: d.used, kind: kind, owns: true, reversed: true}
+	it.pos = len(d.order) - 1
+	Incref(d)
+	switch kind {
+	case dictIterKeys:
+		it.init(dictReverseKeyIterType)
+	case dictIterValues:
+		it.init(dictReverseValueIterType)
+	case dictIterItems:
+		it.init(dictReverseItemIterType)
 	}
 	return it
 }
@@ -222,6 +301,16 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 		}
 		it.src = nil
 		return nil, nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
+	}
+	if it.reversed {
+		for it.pos >= 0 {
+			slot := it.src.order[it.pos]
+			it.pos--
+			if it.src.slotIsLive(slot) {
+				return it.src.slotKey(slot), it.src.slotValue(slot), nil
+			}
+		}
+		return nil, nil, ErrStopIteration
 	}
 	for it.pos < len(it.src.order) {
 		slot := it.src.order[it.pos]
@@ -309,6 +398,71 @@ func init() {
 		Xor:      dictItemsViewXor,
 	}
 	dictItemsViewType.Repr = dictViewRepr
+	// dictviews_richcompare is shared between keys and items views; both
+	// lift to sets and compare. values views are not set-like, so they
+	// keep object identity comparison.
+	//
+	// CPython: Objects/dictobject.c:6447 dictviews_richcompare
+	dictItemsViewType.RichCmp = dictKeysViewRichCmp
+
+	// reversed() over a view walks the backing dict's entries tail-first.
+	//
+	// CPython: Objects/dictobject.c:6588 dictkeys_reversed
+	//          Objects/dictobject.c:6790 dictvalues_reversed
+	//          Objects/dictobject.c:6700 dictitems_reversed
+	for _, vt := range []*Type{dictKeysViewType, dictValuesViewType, dictItemsViewType} {
+		SetTypeDescr(vt, "__reversed__", NewMethodDescr(vt, "__reversed__", dictViewReversed))
+		SetTypeDescr(vt, "mapping", NewGetSetDescr("mapping", dictViewMappingGet, nil))
+	}
+	// isdisjoint is only defined on the set-like views (keys, items).
+	//
+	// CPython: Objects/dictobject.c:6650 dictkeys_methods / dictitems_methods
+	SetTypeDescr(dictKeysViewType, "isdisjoint", NewMethodDescr(dictKeysViewType, "isdisjoint", dictViewIsDisjoint))
+	SetTypeDescr(dictItemsViewType, "isdisjoint", NewMethodDescr(dictItemsViewType, "isdisjoint", dictViewIsDisjoint))
+}
+
+// dictViewReversed implements view.__reversed__(): a reverse iterator
+// over the backing dict in the view's kind.
+//
+// CPython: Objects/dictobject.c:6588 dictkeys_reversed
+func dictViewReversed(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments")
+	}
+	v := args[0].(*dictView)
+	return newDictIterReversed(v.src, v.kind), nil
+}
+
+// dictViewMappingGet returns a read-only mappingproxy over the backing
+// dict, exposed as the view's .mapping attribute.
+//
+// CPython: Objects/dictobject.c:6175 dictview_mapping
+func dictViewMappingGet(o Object) (Object, error) {
+	return NewMappingProxy(o.(*dictView).src)
+}
+
+// dictViewIsDisjoint reports whether the view and other share no
+// elements, draining the smaller operand against the larger.
+//
+// CPython: Objects/dictobject.c:6332 dictviews_isdisjoint
+func dictViewIsDisjoint(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: isdisjoint() takes exactly one argument")
+	}
+	v := args[0].(*dictView)
+	left, err := dictViewToSet(v)
+	if err != nil {
+		return nil, err
+	}
+	right, err := otherToSet(args[1])
+	if err != nil {
+		return nil, err
+	}
+	dis, err := left.IsDisjoint(right)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(dis), nil
 }
 
 // KeysView returns a dict_keys view over d. The view stays bound to

@@ -129,6 +129,7 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators
 	SetTypeDescr(DictType, "__repr__", NewMethodDescr(DictType, "__repr__", dictReprMethod))
+	SetTypeDescr(DictType, "__reversed__", NewMethodDescr(DictType, "__reversed__", dictReversedMethod))
 	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
 	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
 	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
@@ -982,15 +983,14 @@ func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	other, ok := args[1].(*Dict)
-	if !ok {
-		return NotImplemented(), nil
-	}
-	for _, k := range other.Keys() {
-		v, _ := other.GetItem(k)
-		if err := self.SetItem(k, v); err != nil {
-			return nil, err
-		}
+	// |= delegates to dict_update_arg, which accepts any mapping or any
+	// iterable of key/value pairs, exactly like dict.update. This is
+	// looser than __or__ (which only pairs two dicts): `d |= [(1, 1)]`
+	// is valid.
+	//
+	// CPython: Objects/dictobject.c:3922 dict___ior___impl (dict_update_arg)
+	if err := dictMergeFromArg(self, args[1]); err != nil {
+		return nil, err
 	}
 	return self, nil
 }
