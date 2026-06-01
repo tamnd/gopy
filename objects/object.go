@@ -92,7 +92,28 @@ func init() {
 	// dispatch.
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
-	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, nil))
+	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+}
+
+// objectSetDict implements object.__dict__ set for HasDict-bearing
+// instances. The new value must be a dictionary; a HasDict instance
+// rebinds its attribute store to it, anything else raises the same
+// "not writable" AttributeError CPython does for a type with no
+// tp_dictoffset.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict /
+// Objects/object.c:_PyObject_SetDict
+func objectSetDict(o Object, value Object) error {
+	d, ok := value.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __dict__ must be set to a dictionary, not a '%s'", value.Type().Name)
+	}
+	v, ok := o.(*Instance)
+	if !ok || !v.Type().HasDict {
+		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
+	}
+	v.dict = d
+	return nil
 }
 
 // excessArgs reports whether args / kwargs carry any non-self payload.
