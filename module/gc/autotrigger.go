@@ -67,10 +67,13 @@ func maybeAutoCollect() {
 	}
 	state.collecting = true
 	state.mu.Unlock()
-	// Collect re-acquires state.mu internally. We must not hold it
+	// collect re-acquires state.mu internally. We must not hold it
 	// across the call because invokeGCCallback / weakref callbacks
-	// run user code and could otherwise deadlock.
-	Collect(gen)
+	// run user code and could otherwise deadlock. forceGoGC is false:
+	// the allocator hook runs only the cyclic collector, never a
+	// whole-heap Go GC, so an allocation-heavy loop does not stall on
+	// thousands of stop-the-world passes.
+	runCollect(gen, false)
 	state.mu.Lock()
 	state.collecting = false
 }

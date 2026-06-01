@@ -36,6 +36,27 @@ import (
 //
 // CPython: Python/gc.c:1430 gc_collect_main
 func Collect(gen int) int {
+	return runCollect(gen, true)
+}
+
+// collect runs the cyclic collector over generations 0..gen. forceGoGC
+// distinguishes the two entry points that share this driver:
+//
+//   - The explicit gc.collect() / support.gc_collect() path passes true.
+//     Tests synchronize on that call to observe reclaimed objects, so it
+//     drives two Go GC passes to flush runtime.SetFinalizer-backed weakref
+//     finalizers before returning.
+//
+//   - The allocator-side auto-trigger (maybeAutoCollect) passes false. It
+//     fires from Track on every object whose allocation crosses the gen-0
+//     threshold, so it must stay cheap: like CPython's _PyObject_GC_Link
+//     hook it runs only the cyclic collector, never a whole-heap sweep.
+//     Forcing two stop-the-world Go GCs here would turn any allocation-heavy
+//     loop (for example an O(n^2) set build whose every __eq__ allocates an
+//     argument tuple) into thousands of full collections.
+//
+// CPython: Python/gc.c:1430 gc_collect_main
+func runCollect(gen int, forceGoGC bool) int {
 	if gen < 0 {
 		gen = 0
 	}
@@ -55,19 +76,21 @@ func Collect(gen int) int {
 	collected, pending := collectMain(gen)
 	state.mu.Unlock()
 
-	// Force Go GC so any weakref finalizers registered via
-	// runtime.SetFinalizer on dropped objects can fire. Without this,
-	// support.gc_collect() returns before the underlying Go runtime
-	// has a chance to reclaim user objects whose only post-Decref
-	// keep-alive is Go's tracing collector. Two passes are needed
-	// because the first GC marks finalizers runnable; the second
-	// reclaims the now-finalized memory.
-	//
-	// CPython: Modules/gcmodule.c:1822 gc_collect_impl (CPython's
-	// refcount makes collection synchronous, so the second pass
-	// approximates the same end state for gopy's Go-backed objects).
-	runtime.GC()
-	runtime.GC()
+	if forceGoGC {
+		// Force Go GC so any weakref finalizers registered via
+		// runtime.SetFinalizer on dropped objects can fire. Without this,
+		// support.gc_collect() returns before the underlying Go runtime
+		// has a chance to reclaim user objects whose only post-Decref
+		// keep-alive is Go's tracing collector. Two passes are needed
+		// because the first GC marks finalizers runnable; the second
+		// reclaims the now-finalized memory.
+		//
+		// CPython: Modules/gcmodule.c:1822 gc_collect_impl (CPython's
+		// refcount makes collection synchronous, so the second pass
+		// approximates the same end state for gopy's Go-backed objects).
+		runtime.GC()
+		runtime.GC()
+	}
 
 	invokeWeakrefCallbacks(pending)
 	invokeGCCallback(cbList, "stop", gen, collected, 0)
