@@ -604,8 +604,17 @@ func (u *Unicode) RuneAt(i int) rune {
 func unicodeRepr(o Object) (string, error) {
 	s := o.(*Unicode).v
 
+	// Decode through strLenientRunes rather than Go's range loop: a lone
+	// surrogate (U+D800..U+DFFF) is stored as 3-byte pseudo-UTF-8, which
+	// Go's range rejects byte-by-byte as three U+FFFD runes. strLenientRunes
+	// recovers the single surrogate code point so the escape loop emits one
+	// \udXXX escape (surrogates are non-printable) instead of � repeated.
+	//
+	// CPython: Objects/unicodeobject.c:12956 unicode_repr
+	runes := strLenientRunes(s)
+
 	squote, dquote := 0, 0
-	for _, ch := range s {
+	for _, ch := range runes {
 		switch ch {
 		case '\'':
 			squote++
@@ -622,7 +631,7 @@ func unicodeRepr(o Object) (string, error) {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
 	b.WriteByte(quote)
-	for _, ch := range s {
+	for _, ch := range runes {
 		switch {
 		case ch == rune(quote) || ch == '\\':
 			b.WriteByte('\\')
