@@ -865,6 +865,49 @@ func asyncGenAThrowAwaitMethod(args []Object, _ map[string]Object) (Object, erro
 	return args[0], nil
 }
 
+// asyncGenAThrowCloseResult handles a gen_throw / gen_send result while
+// the athrow awaitable is in aclose() mode (agt_args == NULL). It runs
+// for both the initial GeneratorExit throw and every later resume, so
+// the body that suspends on an intermediate await (e.g. asyncio.sleep)
+// and only later yields still gets caught.
+//
+//   - an AsyncGenWrappedValue means the body answered GeneratorExit with
+//     another async yield, which is "async generator ignored
+//     GeneratorExit" (yield_close).
+//   - a plain value is an intermediate await the body is suspended on;
+//     forward it untouched.
+//   - a swallowed StopAsyncIteration / GeneratorExit (or any nil result)
+//     means the aclose() await is done, reported as StopIteration so it is
+//     not propagated; PyErr_Clear first so wrapCallError does not
+//     re-surface the swallowed exception. Other errors propagate as-is.
+//
+// CPython: Objects/genobject.c:2190 async_gen_athrow_send (aclose mode,
+// yield_close + check_error labels)
+func asyncGenAThrowCloseResult(a *asyncGenAThrow, r Object, e error) (Object, error) {
+	if e != nil {
+		a.state = asyncAwaitClosed
+		a.gen.RunningAsync.Store(0)
+		if asyncCloseSwallow(e) {
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
+			return nil, ErrStopIteration
+		}
+		return nil, e
+	}
+	if r != nil {
+		if _, ok := r.(*AsyncGenWrappedValue); ok {
+			a.state = asyncAwaitClosed
+			a.gen.RunningAsync.Store(0)
+			return nil, fmt.Errorf("RuntimeError: async generator ignored GeneratorExit")
+		}
+		return r, nil
+	}
+	a.state = asyncAwaitClosed
+	a.gen.RunningAsync.Store(0)
+	return nil, ErrStopIteration
+}
+
 // asyncGenAThrowDrive is the shared body of send() / __next__ on the
 // athrow awaitable. The first call throws the captured error or
 // GeneratorExit (aclose mode); subsequent calls forward arg via Send.
@@ -874,55 +917,17 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 	if a.used {
 		// Subsequent send() forwards arg into the generator so awaited
 		// sub-coroutines keep receiving values. CPython does the same
-		// at Objects/genobject.c:2170 gen_iternext branch.
+		// at Objects/genobject.c:2184 (AWAITABLE_STATE_ITER branch).
 		r, e := a.gen.Send(arg)
+		if a.isClose {
+			return asyncGenAThrowCloseResult(a, r, e)
+		}
 		return asyncGenAThrowDriveResult(a, r, e)
 	}
 	a.used = true
 	if a.isClose {
 		r, e := a.gen.Throw(ErrGeneratorExit)
-		if e != nil {
-			if asyncCloseSwallow(e) {
-				a.state = asyncAwaitClosed
-				a.gen.RunningAsync.Store(0)
-				// check_error label: when aclose() is called we do not
-				// propagate StopAsyncIteration or GeneratorExit, we raise
-				// StopIteration to signal this aclose() await is done.
-				// PyErr_Clear first so the swallowed GeneratorExit is not
-				// re-surfaced by wrapCallError.
-				//
-				// CPython: Objects/genobject.c:2211 async_gen_athrow_send
-				// (check_error), Python/errors.c:488 _PyErr_Clear
-				if ClearCurrentExceptionHook != nil {
-					ClearCurrentExceptionHook()
-				}
-				return nil, ErrStopIteration
-			}
-			return asyncGenAThrowDriveResult(a, r, e)
-		}
-		if r != nil {
-			// aclose() mode. A wrapped value means the body answered
-			// GeneratorExit with another async yield instead of letting
-			// it propagate, so raise "async generator ignored
-			// GeneratorExit". A plain value is an intermediate await the
-			// body is suspended on; forward it untouched.
-			//
-			// CPython: Objects/genobject.c:2190 async_gen_athrow_send
-			// (aclose() mode, yield_close label)
-			if _, ok := r.(*AsyncGenWrappedValue); ok {
-				a.state = asyncAwaitClosed
-				a.gen.RunningAsync.Store(0)
-				return nil, fmt.Errorf("RuntimeError: async generator ignored GeneratorExit")
-			}
-			return r, nil
-		}
-		// aclose() drove the body to completion without another yield:
-		// the await is done, signaled by StopIteration (check_error).
-		//
-		// CPython: Objects/genobject.c:2211 async_gen_athrow_send
-		a.state = asyncAwaitClosed
-		a.gen.RunningAsync.Store(0)
-		return nil, ErrStopIteration
+		return asyncGenAThrowCloseResult(a, r, e)
 	}
 	if a.argExc != nil {
 		if GenThrowHook == nil {
