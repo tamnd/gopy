@@ -275,6 +275,7 @@ func sockInitDescr(args []objects.Object, kwargs map[string]objects.Object) (obj
 		s.typ = typ
 		s.proto = proto
 		s.timeout = timeout
+		applyTimeoutBlocking(s)
 		return objects.None(), nil
 	}
 	if s.fd >= 0 {
@@ -293,6 +294,7 @@ func sockInitDescr(args []objects.Object, kwargs map[string]objects.Object) (obj
 	s.typ = typ
 	s.proto = proto
 	s.timeout = timeout
+	applyTimeoutBlocking(s)
 	return objects.None(), nil
 }
 
@@ -310,7 +312,14 @@ func sockRepr(o objects.Object) (string, error) {
 func osError(err error) error {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return fmt.Errorf("OSError: [Errno %d] %s", int(errno), errno.Error())
+		// Wrap the errno with %w so the eval loop's promoteOSErrorByErrno
+		// can recover it via errors.As and pick the matching OSError
+		// subclass (BlockingIOError for EAGAIN, TimeoutError for
+		// ETIMEDOUT, ...). Without the wrap every errno surfaced as a
+		// plain OSError and `except BlockingIOError:` never caught.
+		//
+		// CPython: Objects/exceptions.c:2158 errnomap promotion in OSError_new
+		return fmt.Errorf("OSError: [Errno %d] %w", int(errno), errno)
 	}
 	return fmt.Errorf("OSError: %s", err.Error())
 }
@@ -536,6 +545,7 @@ func sockAccept(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 		timeout: s.timeout,
 	}
 	newSock.Init(SocketType)
+	applyTimeoutBlocking(newSock)
 
 	addrTup, err2 := sockaddrToTuple(sa)
 	if err2 != nil {
@@ -583,6 +593,7 @@ func socketSocketpair(args []objects.Object, _ map[string]objects.Object) (objec
 	mk := func(fd int) *sockObj {
 		s := &sockObj{fd: fd, family: family, typ: typ, proto: proto, timeout: timeout}
 		s.Init(SocketType)
+		applyTimeoutBlocking(s)
 		return s
 	}
 	return objects.NewTuple([]objects.Object{mk(fds[0]), mk(fds[1])}), nil
@@ -894,6 +905,7 @@ func sockDup(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ns := &sockObj{fd: newfd, family: s.family, typ: s.typ, proto: s.proto, timeout: s.timeout}
 	ns.Init(s.Type())
+	applyTimeoutBlocking(ns)
 	return ns, nil
 }
 
@@ -1093,6 +1105,34 @@ func sockFileno(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	return objects.NewInt(int64(socketFdInt(s.fd))), nil
 }
 
+// setFdNonblock toggles the kernel O_NONBLOCK flag on the socket fd.
+// syscall.SetNonblock has the same shape on every platform gopy builds
+// for (fd int on unix, fd Handle on Windows), so socketFd matches it
+// directly. This is the piece internal_setblocking actually performs;
+// before it landed setblocking() only recorded a logical timeout and
+// recv()/send() kept blocking, which deadlocked the asyncio self-pipe
+// reader (it expects a drained non-blocking recv to raise EAGAIN).
+//
+// CPython: Modules/socketmodule.c:643 internal_setblocking (ioctl FIONBIO)
+func setFdNonblock(fd socketFd, nonblock bool) error {
+	return syscall.SetNonblock(fd, nonblock)
+}
+
+// applyTimeoutBlocking syncs the fd's O_NONBLOCK flag with the socket's
+// logical timeout. CPython keeps the descriptor non-blocking whenever a
+// timeout is in force (timeout == 0 means pure non-blocking; timeout > 0
+// drives a select loop on the non-blocking fd) and blocking only when
+// the timeout is None (stored here as a negative value).
+//
+// CPython: Modules/socketmodule.c:3267 sock_settimeout (block = timeout < 0),
+// Modules/socketmodule.c:643 internal_setblocking
+func applyTimeoutBlocking(s *sockObj) {
+	if !socketFdValid(s.fd) {
+		return
+	}
+	_ = setFdNonblock(s.fd, s.timeout >= 0)
+}
+
 // sockSetblocking implements socket.setblocking(flag).
 //
 // CPython: Modules/socketmodule.c:3170 setblocking_doc
@@ -1113,6 +1153,7 @@ func sockSetblocking(args []objects.Object, _ map[string]objects.Object) (object
 	} else {
 		s.timeout = 0.0
 	}
+	applyTimeoutBlocking(s)
 	return objects.None(), nil
 }
 
@@ -1129,6 +1170,7 @@ func sockSettimeout(args []objects.Object, _ map[string]objects.Object) (objects
 	}
 	if args[1] == objects.None() {
 		s.timeout = -1.0
+		applyTimeoutBlocking(s)
 		return objects.None(), nil
 	}
 	switch v := args[1].(type) {
@@ -1147,6 +1189,7 @@ func sockSettimeout(args []objects.Object, _ map[string]objects.Object) (objects
 	default:
 		return nil, fmt.Errorf("TypeError: a float is required")
 	}
+	applyTimeoutBlocking(s)
 	return objects.None(), nil
 }
 
@@ -1243,6 +1286,7 @@ func socketSocket(args []objects.Object, _ map[string]objects.Object) (objects.O
 		timeout: timeout,
 	}
 	s.Init(SocketType)
+	applyTimeoutBlocking(s)
 	return s, nil
 }
 
