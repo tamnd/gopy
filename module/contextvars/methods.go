@@ -22,35 +22,79 @@ import (
 var CurrentThreadHook func() *state.Thread
 
 func init() {
-	ContextVarType.Getattro = contextVarGetattr
+	// Register name (read-only getset) plus the get/set/reset methods
+	// and let the inherited PyObject_GenericGetAttr slot resolve them.
+	// A NULL setter on the name getset makes `cv.name = x` raise
+	// AttributeError, matching CPython's tp_getset.
+	//
+	// CPython: Python/context.c:1083 PyContextVar_members
+	// CPython: Python/context.c:1088 PyContextVar_methods
+	objects.SetTypeDescr(ContextVarType, "name",
+		objects.NewGetSetDescr("name", contextVarGetName, nil))
+	objects.SetTypeDescr(ContextVarType, "get",
+		objects.NewMethodDescr(ContextVarType, "get", contextVarGetDescr))
+	objects.SetTypeDescr(ContextVarType, "set",
+		objects.NewMethodDescr(ContextVarType, "set", contextVarSetDescr))
+	objects.SetTypeDescr(ContextVarType, "reset",
+		objects.NewMethodDescr(ContextVarType, "reset", contextVarResetDescr))
+	ContextVarType.Repr = contextVarRepr
+	ContextVarType.Str = contextVarRepr
+	// Route attribute assignment through the generic setattr so the
+	// read-only `name` getset raises AttributeError rather than the
+	// "object has no attributes" TypeError a nil tp_setattro yields.
+	//
+	// CPython: Python/context.c:1110 inherits object's tp_setattro
+	ContextVarType.Setattro = objects.GenericSetAttr
+	// ContextVar omits Py_TPFLAGS_BASETYPE, so `class C(ContextVar)`
+	// raises "not an acceptable base type".
+	//
+	// CPython: Python/context.c:1110 .tp_flags (no Py_TPFLAGS_BASETYPE)
+	ContextVarType.TpFlags &^= objects.TpFlagBasetype
 }
 
-func contextVarGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
+// contextVarSelf pulls the ContextVar receiver from args[0] for a
+// method descriptor, which binds self as the first positional argument.
+func contextVarSelf(name string, args []objects.Object) (*ContextVar, []objects.Object, error) {
+	if len(args) == 0 {
+		return nil, nil, fmt.Errorf("TypeError: descriptor '%s' of 'ContextVar' object needs an argument", name)
+	}
+	cv, ok := args[0].(*ContextVar)
+	if !ok {
+		return nil, nil, fmt.Errorf("TypeError: descriptor '%s' requires a 'ContextVar' object", name)
+	}
+	return cv, args[1:], nil
+}
+
+func contextVarGetName(o objects.Object) (objects.Object, error) {
 	cv, ok := o.(*ContextVar)
 	if !ok {
-		return nil, fmt.Errorf("TypeError: expected ContextVar")
+		return nil, fmt.Errorf("TypeError: descriptor 'name' requires a 'ContextVar' object")
 	}
-	n, ok := name.(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	return objects.NewStr(cv.name), nil
+}
+
+func contextVarGetDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	cv, rest, err := contextVarSelf("get", args)
+	if err != nil {
+		return nil, err
 	}
-	switch n.Value() {
-	case "name":
-		return objects.NewStr(cv.name), nil
-	case "get":
-		return objects.NewBuiltinFunction("get", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			return contextVarGet(cv, args, kwargs)
-		}), nil
-	case "set":
-		return objects.NewBuiltinFunction("set", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			return contextVarSet(cv, args, kwargs)
-		}), nil
-	case "reset":
-		return objects.NewBuiltinFunction("reset", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			return contextVarReset(cv, args, kwargs)
-		}), nil
+	return contextVarGet(cv, rest, kwargs)
+}
+
+func contextVarSetDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	cv, rest, err := contextVarSelf("set", args)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("AttributeError: 'ContextVar' object has no attribute '%s'", n.Value())
+	return contextVarSet(cv, rest, kwargs)
+}
+
+func contextVarResetDescr(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	cv, rest, err := contextVarSelf("reset", args)
+	if err != nil {
+		return nil, err
+	}
+	return contextVarReset(cv, rest, kwargs)
 }
 
 // currentTS returns the running thread or errors out if vm has not

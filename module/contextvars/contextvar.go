@@ -8,6 +8,7 @@
 package contextvars
 
 import (
+	"fmt"
 	"sync"
 	"unsafe"
 
@@ -57,6 +58,33 @@ func NewContextVar(name string, defaultVal objects.Object, hasDefault bool) *Con
 
 // Name returns the variable's name as a Go string.
 func (cv *ContextVar) Name() string { return cv.name }
+
+// contextVarRepr renders "<ContextVar name='a' at 0x...>", inserting a
+// " default=<repr>" clause when the variable carries a default. The
+// default's repr runs through the normal repr machinery so a default
+// that refers back to the ContextVar (default=[cv]) folds to "..."
+// via the container's own recursion guard, matching CPython.
+//
+// CPython: Python/context.c:963 contextvar_tp_repr
+func contextVarRepr(o objects.Object) (string, error) {
+	cv, ok := o.(*ContextVar)
+	if !ok {
+		return "", errSentinel("contextvar: repr expected ContextVar")
+	}
+	nameRepr, err := objects.Repr(objects.NewStr(cv.name))
+	if err != nil {
+		return "", err
+	}
+	out := "<ContextVar name=" + nameRepr
+	if cv.hasDefault {
+		defRepr, derr := objects.Repr(cv.defaultVal)
+		if derr != nil {
+			return "", derr
+		}
+		out += " default=" + defRepr
+	}
+	return out + fmt.Sprintf(" at %p>", cv), nil
+}
 
 // Default returns the (defaultVal, hasDefault) pair the variable was
 // constructed with.
@@ -142,7 +170,12 @@ func (cv *ContextVar) notFound(ts *state.Thread) (objects.Object, error) {
 	if cv.hasDefault {
 		return cv.defaultVal, nil
 	}
-	errors.SetString(ts, errors.PyExc_LookupError, cv.name)
+	// CPython raises LookupError with the ContextVar itself as the sole
+	// argument, so str(exc) renders the variable's repr
+	// ("<ContextVar name='c' ...>") rather than just its bare name.
+	//
+	// CPython: Python/context.c:319 PyContextVar_Get (PyErr_SetObject var)
+	errors.Set(ts, errors.PyExc_LookupError, objects.NewTuple([]objects.Object{cv}))
 	return nil, errLookup
 }
 
