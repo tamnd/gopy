@@ -78,7 +78,7 @@ func installSubclassAttrSlots(t *Type) {
 		// strand the subclass with no usable attribute store. Adopt the
 		// base's attr slots and its tp_new so the subclass keeps the base's
 		// instance layout. Only non-nil base slots are copied so a base
-		// that customises one half of the protocol still leaves the other
+		// that customizes one half of the protocol still leaves the other
 		// half on the generic instance path.
 		//
 		// CPython: Objects/typeobject.c:7521 inherit_slots
