@@ -110,6 +110,22 @@ func init() {
 	CoroutineType.Str = coroRepr
 	CoroutineType.Getattro = GenericGetAttr
 	CoroutineType.Setattro = GenericSetAttr
+	// Coroutines are hashable by identity: CPython leaves tp_hash unset
+	// so it inherits object's _Py_HashPointer through inherit_slots.
+	// asyncio.gather keys a dict on the raw coroutine, so the slot must
+	// be present.
+	//
+	// CPython: Objects/genobject.c PyCoro_Type (tp_hash inherited from object)
+	CoroutineType.Hash = IdentityHash
+	// am_await: a coroutine yields the coroutine_wrapper that drives it,
+	// exactly as coro_await does. _PyCoro_GetAwaitableIter returns the
+	// coroutine itself (it lacks tp_iternext), so callers that need an
+	// iterator (anextawaitable_getiter) unwrap this slot to reach the
+	// wrapper. Without the slot that unwrap reports "__await__ returned a
+	// non-iterable".
+	//
+	// CPython: Objects/genobject.c:1486 coro_await (coro_as_async.am_await)
+	CoroutineType.Async = &AsyncMethods{Await: coroAmAwait}
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
 		"send":          coroSendMethod,
 		"throw":         coroThrowMethod,
@@ -761,6 +777,21 @@ func coroAwaitMethod(args []Object, _ map[string]Object) (Object, error) {
 	c, ok := args[0].(*Coroutine)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__await__' requires a 'coroutine' object")
+	}
+	return c.Await(), nil
+}
+
+// coroAmAwait is the am_await slot for coroutines. CPython's
+// coro_as_async.am_await is coro_await, which returns the
+// coroutine_wrapper. _PyCoro_GetAwaitableIter returns the coroutine
+// itself, so anextawaitable_getiter unwraps this slot to reach an
+// iterator.
+//
+// CPython: Objects/genobject.c:1486 coro_await
+func coroAmAwait(o Object) (Object, error) {
+	c, ok := o.(*Coroutine)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __await__() requires a 'coroutine' object")
 	}
 	return c.Await(), nil
 }

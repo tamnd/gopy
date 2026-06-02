@@ -80,6 +80,16 @@ type AsyncGenerator struct {
 	//
 	// CPython: Objects/genobject.c:1608 ag_await -> coro_get_cr_await
 	YieldFromTarget Object
+
+	// hooksInited guards async_gen_init_hooks so the per-thread firstiter
+	// hook fires exactly once, the first time the generator is iterated.
+	// Finalizer captures the per-thread finalizer at that same point; the
+	// tp_finalize slot runs it so the event loop can schedule aclose().
+	//
+	// CPython: Objects/genobject.c:1605 ag_hooks_inited,
+	//          ag_origin_or_finalizer
+	hooksInited bool
+	Finalizer   Object
 }
 
 func (g *AsyncGenerator) GetExcHandled() Object  { return g.ExcHandled }
@@ -126,6 +136,17 @@ var AsyncGenWrappedValueType *Type
 // CPython: Objects/genobject.c:652 _PyGen_SetStopIterationValue
 var AsyncGenStopIterationHook func(value Object) error
 
+// CoroGetAwaitableIterHook ports _PyCoro_GetAwaitableIter: turn an
+// awaitable into the iterator that drives it. A coroutine (native or a
+// @types.coroutine generator) is its own iterator; anything else routes
+// through its tp_as_async->am_await slot, which must return an iterator
+// that is not itself a coroutine. anextawaitable_getiter calls this on
+// the wrapped __anext__() result, so objects/ needs it without pulling
+// in the vm; the vm wires the implementation here.
+//
+// CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter
+var CoroGetAwaitableIterHook func(o Object) (Object, error)
+
 // AsyncGenWrappedValue mirrors _PyAsyncGenWrappedValue. The compiler
 // emits CALL_INTRINSIC_1 INTRINSIC_ASYNC_GEN_WRAP before YIELD_VALUE
 // in async-generator bodies so the yielded object surfaces here, not
@@ -165,10 +186,22 @@ func init() {
 	AsyncGeneratorType.Str = asyncGenRepr
 	AsyncGeneratorType.Async = &AsyncMethods{
 		Aiter: func(o Object) (Object, error) { return o, nil },
-		Anext: func(o Object) (Object, error) { return o.(*AsyncGenerator).Anext(), nil },
+		Anext: func(o Object) (Object, error) {
+			g := o.(*AsyncGenerator)
+			if err := g.initHooks(); err != nil {
+				return nil, err
+			}
+			return g.Anext(), nil
+		},
 	}
 	AsyncGeneratorType.Getattro = GenericGetAttr
 	AsyncGeneratorType.Setattro = GenericSetAttr
+	AsyncGeneratorType.Finalize = asyncGenFinalize
+	// Async generators are hashable by identity, inheriting object's
+	// _Py_HashPointer through inherit_slots.
+	//
+	// CPython: Objects/genobject.c PyAsyncGen_Type (tp_hash inherited from object)
+	AsyncGeneratorType.Hash = IdentityHash
 
 	// ag_frame: the frame object of the suspended async generator.
 	//
@@ -280,6 +313,15 @@ func init() {
 	// CPython: Objects/genobject.c:1477 async_gen_traverse (-> gen_traverse)
 	AsyncGeneratorType.TpTraverse = asyncGenTraverse
 
+	initAsyncGenAwaitableTypes()
+}
+
+// initAsyncGenAwaitableTypes builds the asend / athrow / wrapped-value
+// helper types and registers their method rows. Split out of init so the
+// async generator setup stays under the cyclomatic-complexity gate.
+//
+// CPython: Objects/genobject.c:1623 async_gen_methods (and asend/athrow rows)
+func initAsyncGenAwaitableTypes() {
 	AsyncGenASendType = NewType("async_generator_asend",
 		[]*Type{objectType})
 	AsyncGenASendType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }
@@ -377,6 +419,9 @@ func asyncGenAsendMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'asend' requires a 'async_generator' object")
 	}
+	if err := g.initHooks(); err != nil {
+		return nil, err
+	}
 	return g.Asend(args[1]), nil
 }
 
@@ -390,6 +435,9 @@ func asyncGenAthrowMethod(args []Object, _ map[string]Object) (Object, error) {
 	g, ok := args[0].(*AsyncGenerator)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'athrow' requires a 'async_generator' object")
+	}
+	if err := g.initHooks(); err != nil {
+		return nil, err
 	}
 	// CPython: Objects/genobject.c:1567 emits a DeprecationWarning when
 	// the deprecated (type, exc, tb) form is used. The actual exception
@@ -430,6 +478,9 @@ func asyncGenAcloseMethod(args []Object, _ map[string]Object) (Object, error) {
 	g, ok := args[0].(*AsyncGenerator)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'aclose' requires a 'async_generator' object")
+	}
+	if err := g.initHooks(); err != nil {
+		return nil, err
 	}
 	return g.Aclose(), nil
 }
@@ -569,10 +620,34 @@ func asyncGenASendCloseMethod(args []Object, _ map[string]Object) (Object, error
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'async_generator_asend' object")
 	}
+	// CPython: async_gen_asend_close short-circuits an already-closed
+	// awaitable, then routes through async_gen_asend_throw(GeneratorExit),
+	// which leaves ags_state == AWAITABLE_STATE_CLOSED. gopy drives the
+	// throw directly, so it owns that state transition here: once close
+	// has run, a later send/throw must raise "cannot reuse already
+	// awaited", not re-enter the finished generator.
+	//
+	// CPython: Objects/genobject.c:1870 async_gen_asend_close
+	if a.state == asyncAwaitClosed {
+		return None(), nil
+	}
 	a.used = true
 	result, terr := a.gen.Throw(ErrGeneratorExit)
+	a.state = asyncAwaitClosed
+	a.gen.RunningAsync.Store(0)
 	if terr != nil {
 		if asyncCloseSwallow(terr) {
+			// CPython's async_gen_asend_close swallows the GeneratorExit
+			// (or StopIteration/StopAsyncIteration) via PyErr_Clear, which
+			// leaves no exception on the thread state. gopy drives the throw
+			// as a Go error and must mirror that clear, otherwise the next
+			// send/throw's wrapCallError re-wraps its fresh error with this
+			// stale exception object.
+			//
+			// CPython: Python/errors.c:488 _PyErr_Clear
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return None(), nil
 		}
 		return nil, terr
@@ -733,6 +808,13 @@ func asyncGenAThrowCloseMethod(args []Object, _ map[string]Object) (Object, erro
 	result, terr := a.gen.Throw(ErrGeneratorExit)
 	if terr != nil {
 		if asyncCloseSwallow(terr) {
+			// Mirror PyErr_Clear so a later send/throw is not re-wrapped
+			// with this swallowed exception by wrapCallError.
+			//
+			// CPython: Python/errors.c:488 _PyErr_Clear
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return None(), nil
 		}
 		return nil, terr
@@ -794,6 +876,14 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 			if asyncCloseSwallow(e) {
 				a.state = asyncAwaitClosed
 				a.gen.RunningAsync.Store(0)
+				// PyErr_Clear: the GeneratorExit is consumed here and
+				// converted to StopAsyncIteration; do not leave it on the
+				// thread state for wrapCallError to re-surface.
+				//
+				// CPython: Python/errors.c:488 _PyErr_Clear
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
 				return nil, ErrStopAsyncIteration
 			}
 			return asyncGenAThrowDriveResult(a, r, e)
@@ -859,6 +949,9 @@ func asyncGenAnextMethod(args []Object, _ map[string]Object) (Object, error) {
 	g, ok := args[0].(*AsyncGenerator)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__anext__' requires a 'async_generator' object")
+	}
+	if err := g.initHooks(); err != nil {
+		return nil, err
 	}
 	return g.Anext(), nil
 }
@@ -1074,6 +1167,40 @@ func (g *AsyncGenerator) Asend(v Object) Object {
 	return a
 }
 
+// AsyncGenHooksHook returns the running thread's (firstiter, finalizer)
+// async-generator hooks, as installed by sys.set_asyncgen_hooks. The vm
+// wires it; objects/ cannot reach the thread state directly. Either
+// return value may be nil or None when the corresponding hook is unset.
+//
+// CPython: Objects/genobject.c:130 async_gen_init_hooks (tstate hooks)
+var AsyncGenHooksHook func() (firstiter Object, finalizer Object)
+
+// initHooks ports async_gen_init_hooks: the first time the generator is
+// iterated it captures the thread's finalizer hook and invokes the
+// firstiter hook with the generator as its single argument. The guard
+// makes it fire exactly once.
+//
+// CPython: Objects/genobject.c:130 async_gen_init_hooks
+func (g *AsyncGenerator) initHooks() error {
+	if g.hooksInited {
+		return nil
+	}
+	g.hooksInited = true
+	if AsyncGenHooksHook == nil {
+		return nil
+	}
+	firstiter, finalizer := AsyncGenHooksHook()
+	if finalizer != nil && finalizer != None() {
+		g.Finalizer = finalizer
+	}
+	if firstiter != nil && firstiter != None() {
+		if _, err := Call(firstiter, NewTuple([]Object{g}), nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Anext is __anext__: shorthand for asend(None).
 //
 // CPython: Objects/genobject.c:L1862 async_gen_anext
@@ -1195,6 +1322,37 @@ func asyncGenAThrowNext(o Object) (Object, error) {
 func asyncGenRepr(o Object) (string, error) {
 	g := o.(*AsyncGenerator)
 	return fmt.Sprintf("<async_generator object %s at %p>", g.Name, g), nil
+}
+
+// asyncGenFinalize is the tp_finalize slot for async generators. When a
+// finalizer hook was captured (sys.set_asyncgen_hooks, stashed by
+// initHooks) and the generator has not yet been closed, it hands the
+// generator to that hook so the running event loop can schedule
+// aclose(). With no finalizer the suspended generator is simply
+// abandoned to the collector, matching the gen branch of _PyGen_Finalize
+// when ag_origin_or_finalizer is NULL.
+//
+// CPython: Objects/genobject.c:87 _PyGen_Finalize (PyAsyncGen_CheckExact branch)
+func asyncGenFinalize(o Object) {
+	g, ok := o.(*AsyncGenerator)
+	if !ok {
+		return
+	}
+	if g.Finalizer == nil || g.Finalizer == None() || g.closed {
+		return
+	}
+	// Save and restore the ambient exception so running the finalizer
+	// cannot clobber an exception the collector interrupted.
+	//
+	// CPython: Objects/genobject.c:96 _PyGen_Finalize (PyErr_Fetch/Restore)
+	var saved any
+	if h := SaveCurrentExceptionHook; h != nil {
+		saved = h()
+	}
+	_, _ = Call(g.Finalizer, NewTuple([]Object{g}), nil)
+	if h := RestoreCurrentExceptionHook; h != nil {
+		h(saved)
+	}
 }
 
 // asyncGenASendFinalize is the tp_finalize slot for the asend awaitable.

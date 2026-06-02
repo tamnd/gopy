@@ -252,7 +252,31 @@ func sockInitDescr(args []objects.Object, kwargs map[string]objects.Object) (obj
 			proto = int(p64)
 		}
 	}
-	// fileno arg (args[4]) would be for dup; not implemented yet
+	// When a fileno is supplied (args[4] not None) the socket adopts that
+	// existing descriptor instead of opening a new one. socket.py's
+	// socket.__init__ uses this to wrap fds returned by accept() and
+	// socketpair(); CPython's sock_initobj takes the same branch.
+	//
+	// CPython: Modules/socketmodule.c:3453 sock_initobj (fdobj != Py_None)
+	if len(args) >= 5 && args[4] != objects.None() {
+		f, ok2 := args[4].(*objects.Int)
+		if !ok2 {
+			return nil, fmt.Errorf("TypeError: fileno must be int, not %s", args[4].Type().Name)
+		}
+		f64, _ := f.Int64()
+		if s.fd >= 0 {
+			_ = syscall.Close(s.fd)
+		}
+		defaultTimeoutMu.Lock()
+		timeout := defaultTimeoutVal
+		defaultTimeoutMu.Unlock()
+		s.fd = int(f64)
+		s.family = family
+		s.typ = typ
+		s.proto = proto
+		s.timeout = timeout
+		return objects.None(), nil
+	}
 	if s.fd >= 0 {
 		_ = syscall.Close(s.fd)
 	}
@@ -519,6 +543,49 @@ func sockAccept(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 		return nil, err2
 	}
 	return objects.NewTuple([]objects.Object{newSock, addrTup}), nil
+}
+
+// socketSocketpair implements _socket.socketpair([family[, type[, proto]]]).
+// Returns a pair of connected socket objects created with the native
+// socketpair(2) syscall. socket.py wraps each in a high-level socket via
+// detach()/fileno construction.
+//
+// CPython: Modules/socketmodule.c:5836 socket_socketpair
+func socketSocketpair(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	family := syscall.AF_UNIX
+	typ := syscall.SOCK_STREAM
+	proto := 0
+	if len(args) >= 1 {
+		if f, ok := args[0].(*objects.Int); ok {
+			v, _ := f.Int64()
+			family = int(v)
+		}
+	}
+	if len(args) >= 2 {
+		if t, ok := args[1].(*objects.Int); ok {
+			v, _ := t.Int64()
+			typ = int(v)
+		}
+	}
+	if len(args) >= 3 {
+		if p, ok := args[2].(*objects.Int); ok {
+			v, _ := p.Int64()
+			proto = int(v)
+		}
+	}
+	fds, err := syscall.Socketpair(family, typ, proto)
+	if err != nil {
+		return nil, osError(err)
+	}
+	defaultTimeoutMu.Lock()
+	timeout := defaultTimeoutVal
+	defaultTimeoutMu.Unlock()
+	mk := func(fd int) *sockObj {
+		s := &sockObj{fd: fd, family: family, typ: typ, proto: proto, timeout: timeout}
+		s.Init(SocketType)
+		return s
+	}
+	return objects.NewTuple([]objects.Object{mk(fds[0]), mk(fds[1])}), nil
 }
 
 // sockClose implements socket.close().
@@ -1597,6 +1664,7 @@ func buildModule() (*objects.Module, error) {
 		fn   func([]objects.Object, map[string]objects.Object) (objects.Object, error)
 	}{
 		{"socket", socketSocket},
+		{"socketpair", socketSocketpair},
 		{"gethostname", socketGethostname},
 		{"gethostbyname", socketGethostbyname},
 		{"gethostbyname_ex", socketGethostbynameEx},

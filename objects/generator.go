@@ -198,6 +198,11 @@ func init() {
 	GeneratorType.IterNext = genIterNext
 	GeneratorType.Getattro = GenericGetAttr
 	GeneratorType.Setattro = GenericSetAttr
+	// Generators are hashable by identity, inheriting object's
+	// _Py_HashPointer through inherit_slots.
+	//
+	// CPython: Objects/genobject.c PyGen_Type (tp_hash inherited from object)
+	GeneratorType.Hash = IdentityHash
 	// Tp_finalize: invoked by the cycle collector when the generator
 	// becomes unreachable while still suspended. Calls close() so the
 	// body's finally clauses run before memory is reclaimed.

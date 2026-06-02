@@ -73,6 +73,8 @@ func Bind(d *objects.Dict, ts *state.Thread) error {
 		{"set_int_max_str_digits", setIntMaxStrDigits},
 		{"get_coroutine_origin_tracking_depth", getCoroutineOriginTrackingDepth},
 		{"set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth},
+		{"get_asyncgen_hooks", getAsyncgenHooks},
+		{"set_asyncgen_hooks", setAsyncgenHooks},
 	}
 	for _, h := range helpers {
 		if err := setItem(d, h.name, objects.NewBuiltinFunction(h.name, h.fn)); err != nil {
@@ -170,13 +172,11 @@ func setIntMaxStrDigits(args []objects.Object, _ map[string]objects.Object) (obj
 	return objects.None(), nil
 }
 
-// resolveThread returns ts when supplied, otherwise falls back to
-// CurrentThreadHook. inittab-built sys (no ts) routes through the hook
-// the vm installs once the interpreter starts; Bind passes ts directly.
-func resolveThread(ts *state.Thread) *state.Thread {
-	if ts != nil {
-		return ts
-	}
+// resolveThread returns the active thread via CurrentThreadHook, which
+// the vm installs once the interpreter starts. inittab-built sys has no
+// thread of its own, so every coroutine-origin and asyncgen-hook entry
+// point routes through this hook.
+func resolveThread() *state.Thread {
 	if CurrentThreadHook != nil {
 		return CurrentThreadHook()
 	}
@@ -190,7 +190,7 @@ func resolveThread(ts *state.Thread) *state.Thread {
 // CPython: Python/sysmodule.c:1402 sys_get_coroutine_origin_tracking_depth_impl
 // CPython: Python/ceval.c:2690 _PyEval_GetCoroutineOriginTrackingDepth
 func getCoroutineOriginTrackingDepth(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	ts := resolveThread(nil)
+	ts := resolveThread()
 	if ts == nil {
 		return objects.NewInt(0), nil
 	}
@@ -215,7 +215,7 @@ func setCoroutineOriginTrackingDepth(args []objects.Object, _ map[string]objects
 	if v < 0 {
 		return nil, fmt.Errorf("ValueError: depth must be >= 0")
 	}
-	ts := resolveThread(nil)
+	ts := resolveThread()
 	if ts == nil {
 		return objects.None(), nil
 	}

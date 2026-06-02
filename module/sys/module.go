@@ -423,6 +423,9 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
 		return nil, err
 	}
+	if err := setItem(md, "is_finalizing", objects.NewBuiltinFunction("is_finalizing", isFinalizing)); err != nil {
+		return nil, err
+	}
 	// sys.get_int_max_str_digits / sys.set_int_max_str_digits guard
 	// integer-to-string conversion length. Added in CPython 3.11 to
 	// mitigate quadratic-time attacks via enormous int repr.
@@ -446,6 +449,19 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := setItem(md, "set_coroutine_origin_tracking_depth", objects.NewBuiltinFunction("set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth)); err != nil {
+		return nil, err
+	}
+	// sys.get_asyncgen_hooks / sys.set_asyncgen_hooks manage the
+	// per-thread firstiter / finalizer hooks the event loop installs so
+	// it can drive aclose() on async generators that the collector
+	// reclaims. base_events._run_forever_setup swaps them in and out.
+	//
+	// CPython: Python/sysmodule.c:1443 sys_set_asyncgen_hooks_impl,
+	// Python/sysmodule.c:1480 sys_get_asyncgen_hooks_impl
+	if err := setItem(md, "get_asyncgen_hooks", objects.NewBuiltinFunction("get_asyncgen_hooks", getAsyncgenHooks)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_asyncgen_hooks", objects.NewBuiltinFunction("set_asyncgen_hooks", setAsyncgenHooks)); err != nil {
 		return nil, err
 	}
 	// sys._getframe([depth]) returns the frame depth levels up the call

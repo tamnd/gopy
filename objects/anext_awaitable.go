@@ -41,37 +41,43 @@ func NewAnextAwaitable(awaitable, defaultValue Object) *AnextAwaitable {
 }
 
 // anextAwaitableGetIter mirrors anextawaitable_getiter: turn the wrapped
-// awaitable into an iterator. CPython hands the wrapped object to
-// _PyCoro_GetAwaitableIter (Coroutine returns self), then unwraps a
-// Coroutine result via its am_await slot, since Coroutine itself lacks
-// tp_iternext.
+// awaitable into the iterator that drives it. CPython hands the wrapped
+// object (the result of __anext__()) to _PyCoro_GetAwaitableIter, which
+// validates it is awaitable and returns a coroutine, generator, or
+// iterator. Of those only a coroutine lacks tp_iternext; when that
+// happens the coroutine's am_await slot is unwrapped and the result must
+// be an iterator, else "__await__ returned a non-iterable".
 //
 // CPython: Objects/iterobject.c:339 anextawaitable_getiter
 func (a *AnextAwaitable) anextAwaitableGetIter() (Object, error) {
 	if a.wrapped == nil {
 		return nil, fmt.Errorf("RuntimeError: anext_awaitable.wrapped is NULL")
 	}
-	it := a.wrapped
-	// Coroutine: am_await returns the coro_wrapper iterator (Await()).
-	if c, ok := it.(*Coroutine); ok {
-		it = c.Await()
-	} else if t := it.Type(); t.IterNext == nil {
-		// Anything else with no tp_iternext routes through its
-		// am_await slot, then must be iterable. CPython surfaces
-		// the failure as "__await__ returned a non-iterable".
-		if t.Async == nil || t.Async.Await == nil {
-			return nil, fmt.Errorf("TypeError: __await__ returned a non-iterable")
-		}
-		next, err := t.Async.Await(it)
-		if err != nil {
-			return nil, err
-		}
-		if next == nil || next.Type().IterNext == nil {
-			return nil, fmt.Errorf("TypeError: __await__ returned a non-iterable")
-		}
-		it = next
+	if CoroGetAwaitableIterHook == nil {
+		return nil, fmt.Errorf("RuntimeError: CoroGetAwaitableIterHook not installed")
 	}
-	return it, nil
+	awaitable, err := CoroGetAwaitableIterHook(a.wrapped)
+	if err != nil {
+		return nil, err
+	}
+	if awaitable.Type().IterNext != nil {
+		return awaitable, nil
+	}
+	// _PyCoro_GetAwaitableIter returns a Coroutine, a Generator, or an
+	// iterator. Of these, only coroutines lack tp_iternext, so unwrap
+	// the coroutine's am_await slot and require an iterator.
+	t := awaitable.Type()
+	if t.Async == nil || t.Async.Await == nil {
+		return nil, fmt.Errorf("TypeError: __await__ returned a non-iterable")
+	}
+	next, aerr := t.Async.Await(awaitable)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if next == nil || next.Type().IterNext == nil {
+		return nil, fmt.Errorf("TypeError: __await__ returned a non-iterable")
+	}
+	return next, nil
 }
 
 // anextAwaitableIterNext mirrors anextawaitable_iternext: drive the

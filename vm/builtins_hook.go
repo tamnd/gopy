@@ -30,6 +30,7 @@ func init() {
 	objects.GenAttachFrameTBHook = genAttachFrameTBHook
 	objects.WriteUnraisableHook = writeUnraisable
 	objects.KeyErrorHook = keyErrorWithKey
+	objects.CoroGetAwaitableIterHook = coroGetAwaitableIter
 }
 
 // keyErrorWithKey builds a KeyError whose single argument is the missing

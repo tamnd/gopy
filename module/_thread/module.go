@@ -132,6 +132,40 @@ func goid() int64 {
 	return id
 }
 
+// ThreadIdentHook resolves the active Python thread's identity for the
+// current goroutine. The vm installs it so get_ident and thread-local
+// storage key on the Python thread state rather than the raw goroutine.
+// gopy backs each generator and coroutine with its own goroutine, but
+// CPython runs them on the thread that resumes them, so their identity
+// must stay constant across a yield. Returns 0 when no Python thread is
+// active on this goroutine, in which case callers fall back to goid().
+//
+// CPython: Include/cpython/pystate.h PyThreadState.thread_id
+var ThreadIdentHook func() int64
+
+// ThreadSpawnHook allocates a Python thread state for a goroutine that
+// start_new_thread is about to launch. It runs on the parent goroutine
+// and returns the new thread's identity (so start_new_thread hands it
+// back synchronously, matching get_ident inside the child) plus enter /
+// leave callbacks the child goroutine runs to install and retire the
+// thread as its active thread.
+//
+// CPython: Modules/_threadmodule.c:1166 thread_PyThread_start_new_thread
+var ThreadSpawnHook func() (ident int64, enter func(), leave func())
+
+// pyThreadIdent returns the stable Python-thread identity for the
+// current goroutine, preferring the active thread state over the raw
+// goroutine id so generator and coroutine bodies keep their creator's
+// identity across the goroutine boundary.
+func pyThreadIdent() int64 {
+	if ThreadIdentHook != nil {
+		if id := ThreadIdentHook(); id != 0 {
+			return id
+		}
+	}
+	return goid()
+}
+
 // threadGetIdent implements _thread.get_ident().
 //
 // CPython: Modules/_threadmodule.c:2082 thread_get_ident
@@ -139,7 +173,7 @@ func threadGetIdent(args []objects.Object, kwargs map[string]objects.Object) (ob
 	if len(args) != 0 || len(kwargs) != 0 {
 		return nil, fmt.Errorf("TypeError: get_ident() takes no arguments")
 	}
-	id := goid()
+	id := pyThreadIdent()
 	if id == 0 {
 		return nil, fmt.Errorf("_thread.error: no current thread ident")
 	}
@@ -421,16 +455,52 @@ func threadStartNewThread(args []objects.Object, kwargs map[string]objects.Objec
 		pos[i] = targs.Item(i)
 	}
 
-	// Channel to return the goroutine ID before the goroutine runs.
+	// Allocate the child's Python thread state up front (on the parent
+	// goroutine) so start_new_thread can return the identity that
+	// get_ident will report inside the child. Falls back to the raw
+	// goroutine id when the vm has not installed the spawn hook.
+	//
+	// CPython: Modules/_threadmodule.c:1166 thread_PyThread_start_new_thread
+	var (
+		ident int64
+		enter func()
+		leave func()
+	)
+	if ThreadSpawnHook != nil {
+		ident, enter, leave = ThreadSpawnHook()
+	}
+
+	// Channel to return the thread identity before the goroutine runs.
 	idCh := make(chan int64, 1)
 
 	atomic.AddInt64(&activeThreadCount, 1)
 	go func() {
 		defer atomic.AddInt64(&activeThreadCount, -1)
-		idCh <- goid()
-		tp := callable.Type()
-		if tp.Call != nil {
-			tp.Call(callable, pos, tkwargs) //nolint:errcheck
+		if enter != nil {
+			enter()
+			defer leave()
+			idCh <- ident
+		} else {
+			idCh <- goid()
+		}
+		// Route through objects.Call so bound methods and other
+		// vectorcall-only callables run. callable.Type().Call is nil for
+		// such objects, which would silently skip the thread body.
+		//
+		// CPython: Modules/_threadmodule.c:333 thread_run (PyObject_Call)
+		argsTuple := objects.NewTuple(pos)
+		var kwDict *objects.Dict
+		if len(tkwargs) > 0 {
+			kwDict = objects.NewDict()
+			for k, v := range tkwargs {
+				if err := kwDict.SetItem(objects.NewStr(k), v); err != nil {
+					writeThreadUnraisable(callable, err)
+					return
+				}
+			}
+		}
+		if _, err := objects.Call(callable, argsTuple, kwDict); err != nil {
+			writeThreadUnraisable(callable, err)
 		}
 	}()
 
@@ -555,7 +625,7 @@ func localNew(cls *objects.Type, args []objects.Object, kwargs map[string]object
 	// type_call after we return) does not double-fire from ldict.
 	//
 	// CPython: Modules/_threadmodule.c:1497 create_localsdict
-	lc.data.Store(goid(), objects.NewDict())
+	lc.data.Store(pyThreadIdent(), objects.NewDict())
 	return lc, nil
 }
 
@@ -564,7 +634,7 @@ func localNew(cls *objects.Type, args []objects.Object, kwargs map[string]object
 //
 // CPython: Modules/_threadmodule.c:1639 _ldict
 func (lc *localObj) ldict() (*objects.Dict, error) {
-	id := goid()
+	id := pyThreadIdent()
 	if v, ok := lc.data.Load(id); ok {
 		return v.(*objects.Dict), nil
 	}
