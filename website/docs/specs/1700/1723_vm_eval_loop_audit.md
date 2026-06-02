@@ -39,8 +39,8 @@ that tree.
 | test_eval | no standalone module in 3.14 (moved to test_capi/, needs _testcapi) | out-of-scope |
 | test_pow | OK | done |
 | test_yield_from | OK (43 pass) | done |
-| test_coroutines | FAILED (5 failures, 1 error — P11 refcount, asyncio) | ready |
-| test_asyncgen | FAILED (3 failures, 54 errors — asyncio event loop, spec 1711) | ready |
+| test_coroutines | OK (99 pass, 3 skip) | done |
+| test_asyncgen | OK (85 pass) | done |
 | test_generator_stop | OK | done |
 | test_generators | OK (59 pass, 1 skip) | done |
 | test_iter | OK (57 pass, 2 skip) | done |
@@ -707,9 +707,19 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ### P3 — sys hooks
 
-- [ ] P3.1 `sys.set_asyncgen_hooks` / `sys.get_asyncgen_hooks`
-- [ ] P3.2 `sys.set_coroutine_origin_tracking_depth` / `sys.get_coroutine_origin_tracking_depth`
+- [x] P3.1 `sys.set_asyncgen_hooks` / `sys.get_asyncgen_hooks`
+- [x] P3.2 `sys.set_coroutine_origin_tracking_depth` / `sys.get_coroutine_origin_tracking_depth`
 - [ ] P3.3 `sys.call_tracing` stub
+
+### P13 — Async generator finalization through asyncio shutdown
+
+- [x] P13.1 `async_generator.__aiter__` (am_aiter) returns a new strong reference
+  via `PyObject_SelfIter`. The missing incref let `GET_AITER` drop the generator
+  to refcount zero, firing `tp_finalize` on a still-referenced generator and
+  emptying `loop._asyncgens` before `shutdown_asyncgens` ran.
+- [x] P13.2 `async_generator_asend` / `async_generator_athrow` are hashable by
+  identity (`tp_hash` inherits object's `_Py_HashPointer`). `shutdown_asyncgens`
+  gathers the `aclose()` awaitables and keys a dict on each.
 
 ### P4 — Frame attributes
 
