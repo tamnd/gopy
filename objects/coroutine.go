@@ -637,22 +637,31 @@ func (c *Coroutine) throwWithCaller(err error, caller InterpreterFrame) (Object,
 // CPython: Objects/genobject.c:511 _gen_throw (retval / StopIteration branches)
 func (c *Coroutine) forwardThrowResult(fval Object, ferr error, caller InterpreterFrame) (Object, error) {
 	if ferr == nil {
+		// Sub-iterator yielded fval. Return it directly as the awaiting
+		// coroutine's yielded value without entering the body.
+		//
+		// CPython: Objects/genobject.c:511 _gen_throw (retval != NULL)
 		return fval, nil
 	}
-	if stopVal, isStop := genStopIterVal(ferr); isStop {
-		c.YieldFromTarget = nil
-		c.SendCh <- GenMsg{Val: stopVal, CallerFrame: caller}
-		msg := <-c.YieldCh
-		if msg.Err != nil {
-			c.closed = true
-			return nil, msg.Err
-		}
-		return msg.Val, nil
-	}
+	// Sub-iterator raised something (StopIteration or otherwise): throw it
+	// into the awaiting body. CPython's _gen_throw at L536 always calls
+	// gen_send_ex(gen, Py_None, 1, 0) when the sub-iter returned NULL,
+	// regardless of the exception class. The yield-from exception table
+	// entry routes a thrown StopIteration to CLEANUP_THROW, which extracts
+	// .value and jumps past END_SEND. Sending the bare value via Val
+	// instead re-enters the SEND loop with a now-closed sub-iterator
+	// (e.g. an exhausted async_generator_athrow), which then raises
+	// "cannot reuse already awaited aclose()/athrow()".
+	//
+	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
+	c.YieldFromTarget = nil
 	c.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
+		if errors.Is(msg.Err, ErrStopIteration) {
+			return nil, ErrStopIteration
+		}
 		return nil, msg.Err
 	}
 	return msg.Val, nil

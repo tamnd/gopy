@@ -852,24 +852,6 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error, caller Interpret
 	return msg.Val, nil
 }
 
-// genStopIterVal extracts the value from a StopIteration error.
-// Returns (value, true) if err is a StopIteration, (nil, false) otherwise.
-func genStopIterVal(err error) (Object, bool) {
-	if errors.Is(err, ErrStopIteration) {
-		var re *RaisedError
-		if errors.As(err, &re) {
-			if exc, ok := re.Exc.(ExceptionInstance); ok {
-				args := exc.ExceptionArgs()
-				if args != nil && args.Len() > 0 {
-					return args.Item(0), true
-				}
-			}
-		}
-		return None(), true
-	}
-	return nil, false
-}
-
 // Close throws GeneratorExit into the generator. A body that yields
 // instead of swallowing the exit raises RuntimeError; StopIteration
 // and GeneratorExit are both treated as a clean exit.
