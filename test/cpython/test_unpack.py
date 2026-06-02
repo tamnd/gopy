@@ -118,7 +118,7 @@ error)
     >>> a, b, c, d, e = BadSeq()
     Traceback (most recent call last):
       ...
-    BozoError
+    test.test_unpack.BozoError
 
 Trigger code while expecting an IndexError (unpack sequence too short, wrong
 error)
@@ -126,7 +126,7 @@ error)
     >>> a, b, c = BadSeq()
     Traceback (most recent call last):
       ...
-    BozoError
+    test.test_unpack.BozoError
 
 Allow unpacking empty iterables
 
