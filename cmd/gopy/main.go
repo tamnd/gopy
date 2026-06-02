@@ -329,7 +329,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 		return 1
 	}
 	installPathFinder("")
-	mainGlobals := newMainGlobals(g)
+	mainGlobals := newMainGlobals(g, "__main__")
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
@@ -355,7 +355,7 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	}
 	installPathFinder("")
 	sys.SetArgv(append([]string{modName}, modArgs...))
-	mainGlobals := newMainGlobals(g)
+	mainGlobals := newMainGlobals(g, "__main__")
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
@@ -388,7 +388,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 		return 1
 	}
 	installPathFinder(path)
-	mainGlobals := newMainGlobals(g)
+	mainGlobals := newMainGlobals(g, mainModuleName(path))
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
@@ -400,11 +400,13 @@ func runFile(path string, stdout, stderr *os.File) int {
 			fmt.Fprintln(stderr, readErr)
 			return 1
 		}
-		// RunSimpleString uses "<string>" as the filename so __file__ is
-		// never set; set it here so test methods can open the script.
+		// Set __file__ so test methods can open the script, and compile
+		// the rewritten source under the real path (not "<string>") so
+		// the code object's co_filename matches the file: frame repr and
+		// traceback source-line lookup both key off it.
 		_ = mainGlobals.SetItem(objects.NewStr("__file__"), objects.NewStr(path))
 		combined := string(src) + suffix
-		rc = pythonrun.RunSimpleString(ts, combined, mainGlobals, stderr)
+		rc = pythonrun.RunSimpleStringWithName(ts, combined, path, mainGlobals, stderr)
 	} else {
 		rc = pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
 	}
@@ -431,10 +433,34 @@ func unittestRunnerSuffix(path string) (string, bool) {
 	if !bytes.Contains(src, []byte("unittest")) {
 		return "", false
 	}
-	if bytes.Contains(src, []byte("unittest.main")) {
+	// A bare top-level unittest.main() call (one not guarded by
+	// `if __name__ == '__main__'`) already drives the suite, so a second
+	// runner would double-run it. Guarded calls no longer fire because
+	// the module runs under "test.<name>" rather than "__main__", so the
+	// appended runner takes over for those.
+	if bytes.Contains(src, []byte("unittest.main")) && !bytes.Contains(src, []byte("__main__")) {
 		return "", false
 	}
-	return "\nimport unittest as _ut; _ut.main(module=__import__('__main__'), verbosity=2)\n", true
+	// Drive the suite against the running module by name. Under
+	// mainModuleName a vendored test runs as "test.<name>", so resolve
+	// the module via sys.modules[__name__] rather than __main__.
+	return "\nimport sys as _gpsys, unittest as _gput\n_gput.main(module=_gpsys.modules[__name__], verbosity=2)\n", true
+}
+
+// mainModuleName returns the dotted module name a script runs under.
+// Vendored CPython tests live in the `test` package and bake their
+// package-qualified name into doctest and error-message expectations
+// (for example "test.test_extcall.f()"), so a test_*.py file runs under
+// "test.<name>" to match what regrtest produces. Everything else runs
+// as the conventional "__main__".
+//
+// CPython: Lib/test/libregrtest/runtest.py (imports test.<name>)
+func mainModuleName(path string) string {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
+		return "test." + strings.TrimSuffix(base, ".py")
+	}
+	return "__main__"
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner
@@ -450,7 +476,7 @@ func runInteractive(stdout, stderr *os.File) int {
 		return 1
 	}
 	installPathFinder("")
-	mainGlobals := newMainGlobals(g)
+	mainGlobals := newMainGlobals(g, "__main__")
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
@@ -495,12 +521,23 @@ func bootstrapBuiltins(stdout, stderr *os.File) (*objects.Dict, error) {
 //
 // CPython: Modules/main.c:289 pymain_run_command (PyImport_AddModule)
 // CPython: Python/pylifecycle.c init_interp_main (sets __main__)
-func newMainGlobals(builtinsDict *objects.Dict) *objects.Dict {
+func newMainGlobals(builtinsDict *objects.Dict, name string) *objects.Dict {
 	mainDict := objects.NewDict()
-	_ = mainDict.SetItem(objects.NewStr("__name__"), objects.NewStr("__main__"))
+	_ = mainDict.SetItem(objects.NewStr("__name__"), objects.NewStr(name))
 	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsDict)
-	if _, ok := imp.GetModule("__main__"); !ok {
-		imp.AddModule("__main__", objects.NewModuleWithDict("__main__", mainDict))
+	mod := objects.NewModuleWithDict(name, mainDict)
+	if _, ok := imp.GetModule(name); !ok {
+		imp.AddModule(name, mod)
+	}
+	// When a vendored test runs under "test.<name>" the runner harness
+	// and any code that does __import__('__main__') still expect a
+	// __main__ entry, so alias it to the same module object. doctest's
+	// _normalize_module(None) instead resolves sys.modules[__name__],
+	// which the registration above already covers.
+	if name != "__main__" {
+		if _, ok := imp.GetModule("__main__"); !ok {
+			imp.AddModule("__main__", mod)
+		}
 	}
 	return mainDict
 }

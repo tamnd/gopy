@@ -705,13 +705,12 @@ func DrainIterable(o Object) ([]Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	itT := it.Type()
-	if itT.IterNext == nil {
-		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itT.Name)
+	if it.Type().IterNext == nil {
+		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", it.Type().Name)
 	}
 	var out []Object
 	for {
-		v, err := itT.IterNext(it)
+		v, err := IterNext(it)
 		if errors.Is(err, ErrStopIteration) {
 			return out, nil
 		}

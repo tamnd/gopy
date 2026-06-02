@@ -161,6 +161,21 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 		return err
 	}
 	c.addOp(PUSH_NULL, loc(e.Func))
+	// A lone `*x` with no other positional args is passed straight to
+	// CALL_FUNCTION_EX, so the opcode's check_args_iterable reports
+	// "<func>() argument after * must be an iterable". Anything else is
+	// gathered into a list and coerced to a tuple, where a non-iterable
+	// star trips LIST_EXTEND's "Value after *" message instead.
+	//
+	// CPython: Python/codegen.c codegen_call_helper_impl (ex_call single-star)
+	if len(e.Args) == 1 {
+		if star, ok := e.Args[0].(*ast.Starred); ok {
+			if err := c.visitExpr(star.Value); err != nil {
+				return err
+			}
+			return c.emitCallExKwargs(e)
+		}
+	}
 	c.addOpI(BUILD_LIST, 0, loc(e))
 	pending := 0
 	flushArgs := func() {
@@ -187,7 +202,16 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 	}
 	flushArgs()
 	c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, loc(e))
+	return c.emitCallExKwargs(e)
+}
 
+// emitCallExKwargs emits the keyword-unpacking tail shared by the two
+// positional paths in emitCallEx: it builds the kwargs dict when the
+// call carries keyword or **mapping arguments, then emits
+// CALL_FUNCTION_EX with the kwargs-present flag.
+//
+// CPython: Python/codegen.c codegen_call_helper_impl (ex_call keyword tail)
+func (c *Compiler) emitCallExKwargs(e *ast.Call) error {
 	flag := int32(0)
 	if hasKeyword(e.Keywords) {
 		flag = 1

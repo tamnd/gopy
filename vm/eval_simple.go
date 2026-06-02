@@ -626,6 +626,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		items, eerr := iterToSlice(v)
 		if eerr != nil {
+			// LIST_EXTEND clears a not-iterable TypeError and reformats it
+			// as "Value after * must be an iterable" so `f(1, *x)` and
+			// `[*x]` report the unpack site rather than a bare iter error.
+			// An object whose __iter__ raises stays iterable, so its error
+			// propagates unchanged.
+			//
+			// CPython: Python/bytecodes.c:2023 LIST_EXTEND
+			if !objects.Iterable(v) {
+				eerr = fmt.Errorf("TypeError: Value after * must be an iterable, not %s", v.Type().Name)
+			}
 			// CPython closes the iterable on the error path too, before
 			// raising. popObject stole the stack reference, so this arm
 			// owns it and has to release it here as well.
@@ -896,12 +906,32 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			kwargs = d
 		}
 		argsObj := e.popObject()
-		argsSlice, ierr := iterToSlice(argsObj)
-		if ierr != nil {
-			return 0, true, ierr
-		}
 		selfOrNull := e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
+		argsSlice, ierr := iterToSlice(argsObj)
+		if ierr != nil {
+			// check_args_iterable: when the unpacked object is not iterable
+			// at all (no tp_iter and not a sequence), CPython clears the raw
+			// error and reformats it with the callable's funcstr. An object
+			// whose __iter__ raises stays iterable, so its error propagates.
+			//
+			// CPython: Python/ceval.c check_args_iterable
+			if !objects.Iterable(argsObj) {
+				ierr = fmt.Errorf("TypeError: %s argument after * must be an iterable, not %s",
+					objectFunctionStr(callable), argsObj.Type().Name)
+			}
+			objects.Decref(callable)
+			if selfOrNull != nil {
+				objects.Decref(selfOrNull)
+			}
+			if argsObj != nil {
+				objects.Decref(argsObj)
+			}
+			if kwargs != nil {
+				objects.DecrefThrowawayKwargs(kwargs)
+			}
+			return 0, true, ierr
+		}
 		// NewTuple holds the unpacked positional arguments for the call.
 		// It starts at refcount 1 and is owned right here, so it has to be
 		// released once the call returns. Leaving it pinned keeps the

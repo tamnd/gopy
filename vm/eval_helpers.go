@@ -576,13 +576,12 @@ func iterToSlice(o objects.Object) ([]objects.Object, error) {
 	if ierr != nil {
 		return nil, ierr
 	}
-	itType := it.Type()
-	if itType.IterNext == nil {
-		return nil, errors.New("TypeError: iter() returned non-iterator of type '" + itType.Name + "'")
+	if it.Type().IterNext == nil {
+		return nil, errors.New("TypeError: iter() returned non-iterator of type '" + it.Type().Name + "'")
 	}
 	var out []objects.Object
 	for {
-		v, nerr := itType.IterNext(it)
+		v, nerr := objects.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
 			return out, nil
 		}

@@ -186,6 +186,32 @@ func Iter(o Object) (Object, error) {
 	return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
 }
 
+// Iterable reports whether o can be iterated without actually starting
+// iteration: it has a tp_iter slot (or an __iter__ descriptor) or it
+// satisfies the sequence protocol (sq_item / __getitem__). This mirrors
+// the (tp_iter != NULL || PySequence_Check(o)) probe CPython runs in
+// check_args_iterable and the LIST_EXTEND opcode before reformatting an
+// "argument after *" error, so an object whose __iter__ itself raises
+// still reports as iterable and lets the real error propagate.
+//
+// CPython: Python/ceval.c check_args_iterable (tp_iter / PySequence_Check)
+func Iterable(o Object) bool {
+	tp := o.Type()
+	if tp.Iter != nil {
+		return true
+	}
+	if descr, _ := LookupDescriptor(tp, "__iter__"); descr != nil {
+		return true
+	}
+	if s := tp.Sequence; s != nil && s.GetItem != nil {
+		return true
+	}
+	if descr, _ := LookupDescriptor(tp, "__getitem__"); descr != nil {
+		return true
+	}
+	return false
+}
+
 // LengthHint mirrors PyObject_LengthHint. Returns __len__'s result when
 // available, then __length_hint__, else default. A non-TypeError out of
 // either dunder propagates to the caller, matching CPython's behavior.
