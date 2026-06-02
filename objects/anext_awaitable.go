@@ -99,6 +99,15 @@ func anextAwaitableIterNext(o Object) (Object, error) {
 	}
 	if errors.Is(ierr, ErrStopAsyncIteration) || isStopAsyncIteration(ierr) {
 		if AsyncGenStopIterationHook != nil {
+			// PyErr_Clear before SetStopIterationValue: the driven iterator
+			// left StopAsyncIteration pending on the thread state, and the
+			// VM reads tstate (not this returned Go error) when the call
+			// unwinds. Clearing lets the fresh StopIteration(default) win.
+			//
+			// CPython: Objects/iterobject.c:392 anextawaitable_iternext
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return nil, AsyncGenStopIterationHook(a.defaultV)
 		}
 	}
@@ -155,6 +164,13 @@ func anextAwaitableProxy(a *AnextAwaitable, method string, args []Object) (Objec
 	}
 	if errors.Is(cerr, ErrStopAsyncIteration) || isStopAsyncIteration(cerr) {
 		if AsyncGenStopIterationHook != nil {
+			// PyErr_Clear before SetStopIterationValue: see the matching
+			// note in anextAwaitableIterNext.
+			//
+			// CPython: Objects/iterobject.c:434 anextawaitable_proxy
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return nil, AsyncGenStopIterationHook(a.defaultV)
 		}
 	}
