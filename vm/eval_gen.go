@@ -806,15 +806,27 @@ func (e *evalState) execGetAiter() (genResult, error) {
 	obj := e.popObject()
 	t := obj.Type()
 	if t.Async == nil || t.Async.Aiter == nil {
+		// The popped stack reference is owned here; release it before
+		// surfacing the error so a failed async-for setup does not leak
+		// the iterable. CPython's GET_AITER runs DECREF_INPUTS on every
+		// exit path.
+		//
+		// CPython: Python/bytecodes.c:1230 GET_AITER (DECREF_INPUTS)
+		objects.Decref(obj)
 		return genResult{ok: true}, fmt.Errorf(
 			"TypeError: 'async for' requires an object with __aiter__ method, got %s", t.Name)
 	}
 	iter, err := t.Async.Aiter(obj)
+	// GET_AITER consumes the iterable regardless of the call's outcome.
+	//
+	// CPython: Python/bytecodes.c:1230 GET_AITER (DECREF_INPUTS)
+	objects.Decref(obj)
 	if err != nil {
 		return genResult{ok: true}, err
 	}
 	it := iter.Type()
 	if it.Async == nil || it.Async.Anext == nil {
+		objects.Decref(iter)
 		return genResult{ok: true}, fmt.Errorf(
 			"TypeError: 'async for' received an object from __aiter__ that does not implement __anext__: %s",
 			it.Name)
