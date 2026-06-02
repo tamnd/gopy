@@ -34,7 +34,7 @@ that tree.
 | test_with | OK | done |
 | test_contains | OK | done |
 | test_typechecks | OK | done |
-| test_extcall | FAILED (1 doctest — module-name harness artifact, P12.5) | ready |
+| test_extcall | OK (P10 fixed: module naming, star-unpack funcstr, iter-drain StopIteration) | done |
 | test_frame | OK (59 pass, 12 skip) | done |
 | test_eval | no standalone module in 3.14 (moved to test_capi/, needs _testcapi) | out-of-scope |
 | test_pow | OK | done |
@@ -56,10 +56,10 @@ generator gi_exc_state nesting-depth fix so `sys.exception()` is correct across
 a yield inside an except block). The remaining red files reduce to two causes:
 getrefcount / weakref-reclaim exactness (P11, a GC-model gap that the documented
 container refcount discipline makes unsafe to chase), and the asyncio event loop
-(spec 1711). `test_extcall`'s one failure is a harness module-naming artifact
-(P12.5: the doctest expects `test.test_extcall.f()` but the file runs as
-`__main__`, so the function-str module prefix is `__main__.f()`), not a
-behavioural gap. `test_eval` has no standalone module in CPython 3.14 (it moved
+(spec 1711). `test_extcall` is now green (P10): vendored tests run under
+`test.<name>` so the doctest module prefix matches CPython, the star-unpack
+TypeError formatters were ported faithfully, and iterator draining no longer
+leaks a user `__next__` raising `StopIteration`. `test_eval` has no standalone module in CPython 3.14 (it moved
 under `Lib/test/test_capi/test_eval.py` and needs `_testcapi`), so P9 is
 out of scope.
 
@@ -438,24 +438,46 @@ updating spec 1700.
 
 ---
 
-## P10 — `test_extcall` doctest module-name mismatch
+## P10 — `test_extcall` doctest module-name mismatch (shipped)
 
-**Blocked test:** test_extcall (1 failure).
+**Blocked test:** test_extcall. Now green.
 
-The single failure is in a `doctest` block that checks the exact text of
-`TypeError` messages. CPython prefixes the function name with the module
-(`test.test_extcall.f()`), but gopy's error messages use `__main__.f()`.
+The doctests check the exact text of `TypeError` messages, which CPython
+prefixes with the module (`test.test_extcall.f()`). Three separate gaps
+kept this red; all are fixed.
 
-**CPython function:** `Python/ceval.c` error message formatting for CALL
-opcodes uses `PyObject_GetQualName` on the callable.
+1. **Module naming.** Vendored CPython tests are imported by regrtest as
+   `test.<name>`, so `__name__` (and every doctest glob `__name__`) is the
+   dotted package name, and `_PyObject_FunctionStr` bakes that into the
+   message. gopy ran the file as `__main__`. `runFile` now runs a
+   `test_*.py` file under `test.<name>` (`mainModuleName`), registers it
+   under that name, and aliases `__main__` to the same module so
+   `__import__('__main__')` and the appended unittest runner still resolve.
+   CPython: `Lib/test/libregrtest/runtest.py` (imports `test.<name>`).
 
-**Status in gopy:** `objects/call.go` and the error-formatting helpers in
-`vm/` build the TypeError message using `fn.Name` without a module prefix.
+2. **Star-unpack funcstr.** A lone `f(*x)` reaches `CALL_FUNCTION_EX` and
+   must report `f() argument after * must be an iterable, not X`
+   (`Python/ceval.c` check_args_iterable); a mixed `f(1, *x)` goes through
+   `LIST_EXTEND` and must report `Value after * must be an iterable, not X`
+   (`Python/bytecodes.c:2023 LIST_EXTEND`). gopy emitted a generic message
+   and, because codegen always wrapped the single star arg in a list, the
+   two messages were swapped. `codegen_call_helper_impl`'s single-star fast
+   path (visit `star.Value` directly) is now mirrored, and both opcodes
+   reformat only when the object is genuinely not iterable (an `__iter__`
+   that raises still propagates its own error). New helper
+   `objects.Iterable` mirrors `tp_iter != NULL || PySequence_Check`.
 
-**Fix:** in `objects.UnexpectedKeywordError`, `objects.TooManyPositionalError`,
-and related formatters, look up `fn.__module__` and prepend it when not
-`"__main__"`. CPython citation: `Python/ceval.c:1546 positional_only_passed_as_keyword`
-uses `PyObject_GetQualName` on the callable for the error prefix.
+3. **Iterator-drain StopIteration.** `tuple(it)`, `[*it]`, and `f(*it)`
+   drain through `iterToSlice` / `DrainIterable`, which called the raw
+   `tp_iternext` slot rather than the `PyIter_Next` wrapper, so a user
+   `__next__` raising Python-level `StopIteration` was returned as a plain
+   error instead of ending the loop. Both now route through
+   `objects.IterNext` (`Objects/abstract.c:2852 PyIter_Next`), matching the
+   for-loop and `list()` paths.
+
+Appended unittest runners compile under the file's real path rather than
+`"<string>"` so frame repr and traceback source-line lookup keep working
+(`pythonrun.RunSimpleStringWithName`).
 
 ---
 
