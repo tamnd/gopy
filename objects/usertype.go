@@ -830,33 +830,28 @@ func fixupAsyncSlots(t *Type) {
 //
 // CPython: Objects/typeobject.c slot_am_aiter
 func slotAmAiter(o Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__aiter__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple(nil), nil)
+	// Route through slotDunderNoArg so the looked-up callable is released
+	// the way slot_am_aiter's Py_DECREF(func) does. The earlier
+	// lookupMethodOnSelf path built a bound method via __get__ and never
+	// released it, so the method object pinned self forever; a failed
+	// async-for setup then leaked the iterable (test_coroutines test_for_3).
+	//
+	// CPython: Objects/typeobject.c:9090 slot_am_aiter (call_unbound_noarg + Py_DECREF)
+	return slotDunderNoArg(o, "__aiter__")
 }
 
 // slotAmAnext dispatches to __anext__.
 //
-// CPython: Objects/typeobject.c slot_am_anext
+// CPython: Objects/typeobject.c:9112 slot_am_anext
 func slotAmAnext(o Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__anext__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple(nil), nil)
+	return slotDunderNoArg(o, "__anext__")
 }
 
 // slotAmAwait dispatches to __await__.
 //
-// CPython: Objects/typeobject.c slot_am_await
+// CPython: Objects/typeobject.c:9068 slot_am_await
 func slotAmAwait(o Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__await__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple(nil), nil)
+	return slotDunderNoArg(o, "__await__")
 }
 
 // fixupFinalize wires tp_finalize when the class body (or any base on

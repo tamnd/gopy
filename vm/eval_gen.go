@@ -160,6 +160,14 @@ func (e *evalState) execLoadSpecial(oparg uint32) (genResult, error) {
 	// it before invoking.
 	if dg := descr.Type().DescrGet; dg != nil {
 		bound, err := dg(descr, owner, t)
+		// popObject stole the owner reference, and __get__ minted a bound
+		// method that owns its own reference to owner. Release the stolen
+		// reference the way LOAD_SPECIAL's DECREF_INPUTS does; without it
+		// every `with` / `async with` leaked the context manager once per
+		// __enter__/__exit__ lookup (test_coroutines test_for_6).
+		//
+		// CPython: Python/bytecodes.c:3502 LOAD_SPECIAL (DECREF_INPUTS)
+		objects.Decref(owner)
 		if err != nil {
 			return genResult{ok: true}, err
 		}
@@ -167,6 +175,12 @@ func (e *evalState) execLoadSpecial(oparg uint32) (genResult, error) {
 		e.push(stackref.Null)
 		return genResult{next: e.advance(), ok: true}, nil
 	}
+	// Method-like path: LookupDescriptor returned a borrowed reference, so
+	// take a fresh strong reference for the attr slot (Py_NewRef) and leave
+	// owner in the self_or_null slot (its stolen reference transfers there).
+	//
+	// CPython: Python/bytecodes.c:3502 LOAD_SPECIAL (attr = Py_NewRef(meth))
+	objects.Incref(descr)
 	e.pushObject(descr)
 	e.pushObject(owner)
 	return genResult{next: e.advance(), ok: true}, nil
@@ -845,11 +859,24 @@ func (e *evalState) execGetAiter() (genResult, error) {
 // CPython: Python/bytecodes.c:1442 _END_ASYNC_FOR
 func (e *evalState) execEndAsyncFor() (genResult, error) {
 	excVal := e.popObject()
-	_ = e.popObject() // awaitable; discarded either way
+	// The slot beneath the exception is the async iterator GET_AITER left
+	// on the stack (the loop's exception table records handler depth 1, so
+	// only the iterator sits below the pushed exception). popObject steals
+	// the reference, so the caller now owns it and must release it; the
+	// earlier `_ =` discard leaked the iterator on every async-for exit
+	// (test_coroutines test_for_4 / test_for_6 getrefcount mismatch).
+	//
+	// CPython: Python/bytecodes.c:1442 END_ASYNC_FOR (DECREF_INPUTS)
+	iter := e.popObject()
 
 	if isStopAsyncIteration(excVal) {
+		// StopAsyncIteration ends the loop cleanly: DECREF_INPUTS closes
+		// both the awaitable/iterator slot and the exception.
+		objects.Decref(iter)
+		objects.Decref(excVal)
 		return genResult{next: e.advance(), ok: true}, nil
 	}
+	objects.Decref(iter)
 	return genResult{ok: true}, e.raiseExcFromObject(excVal)
 }
 
