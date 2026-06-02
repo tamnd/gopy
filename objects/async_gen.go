@@ -696,6 +696,15 @@ func asyncGenAThrowSendMethod(args []Object, _ map[string]Object) (Object, error
 	if a.state == asyncAwaitClosed {
 		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited aclose()/athrow()")
 	}
+	// FRAME_STATE_FINISHED: a generator that already ran to completion
+	// (exhausted by async-for, or closed) answers any further aclose()/
+	// athrow() await with StopIteration, not StopAsyncIteration.
+	//
+	// CPython: Objects/genobject.c:2112 async_gen_athrow_send
+	if a.gen.closed {
+		a.state = asyncAwaitClosed
+		return nil, ErrStopIteration
+	}
 	if a.state == asyncAwaitInit {
 		if a.gen.RunningAsync.Load() == 1 {
 			a.state = asyncAwaitClosed
@@ -876,15 +885,18 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 			if asyncCloseSwallow(e) {
 				a.state = asyncAwaitClosed
 				a.gen.RunningAsync.Store(0)
-				// PyErr_Clear: the GeneratorExit is consumed here and
-				// converted to StopAsyncIteration; do not leave it on the
-				// thread state for wrapCallError to re-surface.
+				// check_error label: when aclose() is called we do not
+				// propagate StopAsyncIteration or GeneratorExit, we raise
+				// StopIteration to signal this aclose() await is done.
+				// PyErr_Clear first so the swallowed GeneratorExit is not
+				// re-surfaced by wrapCallError.
 				//
-				// CPython: Python/errors.c:488 _PyErr_Clear
+				// CPython: Objects/genobject.c:2211 async_gen_athrow_send
+				// (check_error), Python/errors.c:488 _PyErr_Clear
 				if ClearCurrentExceptionHook != nil {
 					ClearCurrentExceptionHook()
 				}
-				return nil, ErrStopAsyncIteration
+				return nil, ErrStopIteration
 			}
 			return asyncGenAThrowDriveResult(a, r, e)
 		}
@@ -904,9 +916,13 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 			}
 			return r, nil
 		}
+		// aclose() drove the body to completion without another yield:
+		// the await is done, signaled by StopIteration (check_error).
+		//
+		// CPython: Objects/genobject.c:2211 async_gen_athrow_send
 		a.state = asyncAwaitClosed
 		a.gen.RunningAsync.Store(0)
-		return nil, ErrStopAsyncIteration
+		return nil, ErrStopIteration
 	}
 	if a.argExc != nil {
 		if GenThrowHook == nil {
@@ -1144,12 +1160,14 @@ func (g *AsyncGenerator) Close() error {
 	}
 	if errors.Is(msg.Err, ErrGeneratorExit) ||
 		errors.Is(msg.Err, ErrStopIteration) {
+		clearAfterCloseSwallow()
 		return nil
 	}
 	var re *RaisedError
 	if errors.As(msg.Err, &re) && re.Exc != nil {
 		switch re.Exc.Type().Name {
 		case "GeneratorExit", "StopIteration", "StopAsyncIteration":
+			clearAfterCloseSwallow()
 			return nil
 		}
 	}
@@ -1304,6 +1322,13 @@ func asyncGenAThrowNext(o Object) (Object, error) {
 	a := o.(*asyncGenAThrow)
 	if a.state == asyncAwaitClosed {
 		return nil, fmt.Errorf("RuntimeError: cannot reuse already awaited aclose()/athrow()")
+	}
+	// FRAME_STATE_FINISHED: see asyncGenAThrowSendMethod.
+	//
+	// CPython: Objects/genobject.c:2112 async_gen_athrow_send
+	if a.gen.closed {
+		a.state = asyncAwaitClosed
+		return nil, ErrStopIteration
 	}
 	if a.state == asyncAwaitInit {
 		if a.gen.RunningAsync.Load() == 1 {

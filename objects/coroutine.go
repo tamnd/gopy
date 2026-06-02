@@ -685,16 +685,30 @@ func (c *Coroutine) Close() error {
 	}
 	if errors.Is(msg.Err, ErrGeneratorExit) ||
 		errors.Is(msg.Err, ErrStopIteration) {
+		clearAfterCloseSwallow()
 		return nil
 	}
 	var re *RaisedError
 	if errors.As(msg.Err, &re) && re.Exc != nil {
 		switch re.Exc.Type().Name {
 		case "GeneratorExit", "StopIteration":
+			clearAfterCloseSwallow()
 			return nil
 		}
 	}
 	return msg.Err
+}
+
+// clearAfterCloseSwallow mirrors the PyErr_Clear in gen_close that drops
+// the swallowed GeneratorExit / StopIteration off the thread state. Without
+// it the stale exception lingers and wrapCallError re-surfaces it as the
+// type of the next send()/throw() that returns a plain Go error.
+//
+// CPython: Objects/genobject.c:443 gen_close (PyErr_Clear), Python/errors.c:488 _PyErr_Clear
+func clearAfterCloseSwallow() {
+	if ClearCurrentExceptionHook != nil {
+		ClearCurrentExceptionHook()
+	}
 }
 
 func coroSendMethod(args []Object, _ map[string]Object) (Object, error) {
