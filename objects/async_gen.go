@@ -185,7 +185,14 @@ func init() {
 	AsyncGeneratorType.Repr = asyncGenRepr
 	AsyncGeneratorType.Str = asyncGenRepr
 	AsyncGeneratorType.Async = &AsyncMethods{
-		Aiter: func(o Object) (Object, error) { return o, nil },
+		// am_aiter is PyObject_SelfIter, which returns a NEW strong
+		// reference. GET_AITER consumes the iterable slot and steals the
+		// returned reference onto the stack, so skipping the incref here
+		// dropped the async generator to refcount zero (firing tp_finalize
+		// on a still-referenced generator and corrupting asyncio shutdown).
+		//
+		// CPython: Objects/genobject.c:1571 PyAsyncGen_Type.am_aiter = PyObject_SelfIter
+		Aiter: SelfIter,
 		Anext: func(o Object) (Object, error) {
 			g := o.(*AsyncGenerator)
 			if err := g.initHooks(); err != nil {
@@ -339,6 +346,12 @@ func initAsyncGenAwaitableTypes() {
 	//
 	// CPython: Objects/genobject.c:1894 async_gen_asend_finalize
 	AsyncGenASendType.Finalize = asyncGenASendFinalize
+	// Hashable by identity: CPython leaves tp_hash unset so the awaitable
+	// inherits object's _Py_HashPointer. asyncio.gather keys a dict on the
+	// awaitable returned by asend()/aclose(), so the slot must resolve.
+	//
+	// CPython: Objects/genobject.c:1971 _PyAsyncGenASend_Type (tp_hash inherited)
+	AsyncGenASendType.Hash = IdentityHash
 
 	AsyncGenAThrowType = NewType("async_generator_athrow",
 		[]*Type{objectType})
@@ -356,6 +369,12 @@ func initAsyncGenAwaitableTypes() {
 	//
 	// CPython: Objects/genobject.c:2335 async_gen_athrow_finalize
 	AsyncGenAThrowType.Finalize = asyncGenAThrowFinalize
+	// Hashable by identity (see asend): asyncio.shutdown_asyncgens gathers
+	// the aclose() awaitables and keys a dict on each, so tp_hash must
+	// resolve to object's _Py_HashPointer.
+	//
+	// CPython: Objects/genobject.c:2401 _PyAsyncGenAThrow_Type (tp_hash inherited)
+	AsyncGenAThrowType.Hash = IdentityHash
 
 	AsyncGenWrappedValueType = NewType("async_generator_wrapped_value",
 		[]*Type{objectType})
