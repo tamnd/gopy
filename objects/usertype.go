@@ -69,10 +69,79 @@ func installSubclassAttrSlots(t *Type) {
 		t.Getattro = intSubclassGetAttr
 		t.Setattro = intSubclassSetAttr
 		t.TpNew = IntType.TpNew
+	case customAttrBase(t) != nil:
+		// A built-in base on the MRO stores instance attributes through a
+		// custom tp_setattro (for example _thread._local, which keeps a
+		// per-thread dict). CPython inherits tp_getattro / tp_setattro /
+		// tp_new from such a base in inherit_slots; stamping the generic
+		// instance slots here would clobber that storage protocol and
+		// strand the subclass with no usable attribute store. Adopt the
+		// base's attr slots and its tp_new so the subclass keeps the base's
+		// instance layout. Only non-nil base slots are copied so a base
+		// that customises one half of the protocol still leaves the other
+		// half on the generic instance path.
+		//
+		// CPython: Objects/typeobject.c:7521 inherit_slots
+		//          (tp_getattro / tp_setattro / tp_new inheritance)
+		b := customAttrBase(t)
+		if b.Getattro != nil {
+			t.Getattro = b.Getattro
+		} else {
+			t.Getattro = instanceGetAttr
+		}
+		t.Setattro = b.Setattro
+		if b.TpNew != nil {
+			t.TpNew = b.TpNew
+		}
 	default:
 		t.Getattro = instanceGetAttr
 		t.Setattro = instanceSetAttr
 	}
+}
+
+// customAttrBase returns the first built-in base on t's MRO that stores
+// instance attributes through a custom tp_setattro. Subclasses of such a
+// base must inherit its slots rather than have the generic instance slots
+// stamped over them, otherwise attribute writes land in the wrong store.
+// Returns nil when no base needs special treatment (the common
+// object-subclass case), so the caller falls through to instanceGetAttr /
+// instanceSetAttr.
+//
+// A base with a custom tp_getattro but the generic tp_setattro (gopy's
+// _io.StringIO, which serves a fixed set of attrs and rejects the rest)
+// is intentionally NOT matched: such a base holds no per-instance state of
+// its own, so a subclass works correctly on the generic instance path,
+// which is also what CPython produces for those types (they expose their
+// attributes through getset descriptors and inherit object's generic
+// tp_getattro).
+//
+// CPython: Objects/typeobject.c:7521 inherit_slots
+func customAttrBase(t *Type) *Type {
+	for _, base := range t.MRO {
+		if base == t || base == objectType || base.IsUser {
+			continue
+		}
+		if hasCustomAttrSlot(base) {
+			return base
+		}
+	}
+	return nil
+}
+
+// hasCustomAttrSlot reports whether b stores instance attributes through a
+// custom tp_setattro, meaning a slot that is neither the generic built-in
+// path (GenericSetAttr) nor the user-instance path (instanceSetAttr). A
+// custom storage setter is the one piece of the attribute protocol that a
+// subclass cannot reproduce via descriptors plus the generic instance
+// dict, so it is the signal that the base's slots must be inherited.
+// Function-pointer comparison mirrors CPython's slot-inheritance check.
+func hasCustomAttrSlot(b *Type) bool {
+	if b.Setattro != nil &&
+		fnPtr(b.Setattro) != fnPtr(GenericSetAttr) &&
+		fnPtr(b.Setattro) != fnPtr(instanceSetAttr) {
+		return true
+	}
+	return false
 }
 
 // NewUserTypeMeta is the full-form constructor used by type.__new__.
@@ -920,6 +989,26 @@ func unhashableTypeHash(o Object) (int64, error) {
 
 // fixupHashAndIter wires tp_hash, tp_iter, and tp_iternext.
 func fixupHashAndIter(t *Type) {
+	// A class that defines its own __eq__ but not its own __hash__ does
+	// not inherit the base's hash: tp_hash is left NULL during slot
+	// inheritance and type_ready then pins __hash__ to None, making the
+	// class unhashable. Without this, a str subclass that overrides
+	// __eq__ would wrongly keep str.__hash__ (gh-132002).
+	//
+	// CPython: Objects/typeobject.c:8214 overrides_hash
+	// CPython: Objects/typeobject.c:8363 inherit_slots (comparison slots)
+	// CPython: Objects/typeobject.c:8758 type_ready_set_hash
+	if isOwnDescriptor(t, "__eq__") && !isOwnDescriptor(t, "__hash__") {
+		t.Hash = unhashableTypeHash
+		SetTypeDescr(t, "__hash__", None())
+		if lookupDunderCallable(t, "__iter__") {
+			t.Iter = slotTpIter
+		}
+		if lookupDunderCallable(t, "__next__") {
+			t.IterNext = slotTpIterNext
+		}
+		return
+	}
 	hashDescr, _ := LookupDescriptor(t, "__hash__")
 	switch {
 	case hashDescr != nil && hashDescr != None():

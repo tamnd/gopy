@@ -194,6 +194,28 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	//
 	// CPython: Objects/moduleobject.c:88 module_init_dict
 	if key == "__dict__" {
+		// A subclass may shadow __dict__ with a plain class attribute, e.g.
+		// `class M(ModuleType): __dict__ = 8`. CPython resolves __dict__
+		// through generic getattr, which returns that shadowing attribute
+		// when it is not a data descriptor and the instance namespace holds
+		// no "__dict__" key, rather than always handing back md_dict. Mirror
+		// that ordering so dir() on such an instance sees the non-dict value
+		// and raises TypeError, matching CPython.
+		//
+		// CPython: Objects/object.c:1450 _PyObject_GenericGetAttrWithDict
+		if descr, owner := LookupDescriptor(o.Type(), "__dict__"); descr != nil && owner != objectType {
+			dt := descr.Type()
+			if dt.DescrGet != nil && dt.DescrSet != nil {
+				return dt.DescrGet(descr, o, o.Type())
+			}
+			if _, err := m.dict.GetItem(name); err != nil {
+				if dt.DescrGet != nil {
+					return dt.DescrGet(descr, o, o.Type())
+				}
+				Incref(descr)
+				return descr, nil
+			}
+		}
 		// Borrowed slot handed to a caller that treats the result as a
 		// new strong reference (pushObject decrefs it later), so incref
 		// to keep the module's own ownership intact. Without this the
