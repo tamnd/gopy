@@ -769,6 +769,9 @@ func asyncGenAThrowThrowMethod(args []Object, _ map[string]Object) (Object, erro
 		}
 		a.used = true
 		r, e := a.gen.Throw(exc)
+		if a.isClose {
+			return asyncGenAThrowCloseResult(a, r, e)
+		}
 		return asyncGenAThrowDriveResult(a, r, e)
 	}
 	exc, err := GenThrowHook(args[1])
@@ -777,6 +780,14 @@ func asyncGenAThrowThrowMethod(args []Object, _ map[string]Object) (Object, erro
 	}
 	a.used = true
 	r, e := a.gen.Throw(exc)
+	if a.isClose {
+		// aclose() mode: a wrapped value is "ignored GeneratorExit", a
+		// swallowed StopAsyncIteration / GeneratorExit completes the
+		// await as StopIteration, a plain value is an intermediate await.
+		//
+		// CPython: Objects/genobject.c:2273 async_gen_athrow_throw (aclose)
+		return asyncGenAThrowCloseResult(a, r, e)
+	}
 	return asyncGenAThrowDriveResult(a, r, e)
 }
 
