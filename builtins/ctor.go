@@ -225,23 +225,51 @@ func parseIntStringNormalized(s string, base int) (objects.Object, error) {
 //
 // CPython: Objects/unicodeobject.c:11075 _PyUnicode_TransformDecimalAndSpaceToASCII
 func normalizeIntString(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		if r < 128 {
-			out = append(out, r)
-			continue
-		}
-		if isUnicodeSpace(r) {
+	// Walk the WTF-8 bytes by hand rather than ranging: Go's range loop
+	// turns a lone surrogate (stored as 3-byte pseudo-UTF-8) into three
+	// U+FFFD runes, which would destroy the original code point before the
+	// invalid-literal error message reprs it. Decimal and space code points
+	// are folded to ASCII; everything else (surrogates included) passes
+	// through with its original bytes intact.
+	b := []byte(s)
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		r, size := lenientDecodeRune(b[i:])
+		switch {
+		case r < 128:
+			out = append(out, byte(r))
+		case isUnicodeSpace(r):
 			out = append(out, ' ')
-			continue
+		case unicodeDecimalValue(r) >= 0:
+			out = append(out, '0'+byte(unicodeDecimalValue(r)))
+		default:
+			out = append(out, b[i:i+size]...)
 		}
-		if d := unicodeDecimalValue(r); d >= 0 {
-			out = append(out, '0'+rune(d))
-			continue
-		}
-		out = append(out, r)
+		i += size
 	}
 	return string(out)
+}
+
+// lenientDecodeRune decodes one code point from WTF-8 bytes, accepting
+// lone surrogates stored as 3-byte pseudo-UTF-8 instead of rejecting them
+// the way Go's utf8.DecodeRune does. It returns the code point and the
+// number of bytes consumed (always at least 1 so callers make progress).
+//
+// CPython: Objects/unicodeobject.c:1696 find_maxchar_surrogates
+func lenientDecodeRune(b []byte) (rune, int) {
+	c := b[0]
+	switch {
+	case c < 0x80:
+		return rune(c), 1
+	case c&0xE0 == 0xC0 && len(b) >= 2 && b[1]&0xC0 == 0x80:
+		return rune(c&0x1F)<<6 | rune(b[1]&0x3F), 2
+	case c&0xF0 == 0xE0 && len(b) >= 3 && b[1]&0xC0 == 0x80 && b[2]&0xC0 == 0x80:
+		return rune(c&0x0F)<<12 | rune(b[1]&0x3F)<<6 | rune(b[2]&0x3F), 3
+	case c&0xF8 == 0xF0 && len(b) >= 4 && b[1]&0xC0 == 0x80 && b[2]&0xC0 == 0x80 && b[3]&0xC0 == 0x80:
+		return rune(c&0x07)<<18 | rune(b[1]&0x3F)<<12 | rune(b[2]&0x3F)<<6 | rune(b[3]&0x3F), 4
+	default:
+		return 0xFFFD, 1
+	}
 }
 
 // isUnicodeSpace reports whether r is Unicode whitespace as recognized
@@ -357,6 +385,12 @@ func parseIntStringFrom(s string, base int, fromBytes bool) (objects.Object, err
 func invalidLiteralError(base int, s string, fromBytes bool) error {
 	if fromBytes {
 		return fmt.Errorf("ValueError: invalid literal for int() with base %d: b%s", base, pyReprBytes(s))
+	}
+	// Route the str through the real unicode repr so a lone surrogate
+	// renders as \udXXX rather than the three replacement chars Go's range
+	// loop produces for its WTF-8 bytes.
+	if r, err := objects.Repr(objects.NewStr(s)); err == nil {
+		return fmt.Errorf("ValueError: invalid literal for int() with base %d: %s", base, r)
 	}
 	return fmt.Errorf("ValueError: invalid literal for int() with base %d: %s", base, pyReprStr(s))
 }
