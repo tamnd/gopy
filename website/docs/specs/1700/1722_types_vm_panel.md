@@ -641,21 +641,27 @@ bytes via `memoryview.ToBytes()`.
 
 ### Spec 1700 rows to advance
 
-| Test | Current state (2026-05-29) | Unblocked by |
+| Test | Current state (2026-06-04) | Unblocked by |
 |------|---------------------------|--------------|
-| test_float | crash (fractions) | P1.1 |
-| test_builtin | done (P1.1 + str surrogate repr) | — |
-| test_compare | done (1722 audit) | — |
-| test_numeric_tower | crash (fractions) | P1.1 |
-| test_bytes | crash (string_tests) | P1.2 |
-| test_str | 18 fail / 1 error | P1.2 + str fixes |
-| test_userstring | crash (string_tests) | P1.2 |
-| test_dict | crash (mapping_tests) | P1.3 |
-| test_frame | 17 fail / 9 errors | spec 1723 P4 |
-| test_symtable | crash (symtable) | P1.4 |
-| test_long | crash (int_info) | P2.3 |
-| test_int | 17 fail / 8 error | P2.1 P2.2 P2.4 |
-| test_complex | done (P3.1–P3.10 landed) | — |
-| test_slice | done (P4.3 landed via type_call orphan-tuple fix) | — |
-| test_iter | 1 fail | P5.1 |
-| test_py_compile | 1 error | P6.1 |
+| test_float | OK (skipped=3) | P1.1 |
+| test_builtin | OK (skipped=12) | P1.1 + str surrogate repr |
+| test_compare | OK | 1722 audit |
+| test_numeric_tower | OK | P1.1 |
+| test_bytes | OK (skipped=12) | P1.2 |
+| test_str | OK (skipped=8) | P1.2 + str fixes |
+| test_userstring | OK (skipped=2) | P1.2 |
+| test_dict | OK (skipped=10) | P1.3 |
+| test_frame | OK (skipped=12) | spec 1723 P4 |
+| test_symtable | OK | P1.4 |
+| test_long | OK (skipped=7) | P2.3 |
+| test_int | OK (skipped=11) | P2.1 P2.2 P2.4 + str->int DoS digit-count guard |
+| test_complex | OK | P3.1–P3.10 |
+| test_slice | OK | P4.3 type_call orphan-tuple fix |
+| test_iter | OK (skipped=2) | P5.1 |
+| test_py_compile | OK (skipped=2) | P6.1 |
+
+All sixteen rows are green as of the 2026-06-04 pass. The last open
+item, the str->int denial-of-service guard exercised by `test_int`,
+landed as a digit-count check ahead of the base conversion: for
+non-power-of-two bases the conversion is super-linear, so an oversized
+literal has to be rejected on length before the parse runs.
