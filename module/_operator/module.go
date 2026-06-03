@@ -693,6 +693,10 @@ func init() {
 	t.Call = itemgetterCall
 	t.TpNew = itemgetterNew
 	t.Getattro = objects.GenericGetAttr
+	// CPython: Modules/_operator.c:1158 itemgetter_traverse
+	t.TpTraverse = itemgetterTraverse
+	// CPython: Modules/_operator.c:1145 itemgetter_dealloc
+	t.Dealloc = itemgetterDealloc
 	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", itemgetterReduce))
 }
 
@@ -708,8 +712,53 @@ func itemgetterNew(cls *objects.Type, args []objects.Object, kwargs map[string]o
 		return nil, fmt.Errorf("TypeError: itemgetter expected at least 1 argument, got 0")
 	}
 	ig := &Itemgetter{items: append([]objects.Object(nil), args...), single: len(args) == 1}
+	// itemgetter owns a reference to each stashed item the way
+	// itemgetter_new keeps the args tuple alive with Py_NewRef. Without
+	// this a stashed slice (which recycles through a freelist on dealloc)
+	// gets reclaimed once the constructor's stack temporary is dropped,
+	// leaving Itemgetter.items pointing at a slice whose bounds are nil.
+	//
+	// CPython: Modules/_operator.c:1034 itemgetter_new (Py_NewRef item)
+	for _, it := range ig.items {
+		objects.Incref(it)
+	}
 	ig.Init(cls)
 	return ig, nil
+}
+
+// itemgetterTraverse visits each stashed item so the cycle collector
+// can see references the getter owns.
+//
+// CPython: Modules/_operator.c:1158 itemgetter_traverse
+func itemgetterTraverse(o objects.Object, visit objects.Visitor) error {
+	ig, ok := o.(*Itemgetter)
+	if !ok {
+		return nil
+	}
+	for _, it := range ig.items {
+		if it == nil {
+			continue
+		}
+		if err := visit(it); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// itemgetterDealloc releases the references the getter owns, mirroring
+// itemgetter_clear followed by the tp_free in itemgetter_dealloc.
+//
+// CPython: Modules/_operator.c:1145 itemgetter_dealloc
+func itemgetterDealloc(o objects.Object) {
+	ig, ok := o.(*Itemgetter)
+	if !ok {
+		return
+	}
+	for _, it := range ig.items {
+		objects.Decref(it)
+	}
+	ig.items = nil
 }
 
 // itemgetterCall is the tp_call slot: pull the saved items from obj

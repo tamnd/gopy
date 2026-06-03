@@ -167,10 +167,20 @@ func bytearrayExtendMethod() methodFn {
 			}
 			return nil, err
 		}
+		// Probe the length to presize the buffer (32 is arbitrary). This
+		// also surfaces a __len__/__length_hint__ that raises something
+		// other than TypeError: PyObject_LengthHint propagates it, which
+		// is what makes b.extend(BadLen()) raise RuntimeError.
+		//
+		// CPython: Objects/bytearrayobject.c:2325 bytearray_extend (PyObject_LengthHint)
+		bufSize, err := LengthHint(arg, 32)
+		if err != nil {
+			return nil, err
+		}
 		// Coerce every item into a private buffer first; self is only
 		// mutated once the whole iterable has been consumed successfully,
 		// so a mid-stream failure leaves the bytearray untouched.
-		var buf []byte
+		buf := make([]byte, 0, bufSize)
 		for {
 			item, err := IterNext(it)
 			if err != nil {
