@@ -41,6 +41,24 @@ func init() {
 			}
 			return floatTrueDiv(args[0], args[1])
 		}))
+	// CPython: Objects/floatobject.c:1561 float___getnewargs___impl
+	SetTypeDescr(FloatType, "__getnewargs__", NewMethodDescr(FloatType, "__getnewargs__", floatGetNewArgs))
+}
+
+// floatGetNewArgs implements float.__getnewargs__. It returns a 1-tuple
+// holding a plain float copy of self so a float subclass round-trips
+// through pickle via __newobj__(cls, float(self)).
+//
+// CPython: Objects/floatobject.c:1561 float___getnewargs___impl
+func floatGetNewArgs(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	f, ok := asFloat(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'float' object")
+	}
+	return NewTuple([]Object{NewFloat(f)}), nil
 }
 
 // floatAsIntegerRatio returns (numerator, denominator) such that

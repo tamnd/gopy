@@ -12,6 +12,7 @@
 package _pickle
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
@@ -177,6 +178,121 @@ func (p *pickler) batchDictExact(d *objects.Dict) error {
 		p.writeByte(opSetitems)
 	}
 	return nil
+}
+
+// batchListIter consumes a Python iterator of items and emits them as
+// MARK ... APPENDS chunks (or a lone APPEND for a single item), exactly
+// like CPython's batch_list. This drives the listitems slot (4th
+// element) of a reduce value so a list subclass reconstructed via
+// __newobj__ regains its contents.
+//
+// CPython: Modules/_pickle.c:2967 batch_list
+func (p *pickler) batchListIter(it objects.Object) error {
+	return p.batchIter(it, p.save, opAppend, opAppends)
+}
+
+// batchDictIter consumes a Python iterator of (key, value) pairs and
+// emits them as MARK key value ... SETITEMS chunks (or a lone SETITEM
+// for a single pair), like CPython's batch_dict. This drives the
+// dictitems slot (5th element) of a reduce value.
+//
+// CPython: Modules/_pickle.c:3208 batch_dict
+func (p *pickler) batchDictIter(it objects.Object) error {
+	return p.batchIter(it, p.saveDictPair, opSetitem, opSetitems)
+}
+
+// saveDictPair saves a single (key, value) pair from the dictitems
+// iterator. CPython requires each element to be a 2-tuple.
+//
+// CPython: Modules/_pickle.c:3208 batch_dict
+func (p *pickler) saveDictPair(o objects.Object) error {
+	pair, ok := o.(*objects.Tuple)
+	if !ok || pair.Len() != 2 {
+		return fmt.Errorf("PicklingError: dictitems iterator must return 2-tuples")
+	}
+	if err := p.save(pair.Item(0)); err != nil {
+		return err
+	}
+	return p.save(pair.Item(1))
+}
+
+// batchIter is the shared engine behind batch_list and batch_dict. It
+// pulls elements from a Python iterator and writes them with saveOne,
+// emitting a lone singleOp for a single trailing element or MARK ...
+// batchOp chunks of BATCHSIZE otherwise.
+//
+// CPython: Modules/_pickle.c:2967 batch_list / 3208 batch_dict
+func (p *pickler) batchIter(it objects.Object, saveOne func(objects.Object) error, singleOp, batchOp byte) error {
+	for {
+		first, err := nextOrStop(it)
+		if err != nil {
+			return err
+		}
+		if first == nil {
+			return nil // exhausted
+		}
+		second, err := nextOrStop(it)
+		if err != nil {
+			return err
+		}
+		if second == nil {
+			// Exactly one element left.
+			if err := saveOne(first); err != nil {
+				return err
+			}
+			p.writeByte(singleOp)
+			return nil
+		}
+		n, err := p.batchChunk(it, saveOne, batchOp, first, second)
+		if err != nil {
+			return err
+		}
+		if n < batchSize {
+			return nil
+		}
+	}
+}
+
+// batchChunk writes one MARK ... batchOp chunk of up to BATCHSIZE
+// elements, beginning with the two already-pulled elements, and returns
+// the count written.
+func (p *pickler) batchChunk(it objects.Object, saveOne func(objects.Object) error, batchOp byte, first, second objects.Object) (int, error) {
+	p.writeByte(opMark)
+	if err := saveOne(first); err != nil {
+		return 0, err
+	}
+	n := 1
+	cur := second
+	for cur != nil {
+		if err := saveOne(cur); err != nil {
+			return 0, err
+		}
+		n++
+		if n == batchSize {
+			break
+		}
+		var err error
+		cur, err = nextOrStop(it)
+		if err != nil {
+			return 0, err
+		}
+	}
+	p.writeByte(batchOp)
+	return n, nil
+}
+
+// nextOrStop pulls the next value from a Python iterator, returning
+// (nil, nil) once the iterator is exhausted so callers can loop without
+// matching on the StopIteration sentinel themselves.
+func nextOrStop(it objects.Object) (objects.Object, error) {
+	v, err := objects.IterNext(it)
+	if err != nil {
+		if errors.Is(err, objects.ErrStopIteration) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return v, nil
 }
 
 // callReduce calls __reduce__ on obj and returns the resulting tuple.

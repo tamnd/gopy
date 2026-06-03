@@ -97,6 +97,27 @@ func init() {
 		},
 		nil,
 	))
+	// type.__flags__ exposes tp_flags. copyreg._reduce_ex walks the MRO
+	// and stops at the first base whose Py_TPFLAGS_HEAPTYPE bit is clear
+	// (the nearest built-in base), so a subclass of bytes/list/... reduces
+	// through that base's __new__ on protocols 0 and 1. IsUser is gopy's
+	// stand-in for HEAPTYPE, so OR the bit in for user (heap) types.
+	//
+	// CPython: Objects/typeobject.c:1109 type_flags (getset entry)
+	SetTypeDescr(typeType, "__flags__", NewGetSetDescr("__flags__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__flags__' requires 'type' object")
+			}
+			flags := tp.TpFlags
+			if tp.IsUser {
+				flags |= TpFlagHeapType
+			}
+			return NewInt(int64(flags)), nil
+		},
+		nil,
+	))
 	SetTypeDescr(typeType, "__annotate__", NewGetSetDescr("__annotate__",
 		func(o Object) (Object, error) {
 			tp, ok := o.(*Type)

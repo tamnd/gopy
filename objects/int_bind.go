@@ -33,6 +33,7 @@ func init() {
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
 	bind("__sizeof__", intSizeofMethod)
+	bind("__getnewargs__", intGetNewArgsMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
@@ -44,6 +45,22 @@ func init() {
 	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
 		NewBuiltinFunction("from_bytes", intFromBytesMethod),
 	))
+}
+
+// intGetNewArgsMethod implements int.__getnewargs__. It returns a
+// 1-tuple holding a plain int copy of self's value so an int subclass
+// reconstructs through __newobj__(cls, int(self)) under pickle.
+//
+// CPython: Objects/longobject.c:6178 long___getnewargs___impl
+func intGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := asInt(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'int' object")
+	}
+	return NewTuple([]Object{NewIntFromBig(i.BigInt())}), nil
 }
 
 // intRealGetter backs int.real and int.numerator: returns self when

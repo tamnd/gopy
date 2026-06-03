@@ -465,12 +465,18 @@ func (p *pickler) save(obj objects.Object) error {
 		p.saveBool(false)
 		return nil
 	}
+	// Exact-type gate on int / float too: an int or float subclass shares
+	// the *objects.Int / *objects.Float representation but must reduce
+	// through saveViaReduce so its actual type round-trips, rather than
+	// being flattened to a plain int / float here.
+	//
+	// CPython: Modules/_pickle.c:4401 save (dispatch keyed on type(obj))
 	if _, isBool := obj.(*objects.Bool); !isBool {
-		if i, ok := obj.(*objects.Int); ok {
+		if i, ok := obj.(*objects.Int); ok && i.Type() == objects.IntType {
 			return p.saveLong(i)
 		}
 	}
-	if f, ok := obj.(*objects.Float); ok {
+	if f, ok := obj.(*objects.Float); ok && f.Type() == objects.FloatType {
 		p.saveFloat(f.Float64())
 		return nil
 	}
@@ -480,23 +486,40 @@ func (p *pickler) save(obj objects.Object) error {
 		return p.memoGet(obj)
 	}
 
+	// The per-type savers below are gated on an EXACT type match, mirroring
+	// CPython's save(), which keys its dispatch table on type(obj) rather
+	// than an isinstance check. A subclass instance falls through to
+	// saveViaReduce so its actual type and __dict__ are preserved instead of
+	// being flattened to the base built-in.
+	//
+	// CPython: Modules/_pickle.c:4401 save
 	switch v := obj.(type) {
 	case *objects.Bytes:
-		if err := p.saveBytes(v.Bytes()); err != nil {
-			return err
+		if v.Type() == objects.BytesType {
+			if err := p.saveBytes(v.Bytes()); err != nil {
+				return err
+			}
+			return p.memoPut(obj)
 		}
-		return p.memoPut(obj)
 	case *objects.Unicode:
-		if err := p.saveUnicode(v.Value()); err != nil {
-			return err
+		if v.Type() == objects.StrType() {
+			if err := p.saveUnicode(v.Value()); err != nil {
+				return err
+			}
+			return p.memoPut(obj)
 		}
-		return p.memoPut(obj)
 	case *objects.List:
-		return p.saveList(v)
+		if v.Type() == objects.ListType {
+			return p.saveList(v)
+		}
 	case *objects.Tuple:
-		return p.saveTuple(v)
+		if v.Type() == objects.TupleType {
+			return p.saveTuple(v)
+		}
 	case *objects.Dict:
-		return p.saveDict(v)
+		if v.Type() == objects.DictType {
+			return p.saveDict(v)
+		}
 	case *objects.Set:
 		// CPython: Modules/_pickle.c:4471 save — exact type check, not PySet_Check.
 		// Subclasses fall through to saveViaReduce so their type and __dict__ are preserved.
@@ -666,18 +689,31 @@ func (p *pickler) saveTypeGlobal(t *objects.Type) error {
 	return p.memoPut(t)
 }
 
-// saveViaReduce calls __reduce__ on obj and dispatches on the result.
-// A string result → save_global; a tuple result → save_reduce.
+// saveViaReduce obtains a reduction callable the way CPython's save()
+// does: prefer the object's __reduce_ex__(protocol), then fall back to
+// __reduce__(). The protocol argument is what lets a subclass of a
+// built-in (bytes, list, ...) reduce through copyreg.__newobj__ on
+// proto >= 2 instead of copyreg._reconstructor. A string result →
+// save_global; a tuple result → save_reduce.
 //
-// CPython: Modules/_pickle.c:4425 save -> __reduce_ex__ fallback
+// CPython: Modules/_pickle.c:4561 save (__reduce_ex__ then __reduce__)
 func (p *pickler) saveViaReduce(obj objects.Object) error {
-	reduceAttr, err := objects.GetAttr(obj, objects.NewStr("__reduce__"))
-	if err != nil {
-		return errUnsupportedType
-	}
-	result, err := objects.CallNoArgs(reduceAttr)
-	if err != nil {
-		return fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+	reduceAttr, err := objects.GetAttr(obj, objects.NewStr("__reduce_ex__"))
+	var result objects.Object
+	if err == nil && reduceAttr != nil {
+		result, err = objects.Call(reduceAttr, objects.NewTuple([]objects.Object{objects.NewInt(int64(p.proto))}), nil)
+		if err != nil {
+			return fmt.Errorf("PicklingError: __reduce_ex__ failed: %w", err)
+		}
+	} else {
+		reduceAttr, err = objects.GetAttr(obj, objects.NewStr("__reduce__"))
+		if err != nil {
+			return errUnsupportedType
+		}
+		result, err = objects.CallNoArgs(reduceAttr)
+		if err != nil {
+			return fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+		}
 	}
 	switch rv := result.(type) {
 	case *objects.Unicode:
@@ -719,9 +755,15 @@ func (p *pickler) saveReduceTuple(rv *objects.Tuple, obj objects.Object) error {
 	if !ok {
 		return errors.New("PicklingError: __reduce__ tuple second element must be a tuple")
 	}
-	var state objects.Object
+	var state, listitems, dictitems objects.Object
 	if n >= 3 {
 		state = rv.Item(2)
+	}
+	if n >= 4 {
+		listitems = rv.Item(3)
+	}
+	if n >= 5 {
+		dictitems = rv.Item(4)
 	}
 
 	// Emit callable + args + REDUCE.
@@ -734,6 +776,21 @@ func (p *pickler) saveReduceTuple(rv *objects.Tuple, obj objects.Object) error {
 	p.writeByte(opReduce)
 	if err := p.memoPut(obj); err != nil {
 		return err
+	}
+
+	// Replay the list / dict items so a list or dict subclass rebuilt
+	// through __newobj__ regains its contents (APPENDS / SETITEMS).
+	//
+	// CPython: Modules/_pickle.c:4353 save_reduce (batch_list/batch_dict)
+	if listitems != nil && !objects.IsNone(listitems) {
+		if err := p.batchListIter(listitems); err != nil {
+			return err
+		}
+	}
+	if dictitems != nil && !objects.IsNone(dictitems) {
+		if err := p.batchDictIter(dictitems); err != nil {
+			return err
+		}
 	}
 
 	// Apply state via __setstate__ / BUILD opcode.

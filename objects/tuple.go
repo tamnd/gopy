@@ -74,6 +74,7 @@ func init() {
 	SetTypeDescr(TupleType, "__rmul__", NewMethodDescr(TupleType, "__rmul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
 	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
+	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescr(TupleType, "__getnewargs__", tupleGetNewArgsMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
@@ -589,6 +590,26 @@ func tupleCountMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 	}
 	return NewInt(int64(count)), nil
+}
+
+// tupleGetNewArgsMethod implements tuple.__getnewargs__. It returns a
+// 1-tuple holding a plain-tuple copy of self's items so a tuple subclass
+// can round-trip through pickle: copyreg builds __newobj__(cls, *args)
+// where args is this getnewargs result, reconstructing the subclass with
+// its original contents.
+//
+// CPython: Objects/tupleobject.c:790 tuple___getnewargs___impl
+func tupleGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'tuple' object")
+	}
+	cp := make([]Object, len(t.items))
+	copy(cp, t.items)
+	return NewTuple([]Object{NewTuple(cp)}), nil
 }
 
 // toGoInt converts an Object to a Go int for use as a sequence index.

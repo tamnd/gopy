@@ -368,6 +368,13 @@ const (
 	//
 	// CPython: Include/object.h:264 Py_TPFLAGS_BASETYPE
 	TpFlagBasetype uint64 = 1 << 10
+	// TpFlagHeapType mirrors Py_TPFLAGS_HEAPTYPE: set on types allocated
+	// at runtime (user/heap types). gopy tracks this via Type.IsUser and
+	// only materializes the bit in the type.__flags__ getset, which
+	// copyreg._reduce_ex consults to find the nearest built-in base.
+	//
+	// CPython: Include/object.h:280 Py_TPFLAGS_HEAPTYPE
+	TpFlagHeapType uint64 = 1 << 9
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
