@@ -63,6 +63,16 @@ func IntFromString(s string, base int) (*Int, error) {
 		return nil, fmtIntInvalid(base, s)
 	}
 
+	// Enforce sys.int_max_str_digits before the base conversion. For
+	// non-power-of-two bases that conversion is super-linear, so the
+	// guard rejects oversized literals on digit count (O(n)) rather than
+	// after paying for the parse; this is what defeats the str->int DoS.
+	//
+	// CPython: Objects/longobject.c:2649 _PyLong_FromString (max_str_digits)
+	if err := checkStrToIntLimit(len(digits), base); err != nil {
+		return nil, err
+	}
+
 	v := new(big.Int)
 	if _, ok := v.SetString(digits, base); !ok {
 		return nil, fmtIntInvalid(base, s)

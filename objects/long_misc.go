@@ -48,6 +48,31 @@ func checkIntToStrLimit(bitLen int) error {
 	return nil
 }
 
+// checkStrToIntLimit raises ValueError when a string literal carries
+// more significant digits than sys.int_max_str_digits allows. The limit
+// only governs bases whose conversion is super-linear; binary, octal,
+// and hexadecimal parse in linear time and are exempt. Callers pass the
+// digit count so the check stays O(1).
+//
+// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
+func checkStrToIntLimit(numDigits, base int) error {
+	if IntMaxStrDigitsHook == nil {
+		return nil
+	}
+	limit := IntMaxStrDigitsHook()
+	if limit <= 0 {
+		return nil
+	}
+	switch base {
+	case 2, 4, 8, 16, 32:
+		return nil
+	}
+	if int32(numDigits) > limit {
+		return fmt.Errorf("ValueError: Exceeds the limit (%d digits) for integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit", limit, numDigits)
+	}
+	return nil
+}
+
 func intRepr(o Object) (string, error) {
 	i := o.(*Int)
 	if err := checkIntToStrLimit(i.v.BitLen()); err != nil {
