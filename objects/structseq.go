@@ -72,6 +72,12 @@ func NewStructSeqType(name string, fields []StructSeqField) *Type {
 		Length:  structSeqLen,
 		GetItem: structSeqGetItem,
 	}
+	// Drop the inherited tuple mp_length / mp_subscript for the same
+	// reason as the sequence bundle: tupleSubscript does `o.(*Tuple)` and
+	// would panic on a *StructSeq. structseq keeps integer-only indexing
+	// through its own sq_item; porting a *StructSeq-aware mp_subscript
+	// (for slicing) is out of scope here.
+	tp.Mapping = nil
 	tp.Getattro = structSeqGetattro
 	return tp
 }

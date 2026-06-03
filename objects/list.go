@@ -653,12 +653,15 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 //
 // CPython: Objects/abstract.c:1846 PySequence_Fast
 func drainIterableForSlice(o Object) ([]Object, error) {
-	if l, ok := o.(*List); ok {
+	// PySequence_Fast fast-paths only PyList_CheckExact / PyTuple_CheckExact.
+	// A subclass may override __iter__ (seq_tests.LyingTuple yields values
+	// unrelated to its storage), so it must go through the iterator protocol.
+	if l, ok := o.(*List); ok && l.Type() == ListType {
 		out := make([]Object, len(l.items))
 		copy(out, l.items)
 		return out, nil
 	}
-	if t, ok := o.(*Tuple); ok {
+	if t, ok := o.(*Tuple); ok && t.Type() == TupleType {
 		out := make([]Object, len(t.items))
 		copy(out, t.items)
 		return out, nil
@@ -691,12 +694,15 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 //
 // CPython: Objects/abstract.c:2820 PySequence_Fast (constructor path)
 func DrainIterable(o Object) ([]Object, error) {
-	if l, ok := o.(*List); ok {
+	// PySequence_Fast fast-paths only PyList_CheckExact / PyTuple_CheckExact.
+	// A subclass may override __iter__ (seq_tests.LyingTuple yields values
+	// unrelated to its storage), so it must go through the iterator protocol.
+	if l, ok := o.(*List); ok && l.Type() == ListType {
 		out := make([]Object, len(l.items))
 		copy(out, l.items)
 		return out, nil
 	}
-	if t, ok := o.(*Tuple); ok {
+	if t, ok := o.(*Tuple); ok && t.Type() == TupleType {
 		out := make([]Object, len(t.items))
 		copy(out, t.items)
 		return out, nil

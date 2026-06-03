@@ -48,10 +48,21 @@ func init() {
 	TupleType.RichCmp = tupleRichCmp
 	TupleType.Iter = tupleIter
 	TupleType.Sequence = &SequenceMethods{
+		Length:   tupleLen,
+		GetItem:  tupleGetItem,
+		Concat:   tupleConcat,
+		Repeat:   tupleRepeat,
+		Contains: tupleContains,
+	}
+	// tuple_as_mapping carries mp_length and mp_subscript; the subscript
+	// slot is what handles slice keys (sq_item is integer-only). With the
+	// mapping present, GetItem(tuple, key) routes through tupleSubscript
+	// first, matching PyObject_GetItem's mp_subscript precedence.
+	//
+	// CPython: Objects/tupleobject.c:886 tuple_as_mapping
+	TupleType.Mapping = &MappingMethods{
 		Length:  tupleLen,
-		GetItem: tupleGetItem,
-		Concat:  tupleConcat,
-		Repeat:  tupleRepeat,
+		GetItem: tupleSubscript,
 	}
 	TupleType.TpTraverse = tupleTraverse
 	TupleType.Getattro = GenericGetAttr
@@ -69,6 +80,7 @@ func init() {
 	// CPython: Objects/typeobject.c add_operators slot wrapper for sq_item / sq_length
 	SetTypeDescr(TupleType, "__getitem__", NewMethodDescr(TupleType, "__getitem__", tupleGetItemMethod))
 	SetTypeDescr(TupleType, "__len__", NewMethodDescr(TupleType, "__len__", tupleLenMethod))
+	SetTypeDescr(TupleType, "__contains__", NewMethodDescr(TupleType, "__contains__", tupleContainsMethod))
 	SetTypeDescr(TupleType, "__add__", NewMethodDescr(TupleType, "__add__", tupleAddMethod))
 	SetTypeDescr(TupleType, "__mul__", NewMethodDescr(TupleType, "__mul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "__rmul__", NewMethodDescr(TupleType, "__rmul__", tupleMulMethod))
@@ -81,8 +93,28 @@ func init() {
 	//
 	// CPython: Objects/tupleobject.c:778 tuple_new_impl
 	TupleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		// The clinic-generated tuple_new rejects keywords when
+		// type == &PyTuple_Type OR the subtype has not overridden __init__
+		// (type->tp_init == base_tp->tp_init). tuple itself inherits
+		// object.__init__, so this means: a bare subclass still rejects
+		// kwargs, but subclass_with_init(tuple) (which defines __init__)
+		// may pass them through to __init__.
+		//
+		// CPython: Objects/clinic/tupleobject.c.h:96 tuple_new
+		if len(kwargs) > 0 && (cls == TupleType || initInheritedFromObject(cls)) {
+			return nil, fmt.Errorf("TypeError: tuple() takes no keyword arguments")
+		}
 		if len(args) > 1 {
 			return nil, fmt.Errorf("TypeError: tuple expected at most 1 argument, got %d", len(args))
+		}
+		// tuple(some_exact_tuple) returns that very object: PySequence_Tuple
+		// fast-paths PyTuple_CheckExact with a bare incref.
+		//
+		// CPython: Objects/abstract.c:2820 PySequence_Tuple
+		if cls == TupleType && len(args) == 1 {
+			if t, ok := args[0].(*Tuple); ok && t.Type() == TupleType {
+				return t, nil
+			}
 		}
 		var items []Object
 		if len(args) == 1 {
@@ -164,6 +196,70 @@ func tupleGetItem(o Object, i int) (Object, error) {
 		return nil, errIndexOutOfRange
 	}
 	return t.items[i], nil
+}
+
+// tupleSubscript ports tuple_subscript (mp_subscript): an index-like key
+// goes through tupleGetItem, a slice key returns a fresh tuple of the
+// selected region, and anything else raises the same TypeError CPython
+// emits.
+//
+// CPython: Objects/tupleobject.c:811 tuple_subscript
+func tupleSubscript(o, key Object) (Object, error) {
+	t := o.(*Tuple)
+	if s, ok := key.(*Slice); ok {
+		start, _, step, slicelen, err := s.GetIndices(len(t.items))
+		if err != nil {
+			return nil, err
+		}
+		if slicelen <= 0 {
+			return emptyTuple, nil
+		}
+		out := make([]Object, slicelen)
+		for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
+			out[i] = t.items[idx]
+		}
+		return NewTuple(out), nil
+	}
+	idx, err := indexValueAsInt(key, "tuple")
+	if err != nil {
+		return nil, err
+	}
+	return tupleGetItem(o, idx)
+}
+
+// tupleContains ports tuple_contains (sq_contains): linear scan with
+// RichCmpBool, needle on the left.
+//
+// CPython: Objects/tupleobject.c:692 tuple_contains
+func tupleContains(o, v Object) (bool, error) {
+	t := o.(*Tuple)
+	for _, item := range t.items {
+		// tuple_contains compares the element on the left and the needle
+		// on the right: PyObject_RichCompareBool(item, el, Py_EQ).
+		eq, err := RichCmpBool(item, v, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// tupleContainsMethod backs tuple.__contains__.
+func tupleContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[0].(*Tuple); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__contains__' requires a 'tuple' object")
+	}
+	found, err := tupleContains(args[0], args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(found), nil
 }
 
 func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -526,10 +622,16 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	n := len(t.items)
 	start := 0
 	stop := n
+	// start / stop go through the slice_index clinic converter, which
+	// clamps values outside the ssize_t range (e.g. -4*sys.maxsize) to
+	// the platform min / max rather than raising, so a huge window still
+	// scans the whole tuple.
+	//
+	// CPython: Python/ceval.c:1786 _PyEval_SliceIndex
 	if len(args) >= 3 {
-		s, err := toGoInt(args[2])
+		s, err := sliceIndex(args[2])
 		if err != nil {
-			return nil, fmt.Errorf("TypeError: 'start' must be an integer")
+			return nil, err
 		}
 		start = s
 		if start < 0 {
@@ -540,9 +642,9 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 	}
 	if len(args) >= 4 {
-		s, err := toGoInt(args[3])
+		s, err := sliceIndex(args[3])
 		if err != nil {
-			return nil, fmt.Errorf("TypeError: 'stop' must be an integer")
+			return nil, err
 		}
 		stop = s
 		if stop < 0 {
@@ -610,15 +712,6 @@ func tupleGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
 	cp := make([]Object, len(t.items))
 	copy(cp, t.items)
 	return NewTuple([]Object{NewTuple(cp)}), nil
-}
-
-// toGoInt converts an Object to a Go int for use as a sequence index.
-func toGoInt(o Object) (int, error) {
-	if i, ok := o.(*Int); ok {
-		n, _ := i.Int64()
-		return int(n), nil
-	}
-	return 0, fmt.Errorf("not an integer")
 }
 
 // TupleIterNextFast advances o as a tuple_iterator without going
