@@ -24,6 +24,10 @@ type MemoryView struct {
 	readonly bool
 	format   string
 	itemsize int
+	// contiguous is false once a strided slice (step != 1) detaches the
+	// view from a single run of bytes. A non-contiguous view cannot back a
+	// writable buffer request, matching PyBUF_C_CONTIGUOUS in CPython.
+	contiguous bool
 	// exporter is the bytearray this view was opened on, if any. The
 	// view holds one of the bytearray's ob_exports for its lifetime so
 	// the bytearray cannot be re-sized while the view is live; release()
@@ -98,27 +102,41 @@ func formatItemsize(format string) int {
 }
 
 // NewMemoryView wraps src in a memoryview. The view aliases the
-// underlying byte slice; callers can read but the readonly flag
-// determines whether the type can later expose mutation. Bytes get a
-// read-only view; bytearray is technically writable but every view
-// stays read-only for now.
+// underlying byte slice; the readonly flag follows the exporter: bytes is
+// read-only, bytearray and array.array are writable. A buffer-protocol
+// type outside this package (array.array) is resolved through BufferHook.
 //
 // CPython: Objects/memoryobject.c:1041 PyMemoryView_FromObject
 func NewMemoryView(src Object) (*MemoryView, error) {
 	switch s := src.(type) {
 	case *Bytes:
-		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1}
+		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, contiguous: true}
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *ByteArray:
-		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, exporter: s}
+		mv := &MemoryView{buf: s.Bytes(), readonly: false, format: "B", itemsize: 1, contiguous: true, exporter: s}
 		s.ExportInc()
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *MemoryView:
-		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize}
+		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize, contiguous: s.contiguous}
 		mv.init(MemoryViewType)
 		return mv, nil
+	}
+	if BufferHook != nil {
+		if bi, ok := BufferHook(src); ok {
+			itemsize := bi.Itemsize
+			if itemsize == 0 {
+				itemsize = 1
+			}
+			format := bi.Format
+			if format == "" {
+				format = "B"
+			}
+			mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true}
+			mv.init(MemoryViewType)
+			return mv, nil
+		}
 	}
 	return nil, fmt.Errorf("TypeError: memoryview: a bytes-like object is required, not '%s'", src.Type().Name)
 }
@@ -229,15 +247,16 @@ func memoryViewGetItemKey(o, key Object) (Object, error) {
 				src := (start + i*step) * m.itemsize
 				copy(out[i*m.itemsize:], m.buf[src:src+m.itemsize])
 			}
-			view := &MemoryView{buf: out, readonly: m.readonly, format: m.format, itemsize: m.itemsize}
+			view := &MemoryView{buf: out, readonly: m.readonly, format: m.format, itemsize: m.itemsize, contiguous: false}
 			view.init(MemoryViewType)
 			return view, nil
 		}
 		view := &MemoryView{
-			buf:      m.buf[start*m.itemsize : stop*m.itemsize],
-			readonly: m.readonly,
-			format:   m.format,
-			itemsize: m.itemsize,
+			buf:        m.buf[start*m.itemsize : stop*m.itemsize],
+			readonly:   m.readonly,
+			contiguous: m.contiguous,
+			format:     m.format,
+			itemsize:   m.itemsize,
 		}
 		view.init(MemoryViewType)
 		return view, nil
@@ -315,6 +334,48 @@ func bytesViewOf(o Object) ([]byte, bool) { return AsBytesLike(o) }
 // ByteBufferHook extends AsBytesLike to buffer-protocol types outside
 // the objects package (e.g. array.array). Set at module init time.
 var ByteBufferHook func(Object) ([]byte, bool)
+
+// BufferInfo carries the result of a buffer-protocol request on an object
+// implemented outside the objects package, mirroring the fields of a
+// Py_buffer the memoryview machinery cares about.
+//
+// CPython: Include/pybuffer.h Py_buffer
+type BufferInfo struct {
+	Buf      []byte
+	Readonly bool
+	Format   string
+	Itemsize int
+}
+
+// BufferHook resolves a buffer-protocol object outside the objects package
+// (array.array) into its live buffer info. Set at module init time.
+var BufferHook func(Object) (BufferInfo, bool)
+
+// AsWritableBuffer unwraps o to a live, writable, contiguous byte slice,
+// or reports false. It is the gopy equivalent of PyObject_GetBuffer with
+// PyBUF_WRITABLE: read-only exporters (bytes), non-contiguous views, and
+// non-buffer objects are rejected.
+//
+// CPython: Objects/abstract.c:341 PyObject_GetBuffer (PyBUF_WRITABLE)
+func AsWritableBuffer(o Object) ([]byte, bool) {
+	switch v := o.(type) {
+	case *ByteArray:
+		return v.Bytes(), true
+	case *MemoryView:
+		if v.readonly || !v.contiguous {
+			return nil, false
+		}
+		return v.buf, true
+	case *Bytes:
+		return nil, false
+	}
+	if BufferHook != nil {
+		if bi, ok := BufferHook(o); ok && !bi.Readonly {
+			return bi.Buf, true
+		}
+	}
+	return nil, false
+}
 
 // AsBytesLike unwraps any bytes-like object (Bytes, ByteArray,
 // MemoryView, or a type registered via ByteBufferHook) to the
@@ -437,7 +498,7 @@ func memoryViewCastMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(m.buf)%sz != 0 {
 		return nil, fmt.Errorf("TypeError: memoryview: length is not a multiple of itemsize")
 	}
-	view := &MemoryView{buf: m.buf, readonly: m.readonly, format: format, itemsize: sz}
+	view := &MemoryView{buf: m.buf, readonly: m.readonly, format: format, itemsize: sz, contiguous: m.contiguous}
 	view.init(MemoryViewType)
 	return view, nil
 }
@@ -522,7 +583,7 @@ func memoryViewToreadonlyMethod(args []Object, _ map[string]Object) (Object, err
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'toreadonly' requires a 'memoryview' object")
 	}
-	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize}
+	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize, contiguous: m.contiguous}
 	view.init(MemoryViewType)
 	return view, nil
 }
