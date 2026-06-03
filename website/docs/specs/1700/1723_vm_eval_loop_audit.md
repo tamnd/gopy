@@ -69,6 +69,19 @@ never-awaited finalizer never ran; the exception-unwind path now decrefs the
 abandoned stack temporaries the way CPython's exception_unwind does, which
 recovered `test_coroutines.test_func_9` (7 failures down to 5).
 
+`test_asyncgen` emitted spurious `Task was destroyed but it is pending!`
+lines on stderr after the aclose cases. The async-generator port now mirrors
+CPython's `ag_closed` flag (set the instant aclose begins driving the body,
+distinct from the frame-finished state) and gates `_PyGen_Finalize` on it, so
+a body that ignores GeneratorExit and raises RuntimeError no longer leaves the
+generator looking open for a later GC to re-finalize. The one remaining stderr
+line comes from `test_async_gen_aclose_compatible_with_get_stack`, which
+creates an aclose task it never awaits: gopy collects the parent async
+generator while that task is still queued in the loop's ready deque, so the
+finalizer fires once more. That reachability gap is the same container
+refcount discipline tracked under P11, not the asyncgen logic; the test itself
+passes.
+
 ---
 
 ## P1 — Generator / coroutine / async-generator attribute gaps
