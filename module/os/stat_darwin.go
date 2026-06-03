@@ -39,11 +39,23 @@ func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	return objects.NewInt(int64(syscall.Getuid())), nil
 }
 
-// osPipe creates a pipe and returns (read_fd, write_fd).
-// CPython: Modules/posixmodule.c:8024 os_pipe_impl
+// osPipe creates a pipe and returns (read_fd, write_fd). Both descriptors
+// are made non-inheritable (FD_CLOEXEC), matching CPython's PEP 446 default:
+// pipe fds must not leak into spawned children, or a child holding the write
+// end of an error/data pipe deadlocks the parent's blocking read. Darwin has
+// no pipe2, so we hold ForkLock across pipe()+CloseOnExec to keep the window
+// where the fds are inheritable closed to a concurrent fork.
+// CPython: Modules/posixmodule.c:8024 os_pipe_impl (non-HAVE_PIPE2 branch)
 func osPipe(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	fds := make([]int, 2)
-	if err := syscall.Pipe(fds); err != nil {
+	syscall.ForkLock.Lock()
+	err := syscall.Pipe(fds)
+	if err == nil {
+		syscall.CloseOnExec(fds[0])
+		syscall.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.NewTuple([]objects.Object{
