@@ -35,6 +35,15 @@ type AsyncGenerator struct {
 	started bool
 	closed  bool
 
+	// agClosed mirrors CPython's ag_closed flag, set the moment aclose()
+	// begins driving the generator (distinct from closed, which marks the
+	// frame finished). _PyGen_Finalize gates its finalizer hook on
+	// !ag_closed, so once aclose has started a later GC must not re-fire
+	// the asyncio finalizer and schedule a dangling create_task(aclose()).
+	//
+	// CPython: Include/cpython/genobject.h ag_closed
+	agClosed bool
+
 	// Running is 1 while the async generator body is actively
 	// executing. CPython exposes ag_running_async as a Py_T_BOOL
 	// PyMemberDef pointing at this flag.
@@ -956,6 +965,15 @@ func asyncGenAThrowDrive(a *asyncGenAThrow, arg Object) (Object, error) {
 	}
 	a.used = true
 	if a.isClose {
+		// aclose() mode marks ag_closed before the throw, so a later GC does
+		// not re-fire the asyncio finalizer hook and schedule a dangling
+		// create_task(aclose()). Even when the body ignores GeneratorExit and
+		// we raise "ignored GeneratorExit", ag_closed stays set. This is
+		// distinct from gen.closed (frame finished); the aclose may still
+		// need several resumes to drain intermediate awaits.
+		//
+		// CPython: Objects/genobject.c:2151 async_gen_athrow_send (aclose mode)
+		a.gen.agClosed = true
 		r, e := a.gen.Throw(ErrGeneratorExit)
 		return asyncGenAThrowCloseResult(a, r, e)
 	}
@@ -1398,7 +1416,7 @@ func asyncGenFinalize(o Object) {
 	if !ok {
 		return
 	}
-	if g.Finalizer == nil || g.Finalizer == None() || g.closed {
+	if g.Finalizer == nil || g.Finalizer == None() || g.closed || g.agClosed {
 		return
 	}
 	// Save and restore the ambient exception so running the finalizer
