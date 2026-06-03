@@ -30,6 +30,17 @@ func socketFdInt(s socketFd) int { return int(s) }
 // CPython: Modules/socketmodule.c sock_close
 func closeFd(s socketFd) error { return syscall.Close(s) }
 
+// makeSocketpair creates a connected pair of sockets via socketpair(2).
+//
+// CPython: Modules/socketmodule.c:5836 socket_socketpair (HAVE_SOCKETPAIR)
+func makeSocketpair(family, typ, proto int) ([2]socketFd, error) {
+	fds, err := syscall.Socketpair(family, typ, proto)
+	if err != nil {
+		return [2]socketFd{invalidFd, invalidFd}, err
+	}
+	return [2]socketFd{fds[0], fds[1]}, nil
+}
+
 // readFd reads from the socket using read(2). The wider gopy port
 // only uses this for the recv(bufsize) shorthand where no flags are
 // supplied.

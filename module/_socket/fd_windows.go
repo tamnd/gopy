@@ -32,6 +32,16 @@ func socketFdInt(s socketFd) int { return int(s) }
 // closeFd closes the socket with closesocket(2).
 func closeFd(s socketFd) error { return syscall.Closesocket(s) }
 
+// makeSocketpair has no Winsock equivalent: CPython's _socket module
+// omits socketpair on Windows and Lib/socket.py supplies a pure-Python
+// emulation over a loopback listener instead. Surface the same absence
+// as an error so callers fall back to that path.
+//
+// CPython: Modules/socketmodule.c HAVE_SOCKETPAIR (undefined on Windows)
+func makeSocketpair(_, _, _ int) ([2]socketFd, error) {
+	return [2]socketFd{invalidFd, invalidFd}, syscall.EWINDOWS
+}
+
 // readFd reads from the socket via WSARecv. Mirrors POSIX read(2)
 // for the no-flags recv(bufsize) shorthand. flags=0 here matches
 // MSG_NONE in CPython's sock_recv_impl.

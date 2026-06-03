@@ -264,13 +264,13 @@ func sockInitDescr(args []objects.Object, kwargs map[string]objects.Object) (obj
 			return nil, fmt.Errorf("TypeError: fileno must be int, not %s", args[4].Type().Name)
 		}
 		f64, _ := f.Int64()
-		if s.fd >= 0 {
-			_ = syscall.Close(s.fd)
+		if socketFdValid(s.fd) {
+			_ = closeFd(s.fd)
 		}
 		defaultTimeoutMu.Lock()
 		timeout := defaultTimeoutVal
 		defaultTimeoutMu.Unlock()
-		s.fd = int(f64)
+		s.fd = socketFd(f64)
 		s.family = family
 		s.typ = typ
 		s.proto = proto
@@ -583,14 +583,14 @@ func socketSocketpair(args []objects.Object, _ map[string]objects.Object) (objec
 			proto = int(v)
 		}
 	}
-	fds, err := syscall.Socketpair(family, typ, proto)
+	fds, err := makeSocketpair(family, typ, proto)
 	if err != nil {
 		return nil, osError(err)
 	}
 	defaultTimeoutMu.Lock()
 	timeout := defaultTimeoutVal
 	defaultTimeoutMu.Unlock()
-	mk := func(fd int) *sockObj {
+	mk := func(fd socketFd) *sockObj {
 		s := &sockObj{fd: fd, family: family, typ: typ, proto: proto, timeout: timeout}
 		s.Init(SocketType)
 		applyTimeoutBlocking(s)
