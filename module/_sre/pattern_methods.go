@@ -49,23 +49,13 @@ func patternFindall(args []objects.Object, _ map[string]objects.Object) (objects
 		var item objects.Object
 		switch cp.groups {
 		case 0:
-			item = objects.NewStr(srcStr[mStart:mEnd])
+			item = sliceSubject(srcStr, mStart, mEnd, cp.isbytes)
 		case 1:
-			lo, hi := st.mark[0], st.mark[1]
-			if lo < 0 || hi < 0 {
-				item = objects.NewStr("")
-			} else {
-				item = objects.NewStr(srcStr[lo:hi])
-			}
+			item = sliceSubject(srcStr, st.mark[0], st.mark[1], cp.isbytes)
 		default:
 			parts := make([]objects.Object, cp.groups)
 			for g := 0; g < cp.groups; g++ {
-				lo, hi := st.mark[2*g], st.mark[2*g+1]
-				if lo < 0 || hi < 0 {
-					parts[g] = objects.NewStr("")
-				} else {
-					parts[g] = objects.NewStr(srcStr[lo:hi])
-				}
+				parts[g] = sliceSubject(srcStr, st.mark[2*g], st.mark[2*g+1], cp.isbytes)
 			}
 			item = objects.NewTuple(parts)
 		}
@@ -340,12 +330,31 @@ func patternSplit(args []objects.Object, _ map[string]objects.Object) (objects.O
 
 // stringOf turns a Python str or bytes argument into its Go string
 // representation. Returns "" for anything else.
+// sliceSubject materialises subject[lo:hi] as a bytes object when the
+// pattern is byte-oriented and a str otherwise. An unset group (lo or hi
+// negative) yields the empty result of the matching kind. Mirrors
+// getslice's str/bytes branch in the C engine.
+//
+// CPython: Modules/_sre/sre.c:1769 getslice
+func sliceSubject(s string, lo, hi int, isBytes bool) objects.Object {
+	var seg string
+	if lo >= 0 && hi >= 0 {
+		seg = s[lo:hi]
+	}
+	if isBytes {
+		return objects.NewBytes([]byte(seg))
+	}
+	return objects.NewStr(seg)
+}
+
 func stringOf(o objects.Object) string {
 	if u, ok := o.(*objects.Unicode); ok {
 		return u.Value()
 	}
-	if b, ok := o.(*objects.Bytes); ok {
-		return string(b.Bytes())
+	// bytes, bytearray, memoryview and array all expose a buffer; read it
+	// uniformly so a bytearray subject is not silently treated as empty.
+	if b, ok := objects.AsBytesLike(o); ok {
+		return string(b)
 	}
 	return ""
 }

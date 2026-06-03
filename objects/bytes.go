@@ -9,6 +9,7 @@ package objects
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -18,6 +19,37 @@ import (
 type Bytes struct {
 	VarHeader
 	v []byte
+	// attrs holds instance attributes for bytes subclass objects. Nil for
+	// plain bytes; allocated lazily by EnsureAttrDict. Mirrors the
+	// tp_dictoffset a bytes subclass picks up from object.
+	attrs *Dict
+}
+
+// AttrDict / EnsureAttrDict implement AttrDictHolder so bytes subclasses can
+// carry instance attributes through generic_attr's HasDict path.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (bytes-subclass path)
+func (b *Bytes) AttrDict() *Dict { return b.attrs }
+
+// EnsureAttrDict allocates the attrs dict on first use.
+func (b *Bytes) EnsureAttrDict() *Dict {
+	if b.attrs == nil {
+		b.attrs = NewDict()
+	}
+	return b.attrs
+}
+
+// NewBytesSubtype wraps a copy of buf in a Bytes object bound to a bytes
+// subclass. Used by tp_new when the requested type is a proper subclass of
+// bytes (bytes_subtype_new), so the instance reports the subclass type and
+// can hold instance attributes.
+//
+// CPython: Objects/bytesobject.c:3055 bytes_subtype_new
+func NewBytesSubtype(cls *Type, buf []byte) *Bytes {
+	b := &Bytes{v: append([]byte(nil), buf...)}
+	b.init(cls)
+	b.size = int64(len(buf))
+	return b
 }
 
 // BytesType is the type singleton for bytes. Mirrors PyBytes_Type.
@@ -31,6 +63,18 @@ func init() {
 	BytesType.Hash = bytesHash
 	BytesType.RichCmp = bytesRichCmp
 	BytesType.TpFlags |= TpFlagMatchSelf
+	// CPython: Objects/bytesobject.c bytes_doc (tp_doc)
+	SetTypeDescr(BytesType, "__doc__", NewStr("bytes(iterable_of_ints) -> bytes\n"+
+		"bytes(string, encoding[, errors]) -> bytes\n"+
+		"bytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\n"+
+		"bytes(int) -> bytes object of size given by the parameter initialized with null bytes\n"+
+		"bytes() -> empty bytes object\n"+
+		"\n"+
+		"Construct an immutable array of bytes from:\n"+
+		"  - an iterable yielding integers in range(256)\n"+
+		"  - a text string encoded using the specified encoding\n"+
+		"  - any object implementing the buffer API.\n"+
+		"  - an integer"))
 	BytesType.Sequence = &SequenceMethods{
 		Length:   bytesLen,
 		Concat:   bytesConcat,
@@ -82,6 +126,13 @@ func init() {
 			return NewInt(int64(n)), nil
 		},
 	))
+	// bytes.__repr__ / __str__ slot wrappers. CPython exposes tp_repr via
+	// add_operators -> slotdefs so a bytes subclass finds bytes_repr in the
+	// MRO instead of inheriting object.__repr__'s `<addr object>` format.
+	//
+	// CPython: Objects/typeobject.c slotdefs (TPSLOT __repr__ + PyBytes_Type.tp_repr)
+	SetTypeDescr(BytesType, "__repr__", NewMethodDescr(BytesType, "__repr__", bytesReprDescr))
+	SetTypeDescr(BytesType, "__str__", NewMethodDescr(BytesType, "__str__", bytesReprDescr))
 	SetTypeDescr(BytesType, "__add__", NewMethodDescr(BytesType, "__add__",
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
@@ -95,6 +146,24 @@ func init() {
 	))
 	SetTypeDescr(BytesType, "__rmul__", NewMethodDescr(BytesType, "__rmul__",
 		bytesMulMethod,
+	))
+	SetTypeDescr(BytesType, "__mod__", NewMethodDescr(BytesType, "__mod__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __mod__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return bytesModulo(args[0], args[1])
+		},
+	))
+	SetTypeDescr(BytesType, "__rmod__", NewMethodDescr(BytesType, "__rmod__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __rmod__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			// a.__rmod__(b) computes b % a; bytes_mod requires the left
+			// operand to be bytes, so a non-bytes lhs yields NotImplemented.
+			return bytesModulo(args[1], args[0])
+		},
 	))
 }
 
@@ -119,33 +188,13 @@ func bytesMulMethod(args []Object, _ map[string]Object) (Object, error) {
 
 // bytesModulo implements bytes % args (PEP 461).
 //
-// CPython: Objects/bytesobject.c:2893 bytes_mod
+// CPython: Objects/bytesobject.c:2724 bytes_mod
 func bytesModulo(a, b Object) (Object, error) {
 	bv, ok := a.(*Bytes)
 	if !ok {
 		return notImplemented(), nil
 	}
-	// Decode the format bytes as latin-1. For bytes formatting only ASCII
-	// format specs are meaningful, so latin-1 round-trips safely.
-	fmtStr := NewStr(string(bv.v))
-	// Delegate to the str % implementation.
-	result, err := unicodeModulo(fmtStr, b)
-	if err != nil {
-		return nil, err
-	}
-	u, ok2 := result.(*Unicode)
-	if !ok2 {
-		return result, nil
-	}
-	// Encode the result as latin-1 bytes.
-	out := make([]byte, len(u.v))
-	for i, r := range u.v {
-		if r > 0xff {
-			return nil, fmt.Errorf("ValueError: %%b requires a bytes-like object, or an object that implements __bytes__, not 'str'")
-		}
-		out[i] = byte(r)
-	}
-	return NewBytes(out), nil
+	return bytesFormat(bv.v, b, false)
 }
 
 // bytesSubscript ports bytes_subscript: integer keys return the byte
@@ -176,6 +225,13 @@ func bytesSubscript(o, key Object) (Object, error) {
 	idx, err := indexValueAsInt(key, "byte")
 	if err != nil {
 		return nil, err
+	}
+	// bytes_subscript adjusts a negative subscript against the length before
+	// indexing; the sq_item slot (bytesGetItem) does not.
+	//
+	// CPython: Objects/bytesobject.c:1635 bytes_subscript
+	if idx < 0 {
+		idx += len(b.v)
 	}
 	return bytesGetItem(o, idx)
 }
@@ -264,17 +320,17 @@ func bytesIterNext(o Object) (Object, error) {
 //
 // CPython: Objects/bytesobject.c:1147 bytes_concat
 func bytesConcat(a, b Object) (Object, error) {
-	ba, ok := a.(*Bytes)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: can't concat %s to bytes", a.Type().Name)
+	// bytes_concat works on the buffer protocol for both operands, so any
+	// bytes-like right operand (bytearray, memoryview, ...) concatenates;
+	// the result is always a plain bytes object.
+	av, aok := AsBytesLike(a)
+	bv, bok := AsBytesLike(b)
+	if !aok || !bok {
+		return nil, fmt.Errorf("TypeError: can't concat %s to %s", b.Type().Name, a.Type().Name)
 	}
-	bb, ok := b.(*Bytes)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: can't concat %s to bytes", b.Type().Name)
-	}
-	out := make([]byte, 0, len(ba.v)+len(bb.v))
-	out = append(out, ba.v...)
-	out = append(out, bb.v...)
+	out := make([]byte, 0, len(av)+len(bv))
+	out = append(out, av...)
+	out = append(out, bv...)
 	return NewBytes(out), nil
 }
 
@@ -284,11 +340,23 @@ func bytesConcat(a, b Object) (Object, error) {
 // CPython: Objects/bytesobject.c:1184 bytes_repeat
 func bytesRepeat(o Object, n int) (Object, error) {
 	b := o.(*Bytes)
+	// n == 1 returns the original only for an exact bytes object; a
+	// subclass instance must yield a fresh plain bytes copy so identity
+	// is not preserved across the multiply.
+	//
+	// CPython: Objects/bytesobject.c:1184 bytes_repeat
+	if n == 1 && b.Type() == BytesType {
+		return b, nil
+	}
 	if n <= 0 || len(b.v) == 0 {
 		return emptyBytes, nil
 	}
-	if n == 1 {
-		return b, nil
+	// Guard against the multiplication overflowing before the allocation
+	// is attempted, matching the size-argument-may-be-negative check.
+	//
+	// CPython: Objects/bytesobject.c:1184 bytes_repeat
+	if n > 0 && len(b.v) > (math.MaxInt-1)/n {
+		return nil, fmt.Errorf("OverflowError: repeated bytes are too long")
 	}
 	out := make([]byte, 0, len(b.v)*n)
 	for i := 0; i < n; i++ {
@@ -364,6 +432,24 @@ func (b *Bytes) String() string {
 // the way CPython's bytes_repr does and escaping non-printables.
 //
 // CPython: Objects/bytesobject.c:1418 PyBytes_Repr
+// bytesReprDescr backs bytes.__dict__["__repr__"] and ["__str__"]. It
+// requires a bytes (or subclass) receiver and produces the b'...' form, so
+// a bytes subclass renders its payload rather than object.__repr__'s
+// `<addr object>`.
+func bytesReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+	}
+	if _, ok := args[0].(*Bytes); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'bytes' object but received a '%s'", args[0].Type().Name)
+	}
+	out, err := bytesRepr(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
+}
+
 func bytesRepr(o Object) (string, error) {
 	v := o.(*Bytes).v
 	quote := byte('\'')
@@ -463,11 +549,14 @@ func bytesLen(o Object) (int, error) {
 	return o.(*Bytes).Len(), nil
 }
 
+// bytesGetItem is the sq_item slot. It bounds-checks but does NOT adjust a
+// negative index: PySequence_GetItem performs that adjustment via sq_length
+// before reaching the slot, so doing it again here would let, say, index -2
+// on a length-1 object alias to index 0 instead of raising IndexError.
+//
+// CPython: Objects/bytesobject.c:1577 bytes_item
 func bytesGetItem(o Object, i int) (Object, error) {
 	b := o.(*Bytes)
-	if i < 0 {
-		i += len(b.v)
-	}
 	if i < 0 || i >= len(b.v) {
 		return nil, errIndexOutOfRange
 	}
@@ -479,24 +568,42 @@ func bytesGetItem(o Object, i int) (Object, error) {
 //
 // CPython: Objects/bytesobject.c:2900 bytes_contains
 func bytesContains(o, v Object) (bool, error) {
-	b := o.(*Bytes)
-	switch x := v.(type) {
-	case *Int:
-		n, ok := x.Int64()
-		if !ok || n < 0 || n > 255 {
-			return false, fmt.Errorf("ValueError: byte must be in range(0, 256)")
-		}
-		for _, c := range b.v {
-			if int64(c) == n {
-				return true, nil
+	return bytesLikeContains(o.(*Bytes).v, v)
+}
+
+// bytesLikeContains ports _Py_bytes_contains, the shared sq_contains body
+// for bytes and bytearray. The argument is first coerced through __index__
+// (a byte membership test); a non-index argument falls through to a
+// buffer/substring search. CPython uses PyNumber_AsSsize_t(arg, ValueError),
+// so an overflowing int raises ValueError rather than wrapping.
+//
+// CPython: Objects/bytes_methods.c:23 _Py_bytes_contains
+func bytesLikeContains(buf []byte, arg Object) (bool, error) {
+	if IndexCheck(arg) {
+		iv, err := NumberIndex(arg)
+		if err != nil {
+			if !isTypeError(err) {
+				return false, err
 			}
+			// __index__ raised TypeError: fall through to the buffer path.
+		} else {
+			n, fits := iv.(*Int).Int64()
+			if !fits || n < 0 || n >= 256 {
+				return false, fmt.Errorf("ValueError: byte must be in range(0, 256)")
+			}
+			for _, c := range buf {
+				if int64(c) == n {
+					return true, nil
+				}
+			}
+			return false, nil
 		}
-		return false, nil
-	case *Bytes:
-		if len(x.v) == 0 {
+	}
+	if sub, ok := asBytesLike(arg); ok {
+		if len(sub) == 0 {
 			return true, nil
 		}
-		return strings.Contains(string(b.v), string(x.v)), nil
+		return strings.Contains(string(buf), string(sub)), nil
 	}
 	return false, fmt.Errorf("TypeError: a bytes-like object is required")
 }

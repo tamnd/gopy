@@ -1099,96 +1099,369 @@ func mergeDict(dst, src *objects.Dict) error {
 //
 // CPython: Objects/bytesobject.c bytes_new_impl
 func BytesCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return bytesNewObject(objects.BytesType, args, kwargs)
+}
+
+// bytesNewObject ports the full bytes_new path: compute the bytes object via
+// bytes_new_impl, then for a proper subclass wrap the buffer into that subtype
+// (bytes_subtype_new). When cls is exactly bytes the computed object is
+// returned as-is, which preserves a subclass instance handed back by an
+// object's __bytes__ method.
+//
+// CPython: Objects/bytesobject.c:2754 bytes_new_impl + 3055 bytes_subtype_new
+func bytesNewObject(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	args, kwargs = foldSourceKwarg(args, kwargs)
+	obj, err := bytesNewContents(args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	if cls == objects.BytesType {
+		return obj, nil
+	}
+	return objects.NewBytesSubtype(cls, obj.(*objects.Bytes).Bytes()), nil
+}
+
+// foldSourceKwarg moves a bytes(source=...) / bytearray(source=...) keyword
+// into the positional slot when no positional source was supplied. The clinic
+// signatures name the first parameter "source", so it may arrive either way.
+//
+// CPython: Objects/clinic/bytesobject.c.h bytes_new keywords
+func foldSourceKwarg(args []objects.Object, kwargs map[string]objects.Object) ([]objects.Object, map[string]objects.Object) {
+	src, ok := kwargs["source"]
+	if !ok || len(args) != 0 {
+		return args, kwargs
+	}
+	rest := make(map[string]objects.Object, len(kwargs))
+	for k, v := range kwargs {
+		if k != "source" {
+			rest[k] = v
+		}
+	}
+	return []objects.Object{src}, rest
+}
+
+// strArg reports the Go string behind a clinic 's' converter argument; the
+// converter requires an exact str and rejects everything else.
+func strArg(o objects.Object) (string, bool) {
+	if o.Type() != objects.StrType() {
+		return "", false
+	}
+	s, _ := objects.Str(o)
+	return s, true
+}
+
+// parseBytesEncoding pulls the optional encoding/errors arguments out of the
+// positional tail and keyword map for bytes()/bytearray(). The clinic 's'
+// converters require str, so a non-str raises TypeError.
+//
+// CPython: Objects/clinic/bytesobject.c.h bytes_new (encoding/errors 's')
+func parseBytesEncoding(args []objects.Object, kwargs map[string]objects.Object, typeName string) (encoding, errs string, encSet, errSet bool, err error) {
+	errs = "strict"
+	set := func(o objects.Object, what string) (string, bool, error) {
+		s, ok := strArg(o)
+		if !ok {
+			return "", false, fmt.Errorf("TypeError: %s() %s must be str, not '%s'", typeName, what, o.Type().Name)
+		}
+		return s, true, nil
+	}
+	if len(args) > 1 {
+		if encoding, encSet, err = set(args[1], "encoding"); err != nil {
+			return
+		}
+	}
+	if v, ok := kwargs["encoding"]; ok {
+		if encoding, encSet, err = set(v, "encoding"); err != nil {
+			return
+		}
+	}
+	if len(args) > 2 {
+		if errs, errSet, err = set(args[2], "errors"); err != nil {
+			return
+		}
+	}
+	if v, ok := kwargs["errors"]; ok {
+		if errs, errSet, err = set(v, "errors"); err != nil {
+			return
+		}
+	}
+	return
+}
+
+// bytesCoerceItem reads one element of an iterable/list source as a byte. The
+// value is coerced through __index__ (PyNumber_AsSsize_t), so any index-like
+// object is accepted; out-of-range values raise ValueError. bytes() words the
+// range message with "bytes", bytearray() with "byte".
+//
+// CPython: Objects/bytesobject.c:2864 _PyBytes_FromList / Objects/bytearrayobject.c:26 _getbytevalue
+func bytesCoerceItem(item objects.Object, typeName string) (byte, error) {
+	iv, err := objects.NumberIndex(item)
+	if err != nil {
+		return 0, err
+	}
+	n, fits := iv.(*objects.Int).Int64()
+	word := "bytes"
+	if typeName == "bytearray" {
+		word = "byte"
+	}
+	if !fits || n < 0 || n >= 256 {
+		return 0, fmt.Errorf("ValueError: %s must be in range(0, 256)", word)
+	}
+	return byte(n), nil
+}
+
+// bytesFromObjectContents ports PyBytes_FromObject: build a raw byte buffer
+// from a buffer-protocol object, or by coercing each item of an iterable
+// through __index__. A non-iterable non-buffer source raises the
+// "cannot convert 'X' object to <typeName>" TypeError.
+//
+// CPython: Objects/bytesobject.c:3005 PyBytes_FromObject
+func bytesFromObjectContents(x objects.Object, typeName string) ([]byte, error) {
+	if buf, ok := objects.AsBytesLike(x); ok {
+		return append([]byte(nil), buf...), nil
+	}
+	if !objects.IsSubtype(x.Type(), objects.StrType()) {
+		it, ierr := objects.Iter(x)
+		if ierr == nil {
+			var buf []byte
+			for {
+				item, err := objects.IterNext(it)
+				if errors.Is(err, objects.ErrStopIteration) {
+					break
+				}
+				if err != nil {
+					return nil, err
+				}
+				bval, err := bytesCoerceItem(item, typeName)
+				if err != nil {
+					return nil, err
+				}
+				buf = append(buf, bval)
+			}
+			return buf, nil
+		}
+		if !isTypeError(ierr) {
+			return nil, ierr
+		}
+	}
+	return nil, fmt.Errorf("TypeError: cannot convert '%s' object to %s", x.Type().Name, typeName)
+}
+
+// isTypeError reports whether err carries a Python TypeError. A TypeError
+// raised with no message formats as the bare type name ("TypeError" with no
+// trailing colon), so a "TypeError:" prefix check alone misses it.
+func isTypeError(err error) bool {
+	s := err.Error()
+	return s == "TypeError" || strings.HasPrefix(s, "TypeError:")
+}
+
+// bytesIntContents handles the "is it an integer?" branch shared by
+// bytes_new_impl and bytearray___init___impl: when the source defines
+// __index__, coerce it to a count and produce a zero-filled buffer. A
+// TypeError out of __index__ means "fall through" (handled bool false); any
+// other exception (ZeroDivisionError, OverflowError) propagates.
+//
+// CPython: Objects/bytesobject.c:2812 bytes_new_impl (_PyIndex_Check branch)
+func bytesIntContents(arg objects.Object) (buf []byte, handled bool, err error) {
+	if !objects.IndexCheck(arg) {
+		return nil, false, nil
+	}
+	iv, ierr := objects.NumberIndex(arg)
+	if ierr != nil {
+		if isTypeError(ierr) {
+			return nil, false, nil
+		}
+		return nil, true, ierr
+	}
+	n, fits := iv.(*objects.Int).Int64()
+	if !fits {
+		return nil, true, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	if n < 0 {
+		return nil, true, fmt.Errorf("ValueError: negative count")
+	}
+	return make([]byte, n), true, nil
+}
+
+// bytesNewContents ports bytes_new_impl: parse (source, encoding, errors) and
+// build the raw payload. The __bytes__ protocol is honored here (bytes only;
+// bytearray's __init__ does not consult it).
+//
+// CPython: Objects/bytesobject.c:2754 bytes_new_impl
+func bytesNewContents(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	args, kwargs = foldSourceKwarg(args, kwargs)
+	encoding, errs, encSet, errSet, err := parseBytesEncoding(args, kwargs, "bytes")
+	if err != nil {
+		return nil, err
+	}
 	if len(args) == 0 {
+		if encSet {
+			return nil, fmt.Errorf("TypeError: encoding without a string argument")
+		}
+		if errSet {
+			return nil, fmt.Errorf("TypeError: errors without a string argument")
+		}
 		return objects.NewBytes(nil), nil
 	}
-	// Look for a str source first so the encoding/errors kwargs are
-	// honored before the iterable fallback catches str (which is iterable).
-	srcIsStr := args[0].Type() == objects.StrType()
-	if srcIsStr {
-		encoding := ""
-		errorsName := "strict"
-		if len(args) > 1 {
-			if u := args[1].Type() == objects.StrType(); u {
-				s, _ := objects.Str(args[1])
-				encoding = s
-			} else {
-				return nil, fmt.Errorf("TypeError: bytes() encoding must be str, not '%s'", args[1].Type().Name)
-			}
+	x := args[0]
+	isStr := objects.IsSubtype(x.Type(), objects.StrType())
+	switch {
+	case encSet:
+		if !isStr {
+			return nil, fmt.Errorf("TypeError: encoding without a string argument")
 		}
-		if v, ok := kwargs["encoding"]; ok {
-			if v.Type() != objects.StrType() {
-				return nil, fmt.Errorf("TypeError: bytes() encoding must be str, not '%s'", v.Type().Name)
-			}
-			s, _ := objects.Str(v)
-			encoding = s
+		s, _ := objects.Str(x)
+		// In development mode validate the encoding and error-handler
+		// names up front so a bogus name raises LookupError even when the
+		// payload is empty and the handler would never otherwise run.
+		//
+		// CPython: Objects/unicodeobject.c:3938 PyUnicode_AsEncodedString
+		// (unicode_check_encoding_errors)
+		if cerr := codecs.CheckEncodingErrors(encoding, errs); cerr != nil {
+			return nil, cerr
 		}
-		if len(args) > 2 {
-			if args[2].Type() != objects.StrType() {
-				return nil, fmt.Errorf("TypeError: bytes() errors must be str, not '%s'", args[2].Type().Name)
-			}
-			s, _ := objects.Str(args[2])
-			errorsName = s
-		}
-		if v, ok := kwargs["errors"]; ok {
-			if v.Type() != objects.StrType() {
-				return nil, fmt.Errorf("TypeError: bytes() errors must be str, not '%s'", v.Type().Name)
-			}
-			s, _ := objects.Str(v)
-			errorsName = s
-		}
-		if encoding == "" {
-			return nil, fmt.Errorf("TypeError: string argument without an encoding")
-		}
-		s, _ := objects.Str(args[0])
-		out, _, encErr := codecs.Encode(s, encoding, errorsName)
+		out, _, encErr := codecs.Encode(s, encoding, errs)
 		if encErr != nil {
 			return nil, encErr
 		}
 		return objects.NewBytes(out), nil
-	}
-	switch v := args[0].(type) {
-	case *objects.Bytes:
-		return objects.NewBytes(v.Bytes()), nil
-	case *objects.ByteArray:
-		return objects.NewBytes(v.Bytes()), nil
-	case *objects.Int:
-		n, ok := v.Int64()
-		if !ok || n < 0 {
-			return nil, fmt.Errorf("ValueError: bytes(): negative count")
+	case errSet:
+		if isStr {
+			return nil, fmt.Errorf("TypeError: string argument without an encoding")
 		}
-		return objects.NewBytes(make([]byte, n)), nil
+		return nil, fmt.Errorf("TypeError: errors without a string argument")
 	}
-	// iterable of ints
-	items, err := drainIterable(args[0])
-	if err != nil {
-		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", args[0].Type().Name)
+	// __bytes__ protocol: checked before the unicode/int branches, so a str
+	// subclass that defines __bytes__ is honored. The returned object is
+	// handed back unchanged (it may itself be a bytes subclass instance).
+	if out, ok, berr := bytesViaDunderBytes(x); ok || berr != nil {
+		return out, berr
 	}
-	buf := make([]byte, len(items))
-	for i, item := range items {
-		iv, ok := item.(*objects.Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: bytes must be integers, not '%s'", item.Type().Name)
+	if isStr {
+		return nil, fmt.Errorf("TypeError: string argument without an encoding")
+	}
+	if buf, handled, ierr := bytesIntContents(x); handled {
+		if ierr != nil {
+			return nil, ierr
 		}
-		n, fits := iv.Int64()
-		if !fits || n < 0 || n > 255 {
-			return nil, fmt.Errorf("ValueError: bytes must be in range(0, 256)")
-		}
-		buf[i] = byte(n)
+		return objects.NewBytes(buf), nil
+	}
+	buf, ferr := bytesFromObjectContents(x, "bytes")
+	if ferr != nil {
+		return nil, ferr
 	}
 	return objects.NewBytes(buf), nil
 }
 
-// ByteArrayCtor ports bytearray_new.
-// Same construction shapes as bytes, but returns a mutable bytearray.
+// bytesViaDunderBytes calls x.__bytes__() when defined; the result must be a
+// bytes object and is returned unchanged so a subclass instance survives. ok
+// is false (with nil error) when x has no __bytes__.
+//
+// CPython: Objects/bytesobject.c:2791 bytes_new_impl (__bytes__ branch)
+func bytesViaDunderBytes(x objects.Object) (out objects.Object, ok bool, err error) {
+	fn, lerr := objects.LookupSpecial(x, "__bytes__")
+	if lerr != nil || fn == nil {
+		return nil, false, nil
+	}
+	res, cerr := objects.CallObject(fn, nil)
+	if cerr != nil {
+		return nil, true, cerr
+	}
+	if _, isBytes := res.(*objects.Bytes); !isBytes {
+		return nil, true, fmt.Errorf("TypeError: __bytes__ returned non-bytes (type %s)", res.Type().Name)
+	}
+	return res, true, nil
+}
+
+// ByteArrayCtor ports bytearray_new: it only allocates an empty bytearray of
+// the requested type. Population happens in __init__ (bytearray___init___impl).
 //
 // CPython: Objects/bytearrayobject.c bytearray_new_impl
-func ByteArrayCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	b, err := BytesCtor(args, kwargs)
+func ByteArrayCtor(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewByteArray(nil), nil
+}
+
+// bytearrayInitContents ports bytearray___init___impl: parse the
+// (source, encoding, errors) arguments into the bytes that fill self. Unlike
+// bytes_new_impl it does not consult __bytes__.
+//
+// CPython: Objects/bytearrayobject.c:913 bytearray___init___impl
+func bytearrayInitContents(args []objects.Object, kwargs map[string]objects.Object) ([]byte, error) {
+	args, kwargs = foldSourceKwarg(args, kwargs)
+	encoding, errs, encSet, errSet, err := parseBytesEncoding(args, kwargs, "bytearray")
 	if err != nil {
 		return nil, err
 	}
-	return objects.NewByteArray(b.(*objects.Bytes).Bytes()), nil
+	if len(args) == 0 {
+		if encSet {
+			return nil, fmt.Errorf("TypeError: encoding without a string argument")
+		}
+		if errSet {
+			return nil, fmt.Errorf("TypeError: errors without a string argument")
+		}
+		return nil, nil
+	}
+	x := args[0]
+	if objects.IsSubtype(x.Type(), objects.StrType()) {
+		if !encSet {
+			return nil, fmt.Errorf("TypeError: string argument without an encoding")
+		}
+		s, _ := objects.Str(x)
+		// Development-mode eager validation of the encoding/errors names
+		// (see bytesNewContents for the rationale).
+		//
+		// CPython: Objects/unicodeobject.c:3938 PyUnicode_AsEncodedString
+		// (unicode_check_encoding_errors)
+		if cerr := codecs.CheckEncodingErrors(encoding, errs); cerr != nil {
+			return nil, cerr
+		}
+		out, _, encErr := codecs.Encode(s, encoding, errs)
+		if encErr != nil {
+			return nil, encErr
+		}
+		return out, nil
+	}
+	// Not unicode: there can't be an encoding or errors.
+	if encSet {
+		return nil, fmt.Errorf("TypeError: encoding without a string argument")
+	}
+	if errSet {
+		return nil, fmt.Errorf("TypeError: errors without a string argument")
+	}
+	if buf, handled, ierr := bytesIntContents(x); handled {
+		return buf, ierr
+	}
+	return bytesFromObjectContents(x, "bytearray")
+}
+
+// bindByteArrayCtor wires bytearray's constructor as separate TpNew
+// (allocate, set in objects/bytearray.go) and __init__ (populate).
+// bindCtor would conflate them, so subclasses like
+// `class S(bytearray): pass` lose their type and cannot hold instance
+// attributes because TpNew always returned a plain *ByteArray bound to
+// ByteArrayType. The split mirrors list.
+//
+// CPython: Objects/bytearrayobject.c:2674 PyByteArray_Type (tp_new = bytearray_new, tp_init = bytearray___init__)
+func bindByteArrayCtor(t *objects.Type) {
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: descriptor '__init__' of 'bytearray' object needs an argument")
+		}
+		self, ok := args[0].(*objects.ByteArray)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'bytearray' object but received a '%s'", args[0].Type().Name)
+		}
+		// bytearray___init___impl parses (source, encoding, errors) and
+		// fills the already-allocated self.
+		buf, err := bytearrayInitContents(args[1:], kwargs)
+		if err != nil {
+			return nil, err
+		}
+		if err := self.SetContents(buf); err != nil {
+			return nil, err
+		}
+		return objects.None(), nil
+	}))
+	bindCtorDescr(t, ByteArrayCtor)
 }
 
 func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {

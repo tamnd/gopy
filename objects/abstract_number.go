@@ -562,6 +562,22 @@ func IndexCheck(o Object) bool {
 	return n != nil && n.Index != nil
 }
 
+// NumberCheck reports whether o looks like a number: its type bundles
+// number methods exposing __index__, __int__ or __float__, or it is a
+// complex. Mirrors PyNumber_Check.
+//
+// CPython: Objects/abstract.c:163 PyNumber_Check
+func NumberCheck(o Object) bool {
+	if o == nil {
+		return false
+	}
+	if _, ok := o.(*Complex); ok {
+		return true
+	}
+	n := o.Type().Number
+	return n != nil && (n.Index != nil || n.Int != nil || n.Float != nil)
+}
+
 // NumberIndex returns o coerced to int via __index__. Returns the
 // receiver unchanged when it is already an int. Bool routes through
 // IntFromBool to drop the bool subtype.

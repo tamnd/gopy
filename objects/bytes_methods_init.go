@@ -104,4 +104,6 @@ func wireBytearrayOnlyMethods(t *Type) {
 	SetTypeDescr(t, "clear", NewMethodDescr(t, "clear", bytearrayClearMethod()))
 	SetTypeDescr(t, "reverse", NewMethodDescr(t, "reverse", bytearrayReverseMethod()))
 	SetTypeDescr(t, "copy", NewMethodDescr(t, "copy", bytearrayCopyMethod()))
+	SetTypeDescr(t, "__alloc__", NewMethodDescr(t, "__alloc__", bytearrayAllocMethod()))
+	SetTypeDescr(t, "resize", NewMethodDescr(t, "resize", bytearrayResizeMethod()))
 }

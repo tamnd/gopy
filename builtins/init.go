@@ -263,8 +263,14 @@ func wireTypeCalls() {
 		// carry their own type (CPython: frozenset_new passes subtype).
 		objects.FrozensetType.TpNew = frozensetCtorWithType
 		bindCtorDescr(objects.FrozensetType, FrozensetCtor)
-		bindCtor(objects.BytesType, BytesCtor)
-		bindCtor(objects.ByteArrayType, ByteArrayCtor)
+		// bytes uses a subtype-aware TpNew so that class B(bytes): ...
+		// instances carry their own type and can hold instance attributes
+		// (CPython: bytes_subtype_new passes subtype to tp_alloc).
+		objects.BytesType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			return bytesNewObject(cls, args, kwargs)
+		}
+		bindCtorDescr(objects.BytesType, BytesCtor)
+		bindByteArrayCtor(objects.ByteArrayType)
 		bindCtor(objects.RangeType, Range)
 		bindCtor(ZipType, Zip)
 		bindCtor(objects.MapType, Map)

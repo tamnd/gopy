@@ -12,7 +12,10 @@
 
 package objects
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // removePrefixMethod backs bytes.removeprefix / bytearray.removeprefix.
 //
@@ -84,7 +87,14 @@ func bytesDunderBytesMethod() methodFn {
 		}
 		switch x := args[0].(type) {
 		case *Bytes:
-			return x, nil
+			// PyBytes_CheckExact returns self; a bytes subclass instead
+			// produces a fresh plain bytes copy via PyBytes_FromStringAndSize.
+			//
+			// CPython: Objects/bytesobject.c bytes___bytes___impl
+			if x.Type() == BytesType {
+				return x, nil
+			}
+			return NewBytes(x.v), nil
 		case *ByteArray:
 			return NewBytes(x.v), nil
 		}
@@ -117,7 +127,7 @@ func bytearrayAppendMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		v, err := bytearrayCoerceByte(args[1], "append")
+		v, err := bytearrayCoerceByte(args[1])
 		if err != nil {
 			return nil, err
 		}
@@ -140,31 +150,46 @@ func bytearrayExtendMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		if buf, ok := asBytesLike(args[1]); ok {
+		arg := args[1]
+		// bytearray_setslice only accepts something supporting PEP 3118.
+		if buf, ok := asBytesLike(arg); ok {
 			if err := b.Extend(buf); err != nil {
 				return nil, err
 			}
 			return None(), nil
 		}
-		// CPython: Objects/bytearrayobject.c:2329 bytearray_extend calls
-		// PyObject_LengthHint(iterable, 0); a non-TypeError out of
-		// __len__/__length_hint__ propagates instead of falling back to
-		// a silent default.
-		if _, err := LengthHint(args[1], 0); err != nil {
-			return nil, err
-		}
-		items, err := IterToSlice(args[1])
+		// Get an iterator; a TypeError here means the argument is not
+		// iterable, which CPython reformats.
+		it, err := Iter(arg)
 		if err != nil {
+			if isTypeError(err) {
+				return nil, fmt.Errorf("TypeError: can't extend bytearray with %s", arg.Type().Name)
+			}
 			return nil, err
 		}
-		for _, it := range items {
-			v, err := bytearrayCoerceByte(it, "extend")
+		// Coerce every item into a private buffer first; self is only
+		// mutated once the whole iterable has been consumed successfully,
+		// so a mid-stream failure leaves the bytearray untouched.
+		var buf []byte
+		for {
+			item, err := IterNext(it)
 			if err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					break
+				}
 				return nil, err
 			}
-			if err := b.Append(v); err != nil {
+			v, err := bytearrayCoerceByte(item)
+			if err != nil {
+				if isTypeError(err) && arg.Type() == StrType() {
+					return nil, fmt.Errorf("TypeError: expected iterable of integers; got: 'str'")
+				}
 				return nil, err
 			}
+			buf = append(buf, byte(v))
+		}
+		if err := b.Extend(buf); err != nil {
+			return nil, err
 		}
 		return None(), nil
 	}
@@ -186,7 +211,7 @@ func bytearrayInsertMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		v, err := bytearrayCoerceByte(args[2], "insert")
+		v, err := bytearrayCoerceByte(args[2])
 		if err != nil {
 			return nil, err
 		}
@@ -237,12 +262,15 @@ func bytearrayRemoveMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		v, err := bytearrayCoerceByte(args[1], "remove")
+		v, err := bytearrayCoerceByte(args[1])
 		if err != nil {
 			return nil, err
 		}
 		for i, c := range b.v {
 			if c == byte(v) {
+				if err := b.checkResize(len(b.v) - 1); err != nil {
+					return nil, err
+				}
 				b.v = append(b.v[:i], b.v[i+1:]...)
 				b.size = int64(len(b.v))
 				return None(), nil
@@ -304,17 +332,68 @@ func bytearrayCopyMethod() methodFn {
 	}
 }
 
-// bytearrayCoerceByte unpacks args[i] as a Python int in [0, 255].
-// Used by append / insert / remove where CPython's signature is
-// "int", not "byte-like".
-func bytearrayCoerceByte(obj Object, methodName string) (int, error) {
-	i, ok := obj.(*Int)
-	if !ok {
-		return 0, fmt.Errorf("TypeError: %s argument must be an integer, not %s", methodName, obj.Type().Name)
+// bytearrayAllocMethod backs bytearray.__alloc__(): the number of bytes
+// actually allocated for the buffer.
+//
+// CPython: Objects/bytearrayobject.c:2493 bytearray_alloc
+func bytearrayAllocMethod() methodFn {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, arityErr("__alloc__", 1, len(args))
+		}
+		b, err := asByteArray(args[0], "__alloc__")
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(int64(b.Alloc())), nil
 	}
-	n, fits := i.Int64()
-	if !fits || n < 0 || n > 255 {
-		return 0, fmt.Errorf("ValueError: byte must be in range(0, 256)")
+}
+
+// bytearrayResizeMethod backs bytearray.resize(size): grow or shrink the
+// internal buffer to the requested length, zero-filling new bytes. The
+// clinic signature is METH_O with a Py_ssize_t converter, so the single
+// argument runs through __index__.
+//
+// CPython: Objects/bytearrayobject.c:1564 bytearray_resize_impl
+func bytearrayResizeMethod() methodFn {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, arityErr("resize", 2, len(args))
+		}
+		b, err := asByteArray(args[0], "resize")
+		if err != nil {
+			return nil, err
+		}
+		iv, ierr := NumberIndex(args[1])
+		if ierr != nil {
+			return nil, ierr
+		}
+		n, fits := iv.(*Int).Int64()
+		if !fits {
+			return nil, errors.New("MemoryError")
+		}
+		if err := b.Resize(int(n)); err != nil {
+			return nil, err
+		}
+		return None(), nil
+	}
+}
+
+// bytearrayCoerceByte unpacks an object as a byte value in [0, 255].
+// Used by append / insert / remove / extend, whose clinic signature
+// uses the "bytesvalue" converter. The converter runs __index__ on the
+// argument (via PyLong_AsLongAndOverflow), so any object implementing
+// __index__ is accepted; out-of-range or non-index values raise.
+//
+// CPython: Objects/bytearrayobject.c:26 _getbytevalue
+func bytearrayCoerceByte(obj Object) (int, error) {
+	iv, err := NumberIndex(obj)
+	if err != nil {
+		return -1, err
+	}
+	n, fits := iv.(*Int).Int64()
+	if !fits || n < 0 || n >= 256 {
+		return -1, fmt.Errorf("ValueError: byte must be in range(0, 256)")
 	}
 	return int(n), nil
 }

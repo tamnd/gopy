@@ -672,6 +672,17 @@ func objectGetDict(o Object) (Object, error) {
 			v.attrs = NewDict()
 		}
 		return v.attrs, nil
+	case AttrDictHolder:
+		// Subclasses of C-port types (list, bytearray, ...) carry their
+		// per-instance dict through the AttrDictHolder interface. When the
+		// subtype has a non-zero tp_dictoffset (HasDict), expose and lazily
+		// materialize it just like subtype_dict does for *Instance.
+		//
+		// CPython: Objects/typeobject.c:6776 subtype_dict
+		if !o.Type().HasDict {
+			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
+		}
+		return v.EnsureAttrDict(), nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 }

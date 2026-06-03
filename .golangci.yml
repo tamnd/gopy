@@ -280,6 +280,21 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # twoWay / defaultFind / adaptiveFind port Objects/stringlib/fastsearch.h
+      # FASTSEARCH branch-for-branch (Boyer-Moore-Horspool plus the Two-Way
+      # escalation). The bound checks like `i+1 <= w` mirror the C index
+      # arithmetic exactly, so collapsing them would diverge from the source.
+      - path: objects/stringlib_fastsearch\.go
+        linters:
+          - gocognit
+          - gocyclo
+          - gocritic
+      # bytesFormat ports _PyBytes_FormatEx from Objects/bytesobject.c: the
+      # big per-conversion switch is the parity unit with CPython.
+      - path: objects/bytes_format\.go
+        linters:
+          - gocognit
+          - gocyclo
       # translateMethod and hexMethod mirror bytes_translate_impl and
       # bytes_hex_impl from Objects/bytesobject.c branch-for-branch; the
       # nested option/sep parsing and per-byte loop are the parity unit.

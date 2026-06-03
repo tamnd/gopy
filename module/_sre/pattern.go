@@ -77,8 +77,12 @@ func inputForString(o objects.Object) ([]int32, bool, error) {
 		}
 		return out, false, nil
 	}
-	if b, ok := o.(*objects.Bytes); ok {
-		buf := b.Bytes()
+	// Any buffer-bearing object (bytes, bytearray, memoryview, array) is
+	// matched as a byte string, mirroring CPython's getstring(), which calls
+	// PyObject_GetBuffer for non-str inputs.
+	//
+	// CPython: Modules/_sre/sre.c:1308 getstring
+	if buf, ok := objects.AsBytesLike(o); ok {
 		out := make([]int32, len(buf))
 		for i, by := range buf {
 			out[i] = int32(by)

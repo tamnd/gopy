@@ -146,6 +146,13 @@ import (
 	// CPython: Modules/symtablemodule.c:1 _symtable module
 	_ "github.com/tamnd/gopy/module/_symtable"
 
+	// Built-in module: _testlimitedcapi. Registers itself via
+	// module/_testlimitedcapi/module.go init(). Ports the abstract
+	// protocol test wrappers the standard-library test suite reaches for
+	// to drive PyObject_*/PyMapping_*/PySequence_* directly.
+	// CPython: Modules/_testlimitedcapi/abstract.c:1 abstract-protocol tests
+	_ "github.com/tamnd/gopy/module/_testlimitedcapi"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.
