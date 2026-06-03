@@ -181,9 +181,52 @@ func SysGetProfile() objects.Object {
 	})
 }
 
+// CallTracing calls func(*args) with tracing temporarily disabled and
+// the prior tracing depth restored afterwards. A debugger drives this
+// from a checkpoint to recursively trace some other code without the
+// trace machinery re-entering itself on the nested call.
+//
+// CPython: Python/ceval.c:2621 _PyEval_CallTracing
+func CallTracing(fn objects.Object, funcArgs *objects.Tuple) (objects.Object, error) {
+	ts := currentThread()
+	if ts == nil {
+		return nil, fmt.Errorf("SystemError: call_tracing() requires an active thread state")
+	}
+	// Save and disable tracing for the duration of the call.
+	saveTracing := ts.Tracing
+	ts.Tracing = 0
+	n := funcArgs.Len()
+	call := make([]objects.Object, n)
+	for i := 0; i < n; i++ {
+		call[i] = funcArgs.Item(i)
+	}
+	result, err := objects.Vectorcall(fn, call, uint(n), nil)
+	// Restore tracing.
+	ts.Tracing = saveTracing
+	return result, err
+}
+
+// SysCallTracing returns the builtin that backs sys.call_tracing.
+// It calls func(*args) (args must be a tuple) with the tracing state
+// saved and restored around the call.
+//
+// CPython: Python/sysmodule.c:2172 sys_call_tracing_impl
+func SysCallTracing() objects.Object {
+	return objects.NewBuiltinFunction("call_tracing", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: call_tracing expected 2 arguments, got %d", len(args))
+		}
+		funcArgs, ok := args[1].(*objects.Tuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: call_tracing() argument 2 must be tuple, not %s", args[1].Type().Name)
+		}
+		return CallTracing(args[0], funcArgs)
+	})
+}
+
 // RegisterSysTraceBuiltins installs settrace, setprofile, gettrace,
-// and getprofile in the supplied sys dict. Lifecycle wiring calls
-// this once it has built the per-interpreter sys module.
+// getprofile, and call_tracing in the supplied sys dict. Lifecycle
+// wiring calls this once it has built the per-interpreter sys module.
 //
 // CPython: Python/sysmodule.c:3360 sys_methods (settrace / setprofile rows)
 func RegisterSysTraceBuiltins(d *objects.Dict) error {
@@ -195,6 +238,7 @@ func RegisterSysTraceBuiltins(d *objects.Dict) error {
 		{"setprofile", SysSetProfile()},
 		{"gettrace", SysGetTrace()},
 		{"getprofile", SysGetProfile()},
+		{"call_tracing", SysCallTracing()},
 	} {
 		if err := d.SetItem(objects.NewStr(e.name), e.obj); err != nil {
 			return err

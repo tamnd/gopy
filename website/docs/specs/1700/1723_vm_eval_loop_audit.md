@@ -709,7 +709,10 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 - [x] P3.1 `sys.set_asyncgen_hooks` / `sys.get_asyncgen_hooks`
 - [x] P3.2 `sys.set_coroutine_origin_tracking_depth` / `sys.get_coroutine_origin_tracking_depth`
-- [ ] P3.3 `sys.call_tracing` stub
+- [x] P3.3 `sys.call_tracing(func, args)` ports `_PyEval_CallTracing`: saves and
+  zeroes `tstate->tracing` around the call so a debugger can recursively trace
+  code from a checkpoint, then restores the prior depth. Arg-count and non-tuple
+  errors match CPython's clinic wording.
 
 ### P13 — Async generator finalization through asyncio shutdown
 
@@ -725,8 +728,8 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 - [x] P4.1 `frame.f_generator`
 - [x] P4.2 `frame.f_trace` settable
-- [ ] P4.3 `sys.unraisablehook` settable attribute
-- [ ] P4.4 `frame.clear()` executing-frame guard
+- [x] P4.3 `sys.unraisablehook` settable attribute
+- [x] P4.4 `frame.clear()` executing-frame guard (raises `RuntimeError: cannot clear an executing frame`)
 
 ### P5 — isinstance / issubclass with UnionType and abstract classes
 
@@ -737,22 +740,22 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ### P6 — __index__ in subscript paths
 
-- [ ] P6.1 `bytes.__getitem__` calls `objects.Index` on non-int subscript
-- [ ] P6.2 `bytearray.__getitem__` calls `objects.Index`
-- [ ] P6.3 `list.__getitem__` calls `objects.Index`
-- [ ] P6.4 `tuple.__getitem__` calls `objects.Index`
+- [x] P6.1 `bytes.__getitem__` calls `objects.Index` on non-int subscript
+- [x] P6.2 `bytearray.__getitem__` calls `objects.Index`
+- [x] P6.3 `list.__getitem__` calls `objects.Index`
+- [x] P6.4 `tuple.__getitem__` calls `objects.Index`
 
 ### P7 — __length_hint__ on iterators
 
-- [ ] P7.1 deque iterator `__length_hint__`
-- [ ] P7.2 deque reverse iterator `__length_hint__`
-- [ ] P7.3 dict key/value/item iterator `__length_hint__`
+- [x] P7.1 deque iterator `__length_hint__`
+- [x] P7.2 deque reverse iterator `__length_hint__`
+- [x] P7.3 dict key/value/item iterator `__length_hint__`
 
 ### P8 — Generator exception handling
 
-- [ ] P8.1 `gen.throw()` preserves exception object identity
-- [ ] P8.2 `gen.close()` does not re-wrap GeneratorExit
-- [ ] P8.3 PEP 479 StopIteration → RuntimeError conversion in generator body
+- [x] P8.1 `gen.throw()` preserves exception object identity
+- [x] P8.2 `gen.close()` does not re-wrap GeneratorExit
+- [x] P8.3 PEP 479 StopIteration → RuntimeError conversion in generator body (`generator raised StopIteration`)
 
 ### P9 — Missing test file
 
