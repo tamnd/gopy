@@ -146,8 +146,13 @@ func TestAsyncGeneratorAcloseClean(t *testing.T) {
 	_, _ = AsyncGenASendType.IterNext(a)
 	ac := g.Aclose()
 	_, err := AsyncGenAThrowType.IterNext(ac)
-	if !errors.Is(err, ErrStopAsyncIteration) {
-		t.Errorf("aclose should end with StopAsyncIteration, got %v", err)
+	// CPython: when aclose() drives a suspended generator to exit on the
+	// injected GeneratorExit, the await finishes by raising StopIteration
+	// (not StopAsyncIteration), signalling the aclose() await is done.
+	//
+	// CPython: Objects/genobject.c:2225 async_gen_athrow_send (yield_close)
+	if !errors.Is(err, ErrStopIteration) {
+		t.Errorf("aclose should end with StopIteration, got %v", err)
 	}
 }
 
