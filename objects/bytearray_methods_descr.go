@@ -177,31 +177,41 @@ func bytearrayExtendMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
-		// Coerce every item into a private buffer first; self is only
-		// mutated once the whole iterable has been consumed successfully,
-		// so a mid-stream failure leaves the bytearray untouched.
-		buf := make([]byte, 0, bufSize)
-		for {
-			item, err := IterNext(it)
-			if err != nil {
-				if errors.Is(err, ErrStopIteration) {
-					break
-				}
-				return nil, err
-			}
-			v, err := bytearrayCoerceByte(item)
-			if err != nil {
-				if isTypeError(err) && arg.Type() == StrType() {
-					return nil, fmt.Errorf("TypeError: expected iterable of integers; got: 'str'")
-				}
-				return nil, err
-			}
-			buf = append(buf, byte(v))
+		buf, err := bytearrayDrainToBytes(it, bufSize, arg.Type() == StrType())
+		if err != nil {
+			return nil, err
 		}
 		if err := b.Extend(buf); err != nil {
 			return nil, err
 		}
 		return None(), nil
+	}
+}
+
+// bytearrayDrainToBytes consumes the iterator and coerces every item to a
+// byte. The whole iterable is buffered before self is touched so a mid-stream
+// failure leaves the bytearray untouched. fromStr tightens the TypeError to
+// the str-specific message CPython uses when extending from a string.
+//
+// CPython: Objects/bytearrayobject.c:2340 bytearray_extend (coerce loop)
+func bytearrayDrainToBytes(it Object, bufSize int64, fromStr bool) ([]byte, error) {
+	buf := make([]byte, 0, bufSize)
+	for {
+		item, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				return buf, nil
+			}
+			return nil, err
+		}
+		v, err := bytearrayCoerceByte(item)
+		if err != nil {
+			if isTypeError(err) && fromStr {
+				return nil, fmt.Errorf("TypeError: expected iterable of integers; got: 'str'")
+			}
+			return nil, err
+		}
+		buf = append(buf, byte(v))
 	}
 }
 

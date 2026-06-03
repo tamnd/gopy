@@ -266,9 +266,7 @@ func wireTypeCalls() {
 		// bytes uses a subtype-aware TpNew so that class B(bytes): ...
 		// instances carry their own type and can hold instance attributes
 		// (CPython: bytes_subtype_new passes subtype to tp_alloc).
-		objects.BytesType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-			return bytesNewObject(cls, args, kwargs)
-		}
+		objects.BytesType.TpNew = bytesNewObject
 		bindCtorDescr(objects.BytesType, BytesCtor)
 		bindByteArrayCtor(objects.ByteArrayType)
 		bindCtor(objects.RangeType, Range)

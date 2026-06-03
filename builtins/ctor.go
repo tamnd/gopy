@@ -1166,25 +1166,25 @@ func parseBytesEncoding(args []objects.Object, kwargs map[string]objects.Object,
 	}
 	if len(args) > 1 {
 		if encoding, encSet, err = set(args[1], "encoding"); err != nil {
-			return
+			return encoding, errs, encSet, errSet, err
 		}
 	}
 	if v, ok := kwargs["encoding"]; ok {
 		if encoding, encSet, err = set(v, "encoding"); err != nil {
-			return
+			return encoding, errs, encSet, errSet, err
 		}
 	}
 	if len(args) > 2 {
 		if errs, errSet, err = set(args[2], "errors"); err != nil {
-			return
+			return encoding, errs, encSet, errSet, err
 		}
 	}
 	if v, ok := kwargs["errors"]; ok {
 		if errs, errSet, err = set(v, "errors"); err != nil {
-			return
+			return encoding, errs, encSet, errSet, err
 		}
 	}
-	return
+	return encoding, errs, encSet, errSet, nil
 }
 
 // bytesCoerceItem reads one element of an iterable/list source as a byte. The
@@ -1360,7 +1360,9 @@ func bytesNewContents(args []objects.Object, kwargs map[string]objects.Object) (
 func bytesViaDunderBytes(x objects.Object) (out objects.Object, ok bool, err error) {
 	fn, lerr := objects.LookupSpecial(x, "__bytes__")
 	if lerr != nil || fn == nil {
-		return nil, false, nil
+		// A missing __bytes__ (AttributeError out of LookupSpecial) means
+		// "no __bytes__ branch", not a failure: report absent with nil err.
+		return nil, false, nil //nolint:nilerr // absent __bytes__ is not an error
 	}
 	res, cerr := objects.CallObject(fn, nil)
 	if cerr != nil {

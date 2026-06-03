@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/codecs"
 )
@@ -399,10 +400,8 @@ func tailMatchMethod(name string, suffix bool) methodFn {
 				if hi-slen > s {
 					s = hi - slen
 				}
-			} else {
-				if s > len(v)-slen {
-					return false
-				}
+			} else if s > len(v)-slen {
+				return false
 			}
 			if hi-s < slen {
 				return false
@@ -1087,7 +1086,7 @@ func hexSepByte(sepObj Object) (byte, error) {
 		return 0, errors.New("ValueError: sep must be length 1.")
 	}
 	if uni, ok := sepObj.(*Unicode); ok {
-		r := []rune(uni.Value())[0]
+		r, _ := utf8.DecodeRuneInString(uni.Value())
 		if r > 127 {
 			return 0, errors.New("ValueError: sep must be ASCII.")
 		}

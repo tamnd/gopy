@@ -309,15 +309,3 @@ func indexAsInt(o objects.Object) (*objects.Int, error) {
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", o.Type().Name)
 }
-
-func indexAsInt64(o objects.Object, where string) (int64, error) {
-	i, err := indexAsInt(o)
-	if err != nil {
-		return 0, err
-	}
-	v, ok := i.Int64()
-	if !ok {
-		return 0, fmt.Errorf("OverflowError: %s argument does not fit in int64", where)
-	}
-	return v, nil
-}

@@ -295,13 +295,26 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # bytearray.go's init() wires the full bytearray method/getset table in
+      # one block, and byteArrayAssSubscript mirrors bytearray_ass_subscript
+      # (Objects/bytearrayobject.c) branch-for-branch across the single-index
+      # and slice (simple + extended step) assignment and deletion cases. The
+      # complexity is the parity surface, not collapsible branching.
+      - path: objects/bytearray\.go
+        linters:
+          - gocognit
+          - gocyclo
       # translateMethod and hexMethod mirror bytes_translate_impl and
       # bytes_hex_impl from Objects/bytesobject.c branch-for-branch; the
       # nested option/sep parsing and per-byte loop are the parity unit.
+      # hexSepByte carries the _Py_strhex_impl separator messages verbatim
+      # ("sep must be length 1.", "sep must be ASCII.") from Python/pystrhex.c,
+      # which end with periods, so ST1005 does not apply.
       - path: objects/bytes_methods_descr\.go
         linters:
           - gocognit
           - gocyclo
+          - staticcheck
       # funcTpNew mirrors func_new_impl from Objects/funcobject.c: the
       # six positional+keyword arguments each carry typed validation
       # branches that match the upstream signature one-for-one.
