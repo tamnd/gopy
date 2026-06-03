@@ -31,6 +31,14 @@ type Entry struct {
 	// the analyze pass ORs in the resolved Scope at bit 12.
 	Symbols map[string]SymbolFlags
 
+	// SymbolOrder records the first-insertion order of the keys in
+	// Symbols. CPython's ste_symbols is a dict, so symtable.py's
+	// get_identifiers() reports names in the order they were added;
+	// a Go map loses that, so the order is tracked alongside.
+	//
+	// CPython: Include/internal/pycore_symtable.h:90 ste_symbols (dict)
+	SymbolOrder []string
+
 	// Varnames records function parameter names in declaration
 	// order. Used by the codegen to lay out fastlocals.
 	Varnames []string
@@ -180,4 +188,23 @@ func (e *Entry) GetSymbol(name string) SymbolFlags {
 // CPython: Python/symtable.c:L555 _PyST_GetScope
 func (e *Entry) GetScope(name string) Scope {
 	return e.Symbols[name].Scope()
+}
+
+// SetSymbol writes flags for name, recording first-insertion order in
+// SymbolOrder so iteration matches CPython's insertion-ordered
+// ste_symbols dict. Updating an existing name keeps its position.
+//
+// CPython: Python/symtable.c:L1498 symtable_add_def_helper (PyDict_SetItem)
+func (e *Entry) SetSymbol(name string, flags SymbolFlags) {
+	if _, present := e.Symbols[name]; !present {
+		e.SymbolOrder = append(e.SymbolOrder, name)
+	}
+	e.Symbols[name] = flags
+}
+
+// OrderedSymbols returns the symbol names in first-insertion order.
+//
+// CPython: Python/symtable.c:L535 ste_symbols dict key order
+func (e *Entry) OrderedSymbols() []string {
+	return e.SymbolOrder
 }

@@ -23,7 +23,10 @@ func Build(mod ast.Mod, filename string, ff *future.Features) (*Table, error) {
 		Future:   ff,
 	}
 	b := &builder{table: t, filename: filename, future: ff, recursionRemaining: recursionLimit}
-	if err := b.enterBlock("top", ModuleBlock, mod, ast.NoPos); err != nil {
+	// The top ModuleBlock carries loc {0,0,0,0}, not NoPos: symtable.get_lineno()
+	// reports 0 for the module entry.
+	// CPython: Python/symtable.c:438 _Py_SourceLocation loc0 = {0, 0, 0, 0}
+	if err := b.enterBlock("top", ModuleBlock, mod, ast.Pos{}); err != nil {
 		return nil, err
 	}
 	t.Top = b.cur
@@ -205,14 +208,14 @@ func (b *builder) addDefHelper(name string, flag SymbolFlags, ste *Entry, loc as
 		}
 		val |= DefCompIter
 	}
-	ste.Symbols[mangled] = val
+	ste.SetSymbol(mangled, val)
 	switch {
 	case flag&DefParam != 0:
 		ste.Varnames = append(ste.Varnames, mangled)
 	case flag&DefGlobal != 0:
 		gv := b.table.Top.Symbols[mangled]
 		gv |= flag
-		b.table.Top.Symbols[mangled] = gv
+		b.table.Top.SetSymbol(mangled, gv)
 	}
 	return nil
 }

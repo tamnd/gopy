@@ -140,6 +140,12 @@ import (
 	// CPython: Modules/config.c.in:52 {"_struct", PyInit__struct}
 	_ "github.com/tamnd/gopy/module/_struct"
 
+	// Built-in module: _symtable. Registers itself via
+	// module/_symtable/module.go init(). Exposes the compiler's symbol
+	// tables to Python; backs the Lib/symtable.py wrapper.
+	// CPython: Modules/symtablemodule.c:1 _symtable module
+	_ "github.com/tamnd/gopy/module/_symtable"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.

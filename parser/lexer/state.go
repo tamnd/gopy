@@ -624,6 +624,26 @@ func (s *State) recordError(msg string) {
 	}
 }
 
+// recordErrorAtStart pins the error at the start of the current token
+// rather than at s.cur. The bracket-mismatch paths consume the closing
+// bracket before erroring, so s.cur sits one past it. CPython reports the
+// unmatched/mismatched bracket at the bracket itself, so pin at s.start
+// (the bracket position); exc_from_parser.go's +1 then reproduces
+// CPython's 1-based offset.
+//
+// CPython: Parser/lexer/lexer.c:1324 syntaxerror "unmatched '%c'"
+func (s *State) recordErrorAtStart(msg string) {
+	if s.err != nil {
+		return
+	}
+	col := s.charColAt(s.start)
+	s.err = &SyntaxError{
+		Pos:     Pos{Line: s.lineno, Col: col},
+		EndPos:  Pos{Line: 0, Col: -1},
+		Message: msg,
+	}
+}
+
 // recordStringError pins an unterminated-string error at the opening
 // quote, matching CPython which rewinds tok->cur and tok->line_start to
 // the opening-quote position before calling _PyTokenizer_syntaxerror.

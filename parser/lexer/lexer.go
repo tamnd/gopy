@@ -1261,11 +1261,11 @@ func (s *State) popParen(c byte) bool {
 		//
 		// CPython: Parser/lexer/lexer.c:1319 syntaxerror "single '}' is not allowed"
 		if c == '}' && s.insideFString() && s.curMode().curlyBracketDepth == 0 {
-			s.recordError(fmt.Sprintf("%c-string: single '}' is not allowed", s.CurrentFStringPrefixChar()))
+			s.recordErrorAtStart(fmt.Sprintf("%c-string: single '}' is not allowed", s.CurrentFStringPrefixChar()))
 			return false
 		}
 		// CPython: Parser/lexer/lexer.c:1324 syntaxerror "unmatched '%c'".
-		s.recordError(fmt.Sprintf("unmatched '%c'", c))
+		s.recordErrorAtStart(fmt.Sprintf("unmatched '%c'", c))
 		return false
 	}
 	s.level--
@@ -1295,7 +1295,7 @@ func (s *State) popParen(c byte) bool {
 		m := s.curMode()
 		prevBracket := m.curlyBracketDepth - 1
 		if prevBracket == m.curlyBracketExprStartDepth {
-			s.recordError(fmt.Sprintf(
+			s.recordErrorAtStart(fmt.Sprintf(
 				"%c-string: unmatched '%c'", s.CurrentFStringPrefixChar(), c))
 			return false
 		}
@@ -1303,12 +1303,12 @@ func (s *State) popParen(c byte) bool {
 	// CPython: Parser/lexer/lexer.c:1345 — same-line uses the short
 	// form without "on line N", different lines pin the opener line.
 	if s.parenLineno[s.level] != s.lineno {
-		s.recordError(fmt.Sprintf(
+		s.recordErrorAtStart(fmt.Sprintf(
 			"closing parenthesis '%c' does not match opening parenthesis '%c' on line %d",
 			c, open, s.parenLineno[s.level],
 		))
 	} else {
-		s.recordError(fmt.Sprintf(
+		s.recordErrorAtStart(fmt.Sprintf(
 			"closing parenthesis '%c' does not match opening parenthesis '%c'",
 			c, open,
 		))
