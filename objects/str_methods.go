@@ -1123,7 +1123,10 @@ func StrIsIdentifier(s string) bool {
 
 // CPython: Objects/unicodeobject.c:12421 unicode_isprintable_impl
 func StrIsPrintable(s string) bool {
-	for _, r := range s {
+	// Decode leniently: a lone surrogate is stored as 3-byte pseudo-UTF-8
+	// and Go's range loop would surface it as U+FFFD (printable), masking
+	// the surrogate. CPython classifies surrogates as non-printable.
+	for _, r := range strLenientRunes(s) {
 		if !IsPrintableRune(r) {
 			return false
 		}
