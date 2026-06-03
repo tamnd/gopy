@@ -216,6 +216,14 @@ func StrOf(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 		if !ok {
 			return nil, fmt.Errorf("TypeError: decoding to str: need a bytes-like object, %s found", objArg.Type().Name)
 		}
+		// In development mode CPython validates the encoding and errors
+		// names up front, so a bogus name raises LookupError even when the
+		// data is empty and the handler would never otherwise be reached.
+		//
+		// CPython: Objects/unicodeobject.c:3658 PyUnicode_FromEncodedObject
+		if cerr := codecs.CheckEncodingErrors(encoding, errs); cerr != nil {
+			return nil, cerr
+		}
 		out, _, derr := codecs.Decode(buf, encoding, errs)
 		if derr != nil {
 			return nil, derr

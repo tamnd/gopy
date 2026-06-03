@@ -664,6 +664,9 @@ func strEncodeMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if !codecs.IsTextEncoding(encoding) {
 		return nil, fmt.Errorf("LookupError: '%s' is not a text encoding; use codecs.encode() to handle arbitrary codecs", encoding)
 	}
+	if cerr := codecs.CheckEncodingErrors(encoding, errorsName); cerr != nil {
+		return nil, cerr
+	}
 	out, _, encErr := codecs.Encode(s, encoding, errorsName)
 	if encErr != nil {
 		if FormatNoteHook != nil {

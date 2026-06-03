@@ -102,7 +102,6 @@ func encodeUTF7(input, _ string) ([]byte, int, error) {
 			} else {
 				// surrogate pair via UTF-16 encoding
 				r1, r2s := utf16.EncodeRune(r2)
-				_ = utf8.RuneError // imported for init side-effect only
 				u16 = append(u16, byte(r1>>8), byte(r1), byte(r2s>>8), byte(r2s))
 			}
 			j++

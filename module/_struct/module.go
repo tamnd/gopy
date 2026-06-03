@@ -120,10 +120,13 @@ type fmtCode struct {
 
 // parseFmt decodes a format string (without the byte-order prefix)
 // into a slice of fmtCode. "4s" becomes one fmtCode{code:'s',count:4}.
-// Spaces are ignored. 'x' is a pad byte.
+// Spaces are ignored. 'x' is a pad byte. native selects the native
+// format table: 'n', 'N', and 'P' only exist there, so they raise a
+// bad-char error in standard ('<', '>', '=', '!') mode, matching the
+// fact that CPython's standardfmttable omits them.
 //
 // CPython: Modules/_struct.c:1124 calcsize
-func parseFmt(fmtStr string) ([]fmtCode, error) {
+func parseFmt(fmtStr string, native bool) ([]fmtCode, error) {
 	var codes []fmtCode
 	i := 0
 	for i < len(fmtStr) {
@@ -147,7 +150,14 @@ func parseFmt(fmtStr string) ([]fmtCode, error) {
 		}
 		switch c {
 		case 'x', 'c', 'b', 'B', 'h', 'H', 'i', 'I', 'l', 'L', 'q', 'Q',
-			'f', 'd', 's', 'p', '?', 'n', 'N', 'e':
+			'f', 'd', 's', 'p', '?', 'e':
+			codes = append(codes, fmtCode{code: c, count: count})
+		case 'n', 'N', 'P':
+			// Native-only codes (ssize_t, size_t, void*). They have no
+			// standard-size form, so reject them outside native mode.
+			if !native {
+				return nil, fmt.Errorf("struct.error: bad char ('%c') in struct format", c)
+			}
 			codes = append(codes, fmtCode{code: c, count: count})
 		default:
 			return nil, fmt.Errorf("struct.error: bad char ('%c') in struct format", c)
@@ -176,8 +186,8 @@ func codeSize(c byte) (int, error) {
 		return 4, nil
 	case 'q', 'Q', 'd':
 		return 8, nil
-	case 'n', 'N':
-		// ssize_t / size_t — use 8 bytes on 64-bit platforms.
+	case 'n', 'N', 'P':
+		// ssize_t / size_t / void* are pointer-width; 8 bytes on 64-bit.
 		return 8, nil
 	case 'e':
 		return 2, nil
@@ -329,7 +339,7 @@ func packValue(buf []byte, off int, bo byteOrder, c byte, count int, obj objects
 		}
 		return off, nil
 
-	case 'Q', 'N':
+	case 'Q', 'N', 'P':
 		v, err := extractInt(obj)
 		if err != nil {
 			return 0, err
@@ -638,7 +648,7 @@ func unpackValue(buf []byte, off int, bo byteOrder, c byte) (objects.Object, int
 	case 'q', 'n':
 		v := int64(bo.order.Uint64(buf[off:]))
 		return objects.NewInt(v), off + 8, nil
-	case 'Q', 'N':
+	case 'Q', 'N', 'P':
 		v := bo.order.Uint64(buf[off:])
 		return objects.NewInt(int64(v)), off + 8, nil
 	case 'f':
@@ -728,7 +738,7 @@ func moduleCalcsize(args []objects.Object, _ map[string]objects.Object) (objects
 	}
 	bo, rest := parseByteOrder(fmtStr)
 	_ = bo
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +761,7 @@ func modulePack(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 		return nil, fmt.Errorf("struct.error: pack() argument 1 must be str, not %T", args[0])
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +793,7 @@ func modulePackInto(args []objects.Object, _ map[string]objects.Object) (objects
 	}
 	offset := int(off)
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -818,7 +828,7 @@ func moduleUnpack(args []objects.Object, _ map[string]objects.Object) (objects.O
 		return nil, err
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -865,7 +875,7 @@ func moduleUnpackFrom(args []objects.Object, kwargs map[string]objects.Object) (
 		offset = len(buf) + offset
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -942,7 +952,7 @@ func moduleIterUnpack(args []objects.Object, _ map[string]objects.Object) (objec
 		return nil, err
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -1045,7 +1055,7 @@ func structNew(cls *objects.Type, args []objects.Object, kwargs map[string]objec
 		return nil, fmt.Errorf("struct.error: Struct() argument must be str")
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	codes, err := parseFmt(rest)
+	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}

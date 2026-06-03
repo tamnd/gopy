@@ -15,6 +15,7 @@ import (
 
 	"github.com/tamnd/gopy/build"
 	"github.com/tamnd/gopy/builtins"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/getopt"
 	"github.com/tamnd/gopy/imp"
@@ -91,6 +92,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		evalSrc     string
 		modName     string
 		hasC, hasM  bool
+		xOptions    []string
 	)
 
 opts:
@@ -114,11 +116,22 @@ opts:
 			modName = st.OptArg
 			hasM = true
 			break opts
+		case 'X':
+			xOptions = append(xOptions, st.OptArg)
 		default:
-			// Other CPython flags (-b, -B, -O, -W, -X, ...) are accepted
-			// for option-set parity. Wiring each to the runtime config
-			// lands with initconfig.c in a later milestone.
+			// Other CPython flags (-b, -B, -O, -W, ...) are accepted for
+			// option-set parity. Wiring each to the runtime config lands
+			// with initconfig.c in a later milestone.
 		}
+	}
+
+	// dev_mode: -X dev or PYTHONDEVMODE turns on the development-mode
+	// checks (currently the eager encoding/errors validation in the
+	// str(bytes) decode path).
+	//
+	// CPython: Python/preconfig.c:253 _PyPreCmdline_SetConfig dev_mode block
+	if hasXOption(xOptions, "dev") || os.Getenv("PYTHONDEVMODE") != "" {
+		codecs.SetDevMode(true)
 	}
 
 	switch {
@@ -139,6 +152,21 @@ opts:
 	}
 	sys.SetArgv([]string{""})
 	return runInteractive(stdout, stderr)
+}
+
+// hasXOption reports whether the -X option named key was supplied,
+// matching against the part before any '=' so "-X dev" and "-X dev=1"
+// both count.
+//
+// CPython: Python/preconfig.c:582 _Py_get_xoption
+func hasXOption(xOptions []string, key string) bool {
+	for _, opt := range xOptions {
+		name, _, _ := strings.Cut(opt, "=")
+		if name == key {
+			return true
+		}
+	}
+	return false
 }
 
 // installPathFinder wires the PathFinder consulted by imp.ImportModule

@@ -1,5 +1,7 @@
 package initconfig
 
+import "strings"
+
 // ConfigRead applies the env-vars, the CLI args, and the layered
 // defaults to c. Mirrors _PyConfig_Read: pre-init bridge, argv copy,
 // isolated-mode forced flips, env-var read, CLI parse, default
@@ -58,6 +60,21 @@ func ConfigRead(c *PyConfig) Status {
 	return StatusOk()
 }
 
+// getXOption reports whether the -X option named by key is present in
+// xoptions, comparing against the part before any '=' so both bare
+// "-X dev" and "-X dev=1" forms match.
+//
+// CPython: Python/preconfig.c:582 _Py_get_xoption
+func getXOption(xoptions []string, key string) bool {
+	for _, opt := range xoptions {
+		name, _, _ := strings.Cut(opt, "=")
+		if name == key {
+			return true
+		}
+	}
+	return false
+}
+
 // applyDefaults flips every "ask the caller" sentinel that survived
 // the env + CLI passes to its CPython default. Mirrors the
 // "default values" section of config_read.
@@ -67,6 +84,13 @@ func applyDefaults(c *PyConfig) {
 	if c.UseHashSeed < 0 {
 		c.UseHashSeed = 0
 		c.HashSeed = 0
+	}
+	// dev_mode: -X dev or PYTHONDEVMODE turns it on before the default
+	// fallthrough pins the remaining sentinel to off.
+	//
+	// CPython: Python/preconfig.c:253 _PyPreCmdline_SetConfig dev_mode block
+	if c.DevMode < 0 && (getXOption(c.XOptions, "dev") || GetEnv(c.UseEnvironment, "PYTHONDEVMODE") != "") {
+		c.DevMode = 1
 	}
 	if c.DevMode < 0 {
 		c.DevMode = 0
