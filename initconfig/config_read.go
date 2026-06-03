@@ -80,7 +80,7 @@ func getXOption(xoptions []string, key string) bool {
 // "default values" section of config_read.
 //
 // CPython: Python/initconfig.c:2689 config_read defaults block
-func applyDefaults(c *PyConfig) {
+func applyDefaults(c *PyConfig) { //nolint:gocyclo // flat default-fill block, one branch per config field
 	if c.UseHashSeed < 0 {
 		c.UseHashSeed = 0
 		c.HashSeed = 0

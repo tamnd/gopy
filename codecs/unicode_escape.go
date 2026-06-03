@@ -54,7 +54,7 @@ func encodeUnicodeEscape(input, _ string) ([]byte, int, error) {
 // the raw text. Output preserves lone surrogates as pseudo-UTF-8.
 //
 // CPython: Objects/unicodeobject.c:6627 _PyUnicode_DecodeUnicodeEscapeInternal2
-func decodeUnicodeEscape(input []byte, errors string) (string, int, error) { //nolint:gocognit // direct CPython port
+func decodeUnicodeEscape(input []byte, errors string) (string, int, error) {
 	handler, herr := LookupError(errors)
 	if herr != nil {
 		return "", 0, herr

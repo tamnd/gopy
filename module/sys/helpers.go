@@ -243,7 +243,7 @@ func getRefcount(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 // TypeError is raised, and the optional default is returned in its
 // place when one was supplied. gopy stores objects on the Go heap with
 // no PyGC_Head, so the GC-tracked header addition CPython performs has
-// no faithful analogue here; the reported size is the __sizeof__ value
+// no faithful analog here; the reported size is the __sizeof__ value
 // for non-GC objects (str, int, float, bytes, ...), which is exactly
 // what CPython reports for them.
 //

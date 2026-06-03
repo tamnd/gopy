@@ -155,7 +155,7 @@ func decodeDirect(c byte) bool { return c <= 127 && c != '+' }
 // and reports the same ill-formed/partial/padding errors CPython does.
 //
 // CPython: Objects/unicodeobject.c:4732 PyUnicode_DecodeUTF7Stateful
-func decodeUTF7(input []byte, errors string) (string, int, error) { //nolint:gocognit // direct CPython port
+func decodeUTF7(input []byte, errors string) (string, int, error) { //nolint:gocognit,gocyclo // direct CPython port
 	handler, herr := LookupError(errors)
 	if herr != nil {
 		return "", 0, herr
@@ -276,7 +276,6 @@ func decodeUTF7(input []byte, errors string) (string, int, error) { //nolint:goc
 
 	// end of string: in a shift sequence with no more to follow
 	if inShift {
-		inShift = false
 		if surrogate != 0 || base64bits >= 6 || (base64bits > 0 && base64buffer != 0) {
 			if !fail("unterminated shift sequence", e, e) {
 				return "", 0, failErr
