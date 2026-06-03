@@ -68,6 +68,33 @@ type Unicode struct {
 	attrs *Dict
 }
 
+// PEP 393 compact-unicode struct sizes on a 64-bit (non-free-threaded)
+// build, matching sizeof(PyASCIIObject) and sizeof(PyCompactUnicodeObject).
+// str.__sizeof__ and the unicode_repeat allocation guard report storage
+// the way CPython lays it out: a compact ASCII string is the ASCII
+// header plus (len+1) bytes; any other compact string is the compact
+// header plus (len+1)*kind bytes.
+//
+// CPython: Include/cpython/unicodeobject.h:71 PyASCIIObject
+// CPython: Include/cpython/unicodeobject.h:97 PyCompactUnicodeObject
+const (
+	asciiStructSize   = 40
+	compactStructSize = 56
+)
+
+// charSizeAndStruct returns the per-character byte width and the header
+// struct size CPython would use for this string's kind. ASCII strings
+// use the smaller ASCII header; every other kind uses the compact
+// header keyed on the PEP 393 kind tag.
+//
+// CPython: Objects/unicodeobject.c:1208 PyUnicode_New
+func (u *Unicode) charSizeAndStruct() (charSize, structSize int) {
+	if u.ascii {
+		return 1, asciiStructSize
+	}
+	return int(u.kind), compactStructSize
+}
+
 // AttrDict implements AttrDictHolder so MemberDescr can store __slots__
 // values in the attrs dict for str subclasses.
 // CPython: Objects/object.c _PyObject_GetDictPtr (str-subclass path)
@@ -250,6 +277,21 @@ func init() {
 			}
 			if n == 1 && s.Type() == strType {
 				return s, nil
+			}
+			// unicode_repeat first rejects products that overflow
+			// Py_ssize_t, then hands the character count to
+			// PyUnicode_New, which raises MemoryError when the backing
+			// store would exceed the allocator's reach.
+			//
+			// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+			const maxSsize = int(^uint(0) >> 1)
+			if s.length > maxSsize/n {
+				return nil, fmt.Errorf("OverflowError: repeated string is too long")
+			}
+			nchars := s.length * n
+			charSize, structSize := s.charSizeAndStruct()
+			if nchars > (maxSsize-structSize)/charSize-1 {
+				return nil, fmt.Errorf("MemoryError")
 			}
 			b := make([]byte, 0, len(s.v)*n)
 			for range n {

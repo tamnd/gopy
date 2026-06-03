@@ -423,6 +423,9 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
 		return nil, err
 	}
+	if err := setItem(md, "getsizeof", objects.NewBuiltinFunction("getsizeof", getSizeof)); err != nil {
+		return nil, err
+	}
 	if err := setItem(md, "is_finalizing", objects.NewBuiltinFunction("is_finalizing", isFinalizing)); err != nil {
 		return nil, err
 	}

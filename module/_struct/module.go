@@ -168,11 +168,14 @@ func parseFmt(fmtStr string, native bool) ([]fmtCode, error) {
 }
 
 // codeSize returns the byte size of one instance of format code c
-// (ignoring the repeat count). Native sizes match what CPython uses
-// for '@' and '='; network/explicit formats use the standard widths.
+// (ignoring the repeat count). Native sizes ('@') match the underlying C
+// type widths on a 64-bit platform; standard formats ('=', '<', '>',
+// '!') use fixed widths. The two tables agree everywhere except 'l'/'L',
+// which is sizeof(long) == 8 in native mode but a fixed 4 bytes in
+// standard mode.
 //
-// CPython: Modules/_struct.c:152 native_fmttable / Modules/_struct.c:240 standardfmttable
-func codeSize(c byte) (int, error) {
+// CPython: Modules/_struct.c:152 native_table / Modules/_struct.c:240 lilendian_table
+func codeSize(c byte, native bool) (int, error) {
 	switch c {
 	case 'x':
 		return 1, nil
@@ -182,7 +185,13 @@ func codeSize(c byte) (int, error) {
 		return 1, nil
 	case 'h', 'H':
 		return 2, nil
-	case 'i', 'I', 'l', 'L', 'f':
+	case 'l', 'L':
+		// sizeof(long): 8 bytes native on a 64-bit platform, 4 standard.
+		if native {
+			return 8, nil
+		}
+		return 4, nil
+	case 'i', 'I', 'f':
 		return 4, nil
 	case 'q', 'Q', 'd':
 		return 8, nil
@@ -198,23 +207,63 @@ func codeSize(c byte) (int, error) {
 	}
 }
 
-// calcSize returns the total byte size for the given pre-parsed codes.
+// codeAlign returns the natural alignment of format code c. In standard
+// mode every entry aligns to 0 (no padding), matching CPython's
+// standard tables. In native mode the alignment is _Alignof the
+// underlying C type on a 64-bit platform.
 //
-// CPython: Modules/_struct.c:1124 s_struct_calcsize
-func calcSize(codes []fmtCode) (int, error) {
-	total := 0
+// CPython: Modules/_struct.c:152 native_table (alignment column)
+func codeAlign(c byte, native bool) int {
+	if !native {
+		return 0
+	}
+	switch c {
+	case 'h', 'H', 'e':
+		return 2
+	case 'i', 'I', 'f':
+		return 4
+	case 'l', 'L', 'q', 'Q', 'n', 'N', 'P', 'd':
+		return 8
+	case '?':
+		return 1
+	default:
+		// x, c, b, B, s, p align to 0 (no padding).
+		return 0
+	}
+}
+
+// alignOffset rounds size up to the alignment boundary of code c,
+// mirroring CPython's align(). Codes with alignment 0 or 1 never pad.
+//
+// CPython: Modules/_struct.c:60 align
+func alignOffset(size int, c byte, native bool) int {
+	a := codeAlign(c, native)
+	if a > 1 && size > 0 {
+		extra := (a - 1) - (size-1)%a
+		size += extra
+	}
+	return size
+}
+
+// calcSize returns the total byte size for the given pre-parsed codes,
+// inserting native alignment padding between fields when native is set.
+//
+// CPython: Modules/_struct.c:1124 s_struct_calcsize / prepare_s
+func calcSize(codes []fmtCode, native bool) (int, error) {
+	size := 0
 	for _, fc := range codes {
-		sz, err := codeSize(fc.code)
+		sz, err := codeSize(fc.code, native)
 		if err != nil {
 			return 0, err
 		}
+		size = alignOffset(size, fc.code, native)
 		if fc.code == 's' || fc.code == 'p' {
-			total += fc.count
+			size += fc.count
 		} else {
-			total += sz * fc.count
+			size += sz * fc.count
 		}
 	}
-	return total, nil
+	return size, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +360,14 @@ func packValue(buf []byte, off int, bo byteOrder, c byte, count int, obj objects
 		if err != nil {
 			return 0, err
 		}
+		// Native 'l' is sizeof(long) == 8 bytes; standard 'l' is 4.
+		if c == 'l' && bo.native {
+			for i := 0; i < count; i++ {
+				bo.order.PutUint64(buf[off:], uint64(v))
+				off += 8
+			}
+			return off, nil
+		}
 		for i := 0; i < count; i++ {
 			bo.order.PutUint32(buf[off:], uint32(int32(v)))
 			off += 4
@@ -321,6 +378,13 @@ func packValue(buf []byte, off int, bo byteOrder, c byte, count int, obj objects
 		v, err := extractInt(obj)
 		if err != nil {
 			return 0, err
+		}
+		if c == 'L' && bo.native {
+			for i := 0; i < count; i++ {
+				bo.order.PutUint64(buf[off:], uint64(v))
+				off += 8
+			}
+			return off, nil
 		}
 		for i := 0; i < count; i++ {
 			bo.order.PutUint32(buf[off:], uint32(v))
@@ -547,7 +611,7 @@ func halfToFloat32(h uint16) float32 {
 //
 // CPython: Modules/_struct.c:848 s_pack
 func doPack(bo byteOrder, codes []fmtCode, args []objects.Object) ([]byte, error) {
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -555,6 +619,8 @@ func doPack(bo byteOrder, codes []fmtCode, args []objects.Object) ([]byte, error
 	off := 0
 	ai := 0 // index into args; 'x' does not consume an arg
 	for _, fc := range codes {
+		// Skip native alignment padding (already zero in buf).
+		off = alignOffset(off, fc.code, bo.native)
 		if fc.code == 'x' {
 			// Pad bytes consume no arg.
 			newOff, perr := packValue(buf, off, bo, 'x', fc.count, nil)
@@ -640,9 +706,18 @@ func unpackValue(buf []byte, off int, bo byteOrder, c byte) (objects.Object, int
 		v := bo.order.Uint16(buf[off:])
 		return objects.NewInt(int64(v)), off + 2, nil
 	case 'i', 'l':
+		// Native 'l' is sizeof(long) == 8 bytes; standard 'l' is 4.
+		if c == 'l' && bo.native {
+			v := int64(bo.order.Uint64(buf[off:]))
+			return objects.NewInt(v), off + 8, nil
+		}
 		v := int32(bo.order.Uint32(buf[off:]))
 		return objects.NewInt(int64(v)), off + 4, nil
 	case 'I', 'L':
+		if c == 'L' && bo.native {
+			v := bo.order.Uint64(buf[off:])
+			return objects.NewInt(int64(v)), off + 8, nil
+		}
 		v := bo.order.Uint32(buf[off:])
 		return objects.NewInt(int64(v)), off + 4, nil
 	case 'q', 'n':
@@ -672,6 +747,8 @@ func doUnpack(bo byteOrder, codes []fmtCode, buf []byte, startOff int) (*objects
 	var items []objects.Object
 	off := startOff
 	for _, fc := range codes {
+		// Skip native alignment padding between fields.
+		off = alignOffset(off, fc.code, bo.native)
 		switch fc.code {
 		case 's':
 			n := fc.count
@@ -699,7 +776,7 @@ func doUnpack(bo byteOrder, codes []fmtCode, buf []byte, startOff int) (*objects
 				off++
 			}
 		default:
-			sz, err := codeSize(fc.code)
+			sz, err := codeSize(fc.code, bo.native)
 			if err != nil {
 				return nil, err
 			}
@@ -737,12 +814,11 @@ func moduleCalcsize(args []objects.Object, _ map[string]objects.Object) (objects
 		return nil, fmt.Errorf("struct.error: calcsize() argument 1 must be str, not %T", args[0])
 	}
 	bo, rest := parseByteOrder(fmtStr)
-	_ = bo
 	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -802,11 +878,28 @@ func modulePackInto(args []objects.Object, _ map[string]objects.Object) (objects
 		return nil, err
 	}
 	dst := ba.Bytes()
+	size := len(packed)
+	bufLen := len(dst)
+	// Negative offsets count from the end. The two guards below reject an
+	// offset whose data would run off either side of the buffer; the
+	// boundary check that follows is written as a subtraction so a huge
+	// positive offset cannot overflow Py_ssize_t.
+	//
+	// CPython: Modules/_struct.c:1979 s_pack_into
 	if offset < 0 {
-		offset = len(dst) + offset
+		if offset+size > 0 {
+			return nil, fmt.Errorf("struct.error: no space to pack %d bytes at offset %d", size, offset)
+		}
+		if offset+bufLen < 0 {
+			return nil, fmt.Errorf("struct.error: offset %d out of range for %d-byte buffer", offset, bufLen)
+		}
+		offset += bufLen
 	}
-	if offset < 0 || offset+len(packed) > len(dst) {
-		return nil, fmt.Errorf("struct.error: pack_into requires a buffer of at least %d bytes for packing %d bytes at offset %d", offset+len(packed), len(packed), offset)
+	if bufLen-offset < size {
+		// CPython reports the required size as an unsigned sum so an
+		// overflowing offset+size still prints a meaningful figure.
+		atLeast := uint64(size) + uint64(offset)
+		return nil, fmt.Errorf("struct.error: pack_into requires a buffer of at least %d bytes for packing %d bytes at offset %d (actual buffer size is %d)", atLeast, size, offset, bufLen)
 	}
 	copy(dst[offset:], packed)
 	return objects.None(), nil
@@ -832,7 +925,7 @@ func moduleUnpack(args []objects.Object, _ map[string]objects.Object) (objects.O
 	if err != nil {
 		return nil, err
 	}
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -871,20 +964,33 @@ func moduleUnpackFrom(args []objects.Object, kwargs map[string]objects.Object) (
 		}
 		offset = int(off)
 	}
-	if offset < 0 {
-		offset = len(buf) + offset
-	}
 	bo, rest := parseByteOrder(fmtStr)
 	codes, err := parseFmt(rest, bo.native)
 	if err != nil {
 		return nil, err
 	}
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}
-	if offset < 0 || offset+size > len(buf) {
-		return nil, fmt.Errorf("struct.error: unpack_from requires a buffer of at least %d bytes for unpacking %d bytes at offset %d (actual buffer size is %d)", offset+size, size, offset, len(buf))
+	bufLen := len(buf)
+	// Mirror s_pack_into's boundary handling: clamp negative offsets to
+	// the end and reject any offset whose read would run off the buffer,
+	// using subtraction so a huge positive offset cannot overflow.
+	//
+	// CPython: Modules/_struct.c:2065 s_unpack_from
+	if offset < 0 {
+		if offset+size > 0 {
+			return nil, fmt.Errorf("struct.error: not enough data to unpack %d bytes at offset %d", size, offset)
+		}
+		if offset+bufLen < 0 {
+			return nil, fmt.Errorf("struct.error: offset %d out of range for %d-byte buffer", offset, bufLen)
+		}
+		offset += bufLen
+	}
+	if bufLen-offset < size {
+		atLeast := uint64(size) + uint64(offset)
+		return nil, fmt.Errorf("struct.error: unpack_from requires a buffer of at least %d bytes for unpacking %d bytes at offset %d (actual buffer size is %d)", atLeast, size, offset, bufLen)
 	}
 	return doUnpack(bo, codes, buf, offset)
 }
@@ -956,7 +1062,7 @@ func moduleIterUnpack(args []objects.Object, _ map[string]objects.Object) (objec
 	if err != nil {
 		return nil, err
 	}
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,7 +1165,7 @@ func structNew(cls *objects.Type, args []objects.Object, kwargs map[string]objec
 	if err != nil {
 		return nil, err
 	}
-	size, err := calcSize(codes)
+	size, err := calcSize(codes, bo.native)
 	if err != nil {
 		return nil, err
 	}

@@ -76,6 +76,27 @@ func init() {
 	bind("__rmul__", strRMulMethod)
 	bind("__add__", strAddMethod)
 	bind("__mod__", strModMethod)
+	bind("__sizeof__", strSizeofMethod)
+}
+
+// strSizeofMethod ports str.__sizeof__. CPython reports the compact
+// unicode layout: a compact ASCII string is sizeof(PyASCIIObject) plus
+// one byte per code point plus the trailing NUL; any other compact
+// string is sizeof(PyCompactUnicodeObject) plus (len+1) units of the
+// PEP 393 kind width. gopy stores text as UTF-8 but mirrors the same
+// reported size so sys.getsizeof and __sizeof__ stay byte-compatible.
+//
+// CPython: Objects/unicodeobject.c:13991 unicode_sizeof_impl
+func strSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' for 'str' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	charSize, structSize := u.charSizeAndStruct()
+	return NewInt(int64(structSize + charSize*(u.length+1))), nil
 }
 
 func selfStr(args []Object, name string) (string, error) {
