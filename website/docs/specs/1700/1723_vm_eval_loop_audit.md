@@ -776,7 +776,7 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 - [x] P12.1 Python recursion limit on `CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS` / `CALL_ALLOC_AND_ENTER_INIT` fast arms.
 - [x] P12.2 C recursion limit on `objects.Repr` / `objects.Str` (`test_repr_deep`).
-- [ ] P12.3 Throw-path frame linking so `traceback.extract_stack()` matches `send` (`test_stack_in_coroutine_throw`).
+- [x] P12.3 Throw-path frame linking so `traceback.extract_stack()` matches `send` (`test_stack_in_coroutine_throw`): a coroutine driven by `throw()` reports the same visible stack depth as one driven by `send()` (both 4).
 - [x] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
 - [x] P12.5 `test_extcall` module-name diagnosed as harness artifact (no code change).
 
