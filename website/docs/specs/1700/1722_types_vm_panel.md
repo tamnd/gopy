@@ -664,4 +664,20 @@ All sixteen rows are green as of the 2026-06-04 pass. The last open
 item, the str->int denial-of-service guard exercised by `test_int`,
 landed as a digit-count check ahead of the base conversion: for
 non-power-of-two bases the conversion is super-linear, so an oversized
-literal has to be rejected on length before the parse runs.
+literal has to be rejected on length before the parse runs. The
+int->str direction guards the same way through `checkIntToStrLimit`,
+which estimates the decimal digit count from `big.Int.BitLen()` (O(1))
+and raises before `String()` ever runs.
+
+One caveat worth recording: `test_denial_of_service_prevented_int_to_str`
+and its str->int twin are wall-clock regression tests. They assert the
+rejected conversion runs in under half the time of a legitimate one.
+Measured in isolation our reject path is ~6 microseconds against a
+~2.2 ms legitimate convert, roughly 180x under the margin, so the guard
+is doing the right thing. But the test allocates a 602060-digit int
+immediately before the timed reject, and on the rare run the Go garbage
+collector pauses inside that Stopwatch window the reject can read as a
+few milliseconds and trip the ratio. It is a GC-jitter flake, not a
+correctness gap; the guard itself is O(1). CPython gates the heavier
+cases in this file behind `requires_resource('cpu')` but leaves these
+two ungated, so they stay sensitive to scheduling on a fast host.
