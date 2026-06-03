@@ -134,7 +134,7 @@ func TestReversedOnTuple(t *testing.T) {
 // counter begins at start and increments.
 func TestEnumerateStartIndex(t *testing.T) {
 	tup := objects.NewTuple([]objects.Object{objects.NewStr("a"), objects.NewStr("b")})
-	e, err := Enumerate([]objects.Object{tup, objects.NewInt(10)}, nil)
+	e, err := Enumerate(objects.EnumerateType, []objects.Object{tup, objects.NewInt(10)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

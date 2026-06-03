@@ -11,6 +11,7 @@ package builtins
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -134,7 +135,14 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 // when the type has no __reversed__.
 //
 // CPython: Objects/enumobject.c:1086 reversed_new_impl
-func Reversed(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func Reversed(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// reversed_new runs _PyArg_NoKeywords before anything else, so
+	// reversed(seq, a=1) is a TypeError regardless of the argument count.
+	//
+	// CPython: Objects/enumobject.c:454 reversed_new (PyArg_NoKeywords)
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: reversed() takes no keyword arguments")
+	}
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: reversed() takes exactly one argument (%d given)", len(args))
 	}
@@ -164,35 +172,65 @@ func Reversed(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	return newReversedIter(o, n), nil
 }
 
-// Enumerate ports builtin_enumerate. Returns an iterator yielding
-// (index, value) tuples. Optional start kwarg / second positional
-// shifts the index.
+// Enumerate ports the enumerate(iterable, start=0) constructor. Both
+// arguments may be passed positionally or by keyword, mirroring
+// enumerate_vectorcall; the result carries cls so subclass instances
+// keep their own type the way enum_new_impl's tp_alloc(type) does.
 //
-// CPython: Objects/enumobject.c:enumerate_new_impl
-func Enumerate(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return nil, fmt.Errorf("TypeError: enumerate expected 1 or 2 arguments, got %d", len(args))
+// CPython: Objects/enumobject.c:48 enum_new_impl
+// CPython: Objects/enumobject.c:103 enumerate_vectorcall
+func Enumerate(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	var iterable, startObj objects.Object
+	switch len(args) {
+	case 0:
+	case 1:
+		iterable = args[0]
+	case 2:
+		iterable, startObj = args[0], args[1]
+	default:
+		return nil, fmt.Errorf("TypeError: enumerate() takes at most 2 arguments (%d given)", len(args)+len(kwargs))
 	}
-	start := int64(0)
-	if len(args) == 2 {
-		v, err := indexAsInt64(args[1], "enumerate")
+	for k, v := range kwargs {
+		switch k {
+		case "iterable":
+			if iterable != nil {
+				return nil, fmt.Errorf("TypeError: argument for enumerate() given by name ('iterable') and position (1)")
+			}
+			iterable = v
+		case "start":
+			if startObj != nil {
+				return nil, fmt.Errorf("TypeError: argument for enumerate() given by name ('start') and position (2)")
+			}
+			startObj = v
+		default:
+			return nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for enumerate()", k)
+		}
+	}
+	if iterable == nil {
+		return nil, fmt.Errorf("TypeError: enumerate() missing required argument 'iterable'")
+	}
+	// start: PyNumber_Index(start) so any __index__-bearing value works,
+	// including ints wider than int64. A non-index start is a TypeError.
+	var index *big.Int
+	if startObj != nil {
+		si, err := objects.NumberIndex(startObj)
 		if err != nil {
 			return nil, err
 		}
-		start = v
-	}
-	if v, ok := kwargs["start"]; ok {
-		s, err := indexAsInt64(v, "enumerate")
-		if err != nil {
-			return nil, err
+		bi, ok := si.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", startObj.Type().Name)
 		}
-		start = s
+		index = bi.BigInt()
 	}
-	it, err := getIter(args[0])
+	it, err := getIter(iterable)
 	if err != nil {
 		return nil, err
 	}
-	return newEnumerate(it, start), nil
+	if cls == nil {
+		cls = objects.EnumerateType
+	}
+	return objects.NewEnumerateOfType(cls, it, index), nil
 }
 
 // Zip ports builtin_zip. The strict kwarg is honored: when true, an

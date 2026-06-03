@@ -96,6 +96,32 @@ func init() {
 			return rangeIter(args[0])
 		},
 	))
+	// CPython: Objects/rangeobject.c:1215 range_reverse
+	SetTypeDescr(RangeType, "__reversed__", NewMethodDescr(RangeType, "__reversed__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
+			}
+			return rangeReverse(args[0])
+		},
+	))
+}
+
+// rangeReverse ports range_reverse: reversed(range(start, stop, step))
+// is range(start+(n-1)*step, start-step, -step), where n is the range
+// length. The result is a range_iterator, the same type iter(range)
+// yields, so reversed() and iter() agree on type.
+//
+// CPython: Objects/rangeobject.c:1215 range_reverse
+func rangeReverse(o Object) (Object, error) {
+	r := o.(*Range)
+	n := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
+	newStep := NewIntFromBig(new(big.Int).Neg(&r.Step.v))
+	newStop := NewIntFromBig(new(big.Int).Sub(&r.Start.v, &r.Step.v))
+	nm1 := new(big.Int).Sub(n, big.NewInt(1))
+	prod := new(big.Int).Mul(nm1, &r.Step.v)
+	newStart := NewIntFromBig(new(big.Int).Add(&r.Start.v, prod))
+	return newRangeIterator(newStart, newStop, newStep), nil
 }
 
 // NewRange builds a range. Step must be non-zero.

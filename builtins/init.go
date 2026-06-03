@@ -275,7 +275,13 @@ func wireTypeCalls() {
 		bindCtor(ZipType, Zip)
 		bindCtor(objects.MapType, Map)
 		bindCtor(objects.FilterType, Filter)
-		bindCtor(objects.EnumerateType, Enumerate)
+		// enumerate uses a subtype-aware TpNew so class E(enumerate): ...
+		// instances carry their own type (CPython: enum_new_impl allocates
+		// with type->tp_alloc(type)).
+		objects.EnumerateType.TpNew = Enumerate
+		bindCtorDescr(objects.EnumerateType, func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			return Enumerate(objects.EnumerateType, args, kwargs)
+		})
 		bindCtor(objects.ReversedType, Reversed)
 		bindCtor(objects.MemoryViewType, memoryViewCtor)
 	})

@@ -557,41 +557,18 @@ func lengthHintFunc(args []objects.Object, kwargs map[string]objects.Object) (ob
 		defaultVal = v
 	}
 
-	// Try len(obj) first.
-	if n, err := objects.Length(obj); err == nil {
-		if n < 0 {
-			return nil, fmt.Errorf("ValueError: __len__() should return >= 0")
-		}
-		return objects.NewInt(int64(n)), nil
+	// Delegate to PyObject_LengthHint: len(obj) first, then
+	// __length_hint__, else default. Only a TypeError out of either
+	// dunder is swallowed; any other exception (ZeroDivisionError from a
+	// pathological __len__, say) propagates rather than collapsing to the
+	// default.
+	//
+	// CPython: Objects/abstract.c:64 PyObject_LengthHint
+	n, err := objects.LengthHint(obj, defaultVal)
+	if err != nil {
+		return nil, err
 	}
-
-	// Look for __length_hint__ on the type, call it. AttributeError
-	// and any TypeError raised by the hook itself fall back to
-	// default, matching PyObject_LengthHint's "ignore and use default"
-	// arm. We deliberately drop the err here.
-	hint, hintErr := objects.GetAttr(obj, objects.NewStr("__length_hint__"))
-	if hintErr != nil {
-		return objects.NewInt(defaultVal), nil //nolint:nilerr // CPython: drop error, fall back to default
-	}
-	res, callErr := objects.Call(hint, objects.NewTuple(nil), nil)
-	if callErr != nil {
-		return objects.NewInt(defaultVal), nil //nolint:nilerr // CPython: drop error, fall back to default
-	}
-	if objects.IsNotImplemented(res) {
-		return objects.NewInt(defaultVal), nil
-	}
-	n, ok := res.(*objects.Int)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: __length_hint__ must be integer, not %s", res.Type().Name)
-	}
-	v, fits := n.Int64()
-	if !fits {
-		return nil, fmt.Errorf("OverflowError: __length_hint__() result too large")
-	}
-	if v < 0 {
-		return nil, fmt.Errorf("ValueError: __length_hint__() should return >= 0")
-	}
-	return objects.NewInt(v), nil
+	return objects.NewInt(n), nil
 }
 
 // ---------------------------------------------------------------------------

@@ -315,38 +315,6 @@ func newReversedIter(o objects.Object, n int) *reversedIter {
 	return it
 }
 
-// enumerateIter is the gopy port of PyEnum_Type. The counter is the
-// CPython en_index field; the wrapped iterator drives the values.
-//
-// CPython: Objects/enumobject.c:46 PyEnum_Type
-type enumerateIter struct {
-	objects.Header
-	it    objects.Object
-	index int64
-}
-
-var enumerateType = objects.NewType("enumerate", []*objects.Type{objects.ObjectType()})
-
-func init() {
-	enumerateType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
-	enumerateType.IterNext = func(o objects.Object) (objects.Object, error) {
-		e := o.(*enumerateIter)
-		v, err := e.it.Type().IterNext(e.it)
-		if err != nil {
-			return nil, err
-		}
-		out := objects.NewTuple([]objects.Object{objects.NewInt(e.index), v})
-		e.index++
-		return out, nil
-	}
-}
-
-func newEnumerate(it objects.Object, start int64) *enumerateIter {
-	e := &enumerateIter{it: it, index: start}
-	e.Init(enumerateType)
-	return e
-}
-
 // zipIter is the gopy port of PyZip_Type. Holds the underlying
 // iterators and the strict flag. When any iterator stops, the zip
 // stops; in strict mode a remaining-items check kicks in afterwards.
