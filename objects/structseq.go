@@ -269,20 +269,13 @@ func structSeqRichCmp(a, b Object, op CompareOp) (Object, error) {
 	return NotImplemented(), nil
 }
 
-// structSeqNew is the struct-sequence tp_new: build an instance from a
-// sequence plus an optional dict of hidden-field overrides.
+// structSeqParseNewArgs resolves the clinic signature
+// structseq.__new__(sequence, dict={}): the sequence and optional dict
+// may be passed positionally or by keyword, and a name given both ways
+// is rejected. Returns the sequence (required) and dict (may be nil).
 //
-// CPython: Objects/structseq.c:162 structseq_new_impl
-func structSeqNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	meta := structSeqMetas[cls]
-	if meta == nil {
-		return nil, fmt.Errorf("TypeError: cannot create '%s' instances", cls.Name)
-	}
-	// CPython clinic signature: structseq.__new__(sequence, dict={}). Both
-	// the sequence and the optional dict can be passed positionally or by
-	// keyword ("sequence", "dict").
-	//
-	// CPython: Objects/structseq.c:157 structseq.__new__
+// CPython: Objects/structseq.c:157 structseq.__new__
+func structSeqParseNewArgs(cls *Type, args []Object, kwargs map[string]Object) (Object, Object, error) {
 	var seqArg, dictArg Object
 	switch len(args) {
 	case 0:
@@ -294,48 +287,36 @@ func structSeqNew(cls *Type, args []Object, kwargs map[string]Object) (Object, e
 	case 2:
 		seqArg, dictArg = args[0], args[1]
 	default:
-		return nil, fmt.Errorf("TypeError: %s() takes at most 2 arguments (%d given)", cls.Name, len(args))
+		return nil, nil, fmt.Errorf("TypeError: %s() takes at most 2 arguments (%d given)", cls.Name, len(args))
 	}
 	for k := range kwargs {
 		switch k {
 		case "sequence":
 			if len(args) >= 1 {
-				return nil, fmt.Errorf("TypeError: argument for %s() given by name ('sequence') and position (1)", cls.Name)
+				return nil, nil, fmt.Errorf("TypeError: argument for %s() given by name ('sequence') and position (1)", cls.Name)
 			}
 		case "dict":
 			if len(args) == 2 {
-				return nil, fmt.Errorf("TypeError: argument for %s() given by name ('dict') and position (2)", cls.Name)
+				return nil, nil, fmt.Errorf("TypeError: argument for %s() given by name ('dict') and position (2)", cls.Name)
 			}
 			dictArg = kwargs["dict"]
 		default:
-			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'", cls.Name, k)
+			return nil, nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'", cls.Name, k)
 		}
 	}
 	if seqArg == nil {
-		return nil, fmt.Errorf("TypeError: %s() missing required argument 'sequence' (pos 1)", cls.Name)
+		return nil, nil, fmt.Errorf("TypeError: %s() missing required argument 'sequence' (pos 1)", cls.Name)
 	}
+	return seqArg, dictArg, nil
+}
 
-	fast, err := SequenceFast(seqArg, "constructor requires a sequence")
-	if err != nil {
-		return nil, err
-	}
-	seq, _ := tupleItemsOf(fast)
-	if seq == nil {
-		if l, ok := fast.(*List); ok {
-			seq = l.items
-		}
-	}
-	// CPython's clinic default for dict is NULL (absent), not {}. An
-	// explicitly supplied non-dict (including None) is rejected.
-	var dict *Dict
-	if dictArg != nil {
-		d, ok := dictArg.(*Dict)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: %s() takes a dict as second arg, if any", cls.Name)
-		}
-		dict = d
-	}
-
+// structSeqBuildItems validates the sequence length against the type's
+// visible/total field counts, copies the visible items, then fills the
+// hidden fields from the override dict (defaulting absent ones to None).
+// A dict carrying names that no hidden field consumed is rejected.
+//
+// CPython: Objects/structseq.c:186 structseq_new_impl (length + fill loop)
+func structSeqBuildItems(cls *Type, meta *structSeqMeta, seq []Object, dict *Dict) ([]Object, error) {
 	minLen := meta.nInSequence
 	maxLen := len(meta.fields)
 	n := len(seq)
@@ -374,6 +355,48 @@ func structSeqNew(cls *Type, args []Object, kwargs map[string]Object) (Object, e
 	}
 	if dict != nil && dict.Len() > foundKeys {
 		return nil, fmt.Errorf("TypeError: %s() got duplicate or unexpected field name(s)", cls.Name)
+	}
+	return items, nil
+}
+
+// structSeqNew is the struct-sequence tp_new: build an instance from a
+// sequence plus an optional dict of hidden-field overrides.
+//
+// CPython: Objects/structseq.c:162 structseq_new_impl
+func structSeqNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	meta := structSeqMetas[cls]
+	if meta == nil {
+		return nil, fmt.Errorf("TypeError: cannot create '%s' instances", cls.Name)
+	}
+	seqArg, dictArg, err := structSeqParseNewArgs(cls, args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+
+	fast, err := SequenceFast(seqArg, "constructor requires a sequence")
+	if err != nil {
+		return nil, err
+	}
+	seq, _ := tupleItemsOf(fast)
+	if seq == nil {
+		if l, ok := fast.(*List); ok {
+			seq = l.items
+		}
+	}
+	// CPython's clinic default for dict is NULL (absent), not {}. An
+	// explicitly supplied non-dict (including None) is rejected.
+	var dict *Dict
+	if dictArg != nil {
+		d, ok := dictArg.(*Dict)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: %s() takes a dict as second arg, if any", cls.Name)
+		}
+		dict = d
+	}
+
+	items, err := structSeqBuildItems(cls, meta, seq, dict)
+	if err != nil {
+		return nil, err
 	}
 
 	s := &StructSeq{items: items}

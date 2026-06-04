@@ -112,7 +112,7 @@ func boundMethodGetattro(o Object, name Object) (Object, error) {
 	// attribute delegates to the wrapped function (method.__dict__ is
 	// func.__dict__). gopy installs a generic __dict__ getset on object,
 	// so skip that inherited descriptor and delegate the same way.
-	if descr != nil && !(base == objectType && attrNameStr(name) == "__dict__") {
+	if descr != nil && (base != objectType || attrNameStr(name) != "__dict__") {
 		if dg := descr.Type().DescrGet; dg != nil {
 			return dg(descr, o, o.Type())
 		}
