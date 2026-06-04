@@ -43,7 +43,7 @@ func statBlockFields(info goos.FileInfo) (blksize, blocks, rdev int64) {
 		return
 	}
 	blksize = int64(sys.Blksize)
-	blocks = int64(sys.Blocks)
+	blocks = sys.Blocks
 	rdev = int64(sys.Rdev)
 	return
 }

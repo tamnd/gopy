@@ -33,5 +33,5 @@ func processTimes() (user, system, childUser, childSystem, elapsed float64) {
 	childUser = tvSeconds(children.Utime)
 	childSystem = tvSeconds(children.Stime)
 	elapsed = float64(time.Now().UnixNano()) / 1e9
-	return
+	return user, system, childUser, childSystem, elapsed
 }
