@@ -55,8 +55,8 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_ucn | FAIL (2f) | hashlib blake2 + named sequences (P6) | ready |
 | test_unicode_file | **CRASH** | os.supports_unicode_filenames (P7) | ready |
 | test_unicode_file_functions | **CRASH** | os unicode path surface (P7) | ready |
-| test_userdict | FAIL (1f, 1e) | UserDict `|` mappingproxy (P8) | ready |
-| test_userlist | FAIL (1f) | UserList iterator free-after-iter (P8) | ready |
+| test_userdict | FAIL (1f) | `|`/`|=` shipped (P8.a); test_fromkeys GC-blocked (P8.b) | in progress |
+| test_userlist | FAIL (1f) | UserList free-after-iter GC-blocked (P8.b) | blocked |
 | test_buffer | not vendored | C-level buffer protocol API | out-of-scope |
 
 Sixteen green, twelve to port. `test_buffer` stays out of scope (it drives the
@@ -441,27 +441,44 @@ does with `requires_unicode_filenames`-style skips).
 
 ## P8 — UserDict / UserList edges
 
-**Blocked tests:** test_userdict (1 fail, 1 error), test_userlist (1 fail).
+**Status (in progress).** The `|` / `|=` half is shipped; the two
+remaining failures are both GC-reclaim, blocked on the refcount audit
+(P8.b, see below).
 
-```
-TypeError: unsupported operand type(s) for |: 'UserDict' and 'mappingproxy'
-AssertionError: type(u) is not dict        (UserDict | mappingproxy)
-AssertionError: False is not true          (UserList free_after_iterating)
-```
+**P8.a — UserDict `|` mappingproxy (shipped).** The vendored
+`collections/__init__.py` `UserDict.__or__` / `__ror__` already match
+CPython 3.14 byte for byte: they only pair with `UserDict` / `dict` and
+return `NotImplemented` otherwise. The real gap was on the operand side.
+`mappingproxy` carried no number slots, and `dict` exposed `__ior__` only
+as a method descriptor, never as `nb_inplace_or`. So:
+- `UserDict | mappingproxy` raised `TypeError`, because neither operand's
+  slot accepted it (`mappingproxy` had no `nb_or` to re-dispatch
+  `UserDict | dict`).
+- `dict |= UserDict` fell through the in-place path (no `nb_inplace_or`)
+  to `UserDict.__ror__`, rebuilding the value as a `UserDict` instead of
+  updating the `dict` in place.
 
-1. **UserDict `|` mappingproxy** (`test_mixed_or` / `test_mixed_ior`):
-   `UserDict.__or__` / `__ror__` must accept a `mappingproxy` (and any
-   mapping) on the other side and produce a plain `dict`. This is in the
-   vendored `collections/__init__.py` `UserDict` plus the `mappingproxy`
-   `__ror__`; confirm `mappingproxy.__ror__` exists (port from
-   `Objects/descrobject.c` mappingproxy if missing).
-2. **UserList free_after_iterating** (`test_free_after_iterating`): the
-   UserList iterator must drop its reference to the backing list when
-   exhausted so a weakref to the list is reclaimed. Same class as the
-   already-shipped list-iterator free-after-iterating fix (task #173); apply
-   the equivalent to the UserList / list iterator path the test exercises.
+Fix: port `dict_or` / `dict_ior` (`Objects/dictobject.c`) and
+`mappingproxy_or` / `mappingproxy_ior` (`Objects/descrobject.c`) onto the
+`Number` slot of each type. `dict |= mapping` now keeps `dict` identity;
+`UserDict | mappingproxy` produces a `UserDict`. `test_mixed_or` and
+`test_mixed_ior` pass.
 
-**Acceptance:** test_userdict and test_userlist green.
+**P8.b — GC reclaim (blocked).** Two failures remain and both are the
+refcount/GC drift tracked in the eval-loop audit:
+- test_userdict `test_fromkeys`: passes in isolation and in pairs, fails
+  only in the full module. `d.fromkeys(g())` over a generator returns
+  `{}` once enough prior comparisons have inflated refcounts.
+- test_userlist `test_free_after_iterating`: the backing instance is held
+  by a Python-level `Sequence.__iter__` generator and is never
+  reclaimed, so the subclass `__del__` does not fire. Same class as the
+  C list-iterator fix (task #173), but reached through a generator frame.
+
+Both wait on the container-incref audit; see the eval-loop DECREF_INPUTS
+follow-up task.
+
+**Acceptance:** P8.a green (test_mixed_or, test_mixed_ior); P8.b deferred
+with P4.b to the refcount audit.
 
 ---
 
@@ -496,5 +513,5 @@ alone), CI green before moving on:
 - [ ] P6.b vendor NormalizationTest-3.2.0.txt (test_unicodedata normalization)
 - [ ] P6.c named-sequence resolver table (test_ucn named sequences)
 - [ ] P7 os.supports_unicode_filenames + unicode path surface (test_unicode_file, test_unicode_file_functions)
-- [ ] P8.a UserDict | mappingproxy -> dict (test_userdict)
-- [ ] P8.b UserList iterator free-after-iterating weakref (test_userlist)
+- [x] P8.a dict / mappingproxy nb_or + nb_inplace_or: `dict |= mapping` keeps dict identity, `UserDict | mappingproxy` -> UserDict (test_userdict 2f/1e -> 1f; test_mixed_or, test_mixed_ior)
+- [ ] P8.b GC reclaim: test_userdict test_fromkeys (full-module only) + test_userlist test_free_after_iterating. Same refcount/GC drift as P4.b; deferred to the container-incref audit.
