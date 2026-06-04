@@ -49,7 +49,7 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_range | GREEN | range getset + methods + pickle compat (P1, shipped) | done |
 | test_dictviews | GREEN | dict-view set ops + __contains__ + recursive repr (P2, shipped) | done |
 | test_property | green | property descriptor surface (P3) | done |
-| test_memoryview | FAIL (49f, 36e) | memoryview buffer protocol (P4) | ready |
+| test_memoryview | FAIL (17f, 2e) | memoryview getrefcount/GC parity (P4.b, blocked) | in progress |
 | test_strtod | GREEN | float.hex mantissa padding + long-mantissa parse (P5, shipped) | done |
 | test_unicodedata | FAIL (4f, 1e) | hashlib blake2 + data file (P6) | ready |
 | test_ucn | FAIL (2f) | hashlib blake2 + named sequences (P6) | ready |
@@ -318,6 +318,26 @@ buffer dunders) if one PR gets large.
 **Acceptance:** test_memoryview green, or, if PickleBuffer is cut, every
 non-PickleBuffer test green with the cut logged here.
 
+**Status (in progress).** Shipped the writable/read-only assignment surface,
+the count/index/context-manager/release methods, `memory_hash` with the
+gh-142664 use-after-free guard (export-pin around hashing the underlying
+object, BufferError on re-entrant release, `__hash__` descriptor wired to the
+slot), and default-pickle rejection (TypeError, with reduce errors propagated
+unchanged). test_memoryview went from 49f/36e to 17f/2e.
+
+The 17 remaining failures and 2 errors are all getrefcount / GC-cycle parity:
+test_getbuffer / test_refs / test_setitem_writable assert
+`sys.getrefcount` returns to its pre-op value, and test_weakref / test_gc /
+the two reference_loop errors expect deterministic cycle reclaim. The root
+cause is that the eval loop omits CPython's DECREF_INPUTS on
+BINARY_OP / COMPARE_OP / BINARY_SUBSCR, so every comparison and arithmetic
+op leaks a reference on its operands. This cannot be fixed in isolation:
+adding the operand release to COMPARE_OP drives frozensets stored as dict /
+set keys (which the container never incref'd) to refcount zero and corrupts
+their later lookup (test_set.TestGraphs.test_cuboctahedron). Closing these
+out requires first auditing every container storage path to incref what it
+retains. Tracked separately from this panel.
+
 ---
 
 ## P5 — float.hex mantissa not zero-padded
@@ -469,8 +489,8 @@ alone), CI green before moving on:
 - [x] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ + _compat_pickle two-to-three mapping (test_range)
 - [x] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
 - [x] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
-- [ ] P4.a memoryview item/slice assignment + hash + context manager/release + count/index (test_memoryview bulk)
-- [ ] P4.b memoryview cast edge cases + PEP 688 __buffer__ + PickleBuffer (test_memoryview tail)
+- [x] P4.a memoryview item/slice assignment + hash (gh-142664 use-after-free guard) + context manager/release + count/index + default-pickle rejection (test_memoryview 49f/36e -> 17f/2e)
+- [ ] P4.b memoryview getrefcount / GC-cycle parity: test_getbuffer, test_refs, test_setitem_writable, test_weakref, test_gc, reference_loop. Blocked on eval-loop DECREF_INPUTS, which needs the container-incref audit first (adding it bare breaks test_set frozenset keys). Tracked outside this panel.
 - [x] P5 float.hex full mantissa zero-padding + exact long-mantissa decimal parsing (test_strtod)
 - [ ] P6.a hashlib blake2b / blake2s (test_unicodedata, test_ucn checksums)
 - [ ] P6.b vendor NormalizationTest-3.2.0.txt (test_unicodedata normalization)
