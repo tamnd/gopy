@@ -39,6 +39,10 @@ func init() {
 	MappingProxyType.Sequence = &SequenceMethods{
 		Contains: mappingProxyContains,
 	}
+	MappingProxyType.Number = &NumberMethods{
+		Or:        mappingProxyOr,
+		InPlaceOr: mappingProxyIOr,
+	}
 	MappingProxyType.TpNew = mappingProxyNew
 
 	SetTypeDescr(MappingProxyType, "get", NewMethodDescr(MappingProxyType, "get", mappingProxyGetMethod))
@@ -175,6 +179,30 @@ func mappingProxyDelItem(o, _ Object) error {
 func mappingProxyContains(o, key Object) (bool, error) {
 	mp := o.(*MappingProxy)
 	return Contains(mp.mapping, key)
+}
+
+// mappingProxyOr is the nb_or slot: a | b. Either operand that is a
+// proxy is unwrapped to its underlying mapping, then the result is
+// PyNumber_Or of the unwrapped operands. So `proxy | dict` and
+// `userdict | proxy` both behave as if the proxy were its mapping.
+//
+// CPython: Objects/descrobject.c:1065 mappingproxy_or
+func mappingProxyOr(a, b Object) (Object, error) {
+	if mp, ok := a.(*MappingProxy); ok {
+		a = mp.mapping
+	}
+	if mp, ok := b.(*MappingProxy); ok {
+		b = mp.mapping
+	}
+	return NumberOr(a, b)
+}
+
+// mappingProxyIOr is the nb_inplace_or slot. A proxy is read-only, so
+// |= is always rejected, pointing the caller at | instead.
+//
+// CPython: Objects/descrobject.c:1077 mappingproxy_ior
+func mappingProxyIOr(a, _ Object) (Object, error) {
+	return nil, fmt.Errorf("TypeError: '|=' is not supported by %s; use '|' instead", a.Type().Name)
 }
 
 // CPython: Objects/descrobject.c:1196 mappingproxy_getiter

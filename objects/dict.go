@@ -108,6 +108,17 @@ func init() {
 		SetItem: dictMappingSet,
 		DelItem: dictMappingDel,
 	}
+	// nb_or / nb_inplace_or back PEP 584's | and |= on dict. Wiring them
+	// as number slots (not just method descriptors) is what makes
+	// `d |= mapping` update d in place: the |= dispatch consults the
+	// in-place number slot first, so it no longer falls through to a
+	// right-hand __ror__ that would rebuild the value as the other type.
+	//
+	// CPython: Objects/dictobject.c:3930 dict_as_number
+	DictType.Number = &NumberMethods{
+		Or:        dictNumberOr,
+		InPlaceOr: dictNumberIOr,
+	}
 	DictType.TpTraverse = dictTraverse
 	DictType.Getattro = GenericGetAttr
 	// TpNew creates a *Dict even for subclasses, so dict methods work
@@ -1106,6 +1117,46 @@ func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
 	//
 	// CPython: Objects/dictobject.c:3922 dict___ior___impl (dict_update_arg)
 	if err := dictMergeFromArg(self, args[1]); err != nil {
+		return nil, err
+	}
+	return self, nil
+}
+
+// dictNumberOr is the nb_or slot: a | b. Returns NotImplemented unless
+// both operands are dicts (or dict subclasses), then copies the left
+// and merges the right on top, so the right wins on duplicate keys.
+//
+// CPython: Objects/dictobject.c:3909 dict_or
+func dictNumberOr(a, b Object) (Object, error) {
+	self, ok := a.(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if _, ok := b.(*Dict); !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	if err := dictMergeFromArg(dst, b); err != nil {
+		return nil, err
+	}
+	return dst, nil
+}
+
+// dictNumberIOr is the nb_inplace_or slot: a |= b. Updates the left dict
+// in place from any mapping or iterable of pairs (dict_update_arg) and
+// returns it, so `d |= mapping` keeps d's identity and type.
+//
+// CPython: Objects/dictobject.c:3924 dict_ior
+func dictNumberIOr(a, b Object) (Object, error) {
+	self, ok := a.(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if err := dictMergeFromArg(self, b); err != nil {
 		return nil, err
 	}
 	return self, nil
