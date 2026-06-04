@@ -443,7 +443,14 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 	} else {
 		f, err := os.OpenFile(a.file, flag, 0o600)
 		if err != nil {
-			return nil, fmt.Errorf("OSError: %s", err.Error())
+			// Preserve the os.PathError chain (errno + filename) with %w
+			// so the unwind path builds a FileNotFoundError /
+			// PermissionError carrying exc.errno / exc.filename, matching
+			// CPython's open() raising via
+			// PyErr_SetFromErrnoWithFilenameObject.
+			//
+			// CPython: Modules/_io/fileio.c:451 _io_FileIO___init___impl
+			return nil, fmt.Errorf("OSError: %w", err)
 		}
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	}

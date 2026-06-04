@@ -43,6 +43,14 @@ type Exception struct {
 	//
 	// CPython: Objects/exceptions.c:2670 PySyntaxErrorObject
 	SyntaxErr *SyntaxErrorState
+
+	// OSErr carries the OSError-specific PyMemberDef payload (myerrno,
+	// strerror, filename, filename2, characters_written). Non-nil only
+	// when ExcType is an OSError subclass. Populated by OSError_init
+	// through the type's tp_call / tp_new dispatch.
+	//
+	// CPython: Objects/exceptions.c:1940 PyOSErrorObject
+	OSErr *OSErrorState
 }
 
 // AttrDict implements objects.AttrDictHolder so a Python subclass of a

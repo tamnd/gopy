@@ -271,7 +271,7 @@ func direntryStat(de *DirEntry) func(args []objects.Object, kwargs map[string]ob
 		ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 		mtime := info.ModTime().Unix()
 		blksize, blocks, rdev := statBlockFields(info)
-		return newStatResult(int64(info.Mode()), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
+		return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 	}
 }
 

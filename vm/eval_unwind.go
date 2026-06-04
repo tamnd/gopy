@@ -164,6 +164,11 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}
 	for prefix, typ := range errorPrefixToType {
 		if strings.HasPrefix(msg, prefix) {
+			if isOSErrorType(typ) {
+				if exc := buildOSErrorFromGo(err); exc != nil {
+					return exc
+				}
+			}
 			typ = promoteOSErrorByErrno(typ, err)
 			return buildExceptionForType(typ, strings.TrimSpace(msg[len(prefix):]))
 		}
@@ -254,6 +259,60 @@ func attachExcNameAttr(exc *pyerrors.Exception, typ *objects.Type, msg string) {
 			}
 		}
 	}
+}
+
+// buildOSErrorFromGo reconstructs the full OSError instance CPython
+// would raise from a failed syscall. It pulls the errno, strerror and
+// filename(s) out of the Go error (os.PathError carries one filename,
+// os.LinkError carries two) and runs them through errors.NewOSError,
+// which promotes to the errnomap subclass and populates exc.errno /
+// exc.strerror / exc.filename. Returns nil when the error carries no
+// errno, so the caller falls back to the plain message path.
+//
+// CPython: Python/errors.c:778 PyErr_SetFromErrnoWithFilenameObjects
+func buildOSErrorFromGo(err error) *pyerrors.Exception {
+	var errno syscall.Errno
+	var filename, filename2 string
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	var sysErr *os.SyscallError
+	switch {
+	case errors.As(err, &pathErr):
+		filename = pathErr.Path
+		_ = errors.As(pathErr.Err, &errno)
+	case errors.As(err, &linkErr):
+		filename = linkErr.Old
+		filename2 = linkErr.New
+		_ = errors.As(linkErr.Err, &errno)
+	case errors.As(err, &sysErr):
+		_ = errors.As(sysErr.Err, &errno)
+	default:
+		if !errors.As(err, &errno) {
+			return nil
+		}
+	}
+	if errno == 0 {
+		return nil
+	}
+	return pyerrors.NewOSError(int(errno), strerrorString(errno), filename, filename2)
+}
+
+// strerrorString renders the errno's message the way CPython's
+// os.strerror does: the platform strerror text with a leading capital
+// letter ("No such file or directory"). Go's syscall.Errno.Error()
+// returns the same text lower-cased, so we upcase the first rune.
+//
+// CPython: Modules/posixmodule.c os_strerror_impl
+func strerrorString(errno syscall.Errno) string {
+	s := errno.Error()
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if r[0] >= 'a' && r[0] <= 'z' {
+		r[0] -= 'a' - 'A'
+	}
+	return string(r)
 }
 
 // promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename

@@ -282,7 +282,14 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 	} else {
 		f, err = stdos.OpenFile(name, flag, 0o666)
 		if err != nil {
-			return nil, fmt.Errorf("OSError: %s", err.Error())
+			// Preserve the os.PathError chain (errno + filename) with %w
+			// so the unwind path can build a FileNotFoundError /
+			// PermissionError carrying exc.errno / exc.filename, the way
+			// CPython's _io.FileIO open raises via
+			// PyErr_SetFromErrnoWithFilenameObject.
+			//
+			// CPython: Modules/_io/fileio.c:451 _io_FileIO___init___impl
+			return nil, fmt.Errorf("OSError: %w", err)
 		}
 	}
 	fi := &FileIO{

@@ -41,6 +41,15 @@ func statBlockFields(_ goos.FileInfo) (blksize, blocks, rdev int64) {
 	return 0, 0, 0
 }
 
+// statMode synthesizes a POSIX st_mode from Go's os.FileMode. Windows
+// has no inode mode; CPython's win32 stat builds one from the file
+// attributes the same way, so the S_IF* nibble and permission bits land
+// where stat.S_ISDIR / S_ISREG expect them.
+// CPython: Modules/posixmodule.c:1862 attributes_to_mode
+func statMode(info goos.FileInfo) int64 {
+	return goFileModeToStMode(info.Mode())
+}
+
 // getuid returns 0 on Windows. CPython does not expose os.getuid on
 // Windows at all (the attribute is absent); we return 0 to keep the
 // shared module.go entry table simple. Callers wanting strict CPython
