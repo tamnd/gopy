@@ -47,7 +47,7 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_funcattrs | **PANIC** | getset setter nil-value (P0) | ready |
 | test_structseq | **PANIC** | structseq-as-tuple cast (P0) | ready |
 | test_range | GREEN | range getset + methods + pickle compat (P1, shipped) | done |
-| test_dictviews | FAIL (1f, 2e) | dict-view set ops (P2) | ready |
+| test_dictviews | GREEN | dict-view set ops + __contains__ + recursive repr (P2, shipped) | done |
 | test_property | FAIL (18f, 5e) | property descriptor surface (P3) | ready |
 | test_memoryview | FAIL (49f, 36e) | memoryview buffer protocol (P4) | ready |
 | test_strtod | GREEN | float.hex mantissa padding + long-mantissa parse (P5, shipped) | done |
@@ -232,6 +232,16 @@ recursive-repr guard.
 
 **Acceptance:** test_dictviews green, including `test_keys_set_operations`,
 `test_compare_error`, and `test_recursive_repr`.
+
+**Shipped.** test_dictviews is green (16 tests). The set-algebra operators
+already returned a set in most cases; the gap was that they cloned the
+shape of the left operand, so `frozenset(d.keys()) & other` yielded a
+frozenset. `dictViewBinop` now forces the left operand through
+`mutableSetCopy` so the result is always a plain `set`, matching
+`PySet_New`. Registered `__contains__` method descriptors on the keys and
+items views forwarding to their `sq_contains` slot, and added the
+`ReprEnter`/`ReprLeave` recursion guard to `dictViewRepr`. Richcompare and
+`isdisjoint` were already present.
 
 ---
 
@@ -457,7 +467,7 @@ alone), CI green before moving on:
 - [x] P0.1 getset setter nil-value deletion guard (test_funcattrs)
 - [x] P0.2 structseq routes through tuple slots without unchecked cast (test_structseq)
 - [x] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ + _compat_pickle two-to-three mapping (test_range)
-- [ ] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
+- [x] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
 - [ ] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
 - [ ] P4.a memoryview item/slice assignment + hash + context manager/release + count/index (test_memoryview bulk)
 - [ ] P4.b memoryview cast edge cases + PEP 688 __buffer__ + PickleBuffer (test_memoryview tail)
