@@ -18,6 +18,12 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	return 0, 0, 1, 0, 0, mtime, mtime
 }
 
+// statBlockFields returns zeros on unsupported platforms.
+// CPython: Modules/posixmodule.c:2521 _pystat_fromstructstat
+func statBlockFields(_ goos.FileInfo) (blksize, blocks, rdev int64) {
+	return 0, 0, 0
+}
+
 // getuid returns 0 on unsupported platforms.
 // CPython: Modules/posixmodule.c:9635 os_getuid_impl
 func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

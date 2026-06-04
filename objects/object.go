@@ -619,6 +619,9 @@ func objectGetClass(o Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7208 object_set_class
 func objectSetClass(o Object, value Object) error {
+	if value == nil {
+		return fmt.Errorf("TypeError: can't delete __class__ attribute")
+	}
 	newType, ok := value.(*Type)
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)

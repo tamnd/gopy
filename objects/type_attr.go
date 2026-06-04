@@ -258,7 +258,12 @@ func typeSetAttr(o Object, name Object, value Object) error {
 	if !ok {
 		return GenericSetAttr(o, name, value)
 	}
-	if !tp.IsUser {
+	// CPython gates type attribute writes on Py_TPFLAGS_IMMUTABLETYPE, not on
+	// whether the type was defined in Python. Heap types built in C (struct
+	// sequences) clear that flag and accept attribute writes.
+	//
+	// CPython: Objects/typeobject.c:5165 type_setattro (IMMUTABLETYPE check)
+	if !tp.IsUser && tp.TpFlags&TpFlagImmutable != 0 {
 		return fmt.Errorf("TypeError: cannot set '%s' attribute of immutable type '%s'", attrNameStr(name), tp.Name)
 	}
 	metatype := tp.Type()

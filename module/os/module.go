@@ -27,20 +27,70 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// statResultType is the struct-sequence type for os.stat_result.
-// CPython: Modules/posixmodule.c:3238 os_stat_impl
-var statResultType = objects.NewStructSeqType("os.stat_result", []objects.StructSeqField{
-	{Name: "st_mode"},
-	{Name: "st_ino"},
-	{Name: "st_dev"},
-	{Name: "st_nlink"},
-	{Name: "st_uid"},
-	{Name: "st_gid"},
-	{Name: "st_size"},
-	{Name: "st_atime"},
-	{Name: "st_mtime"},
-	{Name: "st_ctime"},
+// statResultType is the struct-sequence type for os.stat_result. The
+// first ten fields are visible (n_in_sequence=10): seven named fields,
+// then three unnamed integer-time slots (indices 7,8,9) that hold the
+// truncated st_atime/st_mtime/st_ctime. The named float timestamps,
+// nanosecond timestamps, and block fields trail as hidden fields reached
+// only by attribute.
+//
+// CPython: Modules/posixmodule.c:2337 stat_result_fields
+var statResultType = objects.NewStructSeqTypeDesc(objects.StructSeqDesc{
+	Name:        "os.stat_result",
+	NInSequence: 10,
+	Fields: []objects.StructSeqField{
+		{Name: "st_mode", Doc: "protection bits"},
+		{Name: "st_ino", Doc: "inode"},
+		{Name: "st_dev", Doc: "device"},
+		{Name: "st_nlink", Doc: "number of hard links"},
+		{Name: "st_uid", Doc: "user ID of owner"},
+		{Name: "st_gid", Doc: "group ID of owner"},
+		{Name: "st_size", Doc: "total size, in bytes"},
+		{Name: objects.UnnamedField, Doc: "integer time of last access"},
+		{Name: objects.UnnamedField, Doc: "integer time of last modification"},
+		{Name: objects.UnnamedField, Doc: "integer time of last change"},
+		{Name: "st_atime", Doc: "time of last access"},
+		{Name: "st_mtime", Doc: "time of last modification"},
+		{Name: "st_ctime", Doc: "time of last change"},
+		{Name: "st_atime_ns", Doc: "time of last access in nanoseconds"},
+		{Name: "st_mtime_ns", Doc: "time of last modification in nanoseconds"},
+		{Name: "st_ctime_ns", Doc: "time of last change in nanoseconds"},
+		{Name: "st_blksize", Doc: "blocksize for filesystem I/O"},
+		{Name: "st_blocks", Doc: "number of blocks allocated"},
+		{Name: "st_rdev", Doc: "device type (if inode device)"},
+	},
 })
+
+// newStatResult assembles an os.stat_result from the second-resolution
+// components gathered by the platform stat helpers. The visible integer
+// time slots truncate the float seconds; the hidden float and nanosecond
+// timestamps and block fields follow the CPython layout.
+//
+// CPython: Modules/posixmodule.c:2456 _pystat_fromstructstat
+func newStatResult(mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime, blksize, blocks, rdev int64) *objects.StructSeq {
+	ns := func(sec int64) objects.Object { return objects.NewInt(sec * 1_000_000_000) }
+	return objects.NewStructSeq(statResultType, []objects.Object{
+		objects.NewInt(mode),
+		objects.NewInt(ino),
+		objects.NewInt(dev),
+		objects.NewInt(nlink),
+		objects.NewInt(uid),
+		objects.NewInt(gid),
+		objects.NewInt(size),
+		objects.NewInt(atime), // unnamed: integer st_atime
+		objects.NewInt(mtime), // unnamed: integer st_mtime
+		objects.NewInt(ctime), // unnamed: integer st_ctime
+		objects.NewFloat(float64(atime)),
+		objects.NewFloat(float64(mtime)),
+		objects.NewFloat(float64(ctime)),
+		ns(atime),
+		ns(mtime),
+		ns(ctime),
+		objects.NewInt(blksize),
+		objects.NewInt(blocks),
+		objects.NewInt(rdev),
+	})
+}
 
 // terminalSizeType is the struct-sequence type for os.terminal_size.
 // CPython: Modules/posixmodule.c:15329 os.terminal_size
@@ -86,6 +136,33 @@ var terminalSizeType = func() *objects.Type {
 	}
 	return tp
 }()
+
+// timesResultType is the struct-sequence type for os.times(). All five
+// fields are visible (no unnamed, no hidden), so n_sequence_fields equals
+// n_fields.
+//
+// CPython: Modules/posixmodule.c:10687 times_result_fields
+var timesResultType = objects.NewStructSeqType("os.times_result", []objects.StructSeqField{
+	{Name: "user", Doc: "user time"},
+	{Name: "system", Doc: "system time"},
+	{Name: "children_user", Doc: "user time of children"},
+	{Name: "children_system", Doc: "system time of children"},
+	{Name: "elapsed", Doc: "elapsed time since an arbitrary point in the past"},
+})
+
+// osTimes returns process timing information as an os.times_result.
+//
+// CPython: Modules/posixmodule.c:10755 os_times_impl
+func osTimes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	user, system, childUser, childSystem, elapsed := processTimes()
+	return objects.NewStructSeq(timesResultType, []objects.Object{
+		objects.NewFloat(user),
+		objects.NewFloat(system),
+		objects.NewFloat(childUser),
+		objects.NewFloat(childSystem),
+		objects.NewFloat(elapsed),
+	}), nil
+}
 
 func init() {
 	_ = imp.AppendInittab("os", buildOS)
@@ -273,6 +350,8 @@ func buildOS() (*objects.Module, error) {
 		{"supports_effective_ids", emptyFrozenset},
 		{"terminal_size", terminalSizeType},
 		{"get_terminal_size", objects.NewBuiltinFunction("get_terminal_size", osGetTerminalSize)},
+		{"times_result", timesResultType},
+		{"times", objects.NewBuiltinFunction("times", osTimes)},
 		// Cross-platform additions to round out the posixmodule.c surface.
 		{"chmod", objects.NewBuiltinFunction("chmod", osChmod)},
 		{"symlink", objects.NewBuiltinFunction("symlink", osSymlink)},
@@ -661,19 +740,10 @@ func stat(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 		return nil, fmt.Errorf("OSError: %w", serr)
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
-	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(int64(info.Mode()), int64(ino), int64(dev), int64(nlink),
+		int64(uid), int64(gid), info.Size(), atime, info.ModTime().Unix(), ctime,
+		blksize, blocks, rdev), nil
 }
 
 // getenv mirrors Lib/os.py:818 getenv: returns environ[key] or default.
@@ -1003,18 +1073,8 @@ func osLstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(int64(info.Mode()), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
 
 // osFstat returns the stat of an open file descriptor.
@@ -1039,18 +1099,8 @@ func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(int64(info.Mode()), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
 
 // osReplace atomically renames src to dst, replacing dst if it exists.

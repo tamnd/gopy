@@ -34,6 +34,13 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	return
 }
 
+// statBlockFields returns zeros on Windows; FindFirstFile does not
+// surface block size / block count / rdev.
+// CPython: Modules/posixmodule.c:2521 _pystat_fromstructstat
+func statBlockFields(_ goos.FileInfo) (blksize, blocks, rdev int64) {
+	return 0, 0, 0
+}
+
 // getuid returns 0 on Windows. CPython does not expose os.getuid on
 // Windows at all (the attribute is absent); we return 0 to keep the
 // shared module.go entry table simple. Callers wanting strict CPython

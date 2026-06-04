@@ -45,18 +45,27 @@ var monoStart = gotime.Now()
 // (int). Subclassing tuple means isinstance(t, tuple) holds.
 //
 // CPython: Modules/timemodule.c:420 struct_time_type_fields
-var StructTimeType = objects.NewStructSeqType("time.struct_time", []objects.StructSeqField{
-	{Name: "tm_year", Doc: "year, for example, 1993"},
-	{Name: "tm_mon", Doc: "month of year, range [1, 12]"},
-	{Name: "tm_mday", Doc: "day of month, range [1, 31]"},
-	{Name: "tm_hour", Doc: "hours, range [0, 23]"},
-	{Name: "tm_min", Doc: "minutes, range [0, 59]"},
-	{Name: "tm_sec", Doc: "seconds, range [0, 61])"},
-	{Name: "tm_wday", Doc: "day of week, range [0, 6], Monday is 0"},
-	{Name: "tm_yday", Doc: "day of year, range [1, 366]"},
-	{Name: "tm_isdst", Doc: "1 if summer time is in effect, 0 if not, and -1 if unknown"},
-	{Name: "tm_zone", Doc: "abbreviation of timezone name"},
-	{Name: "tm_gmtoff", Doc: "offset from UTC in seconds"},
+// StructTimeType mirrors CPython's struct_time: nine fields are part of
+// the tuple sequence (tm_year .. tm_isdst), while tm_zone and tm_gmtoff
+// are hidden, reachable only by attribute name.
+//
+// CPython: Modules/timemodule.c:1041 struct_time_type_desc
+var StructTimeType = objects.NewStructSeqTypeDesc(objects.StructSeqDesc{
+	Name:        "time.struct_time",
+	NInSequence: 9,
+	Fields: []objects.StructSeqField{
+		{Name: "tm_year", Doc: "year, for example, 1993"},
+		{Name: "tm_mon", Doc: "month of year, range [1, 12]"},
+		{Name: "tm_mday", Doc: "day of month, range [1, 31]"},
+		{Name: "tm_hour", Doc: "hours, range [0, 23]"},
+		{Name: "tm_min", Doc: "minutes, range [0, 59]"},
+		{Name: "tm_sec", Doc: "seconds, range [0, 61])"},
+		{Name: "tm_wday", Doc: "day of week, range [0, 6], Monday is 0"},
+		{Name: "tm_yday", Doc: "day of year, range [1, 366]"},
+		{Name: "tm_isdst", Doc: "1 if summer time is in effect, 0 if not, and -1 if unknown"},
+		{Name: "tm_zone", Doc: "abbreviation of timezone name"},
+		{Name: "tm_gmtoff", Doc: "offset from UTC in seconds"},
+	},
 })
 
 // buildModule is the time module's init entry: it mirrors
