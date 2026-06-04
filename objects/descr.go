@@ -281,6 +281,17 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		if x.owner == nil {
 			x.owner = t
 		}
+	case *StaticMethod:
+		// type_add_method binds a METH_STATIC builtin to its owning type
+		// via PyCFunction_NewEx(meth, (PyObject*)type, NULL); m_self then
+		// feeds meth_get__qualname__ so str.maketrans.__qualname__ reads
+		// 'str.maketrans'. The METH_STATIC flag keeps __self__ at None.
+		//
+		// CPython: Objects/typeobject.c:8026 type_add_method (METH_STATIC)
+		if bf, ok := x.smCallable.(*BuiltinFunction); ok && bf.Self == nil {
+			bf.Self = t
+			bf.Conv |= MethStatic
+		}
 	}
 	m, ok := typeDescrTable[t]
 	if !ok {

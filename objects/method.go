@@ -78,6 +78,15 @@ func init() {
 	// CPython: Objects/classobject.c:134 method_getset
 	SetTypeDescr(BoundMethodType, "__doc__", NewGetSetDescr("__doc__",
 		boundMethodGetDoc, nil))
+	// __qualname__: a bound Python function delegates to its func_qualname
+	// (PyMethod has no __qualname__ of its own, so method_getattro forwards
+	// it). gopy also models bound builtin methods as method objects, where
+	// CPython uses a PyCFunction; for those, derive the qualname from the
+	// bound self the way meth_get__qualname__ does.
+	//
+	// CPython: Objects/methodobject.c:231 meth_get__qualname__
+	SetTypeDescr(BoundMethodType, "__qualname__", NewGetSetDescr("__qualname__",
+		boundMethodGetQualname, nil))
 	// method_methods: __reduce__ returns (getattr, (self, funcname))
 	// so pickle can rebuild the bound method by re-fetching the
 	// attribute off the instance.
@@ -97,8 +106,13 @@ func init() {
 // CPython: Objects/classobject.c:75 method_getattro
 func boundMethodGetattro(o Object, name Object) (Object, error) {
 	m := o.(*BoundMethod)
-	descr, _ := LookupDescriptor(o.Type(), attrNameStr(name))
-	if descr != nil {
+	descr, base := LookupDescriptor(o.Type(), attrNameStr(name))
+	// CPython's method type carries only __doc__/__func__/__self__; its
+	// MRO lookup never finds __dict__ because object has none, so the
+	// attribute delegates to the wrapped function (method.__dict__ is
+	// func.__dict__). gopy installs a generic __dict__ getset on object,
+	// so skip that inherited descriptor and delegate the same way.
+	if descr != nil && !(base == objectType && attrNameStr(name) == "__dict__") {
 		if dg := descr.Type().DescrGet; dg != nil {
 			return dg(descr, o, o.Type())
 		}
@@ -274,6 +288,48 @@ func boundMethodDescrGet(descr Object, _ Object, _ *Type) (Object, error) {
 func boundMethodGetDoc(o Object) (Object, error) {
 	m := o.(*BoundMethod)
 	return GetAttr(m.imFunc, NewStr("__doc__"))
+}
+
+// boundMethodGetQualname resolves __qualname__. A bound Python function
+// reports the wrapped function's qualname unchanged. A bound builtin
+// (CPython's PyCFunction, which gopy models as a method) derives the
+// qualname from the bound self: a bare name when self is None or a
+// module, otherwise the self type's qualname joined to the method name.
+//
+// CPython: Objects/methodobject.c:231 meth_get__qualname__
+func boundMethodGetQualname(o Object) (Object, error) {
+	m := o.(*BoundMethod)
+	if _, ok := m.imFunc.(*Function); ok {
+		return GetAttr(m.imFunc, NewStr("__qualname__"))
+	}
+	nameObj, err := GetAttr(m.imFunc, NewStr("__name__"))
+	if err != nil {
+		return nil, err
+	}
+	name, ok := nameObj.(*Unicode)
+	if !ok {
+		return GetAttr(m.imFunc, NewStr("__qualname__"))
+	}
+	self := m.imSelf
+	if self == nil || self == None() {
+		return nameObj, nil
+	}
+	if _, ok := self.(*Module); ok {
+		return nameObj, nil
+	}
+	owner := self
+	if _, ok := self.(*Type); !ok {
+		owner = self.Type()
+	}
+	tq, err := GetAttr(owner, NewStr("__qualname__"))
+	if err != nil {
+		return nil, err
+	}
+	tqStr, ok := tq.(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: <method>.__class__.__qualname__ is not a unicode object")
+	}
+	return NewStr(tqStr.Value() + "." + name.Value()), nil
 }
 
 // boundMethodTpNew validates the (function, instance) pair and

@@ -25,7 +25,15 @@ type BuiltinFunction struct {
 	Name   string
 	Module string
 	Conv   MethFlag
-	Fn     func(args []Object, kwargs map[string]Object) (Object, error)
+	// Self mirrors PyCFunctionObject.m_self. For a static method bound
+	// to a type, type_add_method stores the owning type here via
+	// PyCFunction_NewEx(meth, (PyObject*)type, NULL); meth_get__qualname__
+	// reads it directly to yield e.g. 'str.maketrans'. The METH_STATIC
+	// flag still masks it from __self__, which stays None.
+	//
+	// CPython: Objects/typeobject.c:8026 type_add_method (METH_STATIC)
+	Self Object
+	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
 }
 
 // BuiltinFunctionType is the type singleton for built-in functions.
@@ -62,12 +70,7 @@ func init() {
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__qualname__", NewGetSetDescr("__qualname__",
-		func(o Object) (Object, error) {
-			if bf, ok := o.(*BuiltinFunction); ok {
-				return NewStr(bf.Name), nil
-			}
-			return None(), nil
-		},
+		builtinFunctionQualname,
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__self__", NewGetSetDescr("__self__",
@@ -98,6 +101,39 @@ func init() {
 	//
 	// CPython: Objects/methodobject.c:192 meth_reduce
 	SetTypeDescr(BuiltinFunctionType, "__reduce__", NewMethodDescr(BuiltinFunctionType, "__reduce__", builtinFunctionReduce))
+}
+
+// builtinFunctionQualname mirrors meth_get__qualname__. If m_self is
+// NULL or a module the qualname is the bare name (e.g. len.__qualname__
+// == 'len'). If m_self is a type the result is type.__qualname__ + '.'
+// + name (e.g. str.maketrans.__qualname__ == 'str.maketrans'), and
+// otherwise type(m_self).__qualname__ + '.' + name.
+//
+// CPython: Objects/methodobject.c:231 meth_get__qualname__
+func builtinFunctionQualname(o Object) (Object, error) {
+	bf, ok := o.(*BuiltinFunction)
+	if !ok {
+		return None(), nil
+	}
+	if bf.Self == nil {
+		return NewStr(bf.Name), nil
+	}
+	if _, isMod := bf.Self.(*Module); isMod {
+		return NewStr(bf.Name), nil
+	}
+	owner := bf.Self
+	if _, isType := bf.Self.(*Type); !isType {
+		owner = bf.Self.Type()
+	}
+	tq, err := GetAttr(owner, NewStr("__qualname__"))
+	if err != nil {
+		return nil, err
+	}
+	tqStr, ok := tq.(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: <method>.__class__.__qualname__ is not a unicode object")
+	}
+	return NewStr(tqStr.Value() + "." + bf.Name), nil
 }
 
 // builtinFunctionReduce is meth_reduce. For module-level functions
