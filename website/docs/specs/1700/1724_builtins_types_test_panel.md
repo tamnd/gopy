@@ -46,7 +46,7 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_userstring | OK (71) | UserString | done |
 | test_funcattrs | **PANIC** | getset setter nil-value (P0) | ready |
 | test_structseq | **PANIC** | structseq-as-tuple cast (P0) | ready |
-| test_range | FAIL (2f, 7e) | range getset + methods (P1) | ready |
+| test_range | GREEN | range getset + methods + pickle compat (P1, shipped) | done |
 | test_dictviews | FAIL (1f, 2e) | dict-view set ops (P2) | ready |
 | test_property | FAIL (18f, 5e) | property descriptor surface (P3) | ready |
 | test_memoryview | FAIL (49f, 36e) | memoryview buffer protocol (P4) | ready |
@@ -182,6 +182,20 @@ membership path.
 **Acceptance:** test_range green, including `test_attributes`,
 `test_comparison`, `test_count`, `test_index`, `test_large_range`,
 `test_user_index_method`, and the pickle compat tests.
+
+**Shipped.** All 29 test_range cases pass. `start` / `stop` / `step` are
+read-only getsets, `__hash__` hashes the (length, start_or_None,
+step_or_None) tuple, `__bool__` reads the stored length directly,
+`count` / `index` take the exact-int fast path and fall back to an
+`__eq__` iterator search for subclasses, and subscripting computes the
+item in arbitrary precision (so `x[sys.maxsize+1]` raises IndexError).
+The constructor coerces every operand through `PyNumber_Index`.
+
+`test_iterator_unpickle_compat` needed the `_compat_pickle` two-to-three
+name mapping in the Go `_pickle` decoder: `find_class` now remaps GLOBAL
+references through `NAME_MAPPING` then `IMPORT_MAPPING` for proto < 3 with
+fix_imports on, and imports the target module through the vm hook instead
+of only reading sys.modules.
 
 ---
 
@@ -442,7 +456,7 @@ alone), CI green before moving on:
 
 - [x] P0.1 getset setter nil-value deletion guard (test_funcattrs)
 - [x] P0.2 structseq routes through tuple slots without unchecked cast (test_structseq)
-- [ ] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ (test_range)
+- [x] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ + _compat_pickle two-to-three mapping (test_range)
 - [ ] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
 - [ ] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
 - [ ] P4.a memoryview item/slice assignment + hash + context manager/release + count/index (test_memoryview bulk)
