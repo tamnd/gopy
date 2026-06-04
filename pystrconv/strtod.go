@@ -3,6 +3,7 @@ package pystrconv
 import (
 	"errors"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"unicode"
@@ -60,6 +61,27 @@ func ParseFloat(s string) (float64, error) {
 			return 0, ErrInvalidFloat
 		}
 	}
+	// strconv.ParseFloat caps the number of significant mantissa digits
+	// it reads, so a literal carrying more than that can land in the
+	// wrong binade: a value near the overflow boundary may round to Inf
+	// instead of a finite double, and a tiny value spelled with a long
+	// digit run (e.g. "1" followed by 10000 zeros times "e-10000") may
+	// underflow to 0 instead of resolving to its true magnitude. A
+	// binary64 needs at most 17 significant decimal digits to round-trip,
+	// so when the mantissa carries more, recompute the value exactly as a
+	// rational and let big.Rat do the correctly-rounded conversion that
+	// CPython's _Py_dg_strtod performs.
+	//
+	// CPython: Python/dtoa.c _Py_dg_strtod (correctly rounded)
+	if countMantissaDigits(cleaned) > 17 {
+		if r, ok := new(big.Rat).SetString(cleaned); ok {
+			f, _ := r.Float64()
+			if math.IsInf(f, 0) {
+				return f, ErrFloatOverflow
+			}
+			return f, nil
+		}
+	}
 	v, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
 		var ne *strconv.NumError
@@ -75,6 +97,25 @@ func ParseFloat(s string) (float64, error) {
 		return 0, ErrInvalidFloat
 	}
 	return v, nil
+}
+
+// countMantissaDigits returns the count of decimal digit characters in
+// the mantissa (the part before any 'e'/'E' exponent marker), including
+// leading and trailing zeros. It is a cheap upper bound on the digits
+// strconv must consider, used only to decide whether the exact big.Rat
+// path is needed.
+func countMantissaDigits(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 'e' || c == 'E' {
+			break
+		}
+		if c >= '0' && c <= '9' {
+			n++
+		}
+	}
+	return n
 }
 
 // StripUnderscores is the exported wrapper around stripUnderscores. Used
