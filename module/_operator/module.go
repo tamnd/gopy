@@ -974,6 +974,10 @@ func init() {
 	t.Call = methodcallerCall
 	t.TpNew = methodcallerNew
 	t.Getattro = objects.GenericGetAttr
+	// CPython: Modules/_operator.c:1765 methodcaller_traverse
+	t.TpTraverse = methodcallerTraverse
+	// CPython: Modules/_operator.c:1755 methodcaller_dealloc
+	t.Dealloc = methodcallerDealloc
 	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", methodcallerReduce))
 }
 
@@ -999,8 +1003,68 @@ func methodcallerNew(cls *objects.Type, args []objects.Object, kwargs map[string
 			mc.kwds[k] = v
 		}
 	}
+	// methodcaller owns a reference to each stashed positional and keyword
+	// argument the way methodcaller_new keeps its args tuple and kwds dict
+	// alive with Py_NewRef. Without this a stashed slice (which recycles
+	// through a freelist on dealloc) is reclaimed once the constructor's
+	// stack temporary drops, leaving mc.args pointing at nil-bound slices.
+	//
+	// CPython: Modules/_operator.c:1690 methodcaller_new (Py_NewRef args/kwds)
+	for _, a := range mc.args {
+		objects.Incref(a)
+	}
+	for _, v := range mc.kwds {
+		objects.Incref(v)
+	}
 	mc.Init(cls)
 	return mc, nil
+}
+
+// methodcallerTraverse visits each stashed argument so the cycle
+// collector can see references the caller owns.
+//
+// CPython: Modules/_operator.c:1765 methodcaller_traverse
+func methodcallerTraverse(o objects.Object, visit objects.Visitor) error {
+	mc, ok := o.(*Methodcaller)
+	if !ok {
+		return nil
+	}
+	for _, a := range mc.args {
+		if a == nil {
+			continue
+		}
+		if err := visit(a); err != nil {
+			return err
+		}
+	}
+	for _, v := range mc.kwds {
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// methodcallerDealloc releases the references the caller owns, mirroring
+// methodcaller_clear followed by tp_free in methodcaller_dealloc.
+//
+// CPython: Modules/_operator.c:1744 methodcaller_clear / :1755 methodcaller_dealloc
+func methodcallerDealloc(o objects.Object) {
+	mc, ok := o.(*Methodcaller)
+	if !ok {
+		return
+	}
+	for _, a := range mc.args {
+		objects.Decref(a)
+	}
+	for _, v := range mc.kwds {
+		objects.Decref(v)
+	}
+	mc.args = nil
+	mc.kwds = nil
 }
 
 // methodcallerCall looks up the method on obj then invokes it with

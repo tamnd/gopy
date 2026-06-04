@@ -125,6 +125,10 @@ func newPartialType() *objects.Type {
 	t.Call = partialCall
 	t.TpNew = partialNew
 	t.DescrGet = partialDescrGet
+	// CPython: Modules/_functoolsmodule.c:338 partial_traverse
+	t.TpTraverse = partialTraverse
+	// CPython: Modules/_functoolsmodule.c:350 partial_dealloc
+	t.Dealloc = partialDealloc
 	return t
 }
 
@@ -243,8 +247,99 @@ func partialNew(cls *objects.Type, args []objects.Object, kwargs map[string]obje
 		Keywords: totKw,
 		Phcount:  phcount,
 	}
+	// partial owns a reference to fn, args, and kw the way partial_new
+	// keeps them alive with Py_NewRef. gopy's Tuple/Dict do not refcount
+	// their elements, so a stashed slice (which recycles through a
+	// freelist on dealloc) is reclaimed once the constructor's stack
+	// temporaries drop unless the partial pins each leaf itself, leaving
+	// p.Args pointing at a slice whose bounds are nil.
+	//
+	// CPython: Modules/_functoolsmodule.c:167 partial_new (Py_NewRef fn/args/kw)
+	partialIncref(p)
 	p.Init(cls)
 	return p, nil
+}
+
+// partialIncref pins the leaf objects a partial owns: fn, every stored
+// positional argument, and every stored keyword value.
+//
+// CPython: Modules/_functoolsmodule.c:167 partial_new (Py_NewRef)
+func partialIncref(p *Partial) {
+	objects.Incref(p.Fn)
+	if p.Args != nil {
+		for i := 0; i < p.Args.Len(); i++ {
+			objects.Incref(p.Args.Item(i))
+		}
+	}
+	if p.Keywords != nil {
+		for _, k := range p.Keywords.Keys() {
+			if v, err := p.Keywords.GetItem(k); err == nil {
+				objects.Incref(v)
+			}
+		}
+	}
+	if p.Dict != nil {
+		objects.Incref(p.Dict)
+	}
+}
+
+// partialTraverse visits the references the partial owns so the cycle
+// collector can see them.
+//
+// CPython: Modules/_functoolsmodule.c:338 partial_traverse
+func partialTraverse(o objects.Object, visit objects.Visitor) error {
+	p, ok := o.(*Partial)
+	if !ok {
+		return nil
+	}
+	if p.Fn != nil {
+		if err := visit(p.Fn); err != nil {
+			return err
+		}
+	}
+	if p.Args != nil {
+		if err := visit(p.Args); err != nil {
+			return err
+		}
+	}
+	if p.Keywords != nil {
+		if err := visit(p.Keywords); err != nil {
+			return err
+		}
+	}
+	if p.Dict != nil {
+		if err := visit(p.Dict); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// partialDealloc releases the references the partial owns, mirroring
+// partial_clear followed by tp_free in partial_dealloc.
+//
+// CPython: Modules/_functoolsmodule.c:327 partial_clear / :350 partial_dealloc
+func partialDealloc(o objects.Object) {
+	p, ok := o.(*Partial)
+	if !ok {
+		return
+	}
+	objects.Decref(p.Fn)
+	if p.Args != nil {
+		for i := 0; i < p.Args.Len(); i++ {
+			objects.Decref(p.Args.Item(i))
+		}
+	}
+	if p.Keywords != nil {
+		for _, k := range p.Keywords.Keys() {
+			if v, err := p.Keywords.GetItem(k); err == nil {
+				objects.Decref(v)
+			}
+		}
+	}
+	if p.Dict != nil {
+		objects.Decref(p.Dict)
+	}
 }
 
 // partialCall is the tp_call slot. Mirrors partial_call: merge the
