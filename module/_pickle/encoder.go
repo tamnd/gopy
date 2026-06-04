@@ -703,7 +703,12 @@ func (p *pickler) saveViaReduce(obj objects.Object) error {
 	if err == nil && reduceAttr != nil {
 		result, err = objects.Call(reduceAttr, objects.NewTuple([]objects.Object{objects.NewInt(int64(p.proto))}), nil)
 		if err != nil {
-			return fmt.Errorf("PicklingError: __reduce_ex__ failed: %w", err)
+			// CPython's save() lets the exception raised by __reduce_ex__
+			// propagate unchanged (reduce_value == NULL -> goto error); it
+			// does not repaint it as a PicklingError.
+			//
+			// CPython: Modules/_pickle.c:4567 save
+			return err
 		}
 	} else {
 		reduceAttr, err = objects.GetAttr(obj, objects.NewStr("__reduce__"))
@@ -712,7 +717,7 @@ func (p *pickler) saveViaReduce(obj objects.Object) error {
 		}
 		result, err = objects.CallNoArgs(reduceAttr)
 		if err != nil {
-			return fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+			return err
 		}
 	}
 	switch rv := result.(type) {

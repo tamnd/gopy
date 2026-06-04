@@ -412,6 +412,15 @@ func bytesLike(o Object) ([]byte, error) {
 		return v.Bytes(), nil
 	case *ByteArray:
 		return v.Bytes(), nil
+	case *MemoryView:
+		// PyBytes_FromObject acquires a buffer, so a released view raises
+		// ValueError before any copy happens.
+		//
+		// CPython: Objects/bytesobject.c:2818 PyBytes_FromObject
+		if err := v.checkReleased(); err != nil {
+			return nil, err
+		}
+		return v.buf, nil
 	}
 	if descr, _ := LookupDescriptor(o.Type(), "__bytes__"); descr != nil {
 		fn, err := bindDescriptor(descr, o)

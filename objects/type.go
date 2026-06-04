@@ -209,6 +209,19 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
 	HasWeakref bool
 
+	// OpaqueCState marks a built-in type whose instances carry C-level
+	// state (in gopy, Go struct fields) that the default pickler cannot
+	// reach through __dict__ / __slots__. It is the gopy stand-in for
+	// CPython's "tp_basicsize > base" comparison in
+	// object_getstate_default: when the default reducer runs with
+	// required=true on such a type it raises "cannot pickle '%s' object"
+	// rather than emitting a state of None that would round-trip to a
+	// blank instance. memoryview is the canonical example.
+	//
+	// CPython: Objects/typeobject.c:7363 object_getstate_default
+	// (Py_TYPE(obj)->tp_basicsize > basicsize)
+	OpaqueCState bool
+
 	// ClassAttrDict is the live attribute dict for user types, mirroring
 	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
 	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the

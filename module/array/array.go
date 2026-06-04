@@ -237,7 +237,17 @@ func init() {
 		if !ok {
 			return objects.BufferInfo{}, false
 		}
-		return objects.BufferInfo{Buf: a.obItem[:a.nbytes()], Readonly: false, Format: "B", Itemsize: 1}, true
+		// The exported buffer carries the array's own typecode and itemsize
+		// so memoryview reports format 'i' (not a flat 'B'), matching
+		// array_buffer_getbuf which hands back ob_descr->formats / itemsize.
+		//
+		// CPython: Modules/arraymodule.c:3066 array_buffer_getbuf
+		return objects.BufferInfo{
+			Buf:      a.obItem[:a.nbytes()],
+			Readonly: false,
+			Format:   string(a.descr.typecode),
+			Itemsize: a.descr.itemsize,
+		}, true
 	}
 }
 
