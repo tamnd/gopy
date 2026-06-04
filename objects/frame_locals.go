@@ -26,6 +26,8 @@ package objects
 // CPython's "missing key" semantics.
 //
 // CPython: Objects/frameobject.c:2199 frame_get_var
+//
+//nolint:gocognit,gocyclo // mirrors frame_get_var: one branch per localsplus kind (fast / cell / free / hidden)
 func FrameFastToLocals(f *Frame) (*Dict, error) {
 	out := NewDict()
 	if f == nil {
@@ -72,7 +74,59 @@ func FrameFastToLocals(f *Frame) (*Dict, error) {
 			return nil, err
 		}
 	}
+	// Merge in keys spilled into the wrapper's extra-locals dict by
+	// FrameLocalsProxy writes that did not match any fast slot, so
+	// locals() reflects f_locals[name] = v for non-fast names.
+	//
+	// CPython: Objects/frameobject.c:2199 frame_get_var (the
+	// f_extra_locals branch at the end).
+	if f.extraLocals != nil {
+		for _, k := range f.extraLocals.Keys() {
+			v, err := f.extraLocals.GetItem(k)
+			if err != nil || v == nil {
+				continue
+			}
+			if err := out.SetItem(k, v); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return out, nil
+}
+
+// FrameHasHiddenLocals reports whether the frame carries PEP 709 hidden
+// fast locals: the isolated iteration variables of an inlined
+// comprehension, flagged CO_FAST_HIDDEN, that currently hold a value.
+// _PyFrame_GetLocals uses this to decide whether a non-optimized
+// (module / class) frame can hand back its namespace dict directly or
+// must expose a proxy that also surfaces the hidden slots.
+//
+// CPython: Objects/frameobject.c:2248 _PyFrame_HasHiddenLocals
+func FrameHasHiddenLocals(f *Frame) bool {
+	if f == nil {
+		return false
+	}
+	interp := f.interp
+	code := interp.FrameCode()
+	if code == nil {
+		return false
+	}
+	for i, kind := range code.LocalsplusKinds {
+		if kind&CoFastHidden == 0 {
+			continue
+		}
+		val := interp.FrameLocalsPlusItem(i)
+		if val == nil {
+			continue
+		}
+		// A hidden slot that aliases a cell name only counts when the
+		// cell actually holds a value, matching framelocalsproxy_getval.
+		if cell, ok := val.(*Cell); ok && (cell == nil || cell.Contents == nil) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // frameFastToLocalsLegacy is the pre-3.11 split walk over

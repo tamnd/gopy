@@ -9,6 +9,7 @@ package codecs
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 var unicodeEscapeCodec = &CodecInfo{
@@ -35,150 +36,179 @@ func encodeUnicodeEscape(input, _ string) ([]byte, int, error) {
 		case r >= 0x20 && r < 0x7f:
 			out = append(out, byte(r))
 		case r < 0x100:
-			out = append(out, []byte(fmt.Sprintf("\\x%02x", r))...)
+			out = fmt.Appendf(out, "\\x%02x", r)
 		case r < 0x10000:
-			out = append(out, []byte(fmt.Sprintf("\\u%04x", r))...)
+			out = fmt.Appendf(out, "\\u%04x", r)
 		default:
-			out = append(out, []byte(fmt.Sprintf("\\U%08x", r))...)
+			out = fmt.Appendf(out, "\\U%08x", r)
 		}
 	}
 	return out, len([]rune(input)), nil
 }
 
-// decodeUnicodeEscape mirrors _PyUnicode_DecodeUnicodeEscapeInternal2.
-// It handles the standard backslash sequences: \n \r \t \\ \' \" \a \b \f \v
-// \0, octal \ooo, \xHH, \uHHHH, \UHHHHHHHH, and \N{name}.
+// decodeUnicodeEscape is a faithful port of CPython's unicode-escape
+// decoder. It handles \n \r \t \\ \' \" \a \b \f \v, octal \ooo, \xHH,
+// \uHHHH, \UHHHHHHHH, and \N{name}, and routes truncated, illegal, and
+// unknown-name escapes through the configured error handler (so "ignore"
+// drops them and "strict" raises UnicodeDecodeError) rather than emitting
+// the raw text. Output preserves lone surrogates as pseudo-UTF-8.
 //
 // CPython: Objects/unicodeobject.c:6627 _PyUnicode_DecodeUnicodeEscapeInternal2
 func decodeUnicodeEscape(input []byte, errors string) (string, int, error) {
-	var b strings.Builder
-	i := 0
-	for i < len(input) {
-		c := input[i]
-		if c != '\\' {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		if i+1 >= len(input) {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		next := input[i+1]
-		i += 2
-		switch next {
-		case '\\':
-			b.WriteByte('\\')
-		case '\'':
-			b.WriteByte('\'')
-		case '"':
-			b.WriteByte('"')
-		case 'a':
-			b.WriteByte('\a')
-		case 'b':
-			b.WriteByte('\b')
-		case 'f':
-			b.WriteByte('\f')
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		case 'v':
-			b.WriteByte('\v')
-		case '0', '1', '2', '3', '4', '5', '6', '7':
-			// octal: 1 to 3 digits
-			oct := int(next - '0')
-			for k := 0; k < 2 && i < len(input) && input[i] >= '0' && input[i] <= '7'; k++ {
-				oct = oct*8 + int(input[i]-'0')
-				i++
-			}
-			b.WriteRune(rune(oct))
-		case 'x':
-			if i+2 > len(input) {
-				b.WriteString("\\x")
-				continue
-			}
-			hi, okH := fromHex(input[i])
-			lo, okL := fromHex(input[i+1])
-			if !okH || !okL {
-				b.WriteString("\\x")
-				continue
-			}
-			b.WriteRune(rune(hi<<4 | lo))
-			i += 2
-		case 'u':
-			if i+4 > len(input) {
-				b.WriteString("\\u")
-				continue
-			}
-			var ch rune
-			ok := true
-			for j := 0; j < 4; j++ {
-				d, okD := fromHex(input[i+j])
-				if !okD {
-					ok = false
-					break
-				}
-				ch = ch<<4 | rune(d)
-			}
-			if !ok {
-				b.WriteString("\\u")
-				continue
-			}
-			b.WriteRune(ch)
-			i += 4
-		case 'U':
-			if i+8 > len(input) {
-				b.WriteString("\\U")
-				continue
-			}
-			var ch rune
-			ok := true
-			for j := 0; j < 8; j++ {
-				d, okD := fromHex(input[i+j])
-				if !okD {
-					ok = false
-					break
-				}
-				ch = ch<<4 | rune(d)
-			}
-			if !ok || ch > 0x10FFFF {
-				b.WriteString("\\U")
-				continue
-			}
-			b.WriteRune(ch)
-			i += 8
-		case 'N':
-			// \N{name}: look up Unicode named character
-			if i >= len(input) || input[i] != '{' {
-				b.WriteString("\\N")
-				continue
-			}
-			end := i + 1
-			for end < len(input) && input[end] != '}' {
-				end++
-			}
-			if end >= len(input) {
-				b.WriteString("\\N")
-				continue
-			}
-			name := string(input[i+1 : end])
-			if ch := lookupUnicodeName(name); ch >= 0 {
-				b.WriteRune(ch)
-			} else {
-				b.WriteString("\\N{" + name + "}")
-			}
-			i = end + 1
-		default:
-			b.WriteByte('\\')
-			b.WriteByte(next)
+	handler, herr := LookupError(errors)
+	if herr != nil {
+		return "", 0, herr
+	}
+
+	var out []byte
+	writeChar := func(ch rune) {
+		if ch >= 0xD800 && ch <= 0xDFFF {
+			out = append(out, surrogateToBytes(ch)...)
+		} else {
+			out = utf8.AppendRune(out, ch)
 		}
 	}
-	s := b.String()
-	return s, len(s), nil
+
+	s := 0
+	end := len(input)
+	var failErr error
+	// fail runs the error handler over input[start:s], appends its
+	// replacement, and advances s. It returns false when the handler raised.
+	fail := func(message string, start int) bool {
+		rep, newpos, herr := handler("unicodeescape", message, input, start, s)
+		if herr != nil {
+			failErr = herr
+			return false
+		}
+		out = append(out, []byte(rep)...)
+		s = newpos
+		return true
+	}
+
+	for s < end {
+		c := input[s]
+		s++
+		// Non-escape characters are interpreted as Unicode ordinals.
+		if c != '\\' {
+			writeChar(rune(c))
+			continue
+		}
+		startinpos := s - 1
+		if s >= end {
+			if !fail("\\ at end of string", startinpos) {
+				return "", 0, failErr
+			}
+			continue
+		}
+		c = input[s]
+		s++
+		switch c {
+		case '\n': // line continuation: backslash-newline is dropped
+		case '\\':
+			writeChar('\\')
+		case '\'':
+			writeChar('\'')
+		case '"':
+			writeChar('"')
+		case 'b':
+			writeChar('\b')
+		case 'f':
+			writeChar('\014')
+		case 't':
+			writeChar('\t')
+		case 'n':
+			writeChar('\n')
+		case 'r':
+			writeChar('\r')
+		case 'v':
+			writeChar('\013')
+		case 'a':
+			writeChar('\007')
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// \OOO octal escape, 1 to 3 digits.
+			ch := rune(c - '0')
+			if s < end && input[s] >= '0' && input[s] <= '7' {
+				ch = (ch << 3) + rune(input[s]-'0')
+				s++
+				if s < end && input[s] >= '0' && input[s] <= '7' {
+					ch = (ch << 3) + rune(input[s]-'0')
+					s++
+				}
+			}
+			writeChar(ch)
+		case 'x', 'u', 'U':
+			var count int
+			var message string
+			switch c {
+			case 'x':
+				count, message = 2, "truncated \\xXX escape"
+			case 'u':
+				count, message = 4, "truncated \\uXXXX escape"
+			default:
+				count, message = 8, "truncated \\UXXXXXXXX escape"
+			}
+			var ch rune
+			ok := true
+			for ; count > 0; count-- {
+				if s >= end {
+					ok = false
+					break
+				}
+				d, okD := fromHex(input[s])
+				if !okD {
+					ok = false
+					break
+				}
+				ch = ch<<4 | rune(d)
+				s++
+			}
+			if !ok {
+				if !fail(message, startinpos) {
+					return "", 0, failErr
+				}
+				continue
+			}
+			if ch > 0x10FFFF {
+				if !fail("illegal Unicode character", startinpos) {
+					return "", 0, failErr
+				}
+				continue
+			}
+			writeChar(ch)
+		case 'N':
+			// \N{name}: look up the Unicode character database.
+			message := "malformed \\N character escape"
+			if s < end && input[s] == '{' {
+				s++ // consume '{'
+				nameStart := s
+				for s < end && input[s] != '}' {
+					s++
+				}
+				if s < end { // found the closing '}'
+					namelen := s - nameStart
+					if namelen > 0 {
+						name := string(input[nameStart:s])
+						s++ // consume '}'
+						if ch := lookupUnicodeName(name); ch >= 0 {
+							writeChar(ch)
+							continue
+						}
+						message = "unknown Unicode character name"
+					}
+					// empty name {} falls through to the error handler
+				}
+				// no closing '}' (s >= end) falls through to the handler
+			}
+			if !fail(message, startinpos) {
+				return "", 0, failErr
+			}
+		default:
+			// Unknown escape: keep the backslash and the character.
+			writeChar('\\')
+			writeChar(rune(c))
+		}
+	}
+	return string(out), len(out), nil
 }
 
 func fromHex(c byte) (int, bool) {

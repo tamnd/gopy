@@ -228,6 +228,17 @@ func init() {
 		}
 		return a.obItem[:a.nbytes()], true
 	}
+	// array.array is a writable buffer exporter, so memoryview() over it
+	// yields a writable view and struct.pack_into can target it directly.
+	//
+	// CPython: Modules/arraymodule.c:3066 array_buffer_getbuf
+	objects.BufferHook = func(o objects.Object) (objects.BufferInfo, bool) {
+		a, ok := o.(*arrayObject)
+		if !ok {
+			return objects.BufferInfo{}, false
+		}
+		return objects.BufferInfo{Buf: a.obItem[:a.nbytes()], Readonly: false, Format: "B", Itemsize: 1}, true
+	}
 }
 
 // nativeOrder is the host byte order used by the native typecodes.

@@ -2209,8 +2209,35 @@ func (t *actionTranslator) translateUnaryCall(suffix string) error {
 			return fmt.Errorf("unary call arg %q is not a bound stack slot or local", arg)
 		}
 	}
+	// A close of a consumed (non-passthrough) input is redundant under the
+	// gopy stack model: the epilogue stack shrink is the single decref site
+	// for every consumed input, exactly as DECREF_INPUTS reduces to a no-op
+	// for the same reason. Emitting a real .Close() here would decref the
+	// object once in the body and a second time when the slot is dropped,
+	// which double-frees the input. Locals/temporaries and passthrough
+	// inputs (which the shrink never touches) still get a real close.
+	//
+	// CPython: Python/bytecodes.c PyStackRef_CLOSE on an input names the
+	// same decref the cases generator folds into the instruction's stack
+	// effect; gopy realizes that single decref through the epilogue drop.
+	if suffix == ".Close()" && t.isConsumedInput(arg) {
+		fmt.Fprintf(t.writer, "// %s consumed input dropped by stack shrink\n", goLocalName(arg))
+		return nil
+	}
 	fmt.Fprintf(t.writer, "%s%s\n", goLocalName(arg), suffix)
 	return nil
+}
+
+// isConsumedInput reports whether name is one of the instruction's
+// non-passthrough inputs. Those slots are released by the epilogue stack
+// shrink, so a body-level close of them is redundant.
+func (t *actionTranslator) isConsumedInput(name string) bool {
+	for _, in := range t.sig.Inputs {
+		if in.Name == name && !in.Passthrough {
+			return true
+		}
+	}
+	return false
 }
 
 // goLocalName mirrors bindName for the case where the slot has a real

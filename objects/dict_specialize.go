@@ -177,8 +177,12 @@ func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool 
 		if k.Value() != expectName {
 			return false
 		}
+		old := d.entries[slot].value
 		d.entries[slot].value = value
 		notifyDictEvent(DictEventModified, d, storedKey, value)
+		if old != nil {
+			Decref(old)
+		}
 		return true
 	}
 	// Split mode: the shared key is always live in d.entries[slot]
@@ -200,6 +204,7 @@ func (d *Dict) StoreEntryAtName(slot int, expectName string, value Object) bool 
 		notifyDictEvent(DictEventAdded, d, storedKey, value)
 	} else {
 		notifyDictEvent(DictEventModified, d, storedKey, value)
+		Decref(prev)
 	}
 	return true
 }

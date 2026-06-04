@@ -32,19 +32,70 @@ func Divmod(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	return abstract.Divmod(args[0], args[1])
 }
 
-// Pow ports builtin_pow_impl: PyNumber_Power. The two-arg form passes
-// None as the modulus.
+// Pow ports builtin_pow_impl: PyNumber_Power. base, exp, and mod are all
+// positional-or-keyword (mod defaults to None), matching the clinic
+// signature so pow(base=2, exp=4) and functools.partial(pow, mod=10)
+// both work.
 //
 // CPython: Python/bltinmodule.c:1559 builtin_pow_impl
-func Pow(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: pow expected 2 or 3 arguments, got %d", len(args))
+func Pow(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	base, exp, mod, err := bindPowArgs(args, kwargs)
+	if err != nil {
+		return nil, err
 	}
-	mod := objects.None()
-	if len(args) == 3 {
+	return abstract.Power(base, exp, mod)
+}
+
+// bindPowArgs maps positional/keyword arguments onto (base, exp, mod),
+// rejecting duplicates and unknown keywords the way the clinic-generated
+// parser does. mod defaults to None (the two-argument power form).
+//
+// CPython: Python/clinic/bltinmodule.c.h builtin_pow
+func bindPowArgs(args []objects.Object, kwargs map[string]objects.Object) (base, exp, mod objects.Object, err error) {
+	mod = objects.None()
+	if len(args) > 3 {
+		return nil, nil, nil, fmt.Errorf("TypeError: pow expected at most 3 arguments, got %d", len(args))
+	}
+	modSet := false
+	if len(args) >= 1 {
+		base = args[0]
+	}
+	if len(args) >= 2 {
+		exp = args[1]
+	}
+	if len(args) >= 3 {
 		mod = args[2]
+		modSet = true
 	}
-	return abstract.Power(args[0], args[1], mod)
+	for k, v := range kwargs {
+		switch k {
+		case "base":
+			if base != nil {
+				return nil, nil, nil, fmt.Errorf("TypeError: argument for pow() given by name ('base') and position (1)")
+			}
+			base = v
+		case "exp":
+			if exp != nil {
+				return nil, nil, nil, fmt.Errorf("TypeError: argument for pow() given by name ('exp') and position (2)")
+			}
+			exp = v
+		case "mod":
+			if modSet {
+				return nil, nil, nil, fmt.Errorf("TypeError: argument for pow() given by name ('mod') and position (3)")
+			}
+			mod = v
+			modSet = true
+		default:
+			return nil, nil, nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for pow()", k)
+		}
+	}
+	if base == nil {
+		return nil, nil, nil, fmt.Errorf("TypeError: pow() missing required argument 'base' (pos 1)")
+	}
+	if exp == nil {
+		return nil, nil, nil, fmt.Errorf("TypeError: pow() missing required argument 'exp' (pos 2)")
+	}
+	return base, exp, mod, nil
 }
 
 // Chr ports builtin_chr: returns the one-character string for the
@@ -198,7 +249,11 @@ func Format(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	}
 	specStr := ""
 	if len(args) == 2 {
-		if args[1].Type() != objects.StrType() {
+		// The clinic converter for format_spec is PyUnicode_Check, which
+		// admits str subclasses, not just exact str.
+		//
+		// CPython: Python/clinic/bltinmodule.c.h builtin_format
+		if !objects.IsSubtype(args[1].Type(), objects.StrType()) {
 			return nil, fmt.Errorf("TypeError: format() argument 2 must be str, not %s", args[1].Type().Name)
 		}
 		specStr, _ = objects.Str(args[1])

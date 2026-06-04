@@ -48,6 +48,7 @@ type warningsState struct {
 	context        objects.Object // PEP 567 ContextVar; gopy stores the var instance.
 	filtersVersion int64
 	lockHeld       bool
+	fallbackReg    *objects.Dict
 }
 
 var state = func() *warningsState {
@@ -58,6 +59,20 @@ var state = func() *warningsState {
 
 func init() {
 	_ = imp.AppendInittab(moduleName, buildModule)
+	// Wire the coroutine never-awaited finalize path into the warnings
+	// module so an un-driven coroutine that hits GC surfaces a
+	// RuntimeWarning instead of being silently dropped. objects/
+	// declares the hook variable to avoid pulling _warnings into the
+	// objects package's dependency graph.
+	//
+	// CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
+	objects.WarnUnawaitedCoroutineHook = WarnUnawaitedCoroutine
+	// Wire the async-generator asend/athrow/aclose never-awaited finalize
+	// path. A wrapper created but never iterated surfaces a RuntimeWarning
+	// naming the method and the agen qualname.
+	//
+	// CPython: Python/_warnings.c:1558 _PyErr_WarnUnawaitedAgenMethod
+	objects.WarnUnawaitedAgenMethodHook = WarnUnawaitedAgenMethod
 }
 
 // buildModule materializes the _warnings module dict.
@@ -309,7 +324,10 @@ func getWarningsContext() (objects.Object, error) {
 	}
 	ctx, err := cv.Get(ts)
 	if err != nil {
-		// LookupError → no context set; treat as global context.
+		// LookupError → no context set; treat as global context. Clear
+		// the LookupError that cv.Get stamped on the thread state so it
+		// doesn't leak into whatever runs next.
+		errors.Clear(ts)
 		return objects.None(), nil
 	}
 	return ctx, nil
@@ -795,16 +813,74 @@ func warnExplicit(category objects.Object, message objects.Object, filename obje
 	return objects.None(), nil
 }
 
-// setupContext approximates the C version's frame walk. gopy does
-// not expose the current frame from builtin context, so the
-// filename / lineno default to "<unknown>" / 0 and module to
-// "<string>". Once the eval-loop walk lands, this function is the
-// place to plumb sys._getframe(stack_level) in.
+// setupContext walks the interpreter frame chain to mirror CPython's
+// setup_context: it returns the caller's filename, lineno, module name,
+// and the per-module __warningregistry__ dict (creating one in the
+// frame's globals when missing). When no frame is active or the chain
+// runs out before stackLevel hits zero, the function falls back to the
+// shared "<unknown>" entry in fallbackRegistry so successive warnings
+// from the same C-level call site dedup the way CPython's
+// "default" filter expects.
 //
 // CPython: Python/_warnings.c:1024 setup_context
-func setupContext(stackLevel int64) (filename objects.Object, lineno int64, module objects.Object, registry objects.Object, err error) { //nolint:unparam // error slot mirrors CPython once frame walking lands.
-	_ = stackLevel
-	return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), objects.NewDict(), nil
+func setupContext(stackLevel int64) (filename objects.Object, lineno int64, module objects.Object, registry objects.Object, err error) {
+	var f objects.InterpreterFrame
+	if objects.CurrentFrameHook != nil {
+		f = objects.CurrentFrameHook()
+		for stackLevel > 1 && f != nil {
+			f = f.FrameBack()
+			stackLevel--
+		}
+	}
+	if f == nil {
+		return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), fallbackRegistry(), nil
+	}
+	code := f.FrameCode()
+	if code == nil {
+		return objects.NewStr("<unknown>"), 0, objects.NewStr("<string>"), fallbackRegistry(), nil
+	}
+	if code.Filename != "" {
+		filename = objects.NewStr(code.Filename)
+	} else {
+		filename = objects.NewStr("<unknown>")
+	}
+	if pos, ok := objects.CoAddr2Location(code, f.FrameLasti()); ok {
+		lineno = int64(pos.Line)
+	}
+	module = objects.NewStr("<string>")
+	registry = nil
+	if globals := f.FrameGlobals(); globals != nil {
+		if g, ok := globals.(*objects.Dict); ok {
+			if nm, _ := g.GetItem(objects.NewStr("__name__")); nm != nil && !objects.IsNone(nm) {
+				module = nm
+			}
+			regKey := objects.NewStr("__warningregistry__")
+			if reg, _ := g.GetItem(regKey); reg != nil && !objects.IsNone(reg) {
+				registry = reg
+			} else {
+				fresh := objects.NewDict()
+				_ = g.SetItem(regKey, fresh)
+				registry = fresh
+			}
+		}
+	}
+	if registry == nil {
+		registry = fallbackRegistry()
+	}
+	return filename, lineno, module, registry, nil
+}
+
+// fallbackRegistry returns a single shared __warningregistry__ dict
+// used when no Python frame is available (e.g. warnings emitted from
+// pure-Go startup code). Sharing the dict gives the same dedup behavior
+// CPython gets from per-module storage, so a tight loop in user code
+// that triggers a deprecation warning does not flood stderr with
+// thousands of identical lines.
+func fallbackRegistry() *objects.Dict {
+	if state.fallbackReg == nil {
+		state.fallbackReg = objects.NewDict()
+	}
+	return state.fallbackReg
 }
 
 // getCategory normalizes (message, category) into a Warning subclass.
@@ -868,6 +944,12 @@ func warnBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objec
 	}
 	if len(args) >= 4 {
 		source = args[3]
+	}
+	if v, ok := kwargs["message"]; ok {
+		message = v
+	}
+	if v, ok := kwargs["category"]; ok {
+		category = v
 	}
 	if v, ok := kwargs["stacklevel"]; ok {
 		if n, ok := v.(*objects.Int); ok {
@@ -1099,29 +1181,96 @@ func WarnExplicitWithSourceline(category *objects.Type, text, filenameStr string
 	return err
 }
 
-// WarnUnawaitedAgenMethod ports _PyErr_WarnUnawaitedAgenMethod. gopy
-// does not yet ship async generators; the entry point is exposed so
-// callers can wire it once Modules/_asyncio lands.
+// WarnUnawaitedAgenMethod ports _PyErr_WarnUnawaitedAgenMethod. The
+// asend/athrow/aclose wrapper finalizer calls this when the awaitable
+// was created but never iterated. CPython formats the message with the
+// repr of the method name and the repr of the async generator's
+// ag_qualname, so the consumer sees "coroutine method 'asend' of
+// '<qualname>' was never awaited".
 //
 // CPython: Python/_warnings.c:1558 _PyErr_WarnUnawaitedAgenMethod
 func WarnUnawaitedAgenMethod(agen objects.Object, method objects.Object) {
-	_ = WarnFormatSource(agen, errors.PyExc_RuntimeWarning, 1, "coroutine method %v of %v was never awaited", method, agen)
+	methodRepr, _ := objects.Repr(method)
+	qnRepr := methodRepr
+	if ag, ok := agen.(*objects.AsyncGenerator); ok {
+		qnRepr, _ = objects.Repr(objects.NewStr(ag.Qualname))
+	}
+	_ = WarnFormatSource(agen, errors.PyExc_RuntimeWarning, 1, "coroutine method %s of %s was never awaited", methodRepr, qnRepr)
 }
 
-// WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine.
+// WarnUnawaitedCoroutine ports _PyErr_WarnUnawaitedCoroutine. CPython
+// formats the fallback message with cr_qualname, not the bare coro, so
+// users see "coroutine 'Module.func' was never awaited" instead of the
+// less-informative repr. When _warn_unawaited_coroutine itself raises
+// (e.g. filterwarnings("error") has been set so the RuntimeWarning is
+// upgraded to an exception, or warnings is broken), the exception is
+// routed through sys.unraisablehook with the canonical err_msg
+// "Exception ignored while finalizing coroutine <repr>".
 //
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 func WarnUnawaitedCoroutine(coro objects.Object) {
 	fn, _ := getWarningsAttr("_warn_unawaited_coroutine", true)
 	warned := false
+	var callErr error
 	if fn != nil {
-		if _, err := objects.Call(fn, objects.NewTuple([]objects.Object{coro}), nil); err == nil {
+		_, callErr = objects.Call(fn, objects.NewTuple([]objects.Object{coro}), nil)
+		// CPython: a successful call or an exception that matches
+		// RuntimeWarning (warning-as-error) both count as "warned".
+		// The exception case still drops into PyErr_FormatUnraisable
+		// below so the user sees what blew up.
+		if callErr == nil || excMatchesRuntimeWarning(callErr) {
 			warned = true
 		}
 	}
-	if !warned {
-		_ = WarnFormatSource(coro, errors.PyExc_RuntimeWarning, 1, "coroutine '%v' was never awaited", coro)
+	if callErr != nil {
+		if h := objects.WriteUnraisableHook; h != nil {
+			cRepr, _ := objects.Repr(coro)
+			h(coro, "Exception ignored while finalizing coroutine "+cRepr, callErr)
+		}
 	}
+	if !warned {
+		qualname := coroQualname(coro)
+		_ = WarnFormatSource(coro, errors.PyExc_RuntimeWarning, 1, "coroutine '%v' was never awaited", qualname)
+	}
+}
+
+// excMatchesRuntimeWarning reports whether err carries a RuntimeWarning
+// (or a subclass). Mirrors PyErr_ExceptionMatches(PyExc_RuntimeWarning)
+// inside _PyErr_WarnUnawaitedCoroutine.
+//
+// CPython: Python/_warnings.c:1602 _PyErr_WarnUnawaitedCoroutine
+func excMatchesRuntimeWarning(err error) bool {
+	re, ok := err.(*objects.RaisedError)
+	if !ok || re.Exc == nil {
+		return false
+	}
+	t := re.Exc.Type()
+	for t != nil {
+		if t.Name == "RuntimeWarning" {
+			return true
+		}
+		if len(t.Bases) == 0 {
+			return false
+		}
+		t = t.Bases[0]
+	}
+	return false
+}
+
+// coroQualname extracts a coroutine's cr_qualname, falling back to its
+// name and then its repr. Matches CPython's PyCoroObject->cr_qualname
+// access in _PyErr_WarnUnawaitedCoroutine.
+func coroQualname(coro objects.Object) string {
+	if c, ok := coro.(*objects.Coroutine); ok {
+		if c.Qualname != "" {
+			return c.Qualname
+		}
+		return c.Name
+	}
+	if r, err := objects.Repr(coro); err == nil {
+		return r
+	}
+	return "<coroutine>"
 }
 
 // WarningsFini drops every entry of the active state, mirroring

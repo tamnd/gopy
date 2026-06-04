@@ -10,6 +10,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -87,7 +88,11 @@ func MakeTpCall(callable Object, args []Object, nargs int, keywords Object) (Obj
 		}
 	case *Dict:
 		if kw.Len() > 0 {
-			kwargs = dictToMap(kw)
+			var merr error
+			kwargs, merr = dictToMap(kw)
+			if merr != nil {
+				return nil, merr
+			}
 		}
 	default:
 		return nil, fmt.Errorf("MakeTpCall: keywords must be tuple or dict, not %s", keywords.Type().Name)
@@ -117,6 +122,9 @@ func vectorcallCall(fn func(Object, []Object, uint, *Tuple) (Object, error), cal
 	keys := kwargs.Keys()
 	kwnamesItems := make([]Object, 0, len(keys))
 	for i, k := range keys {
+		if !IsSubtype(k.Type(), StrType()) {
+			return nil, errKeywordsMustBeStrings
+		}
 		v, err := kwargs.GetItem(k)
 		if err != nil {
 			return nil, err
@@ -171,7 +179,11 @@ func Call(callable Object, args *Tuple, kwargs *Dict) (Object, error) {
 	}
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	return t.Call(callable, posArgs, kwmap)
 }
@@ -303,18 +315,27 @@ func objectIsNotCallable(callable Object) error {
 // dictToMap copies a *Dict's entries into the map[string]Object shape
 // gopy's tp_call slot expects. Used when MakeTpCall has to bridge a
 // dict-flavored kwargs onto the slot.
-func dictToMap(d *Dict) map[string]Object {
+// errKeywordsMustBeStrings is raised when a ** unpacking carries a
+// non-string key into a call, matching _PyStack_UnpackDict.
+//
+// CPython: Objects/call.c:1096 _PyStack_UnpackDict
+var errKeywordsMustBeStrings = errors.New("TypeError: keywords must be strings")
+
+func dictToMap(d *Dict) (map[string]Object, error) {
 	out := make(map[string]Object, d.Len())
 	for _, k := range d.Keys() {
+		if !IsSubtype(k.Type(), StrType()) {
+			return nil, errKeywordsMustBeStrings
+		}
 		v, err := d.GetItem(k)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		ks, err := Str(k)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		out[ks] = v
 	}
-	return out
+	return out, nil
 }

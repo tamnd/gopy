@@ -6,6 +6,38 @@ import (
 	"testing"
 )
 
+// testStopIterValue stands in for the StopIteration(value) that the
+// await protocol raises when an async generator yields. The real
+// errors package wires AsyncGenStopIterationHook to build a typed
+// StopIteration carrying the value; objects/ tests cannot import that
+// package, so a local hook reproduces the value-carrying surface that
+// async_gen_unwrap_value drives through.
+type testStopIterValue struct{ v Object }
+
+func (e *testStopIterValue) Error() string { return "StopIteration" }
+
+func init() {
+	AsyncGenStopIterationHook = func(value Object) error {
+		if value == nil {
+			value = None()
+		}
+		return &testStopIterValue{v: value}
+	}
+}
+
+// asyncYieldValue drains one asend/anext step and extracts the value
+// the body yielded, which the await protocol surfaces through
+// StopIteration rather than as a direct return.
+func asyncYieldValue(t *testing.T, a Object) Object {
+	t.Helper()
+	_, err := AsyncGenASendType.IterNext(a)
+	var sv *testStopIterValue
+	if !errors.As(err, &sv) {
+		t.Fatalf("anext should raise StopIteration(value), got %v", err)
+	}
+	return sv.v
+}
+
 func runAsyncGenBody(g *AsyncGenerator, body func(yield genYieldFn) error) {
 	go func() {
 		first := <-g.SendCh
@@ -14,7 +46,12 @@ func runAsyncGenBody(g *AsyncGenerator, body func(yield genYieldFn) error) {
 			return
 		}
 		yieldFn := func(v Object) (Object, error) {
-			g.YieldCh <- GenMsg{Val: v}
+			// Mirror the ASYNC_GEN_WRAP intrinsic the real eval loop
+			// applies to every async-generator yield: each value the
+			// body surfaces is wrapped so async_gen_unwrap_value can
+			// tell an async yield apart from an intermediate await and
+			// clear ag_running_async between anext() steps.
+			g.YieldCh <- GenMsg{Val: NewAsyncGenWrappedValue(v)}
 			m := <-g.SendCh
 			if m.Err != nil {
 				return nil, m.Err
@@ -46,19 +83,13 @@ func TestAsyncGeneratorAnext(t *testing.T) {
 	if a.Type() != AsyncGenASendType {
 		t.Fatalf("anext type = %s, want async_generator_asend", a.Type().Name)
 	}
-	v, err := AsyncGenASendType.IterNext(a)
-	if err != nil {
-		t.Fatal(err)
-	}
+	v := asyncYieldValue(t, a)
 	if x, _ := v.(*Int).Int64(); x != 1 {
 		t.Errorf("first anext = %d, want 1", x)
 	}
 
 	a2 := g.Anext()
-	v2, err := AsyncGenASendType.IterNext(a2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	v2 := asyncYieldValue(t, a2)
 	if x, _ := v2.(*Int).Int64(); x != 2 {
 		t.Errorf("second anext = %d, want 2", x)
 	}
@@ -82,14 +113,9 @@ func TestAsyncGeneratorAsendValue(t *testing.T) {
 		return nil
 	})
 	a := g.Anext()
-	if _, err := AsyncGenASendType.IterNext(a); err != nil {
-		t.Fatal(err)
-	}
+	asyncYieldValue(t, a)
 	a2 := g.Asend(NewInt(99))
-	v, err := AsyncGenASendType.IterNext(a2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	v := asyncYieldValue(t, a2)
 	if x, _ := v.(*Int).Int64(); x != 99 {
 		t.Errorf("asend round-trip = %d, want 99", x)
 	}
@@ -120,8 +146,13 @@ func TestAsyncGeneratorAcloseClean(t *testing.T) {
 	_, _ = AsyncGenASendType.IterNext(a)
 	ac := g.Aclose()
 	_, err := AsyncGenAThrowType.IterNext(ac)
-	if !errors.Is(err, ErrStopAsyncIteration) {
-		t.Errorf("aclose should end with StopAsyncIteration, got %v", err)
+	// CPython: when aclose() drives a suspended generator to exit on the
+	// injected GeneratorExit, the await finishes by raising StopIteration
+	// (not StopAsyncIteration), signaling the aclose() await is done.
+	//
+	// CPython: Objects/genobject.c:2225 async_gen_athrow_send (yield_close)
+	if !errors.Is(err, ErrStopIteration) {
+		t.Errorf("aclose should end with StopIteration, got %v", err)
 	}
 }
 

@@ -29,6 +29,20 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
+// writeThreadUnraisable reports an exception that escaped a thread body.
+// CPython's thread_run hands such an exception to PyErr_WriteUnraisable so
+// it is printed through sys.unraisablehook rather than lost. threading.py's
+// Thread already traps its target's exceptions in _bootstrap_inner, so this
+// path mainly serves raw start_new_thread / start_joinable_thread callers
+// and a _bootstrap that itself fails before its except clause runs.
+//
+// CPython: Modules/_threadmodule.c:333 thread_run (PyErr_WriteUnraisable)
+func writeThreadUnraisable(function objects.Object, err error) {
+	if objects.WriteUnraisableHook != nil {
+		objects.WriteUnraisableHook(function, "Exception ignored in thread started by", err)
+	}
+}
+
 // ThreadHandleType is the type singleton for _thread._ThreadHandle.
 //
 // CPython: Modules/_threadmodule.c:66 ThreadHandle_Type_spec
@@ -49,12 +63,19 @@ func init() {
 	ThreadHandleType.TpNew = threadHandleNew
 	objects.SetTypeDescr(ThreadHandleType, "ident",
 		objects.NewGetSetDescr("ident", threadHandleGetIdent, nil))
+	// Register join / is_done / _set_done as method descriptors so an
+	// attribute access like handle.join binds the handle as the first
+	// argument. A plain builtin function stored as a type attribute is
+	// not a descriptor and would be returned unbound, so the receiver
+	// would never reach the implementation.
+	//
+	// CPython: Modules/_threadmodule.c:646 ThreadHandle_methods
 	objects.SetTypeDescr(ThreadHandleType, "join",
-		objects.NewBuiltinFunction("join", threadHandleJoin))
+		objects.NewMethodDescr(ThreadHandleType, "join", threadHandleJoin))
 	objects.SetTypeDescr(ThreadHandleType, "is_done",
-		objects.NewBuiltinFunction("is_done", threadHandleIsDone))
+		objects.NewMethodDescr(ThreadHandleType, "is_done", threadHandleIsDone))
 	objects.SetTypeDescr(ThreadHandleType, "_set_done",
-		objects.NewBuiltinFunction("_set_done", threadHandleSetDone))
+		objects.NewMethodDescr(ThreadHandleType, "_set_done", threadHandleSetDone))
 }
 
 // threadHandleObject backs _ThreadHandle. `done` is closed exactly once
@@ -263,9 +284,16 @@ func threadStartJoinableThread(args []objects.Object, kwargs map[string]objects.
 		id := goid()
 		handle.ident = id
 		idCh <- id
-		tp := function.Type()
-		if tp.Call != nil {
-			tp.Call(function, nil, nil) //nolint:errcheck
+		// Route through objects.Call so any callable runs, not only types
+		// that expose a tp_call slot. threading.Thread hands us a bound
+		// method (self._bootstrap), which gopy dispatches through
+		// tp_vectorcall; calling function.Type().Call directly would find
+		// a nil slot and silently skip the thread body, hanging the
+		// parent on Thread._started.wait().
+		//
+		// CPython: Modules/_threadmodule.c:333 thread_run (PyObject_Call)
+		if _, err := objects.Call(function, nil, nil); err != nil {
+			writeThreadUnraisable(function, err)
 		}
 	}()
 	<-idCh

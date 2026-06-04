@@ -55,24 +55,22 @@ func (c *Compiler) visitModule(m *ast.Module) error {
 	return nil
 }
 
-// visitInteractive is the REPL form. Each top-level expression is
-// printed via PRINT_EXPR; everything else is the same as Module.
+// visitInteractive is the REPL form. Every expression statement at
+// module nest level (including those nested inside `with`, `if`,
+// `for`, ... bodies) emits PRINT_EXPR so the interactive shell sees
+// the result via sys.displayhook. visitExprStmt consults
+// c.interactive plus the unit-stack depth to gate the opcode;
+// nested function / class bodies push the depth past the module
+// level and revert to plain POP_TOP.
 //
 // CPython: Python/codegen.c codegen_body branch is_interactive=true
+// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
+// c->c_nestlevel <= 1)
 func (c *Compiler) visitInteractive(m *ast.Interactive) error {
+	prev := c.interactive
+	c.interactive = true
+	defer func() { c.interactive = prev }()
 	for _, s := range m.Body {
-		if es, ok := s.(*ast.ExprStmt); ok {
-			if err := c.visitExpr(es.Value); err != nil {
-				return err
-			}
-			// PRINT_EXPR was folded into CALL_INTRINSIC_1 with
-			// intrinsic id 1 (INTRINSIC_PRINT) in 3.12+.
-			//
-			// CPython: Include/internal/pycore_intrinsics.h
-			// INTRINSIC_PRINT
-			c.addOpI(CALL_INTRINSIC_1, intrinsicPrint, loc(es))
-			continue
-		}
 		if err := c.visitStmt(s); err != nil {
 			return err
 		}
@@ -280,6 +278,25 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 	if err := c.visitExpr(s.Value); err != nil {
 		return err
 	}
+	// REPL single-mode: print the value at the module nest level so
+	// sys.displayhook fires for top-level expressions even inside
+	// compound bodies (`with`, `if`, ...). Nested function / class
+	// scopes push the unit stack past 1 and stay on POP_TOP.
+	//
+	// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
+	// c->c_nestlevel <= 1 emits CALL_INTRINSIC_1 INTRINSIC_PRINT)
+	if c.interactive && len(c.units) <= 1 {
+		// CALL_INTRINSIC_1 INTRINSIC_PRINT consumes the value and
+		// leaves the result of sys.displayhook (None) on the stack.
+		// Pop it so the body's net stack effect matches the plain
+		// POP_TOP form.
+		//
+		// CPython: Python/codegen.c codegen_stmt_expr (PRINT_EXPR
+		// branch emits the intrinsic followed by POP_TOP)
+		c.addOpI(CALL_INTRINSIC_1, intrinsicPrint, loc(s))
+		c.addOp(POP_TOP, loc(s))
+		return nil
+	}
 	c.addOp(POP_TOP, loc(s))
 	return nil
 }
@@ -294,6 +311,13 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 	l := loc(s)
 	if c.scope == nil || !c.scope.IsFunctionLike() {
 		return c.errorAt(l, "'return' outside function")
+	}
+	// `return value` inside an async generator (async def that also
+	// yields) is forbidden, mirroring CPython's codegen_return check.
+	//
+	// CPython: Python/codegen.c:2201 codegen_return
+	if s.Value != nil && c.scope.Coroutine && c.scope.Generator {
+		return c.errorAt(l, "'return' with value in async generator")
 	}
 	_, valueIsConst := s.Value.(*ast.Constant)
 	preserveTOS := s.Value != nil && !valueIsConst

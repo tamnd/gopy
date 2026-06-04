@@ -41,6 +41,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
+	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/stackref"
@@ -83,6 +84,18 @@ func (e *evalState) fastCallAllocAndEnterInit(oparg uint32) (int, bool, error) {
 	}
 	inst := objects.NewInstance(cls)
 	stack := frameStackFor(e.ts)
+	// _PUSH_FRAME enters init's frame through the eval loop, where
+	// start_frame runs the recursion check. The fast arm pushes the
+	// frame directly, so the guard the generic CALL path applies before
+	// Push has to be repeated here.
+	//
+	// CPython: Python/bytecodes.c:4010 _PUSH_FRAME
+	// CPython: Python/ceval_macros.h:337 _Py_EnterRecursivePy
+	// CPython: Python/ceval.c:1027 _Py_CheckRecursiveCallPy
+	if stack.Depth() >= sys.RecursionLimit() {
+		return 0, true, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
+	}
+	forceGenPrev(stack)
 	f2 := stack.Push(co, init.Globals, init.Builtins, init)
 	f2.SetLocal(0, stackref.FromObject(inst))
 	for i := range argc {

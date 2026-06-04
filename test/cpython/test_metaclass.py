@@ -118,7 +118,7 @@ Use various combinations of explicit keywords and **kwds.
     >>> kwds = {'other': 'haha'}
     >>> class C(B, metaclass=M, *bases, **kwds): pass
     ...
-    Prepare called: ('C', (<class 'test_metaclass.B'>, <class 'object'>)) {'other': 'haha'}
+    Prepare called: ('C', (<class 'test.test_metaclass.B'>, <class 'object'>)) {'other': 'haha'}
     New called: {'other': 'haha'}
     >>> C.__class__ is M
     True
@@ -162,7 +162,7 @@ Use a __prepare__ method that returns an instrumented dict.
     ...     foo = 42
     ...     bar = 123
     ...
-    d['__module__'] = 'test_metaclass'
+    d['__module__'] = 'test.test_metaclass'
     d['__qualname__'] = 'C'
     d['__firstlineno__'] = 1
     d['foo'] = 4
@@ -184,12 +184,12 @@ Use a metaclass that doesn't derive from type.
     ...     b = 24
     ...
     meta: C ()
-    ns: [('__firstlineno__', 1), ('__module__', 'test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 42), ('b', 24)]
+    ns: [('__firstlineno__', 1), ('__module__', 'test.test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 42), ('b', 24)]
     kw: []
     >>> type(C) is dict
     True
     >>> print(sorted(C.items()))
-    [('__firstlineno__', 1), ('__module__', 'test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 42), ('b', 24)]
+    [('__firstlineno__', 1), ('__module__', 'test.test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 42), ('b', 24)]
     >>>
 
 And again, with a __prepare__ attribute.
@@ -205,7 +205,7 @@ And again, with a __prepare__ attribute.
     ...    b = 3
     ...
     prepare: C () [('other', 'booh')]
-    d['__module__'] = 'test_metaclass'
+    d['__module__'] = 'test.test_metaclass'
     d['__qualname__'] = 'C'
     d['__firstlineno__'] = 1
     d['a'] = 1
@@ -213,7 +213,7 @@ And again, with a __prepare__ attribute.
     d['b'] = 3
     d['__static_attributes__'] = ()
     meta: C ()
-    ns: [('__firstlineno__', 1), ('__module__', 'test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 2), ('b', 3)]
+    ns: [('__firstlineno__', 1), ('__module__', 'test.test_metaclass'), ('__qualname__', 'C'), ('__static_attributes__', ()), ('a', 2), ('b', 3)]
     kw: [('other', 'booh')]
     >>>
 
@@ -252,7 +252,7 @@ Test failures in looking up the __prepare__ method work.
     ...     pass
     Traceback (most recent call last):
     [...]
-    test_metaclass.ObscureException
+    test.test_metaclass.ObscureException
 
 Test setting attributes with a non-base type in mro() (gh-127773).
 
@@ -298,5 +298,5 @@ def load_tests(loader, tests, pattern):
 
 if __name__ == "__main__":
     # set __name__ to match doctest expectations
-    __name__ = "test_metaclass"
+    __name__ = "test.test_metaclass"
     unittest.main()

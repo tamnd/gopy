@@ -346,8 +346,9 @@ func NumberDivmod(a, b Object) (Object, error) {
 	return numberBinary(a, b, "divmod()", func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Divmod })
 }
 
-// NumberInPlaceAdd is a += b. Falls through to sq_concat / sq_inplace_concat
-// on LHS when the number protocol doesn't apply.
+// NumberInPlaceAdd is a += b. Falls through to sq_inplace_concat /
+// sq_concat on LHS when the number protocol doesn't apply, mirroring
+// CPython's preference for the mutating slot when both are present.
 //
 // CPython: Objects/abstract.c:1297 PyNumber_InPlaceAdd
 func NumberInPlaceAdd(a, b Object) (Object, error) {
@@ -360,8 +361,13 @@ func NumberInPlaceAdd(a, b Object) (Object, error) {
 	if out != nil {
 		return out, nil
 	}
-	if s := a.Type().Sequence; s != nil && s.Concat != nil {
-		return s.Concat(a, b)
+	if s := a.Type().Sequence; s != nil {
+		if s.InPlaceConcat != nil {
+			return s.InPlaceConcat(a, b)
+		}
+		if s.Concat != nil {
+			return s.Concat(a, b)
+		}
 	}
 	return nil, binopTypeError(a, b, "+=")
 }
@@ -375,8 +381,9 @@ func NumberInPlaceSubtract(a, b Object) (Object, error) {
 		func(n *NumberMethods) func(a, b Object) (Object, error) { return n.Subtract })
 }
 
-// NumberInPlaceMultiply is a *= b. Falls through to sq_repeat /
-// sq_inplace_repeat as PyNumber_InPlaceMultiply does.
+// NumberInPlaceMultiply is a *= b. Falls through to sq_inplace_repeat /
+// sq_repeat as PyNumber_InPlaceMultiply does, preferring the mutating
+// slot on LHS.
 //
 // CPython: Objects/abstract.c:1320 PyNumber_InPlaceMultiply
 func NumberInPlaceMultiply(a, b Object) (Object, error) {
@@ -389,12 +396,21 @@ func NumberInPlaceMultiply(a, b Object) (Object, error) {
 	if out != nil {
 		return out, nil
 	}
-	if s := a.Type().Sequence; s != nil && s.Repeat != nil {
-		count, err := indexAsInt(b)
-		if err != nil {
-			return nil, err
+	if s := a.Type().Sequence; s != nil {
+		if s.InPlaceRepeat != nil {
+			count, err := indexAsInt(b)
+			if err != nil {
+				return nil, err
+			}
+			return s.InPlaceRepeat(a, count)
 		}
-		return s.Repeat(a, count)
+		if s.Repeat != nil {
+			count, err := indexAsInt(b)
+			if err != nil {
+				return nil, err
+			}
+			return s.Repeat(a, count)
+		}
 	}
 	if s := b.Type().Sequence; s != nil && s.Repeat != nil {
 		count, err := indexAsInt(a)
@@ -546,6 +562,22 @@ func IndexCheck(o Object) bool {
 	return n != nil && n.Index != nil
 }
 
+// NumberCheck reports whether o looks like a number: its type bundles
+// number methods exposing __index__, __int__ or __float__, or it is a
+// complex. Mirrors PyNumber_Check.
+//
+// CPython: Objects/abstract.c:163 PyNumber_Check
+func NumberCheck(o Object) bool {
+	if o == nil {
+		return false
+	}
+	if _, ok := o.(*Complex); ok {
+		return true
+	}
+	n := o.Type().Number
+	return n != nil && (n.Index != nil || n.Int != nil || n.Float != nil)
+}
+
 // NumberIndex returns o coerced to int via __index__. Returns the
 // receiver unchanged when it is already an int. Bool routes through
 // IntFromBool to drop the bool subtype.
@@ -590,10 +622,33 @@ func NumberIndex(o Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := res.(*Int); !ok {
+	var i *Int
+	switch v := res.(type) {
+	case *Int:
+		i = v
+	case *Bool:
+		i = &v.Int
+	default:
 		return nil, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", res.Type().Name)
 	}
-	return res, nil
+	if res.Type() == IntType {
+		return i, nil
+	}
+	// Subclass of int (incl. bool): emit DeprecationWarning and downcast
+	// to plain int, mirroring _PyNumber_Index's behavior for non-exact
+	// long subclasses.
+	//
+	// CPython: Objects/abstract.c:1446 PyNumber_Index
+	msg := fmt.Sprintf("__index__ returned non-int (type %s).  "+
+		"The ability to return an instance of a strict subclass of int "+
+		"is deprecated, and may be removed in a future version of Python.",
+		res.Type().Name)
+	if DeprecWarnHook != nil {
+		if werr := DeprecWarnHook(msg); werr != nil {
+			return nil, werr
+		}
+	}
+	return NewIntFromBig(i.BigInt()), nil
 }
 
 // numberBinaryNoErr is numberBinary that returns (nil, nil) when no

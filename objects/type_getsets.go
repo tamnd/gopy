@@ -20,6 +20,7 @@ func init() {
 	register("__qualname__", typeGetQualname, typeSetQualname)
 	register("__module__", typeGetModule, typeSetModule)
 	register("__bases__", typeGetBases, typeSetBases)
+	register("__base__", typeGetBase, nil)
 	register("__mro__", typeGetMRO, nil)
 	register("__doc__", typeGetDoc, typeSetDoc)
 	register("__parameters__", typeGetParameters, typeSetParameters)
@@ -27,6 +28,37 @@ func init() {
 	SetTypeDescr(typeType, "__subclasses__", NewMethodDescr(typeType, "__subclasses__", typeSubclassesMeth))
 	// CPython: Objects/typeobject.c:1254 type_mro — returns __mro__ as a list.
 	SetTypeDescr(typeType, "mro", NewMethodDescr(typeType, "mro", typeMroMeth))
+	// CPython: Objects/typeobject.c:5862 type___dir___impl
+	SetTypeDescr(typeType, "__dir__", NewMethodDescr(typeType, "__dir__", typeDirMeth))
+}
+
+// typeDirMeth implements type.__dir__(): the names reachable by merging
+// the class's own dict with every base's dict. Unlike object.__dir__ it
+// does not chase the metaclass, so dir(str) lists str's and object's
+// members but not type-level names like __mro__ or mro.
+//
+// CPython: Objects/typeobject.c:5862 type___dir___impl
+func typeDirMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__dir__' of 'type' object needs an argument")
+	}
+	t, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__dir__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	// merge_class_dict(dict, self): self's dict plus the recursive merge
+	// of every base. Walking the MRO covers the same set.
+	seen := map[string]struct{}{}
+	for _, base := range t.MRO {
+		for _, n := range descriptorNames(base) {
+			seen[n] = struct{}{}
+		}
+	}
+	items := make([]Object, 0, len(seen))
+	for n := range seen {
+		items = append(items, NewStr(n))
+	}
+	return NewList(items), nil
 }
 
 // typeSubclassesMeth implements type.__subclasses__() -> list.
@@ -83,6 +115,27 @@ func typeGetName(o Object) (Object, error) {
 	return NewStr(tailName(t.Name)), nil
 }
 
+// checkTypeName mirrors the PyUnicode_AsUTF8AndSize step that both
+// type_new_set_name and type_set_name run on a type's name. A lone
+// surrogate cannot encode to UTF-8, so CPython surfaces the codec's
+// UnicodeEncodeError; an embedded null passes the encode but fails the
+// strlen != size guard with ValueError. The test only inspects the
+// exception type, so the messages stay close to CPython without
+// reproducing the full codec arg tuple.
+//
+// CPython: Objects/typeobject.c:4233 type_new_set_name
+func checkTypeName(name string) error {
+	for i, r := range strLenientRunes(name) {
+		if r >= 0xD800 && r <= 0xDFFF {
+			return fmt.Errorf("UnicodeEncodeError: 'utf-8' codec can't encode character '\\u%04x' in position %d: surrogates not allowed", r, i)
+		}
+	}
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("ValueError: type name must not contain null characters")
+	}
+	return nil
+}
+
 // typeSetName writes t.Name. Only allowed on user-defined types.
 //
 // CPython: Objects/typeobject.c:1024 type_set_name
@@ -100,6 +153,9 @@ func typeSetName(o Object, v Object) error {
 	s, ok := v.(*Unicode)
 	if !ok {
 		return fmt.Errorf("TypeError: can only assign string to %s.__name__, not '%s'", t.Name, typeNameOf(v))
+	}
+	if err := checkTypeName(s.v); err != nil {
+		return err
 	}
 	t.Name = s.v
 	t.InvalidateVersionTag()
@@ -193,6 +249,12 @@ func typeSetModule(o Object, v Object) error {
 		return fmt.Errorf("TypeError: can only assign string to %s.__module__, not '%s'", t.Name, typeNameOf(v))
 	}
 	t.Module = s.v
+	// __firstlineno__ records the source line the class statement opened
+	// on; once __module__ is reassigned the recorded line no longer
+	// describes where the type lives, so CPython drops it from tp_dict.
+	//
+	// CPython: Objects/typeobject.c:1581 type_set_module (PyDict_Pop __firstlineno__)
+	DelTypeDescr(t, "__firstlineno__")
 	t.InvalidateVersionTag()
 	return nil
 }
@@ -210,6 +272,83 @@ func typeGetBases(o Object) (Object, error) {
 		items[i] = b
 	}
 	return NewTuple(items), nil
+}
+
+// typeGetBase returns the type's single "best base", the base whose
+// instance layout the type inherits. object has no base and reports
+// None; every other type reports the winner of best_base over its
+// explicit bases.
+//
+// CPython: Objects/typeobject.c:1095 type_get_base
+func typeGetBase(o Object) (Object, error) {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__base__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if len(t.Bases) == 0 {
+		return None(), nil
+	}
+	base, err := bestBase(t.Bases)
+	if err != nil {
+		return nil, err
+	}
+	if base == nil {
+		return None(), nil
+	}
+	return base, nil
+}
+
+// shapeDiffers reports whether two types lay their instances out
+// differently. CPython compares tp_basicsize and tp_itemsize.
+//
+// CPython: Objects/typeobject.c:2962 shape_differs
+func shapeDiffers(t1, t2 *Type) bool {
+	return t1.BaseSize != t2.BaseSize || t1.ItemSize != t2.ItemSize
+}
+
+// solidBase returns the most-derived ancestor of t whose instance
+// layout differs from its own base, walking the primary base chain.
+//
+// CPython: Objects/typeobject.c:2971 solid_base
+func solidBase(t *Type) *Type {
+	var base *Type
+	if len(t.Bases) > 0 {
+		base = solidBase(t.Bases[0])
+	} else {
+		base = objectType
+	}
+	if shapeDiffers(t, base) {
+		return t
+	}
+	return base
+}
+
+// bestBase mirrors best_base: of the explicit bases it picks the one
+// whose solid base is the most derived, raising on an instance-layout
+// conflict between two unrelated solid bases.
+//
+// CPython: Objects/typeobject.c:2998 best_base
+func bestBase(bases []*Type) (*Type, error) {
+	var base, winner *Type
+	for _, bi := range bases {
+		if bi.TpFlags&TpFlagBasetype == 0 {
+			return nil, fmt.Errorf("TypeError: type '%s' is not an acceptable base type", bi.Name)
+		}
+		candidate := solidBase(bi)
+		switch {
+		case winner == nil:
+			winner = candidate
+			base = bi
+		case IsSubtype(winner, candidate):
+			// winner already dominates; keep it.
+		case IsSubtype(candidate, winner):
+			winner = candidate
+			base = bi
+		default:
+			return nil, fmt.Errorf("TypeError: multiple bases have instance lay-out conflict")
+		}
+	}
+	return base, nil
 }
 
 // typeSetBases reassigns t.Bases and recomputes the MRO. Only allowed

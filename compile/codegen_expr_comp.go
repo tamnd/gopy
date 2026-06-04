@@ -73,21 +73,23 @@ func (c *Compiler) compileComprehension(name string, kind compKind,
 	if innerScope == nil {
 		return fmt.Errorf("compile: no symtable entry for comprehension %s", name)
 	}
-	// Inlined comprehensions (PEP 709) have their free vars folded
-	// into the outer scope's locals by the symtable; emitting a
-	// closure tuple here would fail since those names are not Cell in
-	// the outer scope. Gopy still builds a separate function for the
-	// comp body (the real inlining happens with spec 1696), so the
-	// runtime behavior matches the pre-fix path: skip the closure
-	// surface and let LOAD_DEREF surface the missing cell.
-	var closureFlag int32
-	if !innerScope.CompInlined {
-		flag, err := c.emitClosure(innerScope, loc(key))
-		if err != nil {
-			return err
-		}
-		closureFlag = flag
+
+	// PEP 709: a list / set / dict comprehension whose symtable entry
+	// was folded into the parent scope is emitted directly here, with no
+	// nested function or CALL. The outermost iterable evaluates in the
+	// outer scope, the comprehension's bound locals are isolated across
+	// the body, and the result is left on the stack.
+	//
+	// CPython: Python/codegen.c:4794 codegen_comprehension (is_inlined)
+	if innerScope.CompInlined {
+		return c.compileInlinedComprehension(innerScope, kind, gens, elt, val, key)
 	}
+
+	flag, err := c.emitClosure(innerScope, loc(key))
+	if err != nil {
+		return err
+	}
+	closureFlag := flag
 	if err := c.emitInnerComprehensionCode(innerScope, name, kind, gens, elt, val, key); err != nil {
 		return err
 	}
@@ -112,6 +114,58 @@ func (c *Compiler) compileComprehension(name string, kind compKind,
 		c.addLoadConst(nil, loc(key))
 		c.addYieldFromLoop(loc(key))
 	}
+	return nil
+}
+
+// compileInlinedComprehension emits a list / set / dict comprehension
+// directly into the enclosing code object (PEP 709). The outermost
+// iterable is evaluated, the comprehension's bound locals are saved and
+// isolated, the generator loop runs against the iterable already on the
+// stack, then the saved locals are restored, leaving the built container
+// as the top of stack.
+//
+// CPython: Python/codegen.c:4794 codegen_comprehension (is_inlined arm)
+func (c *Compiler) compileInlinedComprehension(entry *symtable.Entry,
+	kind compKind, gens ast.Seq[*ast.Comprehension], elt, val ast.Expr,
+	key ast.Expr,
+) error {
+	l := loc(key)
+	outermost := gens[0]
+
+	// codegen_comprehension_iter: evaluate the outermost iterable.
+	if err := c.visitExpr(outermost.Iter); err != nil {
+		return err
+	}
+	if outermost.IsAsync != 0 {
+		c.addOp(GET_AITER, loc(outermost.Iter))
+	} else {
+		c.addOp(GET_ITER, loc(outermost.Iter))
+	}
+
+	var state inlinedCompState
+	c.tweakInlinedComprehensionScopes(entry, &state)
+	c.pushInlinedComprehensionLocals(entry, &state, l)
+
+	if kind != compGenExp {
+		switch kind {
+		case compListComp:
+			c.addOpI(BUILD_LIST, 0, l)
+		case compSetComp:
+			c.addOpI(BUILD_SET, 0, l)
+		case compDictComp:
+			c.addOpI(BUILD_MAP, 0, l)
+		}
+		// The iterable sits below the freshly-built container; swap it
+		// back to TOS so the generator loop consumes it.
+		c.addOpI(SWAP, 2, l)
+	}
+
+	if err := c.compileGenerator(gens, 0, 0, elt, val, kind, l, true); err != nil {
+		return err
+	}
+
+	c.popInlinedComprehensionLocals(&state, l)
+	c.revertInlinedComprehensionScopes(&state)
 	return nil
 }
 
@@ -153,7 +207,7 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 		c.addOpI(BUILD_MAP, 0, loc(key))
 	}
 
-	if err := c.compileGenerator(gens, 0, 0, elt, val, kind, loc(key)); err != nil {
+	if err := c.compileGenerator(gens, 0, 0, elt, val, kind, loc(key), false); err != nil {
 		return err
 	}
 
@@ -167,10 +221,19 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 	innerUnit.Name = name
 	innerUnit.Argcount = 1
 	innerUnit.Flags |= CoOptimized | CoNewLocals
-	if kind == compGenExp {
+	// Mirror compute_code_flags: a comprehension whose inner scope is
+	// both generator and coroutine becomes CO_ASYNC_GENERATOR; a sync
+	// genexpr is CO_GENERATOR; any other coroutine inside the
+	// comprehension (set / list / dict comp inside an async def) is
+	// CO_COROUTINE alone.
+	//
+	// CPython: Python/compile.c:1379 compute_code_flags
+	switch {
+	case kind == compGenExp && innerScope.Coroutine:
+		innerUnit.Flags |= CoAsyncGenerator
+	case kind == compGenExp:
 		innerUnit.Flags |= CoGenerator
-	}
-	if innerScope.Coroutine {
+	case innerScope.Coroutine:
 		innerUnit.Flags |= CoCoroutine
 	}
 
@@ -190,25 +253,28 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 // CPython: Python/codegen.c:L4391 codegen_sync_comprehension_generator
 func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 	idx, depth int, elt, val ast.Expr, kind compKind, l ast.Pos,
+	iterOnStack bool,
 ) error {
 	gen := gens[idx]
 	if gen.IsAsync != 0 {
-		return c.compileAsyncGenerator(gens, idx, depth, elt, val, kind, l)
+		return c.compileAsyncGenerator(gens, idx, depth, elt, val, kind, l, iterOnStack)
 	}
 
 	start := c.newLabel()
 	ifCleanup := c.newLabel()
 	anchor := c.newLabel()
 
-	if idx == 0 {
-		// Implicit `.0` parameter holds the outermost iter.
-		pool := poolVarNames
-		c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
-	} else {
-		if err := c.visitExpr(gen.Iter); err != nil {
-			return err
+	if !iterOnStack {
+		if idx == 0 {
+			// Implicit `.0` parameter holds the outermost iter.
+			pool := poolVarNames
+			c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
+		} else {
+			if err := c.visitExpr(gen.Iter); err != nil {
+				return err
+			}
+			c.addOp(GET_ITER, loc(gen.Iter))
 		}
-		c.addOp(GET_ITER, loc(gen.Iter))
 	}
 	depth++
 
@@ -226,7 +292,7 @@ func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 	}
 
 	if idx+1 < len(gens) {
-		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l); err != nil {
+		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l, false); err != nil {
 			return err
 		}
 	} else {
@@ -248,20 +314,23 @@ func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 // CPython: Python/codegen.c:L4514 codegen_async_comprehension_generator
 func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 	idx, depth int, elt, val ast.Expr, kind compKind, l ast.Pos,
+	iterOnStack bool,
 ) error {
 	gen := gens[idx]
 	start := c.newLabel()
 	except := c.newLabel()
 	ifCleanup := c.newLabel()
 
-	if idx == 0 {
-		pool := poolVarNames
-		c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
-	} else {
-		if err := c.visitExpr(gen.Iter); err != nil {
-			return err
+	if !iterOnStack {
+		if idx == 0 {
+			pool := poolVarNames
+			c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
+		} else {
+			if err := c.visitExpr(gen.Iter); err != nil {
+				return err
+			}
+			c.addOp(GET_AITER, loc(gen.Iter))
 		}
-		c.addOp(GET_AITER, loc(gen.Iter))
 	}
 
 	c.useLabel(start)
@@ -285,7 +354,7 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 
 	depth++
 	if idx+1 < len(gens) {
-		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l); err != nil {
+		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l, false); err != nil {
 			return err
 		}
 	} else {
@@ -316,7 +385,8 @@ func (c *Compiler) emitCompTail(kind compKind, depth int, elt, val ast.Expr) err
 		if err := c.visitExpr(elt); err != nil {
 			return err
 		}
-		c.addOpI(YIELD_VALUE, 0, loc(elt))
+		// CPython: Python/codegen.c:4478 ADDOP_YIELD in comp_genexp tail.
+		c.addopYield(loc(elt))
 		c.addOp(POP_TOP, loc(elt))
 	case compListComp:
 		if err := c.visitExpr(elt); err != nil {

@@ -18,37 +18,8 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/unicodetype"
 )
-
-// CPython: Objects/unicodectype.c:13-25 flag-bit definitions
-const (
-	typeFlagAlpha         = 0x0001
-	typeFlagDecimal       = 0x0002
-	typeFlagDigit         = 0x0004
-	typeFlagLower         = 0x0008
-	typeFlagTitle         = 0x0040
-	typeFlagUpper         = 0x0080
-	typeFlagXIDStart      = 0x0100
-	typeFlagXIDContinue   = 0x0200
-	typeFlagPrintable     = 0x0400
-	typeFlagNumeric       = 0x0800
-	typeFlagCaseIgnorable = 0x1000
-	typeFlagCased         = 0x2000
-	typeFlagExtendedCase  = 0x4000
-)
-
-// getTypeRecord mirrors gettyperecord: the shift-then-index2 walk
-// over typeIndex1 / typeIndex2 into typeRecords.
-//
-// CPython: Objects/unicodectype.c:43 gettyperecord
-func getTypeRecord(code rune) typeRecord {
-	if code < 0 || code >= 0x110000 {
-		return typeRecords[0]
-	}
-	idx := int(typeIndex1[code>>typeShift])
-	idx = int(typeIndex2[(idx<<typeShift)+(int(code)&((1<<typeShift)-1))])
-	return typeRecords[idx]
-}
 
 // CPython: Modules/unicodedata.c:132 unicodedata_UCD_decimal_impl
 func decimalImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -70,9 +41,8 @@ func decimalImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) 
 		}
 	}
 	if !haveOld {
-		rec := getTypeRecord(r)
-		if rec.Flags&typeFlagDecimal != 0 {
-			rc = int64(rec.Decimal)
+		if d := unicodetype.ToDecimalDigit(r); d >= 0 {
+			rc = int64(d)
 		}
 	}
 	if rc < 0 {
@@ -90,14 +60,14 @@ func digitImpl(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if err != nil {
 		return nil, err
 	}
-	rec := getTypeRecord(r)
-	if rec.Flags&typeFlagDigit == 0 {
+	d := unicodetype.ToDigit(r)
+	if d < 0 {
 		if def != nil {
 			return def, nil
 		}
 		return nil, fmt.Errorf("ValueError: not a digit")
 	}
-	return objects.NewInt(int64(rec.Digit)), nil
+	return objects.NewInt(int64(d)), nil
 }
 
 // CPython: Modules/unicodedata.c:218 unicodedata_UCD_numeric_impl
@@ -121,7 +91,7 @@ func numericImpl(self *UCD, args []objects.Object, _ map[string]objects.Object) 
 		}
 	}
 	if !haveOld {
-		if v, ok := numericValues[r]; ok {
+		if v, ok := unicodetype.ToNumeric(r); ok {
 			rc = v
 		}
 	}

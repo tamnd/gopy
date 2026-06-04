@@ -37,6 +37,48 @@ func ReprLeave(o Object) {
 	delete(reprDepth, objectID(o))
 }
 
+// cRecursionLimit bounds nested C-level slot calls (repr, str) the way
+// CPython's c_stack_soft_limit bounds the native call stack. CPython 3.14
+// measures the real machine stack pointer against a soft limit
+// (_Py_MakeRecCheck), but gopy runs these slots on the Go stack where the
+// pointer is not portably reachable, so we count nesting depth instead.
+// This mirrors the pre-stack-pointer c_recursion_remaining design whose
+// Py_C_RECURSION_LIMIT was 8000 on most platforms; deeply self-nested
+// containers (repr of a list 150k deep) hit it and raise RecursionError
+// rather than overflowing the goroutine stack.
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+const cRecursionLimit = 8000
+
+// cRecursionRemaining is the live budget. It is a package global to match
+// the existing reprDepth cycle tracker: gopy's GIL-style cooperative model
+// runs object slots one logical thread at a time, so a single counter is
+// consistent with that design.
+var cRecursionRemaining = cRecursionLimit
+
+// enterRecursiveCall decrements the C-recursion budget and returns a
+// RecursionError when it is exhausted. where names the operation for the
+// message (" while getting the repr of an object"). The caller must pair a
+// successful enter with leaveRecursiveCall, normally via defer.
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+// CPython: Python/ceval.c:1012 _Py_CheckRecursiveCall
+func enterRecursiveCall(where string) error {
+	cRecursionRemaining--
+	if cRecursionRemaining <= 0 {
+		cRecursionRemaining++
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded%s", where)
+	}
+	return nil
+}
+
+// leaveRecursiveCall returns one unit of C-recursion budget.
+//
+// CPython: Include/internal/pycore_ceval.h:233 _Py_LeaveRecursiveCallTstate
+func leaveRecursiveCall() {
+	cRecursionRemaining++
+}
+
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.
 //
@@ -45,6 +87,15 @@ func Repr(o Object) (string, error) {
 	if o == nil {
 		return "<nil>", nil
 	}
+	// PyObject_Repr guards tp_repr with the C-recursion check so a type
+	// whose repr loops (or a deeply self-nested container) raises instead
+	// of overflowing the native stack.
+	//
+	// CPython: Objects/object.c:777 PyObject_Repr
+	if err := enterRecursiveCall(" while getting the repr of an object"); err != nil {
+		return "", err
+	}
+	defer leaveRecursiveCall()
 	if r := o.Type().Repr; r != nil {
 		return r(o)
 	}
@@ -61,15 +112,11 @@ func ReprObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __repr__ directly and return the Object.
 	if o.Type().IsUser {
-		meth, err := lookupSpecial(o, "__repr__")
+		result, ok, err := callDunderNoArgObject(o, "__repr__")
 		if err != nil {
 			return nil, err
 		}
-		if meth != nil {
-			result, err := Call(meth, NewTuple(nil), nil)
-			if err != nil {
-				return nil, err
-			}
+		if ok {
 			if !IsSubtype(result.Type(), strType) {
 				return nil, fmt.Errorf("TypeError: __repr__ returned non-string (type %s)", result.Type().Name)
 			}
@@ -93,15 +140,11 @@ func StrObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __str__ directly and return the Object.
 	if o.Type().IsUser {
-		meth, err := lookupSpecial(o, "__str__")
+		result, ok, err := callDunderNoArgObject(o, "__str__")
 		if err != nil {
 			return nil, err
 		}
-		if meth != nil {
-			result, err := Call(meth, NewTuple(nil), nil)
-			if err != nil {
-				return nil, err
-			}
+		if ok {
 			if !IsSubtype(result.Type(), strType) {
 				return nil, fmt.Errorf("TypeError: __str__ returned non-string (type %s)", result.Type().Name)
 			}
@@ -122,6 +165,13 @@ func Str(o Object) (string, error) {
 	if o == nil {
 		return "<nil>", nil
 	}
+	// PyObject_Str guards tp_str with the same C-recursion check as repr.
+	//
+	// CPython: Objects/object.c:822 PyObject_Str
+	if err := enterRecursiveCall(" while getting the str of an object"); err != nil {
+		return "", err
+	}
+	defer leaveRecursiveCall()
 	if s := o.Type().Str; s != nil {
 		return s(o)
 	}
@@ -237,6 +287,56 @@ func lookupSpecial(o Object, name string) (Object, error) {
 		return dg(descr, o, o.Type())
 	}
 	return descr, nil
+}
+
+// callDunderNoArgObject looks up a no-argument dunder through the type
+// MRO and calls it, returning (result, found, err). found is false when
+// the type does not define the method, so the caller can fall back to a
+// Go-level slot. It carries CPython's lookup_maybe_method optimization:
+// a method-like descriptor (method_descriptor / function) is invoked
+// unbound with self threaded in as the first positional argument, so no
+// temporary bound method is built; a non-method descriptor is bound via
+// __get__ and the resulting object is Decref'd after the call, matching
+// CPython's Py_DECREF(func). Without that release the bound method holds
+// a strong reference to self forever and the cycle collector can never
+// reclaim the instance (the set-subclass weakref leak).
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+// CPython: Objects/typeobject.c:8235 slot_tp_repr (Py_DECREF(func))
+func callDunderNoArgObject(o Object, name string) (Object, bool, error) {
+	descr, _ := LookupDescriptor(o.Type(), name)
+	if descr == nil {
+		return nil, false, nil
+	}
+	if isMethodLike(descr) {
+		res, err := callUnboundNoArg(true, descr, o)
+		return res, true, err
+	}
+	fn := descr
+	if dg := descr.Type().DescrGet; dg != nil {
+		bound, err := dg(descr, o, o.Type())
+		if err != nil {
+			return nil, true, err
+		}
+		fn = bound
+	}
+	res, err := callUnboundNoArg(false, fn, o)
+	if fn != descr {
+		Decref(fn)
+	}
+	return res, true, err
+}
+
+// LookupSpecial is the exported form of lookupSpecial: a TYPE-level MRO
+// lookup of a dunder method, bound to the instance via DescrGet. It
+// returns (nil, nil) when the type does not define the method, so an
+// instance attribute of the same name is deliberately ignored. Callers
+// dispatching builtins like round() through __round__ need this so that
+// per-instance dunder assignments do not satisfy the slot.
+//
+// CPython: Objects/typeobject.c:1776 _PyObject_LookupSpecial
+func LookupSpecial(o Object, name string) (Object, error) {
+	return lookupSpecial(o, name)
 }
 
 // Hash returns the hash of o. Errors with errUnhashable when the

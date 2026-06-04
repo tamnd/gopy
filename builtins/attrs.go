@@ -108,44 +108,13 @@ func Dir(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	if len(args) == 0 {
 		return dirLocals()
 	}
-	seen := map[string]struct{}{}
-	collect := func(d *objects.Dict) {
-		if d == nil {
-			return
-		}
-		for _, k := range d.Keys() {
-			if s, err := objects.Str(k); err == nil {
-				seen[s] = struct{}{}
-			}
-		}
-	}
-	switch v := args[0].(type) {
-	case *objects.Module:
-		collect(v.Dict())
-	case *objects.Type:
-		for _, name := range objects.TypeDescrNames(v) {
-			seen[name] = struct{}{}
-		}
-	case *objects.Instance:
-		collect(v.Dict())
-		for _, name := range objects.TypeDescrNames(v.Type()) {
-			seen[name] = struct{}{}
-		}
-	default:
-		for _, name := range objects.TypeDescrNames(v.Type()) {
-			seen[name] = struct{}{}
-		}
-	}
-	names := make([]string, 0, len(seen))
-	for n := range seen {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]objects.Object, len(names))
-	for i, n := range names {
-		out[i] = objects.NewStr(n)
-	}
-	return objects.NewList(out), nil
+	// PyObject_Dir routes through _PyObject_LookupSpecial(obj, __dir__)
+	// then sorts the result. Each type's __dir__ (object's, type's,
+	// module's) handles the merge of instance dict and class names, so
+	// builtin_dir is a thin wrapper.
+	//
+	// CPython: Python/bltinmodule.c:1001 builtin_dir
+	return objects.Dir(args[0])
 }
 
 // dirLocals returns the running frame's local-scope keys, sorted.
@@ -158,14 +127,23 @@ func dirLocals() (objects.Object, error) {
 		return objects.NewList(nil), nil
 	}
 	_, locals := currentScope()
-	d, ok := locals.(*objects.Dict)
-	if !ok {
+	if locals == nil {
 		return objects.NewList(nil), nil
 	}
-	keys := d.Keys()
-	names := make([]string, 0, len(keys))
-	for _, k := range keys {
-		s, err := objects.Str(k)
+	// _dir_locals reads f_locals (which may be any mapping when the
+	// frame was set up by exec/eval with a custom locals object) and
+	// materializes its keys via PyMapping_Keys, then sorts. A plain
+	// dict takes the fast path inside MappingKeys; a custom mapping
+	// dispatches to its keys() method.
+	//
+	// CPython: Objects/object.c:2110 _dir_locals
+	keyList, err := objects.MappingKeys(locals)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, keyList.Len())
+	for i := 0; i < keyList.Len(); i++ {
+		s, err := objects.Str(keyList.Item(i))
 		if err != nil {
 			continue
 		}

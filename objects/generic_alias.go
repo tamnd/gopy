@@ -417,7 +417,7 @@ type gaIterObject struct {
 var gaIterType = NewType("generic_alias_iterator", []*Type{objectType})
 
 func init() {
-	gaIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	gaIterType.Iter = SelfIter
 	// CPython: Objects/genericaliasobject.c:922 ga_iternext
 	gaIterType.IterNext = func(o Object) (Object, error) {
 		gi := o.(*gaIterObject)

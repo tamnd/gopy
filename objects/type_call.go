@@ -134,7 +134,11 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		if _, err := callBound(bound, args, kwargs); err != nil {
+		_, err := callBound(bound, args, kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -159,7 +163,11 @@ func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Objec
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		if _, err := callBound(bound, args, kwargs); err != nil {
+		_, err := callBound(bound, args, kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -376,6 +384,12 @@ func bindDescr(descr Object, owner Object, ownerType *Type) Object {
 }
 
 // callBound invokes a bound callable with positional args and kwargs.
+// Routes through VectorcallDict (not Call) so the args slice is
+// consumed in place. A NewTuple wrapper here would survive the call
+// with refcount=1, stay in the GC tracked set, and pin its elements,
+// blocking gc.collect from reaping user-class self-cycles.
+//
+// CPython: Objects/call.c:154 PyObject_VectorcallDict
 func callBound(fn Object, args []Object, kwargs map[string]Object) (Object, error) {
 	var kwd *Dict
 	if len(kwargs) > 0 {
@@ -386,7 +400,7 @@ func callBound(fn Object, args []Object, kwargs map[string]Object) (Object, erro
 			}
 		}
 	}
-	return Call(fn, NewTuple(args), kwd)
+	return VectorcallDict(fn, args, uint(len(args)), kwd)
 }
 
 // typeVectorcall is the PEP 590 vectorcall entry for type objects. It
@@ -426,7 +440,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	}
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	if cls == typeType {
 		return typeMetaCall(args, kwmap)
@@ -449,7 +467,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+		_, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -463,7 +485,11 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	inst, err := cls.TpNew(cls, args, kwmap)
 	if err != nil {
@@ -475,8 +501,12 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
-			return nil, err
+		_, callErr := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		if bound != init {
+			Decref(bound)
+		}
+		if callErr != nil {
+			return nil, callErr
 		}
 	}
 	return inst, nil
@@ -489,7 +519,11 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 	var kwmap map[string]Object
 	if kwargs != nil && kwargs.Len() > 0 {
-		kwmap = dictToMap(kwargs)
+		var merr error
+		kwmap, merr = dictToMap(kwargs)
+		if merr != nil {
+			return nil, merr
+		}
 	}
 	newArgs := make([]Object, len(args)+1)
 	newArgs[0] = cls
@@ -516,7 +550,7 @@ func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, 
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 			bound := bindDescr(init, result, cls)
-			if _, err := Call(bound, NewTuple(args), kwargs); err != nil {
+			if _, err := VectorcallDict(bound, args, uint(len(args)), kwargs); err != nil {
 				return nil, err
 			}
 		}

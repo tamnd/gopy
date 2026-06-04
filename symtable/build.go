@@ -23,7 +23,10 @@ func Build(mod ast.Mod, filename string, ff *future.Features) (*Table, error) {
 		Future:   ff,
 	}
 	b := &builder{table: t, filename: filename, future: ff, recursionRemaining: recursionLimit}
-	if err := b.enterBlock("top", ModuleBlock, mod, ast.NoPos); err != nil {
+	// The top ModuleBlock carries loc {0,0,0,0}, not NoPos: symtable.get_lineno()
+	// reports 0 for the module entry.
+	// CPython: Python/symtable.c:438 _Py_SourceLocation loc0 = {0, 0, 0, 0}
+	if err := b.enterBlock("top", ModuleBlock, mod, ast.Pos{}); err != nil {
 		return nil, err
 	}
 	t.Top = b.cur
@@ -205,14 +208,14 @@ func (b *builder) addDefHelper(name string, flag SymbolFlags, ste *Entry, loc as
 		}
 		val |= DefCompIter
 	}
-	ste.Symbols[mangled] = val
+	ste.SetSymbol(mangled, val)
 	switch {
 	case flag&DefParam != 0:
 		ste.Varnames = append(ste.Varnames, mangled)
 	case flag&DefGlobal != 0:
 		gv := b.table.Top.Symbols[mangled]
 		gv |= flag
-		b.table.Top.Symbols[mangled] = gv
+		b.table.Top.SetSymbol(mangled, gv)
 	}
 	return nil
 }
@@ -261,12 +264,16 @@ func (b *builder) recordDirective(name string, loc ast.Pos) error {
 }
 
 // allowsTopLevelAwait mirrors PyCF_ALLOW_TOP_LEVEL_AWAIT at module
-// scope. v0.5 of gopy does not surface that flag yet; this helper is
-// stubbed to false but kept in place so future wiring is local.
+// scope. compile() folds the flag into ff_features, so it is true only
+// when that bit is set and the current block is the module body. Inside
+// a function (or a comprehension scope) the normal await/async
+// validation applies, exactly as in CPython.
 //
 // CPython: Python/symtable.c:L1831 allows_top_level_await
 func (b *builder) allowsTopLevelAwait() bool {
-	return false
+	return b.future != nil &&
+		b.future.Bits&future.AllowTopLevelAwait != 0 &&
+		b.cur.Type == ModuleBlock
 }
 
 // isAsyncDef reports whether the current block is an async function

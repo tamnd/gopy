@@ -231,10 +231,16 @@ func (e *evalState) commonConsts() [state.NumCommonConstants]objects.Object {
 //
 // CPython: Python/ceval.c:2789 _PyEval_LoadName
 func (e *evalState) loadName(name objects.Object) objects.Object {
-	if v, ok := lookupIn(e.f.Locals, name); ok {
+	if v, found, err := e.loadFromScope(e.f.Locals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
 		return v
 	}
-	if v, ok := lookupIn(e.f.Globals, name); ok {
+	if v, found, err := e.loadFromScope(e.f.Globals, name); err != nil {
+		e.pendingErr = err
+		return nil
+	} else if found {
 		return v
 	}
 	if v, found, err := objects.MappingGetOptionalItem(e.f.Builtins, name); err != nil {
@@ -570,13 +576,12 @@ func iterToSlice(o objects.Object) ([]objects.Object, error) {
 	if ierr != nil {
 		return nil, ierr
 	}
-	itType := it.Type()
-	if itType.IterNext == nil {
-		return nil, errors.New("TypeError: iter() returned non-iterator of type '" + itType.Name + "'")
+	if it.Type().IterNext == nil {
+		return nil, errors.New("TypeError: iter() returned non-iterator of type '" + it.Type().Name + "'")
 	}
 	var out []objects.Object
 	for {
-		v, nerr := itType.IterNext(it)
+		v, nerr := objects.IterNext(it)
 		if errors.Is(nerr, objects.ErrStopIteration) {
 			return out, nil
 		}
@@ -1174,6 +1179,7 @@ func (e *evalState) mappingGetOptionalItem(o, key objects.Object) (objects.Objec
 
 // cellSwapTakeRef wraps PyCell_SwapTakeRef: atomically replaces the
 // cell's contents and returns the previous value (nil if unbound).
+// The returned ref is "taken" from the cell, callers must Decref.
 //
 // CPython: Objects/cellobject.c:60 PyCell_SwapTakeRef
 func (e *evalState) cellSwapTakeRef(cell, newVal objects.Object) objects.Object {
@@ -1197,16 +1203,23 @@ func (e *evalState) sliceNew(start, stop, step objects.Object) objects.Object {
 }
 
 // cellSetTakeRef wraps PyCell_SetTakeRef: writes a value into a cell,
-// stealing the caller's reference. Used by STORE_DEREF.
+// stealing the caller's reference and Decref'ing whatever the cell
+// previously held. Used by STORE_DEREF / DELETE_DEREF (the NULL form).
 //
 // CPython: Objects/cellobject.c PyCell_SetTakeRef
+//
+//	(Py_XDECREF(old_obj) before storing)
 func (e *evalState) cellSetTakeRef(cell, newVal objects.Object) {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
 		e.pendingErr = errors.New("TypeError: PyCell_SetTakeRef expected cell")
 		return
 	}
+	old := c.Contents
 	c.Contents = newVal
+	if old != nil {
+		objects.Decref(old)
+	}
 }
 
 // getANext wraps _PyEval_GetANext. Returns the awaitable for iter's
@@ -1228,9 +1241,29 @@ func (e *evalState) getANext(iter objects.Object) objects.Object {
 	if _, isAG := iter.(*objects.AsyncGenerator); !isAG {
 		wrapped, werr := getAwaitableIter(next)
 		if werr != nil {
-			e.pendingErr = fmt.Errorf(
+			// Mirror _PyErr_FormatFromCause: lift the underlying failure
+			// off the thread state, chain it under a TypeError that names
+			// the offender, and reinstall the TypeError. Without the
+			// Clear+Raise dance, handleException sees the inner exception
+			// already pinned on the thread state and never installs the
+			// TypeError, so `err.__cause__` stays unset upstream.
+			//
+			// CPython: Python/ceval.c:3593 _PyEval_GetANext
+			// CPython: Python/errors.c:1438 _PyErr_FormatFromCause
+			cause := pyerrors.Occurred(e.ts)
+			if cause == nil {
+				cause = synthesizeException(werr)
+			}
+			pyerrors.Clear(e.ts)
+			msg := fmt.Sprintf(
 				"TypeError: 'async for' received an invalid object from __anext__: %s",
 				next.Type().Name)
+			exc := pyerrors.New(pyerrors.PyExc_TypeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+			exc.Cause = cause
+			exc.Context = cause
+			exc.Suppress = true
+			pyerrors.Raise(e.ts, exc)
+			e.pendingErr = objects.NewRaisedError(exc, msg)
 			return nil
 		}
 		next = wrapped
@@ -1385,10 +1418,14 @@ func (e *evalState) longIsZero(o objects.Object) bool {
 	return false
 }
 
-// cellGetStackRef wraps _PyCell_GetStackRef: returns the cell's contents
-// (nil if unbound).
+// cellGetStackRef wraps PyCell_GET + PyStackRef_FromPyObjectNew: returns
+// a new strong reference to the cell's contents (Null if unbound). The
+// cell retains its own strong reference, so the returned ref owns one
+// of its own. CPython's LOAD_DEREF / LOAD_FROM_DICT_OR_DEREF use this
+// pairing so popping the stack does not drop the cell's contents.
 //
-// CPython: Include/cpython/cellobject.h _PyCell_GetStackRef
+// CPython: Python/bytecodes.c LOAD_DEREF (PyStackRef_FromPyObjectNew)
+// CPython: Include/cpython/cellobject.h PyCell_GET
 func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	c, ok := cell.(*objects.Cell)
 	if !ok {
@@ -1398,18 +1435,38 @@ func (e *evalState) cellGetStackRef(cell objects.Object) stackref.Ref {
 	if c.Contents == nil {
 		return stackref.Null
 	}
-	return stackref.FromObject(c.Contents)
+	return stackref.FromObjectNew(c.Contents)
 }
 
 // getAwaitable wraps _PyEval_GetAwaitable. opcode is a hint CPython uses
 // for tailored error messages; gopy currently ignores it.
 //
 // CPython: Python/ceval.c:3525 _PyEval_GetAwaitable
-func (e *evalState) getAwaitable(iter objects.Object, opcode uint32) objects.Object {
-	_ = opcode
+func (e *evalState) getAwaitable(iter objects.Object, oparg uint32) objects.Object {
 	out, err := getAwaitableIter(iter)
 	if err != nil {
-		e.pendingErr = err
+		if msg := formatAwaitableError(iter.Type().Name, oparg); msg != nil {
+			e.pendingErr = msg
+		} else {
+			e.pendingErr = err
+		}
+		return nil
+	}
+	// Awaited-already gate: when the returned iter is a coroutine that is
+	// already suspended yielding from another awaitable, refuse to drive
+	// it from a second parent. Mirrors CPython's _PyGen_yf(iter) != NULL
+	// branch which captures the FRAME_SUSPENDED_YIELD_FROM state. The
+	// suspended-yield-from predicate uses the same gates as cr_await:
+	// started, not closed, not running, and a pending YieldFromTarget.
+	//
+	// CPython: Python/ceval.c:3649 _PyEval_GetAwaitable (PyCoro_CheckExact branch)
+	if c, ok := out.(*objects.Coroutine); ok && c.IsSuspendedYieldFrom() {
+		exc := pyerrors.New(pyerrors.PyExc_RuntimeError,
+			objects.NewTuple([]objects.Object{
+				objects.NewStr("coroutine is being awaited already"),
+			}))
+		pyerrors.Raise(e.ts, exc)
+		e.pendingErr = objects.NewRaisedError(exc, "coroutine is being awaited already")
 		return nil
 	}
 	return out

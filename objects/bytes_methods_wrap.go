@@ -33,6 +33,13 @@ func asBytesLike(o Object) ([]byte, bool) {
 		return x.v, true
 	case *ByteArray:
 		return x.v, true
+	case *MemoryView:
+		// A released or non-contiguous view cannot satisfy PyBUF_SIMPLE.
+		// CPython: Objects/memoryobject.c memory_getbuf (PyBUF_C_CONTIGUOUS)
+		if x.released || !x.contiguous {
+			return nil, false
+		}
+		return x.buf, true
 	}
 	return nil, false
 }
@@ -65,6 +72,32 @@ func clampBytesSlice(n, start, end int) (int, int) {
 	}
 	if end < start {
 		end = start
+	}
+	return start, end
+}
+
+// adjustBytesIndices mirrors CPython's ADJUST_INDICES macro exactly: it
+// folds negative bounds against n and caps end at n, but deliberately does
+// NOT cap start at n nor force end>=start. Callers rely on end-start being
+// negative as the "impossible slice" signal, matching the
+// `if (end - start < sub_len) res = -1` guard in find_internal and the
+// `if (str_len < 0) return 0` guard in stringlib_count.
+//
+// CPython: Objects/bytes_methods.c:435 ADJUST_INDICES
+func adjustBytesIndices(n, start, end int) (int, int) {
+	if end > n {
+		end = n
+	} else if end < 0 {
+		end += n
+		if end < 0 {
+			end = 0
+		}
+	}
+	if start < 0 {
+		start += n
+		if start < 0 {
+			start = 0
+		}
 	}
 	return start, end
 }

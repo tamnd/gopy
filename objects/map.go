@@ -31,10 +31,11 @@ type Map struct {
 var MapType = NewType("map", []*Type{objectType})
 
 func init() {
-	MapType.Iter = func(o Object) (Object, error) { return o, nil }
+	MapType.Iter = SelfIter
 	MapType.IterNext = mapNext
 	AddIterSlotWrappers(MapType)
 	SetTypeDescr(MapType, "__reduce__", NewMethodDescr(MapType, "__reduce__", mapReduce))
+	SetTypeDescr(MapType, "__setstate__", NewMethodDescr(MapType, "__setstate__", mapSetstate))
 }
 
 // NewMap mirrors map_new: convert each iterable to its iterator up
@@ -88,9 +89,11 @@ func mapNext(o Object) (Object, error) {
 }
 
 // mapReduce returns (type(self), (func, iter1, iter2, ...)) so pickle
-// can reconstruct the map at the right iterator position.
+// can reconstruct the map at the right iterator position. In strict
+// mode it appends Py_True as the pickle state so __setstate__ can
+// restore the strict flag, matching map_reduce's "ONO" build.
 //
-// CPython: Python/bltinmodule.c:1624 map_reduce
+// CPython: Python/bltinmodule.c:1573 map_reduce
 func mapReduce(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
@@ -102,7 +105,27 @@ func mapReduce(args []Object, _ map[string]Object) (Object, error) {
 	elems := make([]Object, 0, 1+len(m.Iters))
 	elems = append(elems, m.Func)
 	elems = append(elems, m.Iters...)
+	if m.Strict {
+		return NewTuple([]Object{MapType, NewTuple(elems), True()}), nil
+	}
 	return NewTuple([]Object{MapType, NewTuple(elems)}), nil
+}
+
+// mapSetstate restores the strict flag from the pickle state. map_setstate
+// takes truthiness of the state object, so any truthy value re-enables
+// strict mode after unpickling.
+//
+// CPython: Python/bltinmodule.c:1596 map_setstate
+func mapSetstate(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	m, ok := args[0].(*Map)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__setstate__' for 'map' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	m.Strict = IsTrue(args[1])
+	return None(), nil
 }
 
 // mapStrictMismatch is the strict-mode error that map_next emits when

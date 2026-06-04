@@ -43,7 +43,7 @@
     consumed inputs, then push every new output.
 */ -}}
 {{- range .Writebacks}}
-		e.setPeek({{.DepthExpr}}, {{.Name}})
+		e.setPeekRaw({{.DepthExpr}}, {{.Name}})
 {{- end}}
 {{- if .DropExpr}}
 		e.drop({{.DropExpr}})

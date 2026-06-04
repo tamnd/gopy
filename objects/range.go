@@ -50,6 +50,78 @@ func init() {
 			}), nil
 		},
 	))
+	// __getitem__ and __len__ slot wrappers so attribute lookup finds
+	// range.__getitem__ / range.__len__ without bouncing through
+	// add_operators on the C side.
+	//
+	// CPython: Objects/typeobject.c add_operators slot wrappers for
+	// sq_item / sq_length.
+	SetTypeDescr(RangeType, "__getitem__", NewMethodDescr(RangeType, "__getitem__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return rangeSubscript(args[0], args[1])
+		},
+	))
+	SetTypeDescr(RangeType, "__len__", NewMethodDescr(RangeType, "__len__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+			}
+			n, err := rangeLen(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
+	SetTypeDescr(RangeType, "__contains__", NewMethodDescr(RangeType, "__contains__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			ok, err := rangeContains(args[0], args[1])
+			if err != nil {
+				return nil, err
+			}
+			return NewBool(ok), nil
+		},
+	))
+	SetTypeDescr(RangeType, "__iter__", NewMethodDescr(RangeType, "__iter__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __iter__() takes no arguments (%d given)", len(args)-1)
+			}
+			return rangeIter(args[0])
+		},
+	))
+	// CPython: Objects/rangeobject.c:1215 range_reverse
+	SetTypeDescr(RangeType, "__reversed__", NewMethodDescr(RangeType, "__reversed__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
+			}
+			return rangeReverse(args[0])
+		},
+	))
+}
+
+// rangeReverse ports range_reverse: reversed(range(start, stop, step))
+// is range(start+(n-1)*step, start-step, -step), where n is the range
+// length. The result is a range_iterator, the same type iter(range)
+// yields, so reversed() and iter() agree on type.
+//
+// CPython: Objects/rangeobject.c:1215 range_reverse
+func rangeReverse(o Object) (Object, error) {
+	r := o.(*Range)
+	n := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
+	newStep := NewIntFromBig(new(big.Int).Neg(&r.Step.v))
+	newStop := NewIntFromBig(new(big.Int).Sub(&r.Start.v, &r.Step.v))
+	nm1 := new(big.Int).Sub(n, big.NewInt(1))
+	prod := new(big.Int).Mul(nm1, &r.Step.v)
+	newStart := NewIntFromBig(new(big.Int).Add(&r.Start.v, prod))
+	return newRangeIterator(newStart, newStop, newStep), nil
 }
 
 // NewRange builds a range. Step must be non-zero.

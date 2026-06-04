@@ -48,10 +48,21 @@ func init() {
 	TupleType.RichCmp = tupleRichCmp
 	TupleType.Iter = tupleIter
 	TupleType.Sequence = &SequenceMethods{
+		Length:   tupleLen,
+		GetItem:  tupleGetItem,
+		Concat:   tupleConcat,
+		Repeat:   tupleRepeat,
+		Contains: tupleContains,
+	}
+	// tuple_as_mapping carries mp_length and mp_subscript; the subscript
+	// slot is what handles slice keys (sq_item is integer-only). With the
+	// mapping present, GetItem(tuple, key) routes through tupleSubscript
+	// first, matching PyObject_GetItem's mp_subscript precedence.
+	//
+	// CPython: Objects/tupleobject.c:886 tuple_as_mapping
+	TupleType.Mapping = &MappingMethods{
 		Length:  tupleLen,
-		GetItem: tupleGetItem,
-		Concat:  tupleConcat,
-		Repeat:  tupleRepeat,
+		GetItem: tupleSubscript,
 	}
 	TupleType.TpTraverse = tupleTraverse
 	TupleType.Getattro = GenericGetAttr
@@ -69,20 +80,45 @@ func init() {
 	// CPython: Objects/typeobject.c add_operators slot wrapper for sq_item / sq_length
 	SetTypeDescr(TupleType, "__getitem__", NewMethodDescr(TupleType, "__getitem__", tupleGetItemMethod))
 	SetTypeDescr(TupleType, "__len__", NewMethodDescr(TupleType, "__len__", tupleLenMethod))
+	SetTypeDescr(TupleType, "__contains__", NewMethodDescr(TupleType, "__contains__", tupleContainsMethod))
+	SetTypeDescr(TupleType, "__add__", NewMethodDescr(TupleType, "__add__", tupleAddMethod))
+	SetTypeDescr(TupleType, "__mul__", NewMethodDescr(TupleType, "__mul__", tupleMulMethod))
+	SetTypeDescr(TupleType, "__rmul__", NewMethodDescr(TupleType, "__rmul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
 	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
+	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescr(TupleType, "__getnewargs__", tupleGetNewArgsMethod))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
 	//
 	// CPython: Objects/tupleobject.c:778 tuple_new_impl
 	TupleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		// The clinic-generated tuple_new rejects keywords when
+		// type == &PyTuple_Type OR the subtype has not overridden __init__
+		// (type->tp_init == base_tp->tp_init). tuple itself inherits
+		// object.__init__, so this means: a bare subclass still rejects
+		// kwargs, but subclass_with_init(tuple) (which defines __init__)
+		// may pass them through to __init__.
+		//
+		// CPython: Objects/clinic/tupleobject.c.h:96 tuple_new
+		if len(kwargs) > 0 && (cls == TupleType || initInheritedFromObject(cls)) {
+			return nil, fmt.Errorf("TypeError: tuple() takes no keyword arguments")
+		}
 		if len(args) > 1 {
 			return nil, fmt.Errorf("TypeError: tuple expected at most 1 argument, got %d", len(args))
 		}
+		// tuple(some_exact_tuple) returns that very object: PySequence_Tuple
+		// fast-paths PyTuple_CheckExact with a bare incref.
+		//
+		// CPython: Objects/abstract.c:2820 PySequence_Tuple
+		if cls == TupleType && len(args) == 1 {
+			if t, ok := args[0].(*Tuple); ok && t.Type() == TupleType {
+				return t, nil
+			}
+		}
 		var items []Object
 		if len(args) == 1 {
-			drained, err := drainIterableForSlice(args[0])
+			drained, err := DrainIterable(args[0])
 			if err != nil {
 				return nil, err
 			}
@@ -113,6 +149,10 @@ func NewTuple(items []Object) *Tuple {
 	t := &Tuple{items: append([]Object(nil), items...)}
 	t.init(TupleType)
 	t.size = int64(len(items))
+	// CPython: Objects/tupleobject.c:170 PyTuple_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(t)
+	}
 	return t
 }
 
@@ -158,6 +198,70 @@ func tupleGetItem(o Object, i int) (Object, error) {
 	return t.items[i], nil
 }
 
+// tupleSubscript ports tuple_subscript (mp_subscript): an index-like key
+// goes through tupleGetItem, a slice key returns a fresh tuple of the
+// selected region, and anything else raises the same TypeError CPython
+// emits.
+//
+// CPython: Objects/tupleobject.c:811 tuple_subscript
+func tupleSubscript(o, key Object) (Object, error) {
+	t := o.(*Tuple)
+	if s, ok := key.(*Slice); ok {
+		start, _, step, slicelen, err := s.GetIndices(len(t.items))
+		if err != nil {
+			return nil, err
+		}
+		if slicelen <= 0 {
+			return emptyTuple, nil
+		}
+		out := make([]Object, slicelen)
+		for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
+			out[i] = t.items[idx]
+		}
+		return NewTuple(out), nil
+	}
+	idx, err := indexValueAsInt(key, "tuple")
+	if err != nil {
+		return nil, err
+	}
+	return tupleGetItem(o, idx)
+}
+
+// tupleContains ports tuple_contains (sq_contains): linear scan with
+// RichCmpBool, needle on the left.
+//
+// CPython: Objects/tupleobject.c:692 tuple_contains
+func tupleContains(o, v Object) (bool, error) {
+	t := o.(*Tuple)
+	for _, item := range t.items {
+		// tuple_contains compares the element on the left and the needle
+		// on the right: PyObject_RichCompareBool(item, el, Py_EQ).
+		eq, err := RichCmpBool(item, v, CompareEQ)
+		if err != nil {
+			return false, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// tupleContainsMethod backs tuple.__contains__.
+func tupleContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[0].(*Tuple); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__contains__' requires a 'tuple' object")
+	}
+	found, err := tupleContains(args[0], args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(found), nil
+}
+
 func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
@@ -167,6 +271,43 @@ func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'tuple' object")
 	}
 	return GetItem(t, args[1])
+}
+
+// tupleAddMethod backs tuple.__add__. Returns NotImplemented when other
+// is not a tuple, matching tuple_concat's PyTuple_Check guard.
+//
+// CPython: Objects/tupleobject.c:559 tuple_concat
+func tupleAddMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[1].(*Tuple); !ok {
+		return NotImplemented(), nil
+	}
+	return tupleConcat(args[0], args[1])
+}
+
+// tupleMulMethod backs tuple.__mul__ / tuple.__rmul__. n is coerced via
+// PyNumber_Index.
+//
+// CPython: Objects/tupleobject.c:606 tuple_repeat
+func tupleMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return tupleRepeat(args[0], int(v))
 }
 
 func tupleLenMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -337,15 +478,34 @@ func tupleConcat(a, b Object) (Object, error) {
 	return NewTuple(out), nil
 }
 
-// tupleRepeat is sq_repeat for tuple: t * n builds a new tuple.
+// tupleRepeat is sq_repeat for tuple: t * n builds a new tuple. Two
+// short circuits mirror CPython tuple_repeat: (a) for an exact tuple
+// (not a subclass), n==1 or input==0 returns the same object since
+// tuples are immutable; (b) otherwise n<=0 returns the singleton empty
+// tuple. Multiplying past PY_SSIZE_T_MAX raises MemoryError.
 //
-// CPython: Objects/tupleobject.c:L641 tuplerepeat
-func tupleRepeat(o Object, n int) (Object, error) {
+// CPython: Objects/tupleobject.c:533 tuple_repeat
+func tupleRepeat(o Object, n int) (rv Object, rerr error) {
 	t := o.(*Tuple)
-	if n <= 0 || len(t.items) == 0 {
+	input := len(t.items)
+	if input == 0 || n == 1 {
+		if t.Type() == TupleType {
+			return t, nil
+		}
+	}
+	if input == 0 || n <= 0 {
 		return emptyTuple, nil
 	}
-	out := make([]Object, 0, len(t.items)*n)
+	if input > int(^uint(0)>>1)/n {
+		return nil, fmt.Errorf("MemoryError")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			rv = nil
+			rerr = fmt.Errorf("MemoryError")
+		}
+	}()
+	out := make([]Object, 0, input*n)
 	for i := 0; i < n; i++ {
 		out = append(out, t.items...)
 	}
@@ -374,7 +534,7 @@ func init() {
 		it.pos++
 		return v, nil
 	}
-	tupleIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	tupleIterType.Iter = SelfIter
 	AddIterSlotWrappers(tupleIterType)
 	// CPython: Objects/tupleobject.c:1132 tupleiter_reduce
 	SetTypeDescr(tupleIterType, "__reduce__", NewMethodDescr(tupleIterType, "__reduce__",
@@ -421,6 +581,23 @@ func init() {
 			return None(), nil
 		},
 	))
+	// CPython: Objects/tupleobject.c:1115 tupleiter_len
+	SetTypeDescr(tupleIterType, "__length_hint__", NewMethodDescr(tupleIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*tupleIterator)
+			if it.src == nil {
+				return NewInt(0), nil
+			}
+			n := len(it.src.items) - it.pos
+			if n < 0 {
+				n = 0
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
 }
 
 func tupleIter(o Object) (Object, error) {
@@ -445,10 +622,16 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	n := len(t.items)
 	start := 0
 	stop := n
+	// start / stop go through the slice_index clinic converter, which
+	// clamps values outside the ssize_t range (e.g. -4*sys.maxsize) to
+	// the platform min / max rather than raising, so a huge window still
+	// scans the whole tuple.
+	//
+	// CPython: Python/ceval.c:1786 _PyEval_SliceIndex
 	if len(args) >= 3 {
-		s, err := toGoInt(args[2])
+		s, err := sliceIndex(args[2])
 		if err != nil {
-			return nil, fmt.Errorf("TypeError: 'start' must be an integer")
+			return nil, err
 		}
 		start = s
 		if start < 0 {
@@ -459,9 +642,9 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 		}
 	}
 	if len(args) >= 4 {
-		s, err := toGoInt(args[3])
+		s, err := sliceIndex(args[3])
 		if err != nil {
-			return nil, fmt.Errorf("TypeError: 'stop' must be an integer")
+			return nil, err
 		}
 		stop = s
 		if stop < 0 {
@@ -511,13 +694,24 @@ func tupleCountMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(int64(count)), nil
 }
 
-// toGoInt converts an Object to a Go int for use as a sequence index.
-func toGoInt(o Object) (int, error) {
-	if i, ok := o.(*Int); ok {
-		n, _ := i.Int64()
-		return int(n), nil
+// tupleGetNewArgsMethod implements tuple.__getnewargs__. It returns a
+// 1-tuple holding a plain-tuple copy of self's items so a tuple subclass
+// can round-trip through pickle: copyreg builds __newobj__(cls, *args)
+// where args is this getnewargs result, reconstructing the subclass with
+// its original contents.
+//
+// CPython: Objects/tupleobject.c:790 tuple___getnewargs___impl
+func tupleGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
 	}
-	return 0, fmt.Errorf("not an integer")
+	t, ok := args[0].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'tuple' object")
+	}
+	cp := make([]Object, len(t.items))
+	copy(cp, t.items)
+	return NewTuple([]Object{NewTuple(cp)}), nil
 }
 
 // TupleIterNextFast advances o as a tuple_iterator without going

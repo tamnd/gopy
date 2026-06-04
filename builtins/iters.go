@@ -10,8 +10,8 @@
 package builtins
 
 import (
-	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -114,7 +114,13 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	if err == nil {
 		return v, nil
 	}
-	if errors.Is(err, objects.ErrStopIteration) {
+	// next(it, default) swaps in the default for any StopIteration,
+	// whether the built-in sentinel or a Python `raise StopIteration`
+	// from a user __next__. Match the exception type, not just the
+	// sentinel, mirroring builtin_next's PyErr_ExceptionMatches.
+	//
+	// CPython: Python/bltinmodule.c:1620 builtin_next
+	if objects.IsStopIteration(err) {
 		if len(args) == 2 {
 			return args[1], nil
 		}
@@ -123,18 +129,39 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	return nil, err
 }
 
-// Reversed ports builtin_reversed. v0.7 covers the sequence path
-// (length + getitem) which handles tuple, list, str, range. The
-// __reversed__ slot lookup arrives once attribute access is wired
-// through the type slots.
+// Reversed ports builtin_reversed. Looks for __reversed__ on the type
+// first (range, dict_keys, deque all provide their own reverse
+// iterators) and falls back to the sequence protocol (length + getitem)
+// when the type has no __reversed__.
 //
-// CPython: Objects/enumobject.c:reversed_new_impl
-func Reversed(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+// CPython: Objects/enumobject.c:1086 reversed_new_impl
+func Reversed(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// reversed_new runs _PyArg_NoKeywords before anything else, so
+	// reversed(seq, a=1) is a TypeError regardless of the argument count.
+	//
+	// CPython: Objects/enumobject.c:454 reversed_new (PyArg_NoKeywords)
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: reversed() takes no keyword arguments")
+	}
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: reversed() takes exactly one argument (%d given)", len(args))
 	}
 	o := args[0]
 	t := o.Type()
+	if descr, _ := objects.LookupDescriptor(t, "__reversed__"); descr != nil {
+		fn, err := objects.GetAttr(o, objects.NewStr("__reversed__"))
+		if err == nil && fn != nil {
+			res, callErr := objects.CallObject(fn, nil)
+			// reversed_new owns the bound method returned by the special
+			// lookup and drops it once the call is done; without this the
+			// bound method (and the sequence it captured as __self__) stays
+			// pinned, so check_free_after_iterating never sees __del__ run.
+			//
+			// CPython: Objects/enumobject.c:1110 reversed_new_impl (Py_DECREF reversed_meth)
+			objects.Decref(fn)
+			return res, callErr
+		}
+	}
 	if t.Sequence == nil || t.Sequence.GetItem == nil || t.Sequence.Length == nil {
 		return nil, fmt.Errorf("TypeError: argument to reversed() must be a sequence")
 	}
@@ -145,35 +172,65 @@ func Reversed(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	return newReversedIter(o, n), nil
 }
 
-// Enumerate ports builtin_enumerate. Returns an iterator yielding
-// (index, value) tuples. Optional start kwarg / second positional
-// shifts the index.
+// Enumerate ports the enumerate(iterable, start=0) constructor. Both
+// arguments may be passed positionally or by keyword, mirroring
+// enumerate_vectorcall; the result carries cls so subclass instances
+// keep their own type the way enum_new_impl's tp_alloc(type) does.
 //
-// CPython: Objects/enumobject.c:enumerate_new_impl
-func Enumerate(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return nil, fmt.Errorf("TypeError: enumerate expected 1 or 2 arguments, got %d", len(args))
+// CPython: Objects/enumobject.c:48 enum_new_impl
+// CPython: Objects/enumobject.c:103 enumerate_vectorcall
+func Enumerate(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	var iterable, startObj objects.Object
+	switch len(args) {
+	case 0:
+	case 1:
+		iterable = args[0]
+	case 2:
+		iterable, startObj = args[0], args[1]
+	default:
+		return nil, fmt.Errorf("TypeError: enumerate() takes at most 2 arguments (%d given)", len(args)+len(kwargs))
 	}
-	start := int64(0)
-	if len(args) == 2 {
-		v, err := indexAsInt64(args[1], "enumerate")
+	for k, v := range kwargs {
+		switch k {
+		case "iterable":
+			if iterable != nil {
+				return nil, fmt.Errorf("TypeError: argument for enumerate() given by name ('iterable') and position (1)")
+			}
+			iterable = v
+		case "start":
+			if startObj != nil {
+				return nil, fmt.Errorf("TypeError: argument for enumerate() given by name ('start') and position (2)")
+			}
+			startObj = v
+		default:
+			return nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for enumerate()", k)
+		}
+	}
+	if iterable == nil {
+		return nil, fmt.Errorf("TypeError: enumerate() missing required argument 'iterable'")
+	}
+	// start: PyNumber_Index(start) so any __index__-bearing value works,
+	// including ints wider than int64. A non-index start is a TypeError.
+	var index *big.Int
+	if startObj != nil {
+		si, err := objects.NumberIndex(startObj)
 		if err != nil {
 			return nil, err
 		}
-		start = v
-	}
-	if v, ok := kwargs["start"]; ok {
-		s, err := indexAsInt64(v, "enumerate")
-		if err != nil {
-			return nil, err
+		bi, ok := si.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", startObj.Type().Name)
 		}
-		start = s
+		index = bi.BigInt()
 	}
-	it, err := getIter(args[0])
+	it, err := getIter(iterable)
 	if err != nil {
 		return nil, err
 	}
-	return newEnumerate(it, start), nil
+	if cls == nil {
+		cls = objects.EnumerateType
+	}
+	return objects.NewEnumerateOfType(cls, it, index), nil
 }
 
 // Zip ports builtin_zip. The strict kwarg is honored: when true, an
@@ -251,16 +308,4 @@ func indexAsInt(o objects.Object) (*objects.Int, error) {
 		return i, nil
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", o.Type().Name)
-}
-
-func indexAsInt64(o objects.Object, where string) (int64, error) {
-	i, err := indexAsInt(o)
-	if err != nil {
-		return 0, err
-	}
-	v, ok := i.Int64()
-	if !ok {
-		return 0, fmt.Errorf("OverflowError: %s argument does not fit in int64", where)
-	}
-	return v, nil
 }

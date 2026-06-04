@@ -7,7 +7,10 @@
 
 package objects
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // GetSetDescr is the v0.10 base descriptor: a (name, fget, fset)
 // triple that exposes a Go-backed property to Python attribute
@@ -18,6 +21,7 @@ import "errors"
 type GetSetDescr struct {
 	Header
 	name  string
+	doc   string
 	owner *Type
 	fget  func(owner Object) (Object, error)
 	fset  func(owner Object, value Object) error
@@ -128,6 +132,18 @@ func (d *GetSetDescr) Name() string {
 	return d.name
 }
 
+// Doc returns the documentation string for this descriptor, or "".
+func (d *GetSetDescr) Doc() string { return d.doc }
+
+// WithDoc attaches a docstring to the descriptor and returns it. Mirrors
+// the doc field set by PyGetSetDef rows in CPython.
+//
+// CPython: Objects/descrobject.c:1696 PyDescr_NewGetSet
+func (d *GetSetDescr) WithDoc(doc string) *GetSetDescr {
+	d.doc = doc
+	return d
+}
+
 func getsetDescrRepr(o Object) (string, error) {
 	d := o.(*GetSetDescr)
 	return "<attribute '" + d.name + "'>", nil
@@ -155,14 +171,18 @@ func getsetDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 // getsetDescrSet calls fset, raising AttributeError when the
 // descriptor is read-only (no setter registered).
 //
-// CPython: Objects/descrobject.c:175 getset_set
+// CPython: Objects/descrobject.c:243 getset_set
 func getsetDescrSet(descr Object, owner Object, value Object) error {
 	d := descr.(*GetSetDescr)
 	if d.fset == nil {
-		if value == nil {
-			return errors.New("AttributeError: can't delete attribute " + d.name)
+		tname := "?"
+		if d.owner != nil {
+			tname = d.owner.Name
 		}
-		return errors.New("AttributeError: can't set attribute " + d.name)
+		if value == nil {
+			return fmt.Errorf("AttributeError: attribute '%s' of '%s' objects is not deletable", d.name, tname)
+		}
+		return fmt.Errorf("AttributeError: attribute '%s' of '%s' objects is not writable", d.name, tname)
 	}
 	return d.fset(owner, value)
 }
@@ -274,6 +294,12 @@ func SetTypeDescr(t *Type, name string, d Object) {
 	if t.ClassAttrDict != nil {
 		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
 	}
+	// Mutating tp_dict invalidates every adaptive cache keyed on this
+	// type's version tag (LOAD_ATTR_CLASS stamps the value it read).
+	// During construction versionTag is still 0 so this is a no-op.
+	//
+	// CPython: Objects/typeobject.c:6088 type_setattro -> PyType_Modified
+	t.InvalidateVersionTag()
 }
 
 // TypeOwnDescrs returns the names and values registered directly on
@@ -329,5 +355,7 @@ func DelTypeDescr(t *Type, name string) bool {
 			break
 		}
 	}
+	// CPython: Objects/typeobject.c:6088 type_setattro -> PyType_Modified
+	t.InvalidateVersionTag()
 	return true
 }

@@ -15,15 +15,17 @@
 //
 // Outputs:
 //   - module/unicodedata/data_gen.go: arrays for unicodedata_db.h.
-//   - module/unicodedata/type_gen.go: arrays for unicodetype_db.h
-//     plus the parsed _PyUnicode_ToNumeric switch.
+//   - unicodetype/tables_gen.go: arrays for unicodetype_db.h plus the
+//     parsed _PyUnicode_ToNumeric switch, emitted into the leaf
+//     unicodetype package so both objects and unicodedata can consume
+//     them without an import cycle.
 //
 // Run with:
 //
 //	go run ./Tools/unicodedata_go \
 //	  -cpython=$HOME/cpython-314 \
 //	  -out=module/unicodedata/data_gen.go \
-//	  -out-type=module/unicodedata/type_gen.go
+//	  -out-type=unicodetype/tables_gen.go
 //
 // Both outputs are checked in. The runtime build has no Python
 // dependency.
@@ -49,7 +51,7 @@ import (
 func main() {
 	cpython := flag.String("cpython", "", "path to cpython source tree")
 	out := flag.String("out", "", "output Go file (unicodedata_db.h port)")
-	outType := flag.String("out-type", "", "output Go file (unicodetype_db.h port)")
+	outType := flag.String("out-type", "", "output Go file (unicodetype_db.h port, package unicodetype)")
 	outName := flag.String("out-name", "", "output Go file (unicodename_db.h port)")
 	outUCD320 := flag.String("out-ucd320", "", "output Go file (Unicode 3.2 snapshot tables)")
 	flag.Parse()
@@ -498,11 +500,12 @@ func emitReindex(w *bytes.Buffer, name string, rs []reindex) {
 // flag bit is set), decimal/digit are unsigned char, flags is the
 // bitfield CPython uses for isalpha/isdigit/islower/...
 type typeDB struct {
-	shift   int
-	records [][6]int64 // {upper, lower, title, decimal, digit, flags}
-	index1  []uint32
-	index2  []uint32
-	numeric []numericEntry
+	shift    int
+	records  [][6]int64 // {upper, lower, title, decimal, digit, flags}
+	index1   []uint32
+	index2   []uint32
+	extended []uint32 // _PyUnicode_ExtendedCase
+	numeric  []numericEntry
 }
 
 type numericEntry struct {
@@ -529,6 +532,17 @@ func parseTypeDB(src, ctype string) (*typeDB, error) {
 		return nil, fmt.Errorf("type records: %w", err)
 	}
 	out.records = parseSignedTupleList(body, 6)
+
+	// _PyUnicode_ExtendedCase holds the 1->N case-mapping payloads that
+	// the EXTENDED_CASE_MASK records point into (German sharp s,
+	// ligatures, Greek iota-subscript expansions, full casefold).
+	//
+	// CPython: Objects/unicodetype_db.h:518 _PyUnicode_ExtendedCase
+	extBody, err := extractBlock(src, "_PyUnicode_ExtendedCase[] = {")
+	if err != nil {
+		return nil, fmt.Errorf("extended case: %w", err)
+	}
+	out.extended = parseInts(extBody)
 
 	for _, tab := range []struct {
 		name string
@@ -710,7 +724,11 @@ func evalNumeric(expr string) (float64, error) {
 	return strconv.ParseFloat(expr, 64)
 }
 
-// emitType writes module/unicodedata/type_gen.go.
+// emitType writes unicodetype/tables_gen.go, the leaf package that
+// both objects and module/unicodedata consume. Keeping the tables in
+// a dependency-free leaf breaks the import cycle that would otherwise
+// stop objects (which has no business importing a stdlib module) from
+// reaching the real CPython ctype data.
 //
 // CPython: Objects/unicodetype_db.h (data)
 // CPython: Objects/unicodectype.c:43 gettyperecord
@@ -723,7 +741,7 @@ func emitType(w *bytes.Buffer, d *typeDB) error {
 // CPython: Objects/unicodetype_db.h
 // CPython: Objects/unicodectype.c
 
-package unicodedata
+package unicodetype
 
 `)
 	fmt.Fprintf(w, "const typeShift = %d\n\n", d.shift)
@@ -738,6 +756,11 @@ package unicodedata
 
 	emitUint16(w, "typeIndex1", d.index1)
 	emitUint16(w, "typeIndex2", d.index2)
+
+	fmt.Fprint(w, "// extendedCase holds the 1->N case-mapping payloads pointed to by\n")
+	fmt.Fprint(w, "// records carrying EXTENDED_CASE_MASK.\n")
+	fmt.Fprint(w, "// CPython: Objects/unicodetype_db.h:518 _PyUnicode_ExtendedCase\n")
+	emitUint32(w, "extendedCase", d.extended)
 
 	fmt.Fprint(w, "// numericValues maps each codepoint with a numeric value to its\n")
 	fmt.Fprint(w, "// double, exactly as _PyUnicode_ToNumeric does. CPython compiles a\n")

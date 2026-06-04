@@ -116,7 +116,21 @@ func memberDescrSet(descr Object, owner Object, value Object) error {
 			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
 				inst.Type().Name, d.name)
 		}
+		// Py_T_OBJECT_EX: adopt a new reference to the value, then drop
+		// the slot's previous occupant. Setting the new value before the
+		// decref matches CPython so a self-referential overwrite cannot
+		// finalize the value mid-store.
+		//
+		// CPython: Programs/_testcapi/structmembers.c via
+		//          Python/structmember.c:218 PyMember_SetOne (Py_T_OBJECT_EX)
+		old := inst.slots[d.index]
+		if value != nil {
+			Incref(value)
+		}
 		inst.slots[d.index] = value
+		if old != nil {
+			Decref(old)
+		}
 		return nil
 	}
 	// C-extension subclass: fall back to per-instance attrs dict.

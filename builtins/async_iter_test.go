@@ -37,11 +37,18 @@ func TestANextReturnsAwaitable(t *testing.T) {
 	}
 }
 
-func TestANextDefaultUnsupported(t *testing.T) {
+func TestANextDefaultReturnsAwaitable(t *testing.T) {
+	// anext(iter, default) wraps the asend awaitable so a raised
+	// StopAsyncIteration falls back to StopIteration(default).
+	//
+	// CPython: Python/bltinmodule.c:1909 builtin_anext_impl
 	g := objects.NewAsyncGenerator("g")
-	_, err := ANext([]objects.Object{g, objects.NewInt(0)}, nil)
-	if err == nil {
-		t.Fatal("anext(g, default): want NotImplementedError, got nil")
+	out, err := ANext([]objects.Object{g, objects.NewInt(0)}, nil)
+	if err != nil {
+		t.Fatalf("anext(g, 0): %v", err)
+	}
+	if out == nil {
+		t.Fatal("anext(g, 0) = nil, want anext_awaitable")
 	}
 }
 

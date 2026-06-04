@@ -23,7 +23,7 @@ type rangeIterator struct {
 var rangeIterType = NewType("range_iterator", []*Type{objectType})
 
 func init() {
-	rangeIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	rangeIterType.Iter = SelfIter
 	rangeIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*rangeIterator)
 		c := it.cur.v.Cmp(&it.stop.v)
@@ -59,6 +59,15 @@ func init() {
 				return nil, err
 			}
 			return NewTuple([]Object{iterFn, NewTuple([]Object{r}), NewInt(0)}), nil
+		},
+	))
+	// CPython: Objects/rangeobject.c:1006 longrangeiter_len
+	SetTypeDescr(rangeIterType, "__length_hint__", NewMethodDescr(rangeIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			return args[0].(*rangeIterator).LengthHint(), nil
 		},
 	))
 	// CPython: Objects/rangeobject.c:1095 longrangeiter_setstate

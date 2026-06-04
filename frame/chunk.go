@@ -28,6 +28,15 @@ type Chunk struct {
 type FrameStack struct {
 	current *Chunk // newest chunk (top of stack)
 	depth   int    // total live frames across all chunks
+	// ForcedPrev, when non-nil, overrides the normal s.Top() predecessor
+	// for the next Push call and is then cleared. Used by vm's
+	// genThrowForwardHook to make a custom-iterator throw's frame inherit
+	// f_back from the outer generator's frame rather than the FrameStack
+	// top, mirroring CPython's tstate->current_frame = gen_frame in
+	// _gen_throw before calling yf.throw().
+	//
+	// CPython: Objects/genobject.c:523 _gen_throw
+	ForcedPrev *Frame
 }
 
 // New returns an empty frame stack.
@@ -38,11 +47,16 @@ func New() *FrameStack {
 // Push allocates a frame, initializes it for co, and links it as
 // the new top of the call chain. The new frame's Previous is wired
 // to whatever frame was on top before the push, mirroring
-// _PyThreadState_PushFrame which uses tstate->current_frame.
+// _PyThreadState_PushFrame which uses tstate->current_frame. If
+// ForcedPrev is set it is used instead of s.Top() and then cleared.
 //
 // CPython: Python/frame.c _PyThreadState_PushFrame
 func (s *FrameStack) Push(co *objects.Code, globals, builtins, fn objects.Object) *Frame {
 	prev := s.Top()
+	if s.ForcedPrev != nil {
+		prev = s.ForcedPrev
+		s.ForcedPrev = nil
+	}
 	if s.current == nil || s.current.top == ChunkSize {
 		s.current = &Chunk{prev: s.current}
 	}
@@ -61,15 +75,42 @@ func (s *FrameStack) Pop() {
 	if s.current == nil || s.current.top == 0 {
 		return
 	}
-	s.current.top--
-	s.depth--
-	f := &s.current.frames[s.current.top]
+	// Defer the top/depth decrement until after Clear runs. Close on a
+	// fast local can fire weakref callbacks (or finalizers) which then
+	// re-enter the eval loop via sys.unraisablehook. That re-entry Pushes
+	// a new frame onto this chunk; if top has already been decremented
+	// the new frame lands on top of the slot mid-Clear and Init resizes
+	// LocalsPlus out from under the loop. Keeping top high parks the
+	// re-entrant Push one slot above us so the two activations stay
+	// independent.
+	f := &s.current.frames[s.current.top-1]
+	if len(f.Wrappers) > 0 && f.Owner != OwnedByGenerator {
+		// External code (sys._getframe, traceback, inspect) holds a
+		// Python-visible wrapper for this activation record. The chunk
+		// slot is about to be recycled, so copy the read-only fields
+		// plus LocalsPlus into a FrameSnapshot and point every wrapper
+		// at it. Reads through wrapper.f_code / f_globals / f_locals
+		// then survive the natural return of the call.
+		//
+		// CPython: Objects/frameobject.c:1138 take_ownership (the
+		// iframe copy PyFrameObject keeps after the activation record
+		// goes away).
+		snap := objects.SnapshotFrameWithLocals(f)
+		for _, w := range f.Wrappers {
+			if sw, ok := w.(interface {
+				SwapInterp(objects.InterpreterFrame)
+			}); ok {
+				sw.SwapInterp(snap)
+			}
+		}
+		f.Wrappers = nil
+	}
 	if f.Owner == OwnedByGenerator {
 		// The frame's been handed off to a Generator object; the
 		// generator owns the storage now, including the LocalsPlus
 		// slice, so unwire the slot wholesale. The next Push at this
 		// slot will allocate fresh LocalsPlus.
-		s.current.frames[s.current.top] = Frame{}
+		s.current.frames[s.current.top-1] = Frame{}
 	} else {
 		// f.Clear() closes every live stackref and nils out Code /
 		// Globals / Builtins / Locals / Func / Previous, but leaves
@@ -84,6 +125,8 @@ func (s *FrameStack) Pop() {
 		// (recycles _PyInterpreterFrame slots in-place)
 		f.Clear()
 	}
+	s.current.top--
+	s.depth--
 	// Drop a now-empty chunk only when there is an older chunk
 	// underneath it. The bottom chunk stays attached so its frame
 	// slots survive across a pop-back-to-zero cycle, mirroring

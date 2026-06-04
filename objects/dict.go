@@ -69,6 +69,17 @@ type Dict struct {
 	// CPython: Include/internal/pycore_dict.h DICT_WATCHED_MUTATION_BITS
 	mutationCount uint32
 
+	// structVersion bumps on every structural change to the entry table
+	// (an inserted or deleted key), but not on a value-only replacement.
+	// dict iterators snapshot it and bail with RuntimeError if it moves
+	// mid-walk. CPython gets the same coverage for free from its
+	// append-only dk_entries table plus the di->len counter; gopy
+	// compacts d.order on delete, so a delete+reinsert that leaves
+	// ma_used unchanged needs this explicit version to be caught.
+	//
+	// CPython: Objects/dictobject.c:5237 dictiter_iternextkey_lock_held
+	structVersion uint64
+
 	// watcherTag mirrors CPython's _ma_watcher_tag. Bits 0..7 (one per
 	// DICT_MAX_WATCHERS slot) flag which watchers have subscribed via
 	// PyDict_Watch. Notification iterates the set bits and dispatches
@@ -129,6 +140,7 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators
 	SetTypeDescr(DictType, "__repr__", NewMethodDescr(DictType, "__repr__", dictReprMethod))
+	SetTypeDescr(DictType, "__reversed__", NewMethodDescr(DictType, "__reversed__", dictReversedMethod))
 	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
 	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
 	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
@@ -209,7 +221,21 @@ func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	d := args[0].(*Dict)
 	v, err := d.GetItem(args[1])
-	if err == nil && v != nil {
+	if err != nil {
+		// Only a genuine miss falls back to the default. A TypeError from
+		// an unhashable key or an exception raised by a key's __eq__ must
+		// propagate, matching dict_get_impl which returns NULL on error.
+		//
+		// CPython: Objects/dictobject.c:4290 dict_get_impl
+		if !errors.Is(err, errKeyNotFound) {
+			return nil, err
+		}
+		if len(args) == 3 {
+			return args[2], nil
+		}
+		return None(), nil
+	}
+	if v != nil {
 		return v, nil
 	}
 	if len(args) == 3 {
@@ -267,6 +293,10 @@ func dictTraverse(o Object, visit Visitor) error {
 func NewDict() *Dict {
 	d := &Dict{entries: make([]dictEntry, dictMinSize), kind: dictKindUnicode}
 	d.init(DictType)
+	// CPython: Objects/dictobject.c:737 new_dict (PyObject_GC_Track at end)
+	if h := GCTrackHook; h != nil {
+		h(d)
+	}
 	return d
 }
 
@@ -307,9 +337,27 @@ func (d *Dict) ForEachWithHash(fn func(key Object, hash int64) error) error {
 
 // SetItem inserts or replaces key. Mirrors PyDict_SetItem.
 //
+// dictKeyHash hashes key for a dict operation, wrapping a TypeError from
+// an unhashable key in the "cannot use '<type>' as a dict key (<exc>)"
+// message dict_unhashable_type produces in 3.14. A custom __hash__ that
+// raises something other than TypeError propagates unchanged.
+//
+// CPython: Objects/dictobject.c:2352 dict_unhashable_type
+func dictKeyHash(key Object) (int64, error) {
+	h, err := Hash(key)
+	if err == nil {
+		return h, nil
+	}
+	inner, ok := strings.CutPrefix(err.Error(), "TypeError: ")
+	if !ok {
+		return 0, err
+	}
+	return 0, fmt.Errorf("TypeError: cannot use '%s' as a dict key (%s)", key.Type().Name, inner)
+}
+
 // CPython: Objects/dictobject.c:1985 PyDict_SetItem
 func (d *Dict) SetItem(key, value Object) error {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return err
 	}
@@ -320,7 +368,7 @@ func (d *Dict) SetItem(key, value Object) error {
 //
 // CPython: Objects/dictobject.c:L1925 PyDict_GetItemWithError
 func (d *Dict) GetItem(key Object) (Object, error) {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +424,7 @@ func (d *Dict) DelItem(key Object) error {
 //
 // CPython: Objects/dictobject.c:L2495 PyDict_Contains
 func (d *Dict) Contains(key Object) (bool, error) {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return false, err
 	}
@@ -418,31 +466,58 @@ func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 //
 // CPython: Objects/dictobject.c:2229 dict_subscript
 func dictMappingGet(o, key Object) (Object, error) {
-	d := o.(*Dict)
+	d, ok := o.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
 	v, err := d.GetItem(key)
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
-			// For dict subclasses, invoke __missing__ before raising KeyError.
+			// For dict subclasses, invoke __missing__ before raising
+			// KeyError. dict_subscript uses _PyObject_LookupSpecial, a
+			// type-level lookup, so an instance variable named
+			// __missing__ has no effect (test_missing case F).
+			//
 			// CPython: Objects/dictobject.c:2242 (non-exact dict __missing__ path)
 			if d.Type() != DictType {
-				if missingFn, merr := GetAttr(o, NewStr("__missing__")); merr == nil && missingFn != nil {
+				missingFn, merr := LookupSpecial(o, "__missing__")
+				if merr != nil {
+					return nil, merr
+				}
+				if missingFn != nil {
 					return CallOneArg(missingFn, key)
 				}
 			}
-			repr, rerr := Repr(key)
-			if rerr != nil {
-				repr = "?"
-			}
-			return nil, fmt.Errorf("KeyError: %s", repr)
+			return nil, raiseKeyError(key)
 		}
 		return nil, err
 	}
 	return v, nil
 }
 
-func dictMappingSet(o, key, value Object) error { return o.(*Dict).SetItem(key, value) }
+// dictMappingSet is the mp_ass_subscript slot for dict. When the
+// receiver is not a real *Dict the slot raises a clean TypeError
+// instead of panicking. This protects against pathological MROs
+// (e.g. a metaclass that injects dict into a non-dict layout) where
+// CPython would either reject the class at type-ready time or, failing
+// that, raise TypeError on the first __setitem__ attempt.
+//
+// CPython: Objects/dictobject.c:2407 dict_ass_sub
+func dictMappingSet(o, key, value Object) error {
+	d, ok := o.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__setitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
+	return d.SetItem(key, value)
+}
 
-func dictMappingDel(o, key Object) error { return o.(*Dict).DelItem(key) }
+func dictMappingDel(o, key Object) error {
+	d, ok := o.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: descriptor '__delitem__' requires a 'dict' object but received a '%s'", o.Type().Name)
+	}
+	return d.DelItem(key)
+}
 
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in
@@ -468,6 +543,7 @@ func dictSubclassGetAttr(o Object, name Object) (Object, error) {
 	// Instance attrs from d.attrs.
 	if d.attrs != nil {
 		if v, err := d.attrs.GetItem(name); err == nil {
+			Incref(v)
 			return v, nil
 		}
 	}
@@ -541,7 +617,10 @@ func dictDelItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	d := args[0].(*Dict)
 	if err := d.DelItem(args[1]); err != nil {
-		return nil, fmt.Errorf("KeyError: %v", args[1])
+		if errors.Is(err, errKeyNotFound) {
+			return nil, raiseKeyError(args[1])
+		}
+		return nil, err
 	}
 	return None(), nil
 }
@@ -678,6 +757,19 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	//
 	// CPython: Objects/dictobject.c:2979 PyDict_Clear
 	notifyDictEvent(DictEventCleared, d, nil, nil)
+	d.clearContents()
+	return None(), nil
+}
+
+// clearContents drops every key/value reference the dict owns and
+// resets the table to empty. Shared between dict.clear() and the
+// throwaway-kwargs release path. dictInsert increfs values (and
+// stores keys, which for kwargs and attribute dicts are interned
+// strings whose Decref is a no-op), so releasing both here balances
+// the insert path.
+//
+// CPython: Objects/dictobject.c:2979 PyDict_Clear (clear_keys loop)
+func (d *Dict) clearContents() {
 	if d.sharedKeys != nil {
 		// Split-table: decref all per-instance values, reset values array.
 		for i, v := range d.splitValues {
@@ -705,7 +797,31 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	d.used = 0
 	d.fill = 0
 	d.invalidateKeysVersion()
-	return None(), nil
+}
+
+// DecrefThrowawayKwargs releases the temporary keyword dict the eval
+// loop builds for a CALL_FUNCTION_EX (BUILD_MAP followed by DICT_MERGE).
+// Dropping the call's reference normally leaves the dict at refcount
+// zero, but gopy dicts carry no synchronous tp_dealloc, so the values
+// the merge incref'd into it would stay pinned by a refcount no
+// container actually holds. The cycle collector cannot help: those
+// values are still reachable from the caller's live locals when the
+// throwaway dict dies, so it never classifies them as garbage and the
+// pin never lifts.
+//
+// Clearing is gated on the dict reaching refcount zero, which at this
+// call site is a precise signal that nothing else references it (the
+// compiler builds this dict solely for the unpack). A dict that some
+// other caller still holds keeps a positive refcount and is left
+// untouched.
+//
+// CPython: Objects/dictobject.c:2768 dict_dealloc (PyDict_Clear on the
+// final decref of the keyword dict CALL_FUNCTION_EX owns)
+func DecrefThrowawayKwargs(d *Dict) {
+	Decref(d)
+	if d.Hdr().Refcnt() == 0 {
+		d.clearContents()
+	}
 }
 
 // dictPopMethod backs dict.pop(key[, default]).
@@ -722,8 +838,7 @@ func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) == 3 {
 				return args[2], nil
 			}
-			repr, _ := Repr(args[1])
-			return nil, fmt.Errorf("KeyError: %s", repr)
+			return nil, raiseKeyError(args[1])
 		}
 		return nil, err
 	}
@@ -759,7 +874,14 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:2873 PyDict_Merge
 func dictMergeFromArg(dst *Dict, src Object) error {
-	if d, ok := src.(*Dict); ok {
+	// CPython gates the fast PyDict_Next copy on the source's tp_iter
+	// being the exact dict iterator. A subclass that overrides __iter__
+	// (OrderedDict walks its linked list) must merge through keys() so the
+	// caller observes the subclass's iteration order, not the underlying
+	// hash-table order.
+	//
+	// CPython: Objects/dictobject.c:2901 dict_merge (Py_TYPE(b)->tp_iter == dict_iter)
+	if d, ok := src.(*Dict); ok && !dictIterOverridden(src.Type()) {
 		return dictMergeFromDict(dst, d)
 	}
 	if keysAttr, err := GetAttr(src, NewStr("keys")); err == nil {
@@ -768,7 +890,38 @@ func dictMergeFromArg(dst *Dict, src Object) error {
 	return dictMergeFromPairs(dst, src)
 }
 
+// dictIterOverridden reports whether t overrides dict.__iter__. It is the
+// gopy stand-in for CPython's Py_TYPE(b)->tp_iter != dict_iter gate: when
+// the slot differs, callers that care about iteration order (PyDict_Merge,
+// type_new's namespace copy) must walk the Python iterator rather than the
+// raw hash table.
+//
+// CPython: Objects/dictobject.c:2901 dict_merge
+func dictIterOverridden(t *Type) bool {
+	if t == nil || t == DictType {
+		return false
+	}
+	base, _ := LookupDescriptor(DictType, "__iter__")
+	sub, _ := LookupDescriptor(t, "__iter__")
+	return base != sub
+}
+
+// DictIterOverridden exposes the dict_merge tp_iter gate to the builtins
+// package so the dict() constructor can mirror PyDict_Merge: a subclass that
+// overrides __iter__ (OrderedDict walks its linked list) must merge through
+// keys() so the copy preserves the subclass's iteration order.
+//
+// CPython: Objects/dictobject.c:2901 dict_merge
+func DictIterOverridden(t *Type) bool { return dictIterOverridden(t) }
+
 func dictMergeFromDict(dst, src *Dict) error {
+	// dict_dict_merge snapshots the source's live count and rechecks it
+	// after every insert: an insert into dst can fire a key's __eq__,
+	// which may clear or grow src mid-merge. CPython raises rather than
+	// iterate a table that shifted under it.
+	//
+	// CPython: Objects/dictobject.c:3981 dict_dict_merge
+	origSize := src.used
 	for _, k := range src.Keys() {
 		v, err := src.GetItem(k)
 		if err != nil {
@@ -776,6 +929,9 @@ func dictMergeFromDict(dst, src *Dict) error {
 		}
 		if err := dst.SetItem(k, v); err != nil {
 			return err
+		}
+		if origSize != src.used {
+			return fmt.Errorf("RuntimeError: dict mutated during update")
 		}
 	}
 	return nil
@@ -822,7 +978,19 @@ func dictMergeFromPairs(dst *Dict, src Object) error {
 			}
 			return err
 		}
-		pair, err := IterToSlice(v)
+		// PySequence_Fast carries the literal "object is not iterable"
+		// message, and on a TypeError dict_merge_from_seq2 attaches a
+		// note pinning the failing element index.
+		//
+		// CPython: Objects/dictobject.c:3823 merge_from_seq2_lock_held
+		fast, err := SequenceFast(v, "object is not iterable")
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "TypeError:") && FormatNoteHook != nil {
+				FormatNoteHook(fmt.Sprintf("Cannot convert dictionary update sequence element #%d to a sequence", i))
+			}
+			return err
+		}
+		pair, err := IterToSlice(fast)
 		if err != nil {
 			return err
 		}
@@ -931,15 +1099,14 @@ func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return NotImplemented(), nil
 	}
-	other, ok := args[1].(*Dict)
-	if !ok {
-		return NotImplemented(), nil
-	}
-	for _, k := range other.Keys() {
-		v, _ := other.GetItem(k)
-		if err := self.SetItem(k, v); err != nil {
-			return nil, err
-		}
+	// |= delegates to dict_update_arg, which accepts any mapping or any
+	// iterable of key/value pairs, exactly like dict.update. This is
+	// looser than __or__ (which only pairs two dicts): `d |= [(1, 1)]`
+	// is valid.
+	//
+	// CPython: Objects/dictobject.c:3922 dict___ior___impl (dict_update_arg)
+	if err := dictMergeFromArg(self, args[1]); err != nil {
+		return nil, err
 	}
 	return self, nil
 }
@@ -952,11 +1119,12 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: setdefault expected 1 to 2 arguments, got %d", len(args)-1)
 	}
 	d := args[0].(*Dict)
-	v, err := d.GetItem(args[1])
-	if err == nil {
-		return v, nil
-	}
-	if !errors.Is(err, errKeyNotFound) {
+	// setdefault hashes (and compares) the key exactly once: it threads a
+	// single PyObject_Hash through the lookup and the insert.
+	//
+	// CPython: Objects/dictobject.c:4376 dict_setdefault_ref_lock_held
+	h, err := dictKeyHash(args[1])
+	if err != nil {
 		return nil, err
 	}
 	var dflt Object
@@ -965,10 +1133,7 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 	} else {
 		dflt = None()
 	}
-	if err := d.SetItem(args[1], dflt); err != nil {
-		return nil, err
-	}
-	return dflt, nil
+	return dictSetDefault(d, h, args[1], dflt)
 }
 
 // dictFromKeysMethod backs dict.fromkeys(iterable[, value]).
@@ -985,18 +1150,32 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 	} else {
 		value = None()
 	}
-	out := NewDict()
-	// Set/frozenset fast path: reuse cached hashes to avoid calling __hash__
-	// on each key again.
+	// _PyDict_FromKeys builds the result by calling cls(), so a dict
+	// subclass produces an instance of that subclass and a class whose
+	// __new__ returns a foreign mapping (collections.UserDict) is honored
+	// too. The set/dict fast paths only fire on an empty exact dict.
 	//
-	// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
-	if ss, ok := args[1].(*Set); ok {
-		for _, e := range ss.Entries() {
-			if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
-				return nil, err
+	// CPython: Objects/dictobject.c:3924 _PyDict_FromKeys
+	cls := args[0]
+	d, err := CallNoArgs(cls)
+	if err != nil {
+		return nil, err
+	}
+	out, exact := d.(*Dict)
+	exact = exact && out.Type() == DictType && out.Len() == 0
+	if exact {
+		// Set/frozenset fast path: reuse cached hashes to avoid calling
+		// __hash__ on each key again.
+		//
+		// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
+		if ss, ok := args[1].(*Set); ok {
+			for _, e := range ss.Entries() {
+				if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
+					return nil, err
+				}
 			}
+			return out, nil
 		}
-		return out, nil
 	}
 	it, err := Iter(args[1])
 	if err != nil {
@@ -1010,11 +1189,15 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := out.SetItem(k, value); err != nil {
+		if exact {
+			if err := out.SetItem(k, value); err != nil {
+				return nil, err
+			}
+		} else if err := SetItem(d, k, value); err != nil {
 			return nil, err
 		}
 	}
-	return out, nil
+	return d, nil
 }
 
 // dictPopItemMethod backs dict.popitem().

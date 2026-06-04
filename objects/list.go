@@ -14,6 +14,26 @@ import (
 type List struct {
 	VarHeader
 	items []Object
+	// attrs holds instance attributes for list subclass objects. Nil
+	// for plain list instances; allocated lazily by EnsureAttrDict on
+	// first store. Mirrors CPython's tp_dictoffset on list subclasses
+	// (which type_new_descriptors stamps when the subclass picks up
+	// __dict__ from object).
+	attrs *Dict
+}
+
+// AttrDict implements AttrDictHolder so list subclasses can carry
+// instance attributes through generic_attr's HasDict path.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (list-subclass path)
+func (l *List) AttrDict() *Dict { return l.attrs }
+
+// EnsureAttrDict allocates the attrs dict on first use.
+func (l *List) EnsureAttrDict() *Dict {
+	if l.attrs == nil {
+		l.attrs = NewDict()
+	}
+	return l.attrs
 }
 
 // ListType is the type singleton for list. Mirrors PyList_Type.
@@ -89,6 +109,10 @@ func NewList(items []Object) *List {
 	l := &List{items: append([]Object(nil), items...)}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(l)
+	}
 	return l
 }
 
@@ -103,6 +127,10 @@ func newListAdopt(items []Object) *List {
 	l := &List{items: items}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
+	if h := GCTrackHook; h != nil {
+		h(l)
+	}
 	return l
 }
 
@@ -193,15 +221,27 @@ func listConcat(a, b Object) (Object, error) {
 
 // listRepeat ports list_repeat: produce a fresh list containing n
 // copies of o's items. Negative or zero n produces an empty list,
-// matching the CPython behavior.
+// matching the CPython behavior. A multiplication that would exceed
+// the platform allocator's reach raises MemoryError, mirroring
+// PyErr_NoMemory in list_repeat_lock_held.
 //
-// CPython: Objects/listobject.c:577 list_repeat
-func listRepeat(o Object, n int) (Object, error) {
+// CPython: Objects/listobject.c:790 list_repeat_lock_held
+func listRepeat(o Object, n int) (rv Object, rerr error) {
 	l := o.(*List)
-	if n <= 0 {
+	input := len(l.items)
+	if input == 0 || n <= 0 {
 		return newListAdopt(nil), nil
 	}
-	out := make([]Object, 0, len(l.items)*n)
+	if input > int(^uint(0)>>1)/n {
+		return nil, fmt.Errorf("MemoryError")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			rv = nil
+			rerr = fmt.Errorf("MemoryError")
+		}
+	}()
+	out := make([]Object, 0, input*n)
 	for i := 0; i < n; i++ {
 		out = append(out, l.items...)
 	}
@@ -210,10 +250,41 @@ func listRepeat(o Object, n int) (Object, error) {
 
 // listInPlaceConcat extends a with b's items. b must be iterable; the
 // CPython slot delegates to list_extend, which accepts any iterable.
+// Three fast paths mirror _list_extend's dispatch:
+//   - a is b: degenerate self-extend, equivalent to a *= 2.
+//   - b is a list or tuple: snapshot the items, then append. A bare
+//     iterator loop would observe the destination's growth when
+//     a is b's storage (it isn't here, but the snapshot keeps the
+//     generic case predictable when callers stash an alias).
+//   - otherwise: iterate and append, surfacing __length_hint__
+//     exceptions exactly once before the loop starts.
 //
-// CPython: Objects/listobject.c:838 list_inplace_concat
+// CPython: Objects/listobject.c:1402 _list_extend
+// CPython: Objects/listobject.c:1187 list_extend_fast
+// CPython: Objects/listobject.c:1225 list_extend_iter_lock_held
 func listInPlaceConcat(a, b Object) (Object, error) {
 	la := a.(*List)
+	if la == b {
+		// a.extend(a) → a *= 2. Reading l.items live during a plain
+		// iterator loop would never terminate.
+		//
+		// CPython: Objects/listobject.c:1407 (PyObject *)self == iterable
+		_, err := listInPlaceRepeat(la, 2)
+		return la, err
+	}
+	if lb, ok := b.(*List); ok {
+		snap := append([]Object(nil), lb.items...)
+		for _, v := range snap {
+			la.Append(v)
+		}
+		return la, nil
+	}
+	if tb, ok := b.(*Tuple); ok {
+		for i := 0; i < tb.Len(); i++ {
+			la.Append(tb.Item(i))
+		}
+		return la, nil
+	}
 	tp := b.Type()
 	if tp.Iter == nil {
 		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
@@ -226,12 +297,21 @@ func listInPlaceConcat(a, b Object) (Object, error) {
 	if itType.IterNext == nil {
 		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itType.Name)
 	}
+	// CPython: Objects/listobject.c:1234 PyObject_LengthHint propagates
+	// exceptions out of __len__ / __length_hint__ so a broken iterable
+	// surfaces here instead of looking like a silent empty extend.
+	if _, lhErr := LengthHint(b, 8); lhErr != nil {
+		return nil, lhErr
+	}
 	for {
 		v, err := itType.IterNext(it)
-		if errors.Is(err, ErrStopIteration) {
-			break
-		}
 		if err != nil {
+			if errors.Is(err, ErrStopIteration) || (IsStopIterationHook != nil && IsStopIterationHook(err)) {
+				if ClearCurrentExceptionHook != nil {
+					ClearCurrentExceptionHook()
+				}
+				break
+			}
 			return nil, err
 		}
 		la.Append(v)
@@ -240,23 +320,39 @@ func listInPlaceConcat(a, b Object) (Object, error) {
 }
 
 // listInPlaceRepeat repeats a's contents n times in place. n<=0 wipes
-// the list, matching list_inplace_repeat.
+// the list. A multiplication that would exceed the platform
+// allocator's reach raises MemoryError, mirroring PyErr_NoMemory in
+// list_inplace_repeat_lock_held.
 //
-// CPython: Objects/listobject.c:626 list_inplace_repeat
-func listInPlaceRepeat(o Object, n int) (Object, error) {
+// CPython: Objects/listobject.c:1033 list_inplace_repeat_lock_held
+func listInPlaceRepeat(o Object, n int) (rv Object, rerr error) {
 	l := o.(*List)
-	if n <= 0 {
+	input := len(l.items)
+	if input == 0 || n == 1 {
+		return l, nil
+	}
+	if n < 1 {
 		l.items = l.items[:0]
 		l.size = 0
 		return l, nil
 	}
-	if n == 1 {
-		return l, nil
+	if input > int(^uint(0)>>1)/n {
+		return nil, fmt.Errorf("MemoryError")
 	}
-	base := append([]Object(nil), l.items...)
-	for i := 1; i < n; i++ {
-		l.items = append(l.items, base...)
+	defer func() {
+		if r := recover(); r != nil {
+			rv = nil
+			rerr = fmt.Errorf("MemoryError")
+		}
+	}()
+	// Pre-allocate the destination so makeslice's cap-out-of-range
+	// panic catches absurd n*input products instead of looping forever
+	// before the append heuristic notices.
+	dst := make([]Object, input*n)
+	for i := 0; i < n; i++ {
+		copy(dst[i*input:], l.items)
 	}
+	l.items = dst
 	l.size = int64(len(l.items))
 	return l, nil
 }
@@ -354,19 +450,32 @@ func listGetSlice(l *List, s *Slice) (Object, error) {
 
 // listSetSlice replaces l[start:stop:step] with the values produced by
 // iterating v. Step==1 supports differing lengths (grow / shrink);
-// extended steps require matching lengths.
+// extended steps require matching lengths. CPython drains the source
+// before recomputing slicelen so an iterable that mutates self (e.g.,
+// generator that clears the list mid-iteration) is observed against
+// the live size.
 //
-// CPython: Objects/listobject.c:806 list_ass_slice + extended-slice arm
-// of list_ass_subscript
+// CPython: Objects/listobject.c:3775 list_ass_subscript_lock_held
+//
+//	(extended-slice arm: PySequence_Fast first, then adjust_slice_indexes,
+//	then size-mismatch ValueError).
 func listSetSlice(l *List, s *Slice, v Object) error {
-	start, stop, step, slicelen, err := s.GetIndices(len(l.items))
+	_, _, step, _, err := s.GetIndices(len(l.items))
 	if err != nil {
 		return err
 	}
 	if step == 1 {
+		start, stop, _, _, err := s.GetIndices(len(l.items))
+		if err != nil {
+			return err
+		}
 		return listAssSlice(l, start, stop, v)
 	}
 	src, err := drainIterableForSlice(v)
+	if err != nil {
+		return err
+	}
+	start, _, step, slicelen, err := s.GetIndices(len(l.items))
 	if err != nil {
 		return err
 	}
@@ -522,6 +631,17 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 		}
 		return 0, nil
 	}
+	// CPython routes the subscript through PyNumber_AsSsize_t which
+	// invokes __index__ when present. A class with only __index__ must
+	// work as a sequence subscript.
+	//
+	// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
+	if idx, err := NumberIndex(key); err == nil {
+		if i, ok := idx.(*Int); ok {
+			n, _ := i.Int64()
+			return int(n), nil
+		}
+	}
 	return 0, fmt.Errorf("TypeError: %s indices must be integers or slices, not %s", typeName, key.Type().Name)
 }
 
@@ -533,12 +653,15 @@ func indexValueAsInt(key Object, typeName string) (int, error) {
 //
 // CPython: Objects/abstract.c:1846 PySequence_Fast
 func drainIterableForSlice(o Object) ([]Object, error) {
-	if l, ok := o.(*List); ok {
+	// PySequence_Fast fast-paths only PyList_CheckExact / PyTuple_CheckExact.
+	// A subclass may override __iter__ (seq_tests.LyingTuple yields values
+	// unrelated to its storage), so it must go through the iterator protocol.
+	if l, ok := o.(*List); ok && l.Type() == ListType {
 		out := make([]Object, len(l.items))
 		copy(out, l.items)
 		return out, nil
 	}
-	if t, ok := o.(*Tuple); ok {
+	if t, ok := o.(*Tuple); ok && t.Type() == TupleType {
 		out := make([]Object, len(t.items))
 		copy(out, t.items)
 		return out, nil
@@ -564,6 +687,46 @@ func drainIterableForSlice(o Object) ([]Object, error) {
 	}
 }
 
+// DrainIterable materializes any iterable into a slice. Unlike
+// drainIterableForSlice it propagates the underlying TypeError from
+// PyObject_GetIter, so callers like list() / tuple() / set() surface
+// "'X' object is not iterable" instead of the slice-assign wording.
+//
+// CPython: Objects/abstract.c:2820 PySequence_Fast (constructor path)
+func DrainIterable(o Object) ([]Object, error) {
+	// PySequence_Fast fast-paths only PyList_CheckExact / PyTuple_CheckExact.
+	// A subclass may override __iter__ (seq_tests.LyingTuple yields values
+	// unrelated to its storage), so it must go through the iterator protocol.
+	if l, ok := o.(*List); ok && l.Type() == ListType {
+		out := make([]Object, len(l.items))
+		copy(out, l.items)
+		return out, nil
+	}
+	if t, ok := o.(*Tuple); ok && t.Type() == TupleType {
+		out := make([]Object, len(t.items))
+		copy(out, t.items)
+		return out, nil
+	}
+	it, err := Iter(o)
+	if err != nil {
+		return nil, err
+	}
+	if it.Type().IterNext == nil {
+		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", it.Type().Name)
+	}
+	var out []Object
+	for {
+		v, err := IterNext(it)
+		if errors.Is(err, ErrStopIteration) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+}
+
 // listReprInProgress guards against recursive list repr: [[...]].
 //
 // CPython: Objects/object.c:2256 Py_ReprEnter
@@ -579,11 +742,14 @@ func listRepr(o Object) (string, error) {
 
 	var b strings.Builder
 	b.WriteByte('[')
-	for i, it := range l.items {
+	// CPython: Objects/listobject.c:596 list_repr_impl reloads
+	// Py_SIZE(v) on every iteration so a side effect in repr() that
+	// shrinks the list shortens the walk in step (test_repr_mutate).
+	for i := 0; i < len(l.items); i++ {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		s, err := Repr(it)
+		s, err := Repr(l.items[i])
 		if err != nil {
 			return "", err
 		}
@@ -605,7 +771,7 @@ type listIterator struct {
 var listIterType = NewType("list_iterator", []*Type{objectType})
 
 func init() {
-	listIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	listIterType.Iter = SelfIter
 	listIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listIterator)
 		if it.src == nil {
@@ -676,12 +842,150 @@ func init() {
 			return None(), nil
 		},
 	))
+	// CPython: Objects/listobject.c:3593 listiter_len
+	SetTypeDescr(listIterType, "__length_hint__", NewMethodDescr(listIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*listIterator)
+			if it.src == nil {
+				return NewInt(0), nil
+			}
+			n := len(it.src.items) - it.pos
+			if n < 0 {
+				n = 0
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
 }
 
 func listIter(o Object) (Object, error) {
 	it := &listIterator{src: o.(*List)}
 	it.init(listIterType)
 	return it, nil
+}
+
+// listRevIterator is the iterator returned by list.__reversed__(). It
+// walks the source list from the tail toward the head and shares its
+// backing storage with the original list so pickle round-trips, slice
+// mutations, and length-hint queries all observe the live values.
+//
+// CPython: Objects/listobject.c:4080 listreviterobject
+type listRevIterator struct {
+	Header
+	src   *List
+	index int
+}
+
+var listRevIterType = NewType("list_reverseiterator", []*Type{objectType})
+
+//nolint:gocognit // method-descriptor registration table for the list type; flat sequence of SetTypeDescr calls
+func init() {
+	listRevIterType.Iter = SelfIter
+	listRevIterType.IterNext = func(o Object) (Object, error) {
+		it := o.(*listRevIterator)
+		if it.src == nil || it.index < 0 {
+			it.src = nil
+			it.index = -1
+			return nil, ErrStopIteration
+		}
+		if it.index >= len(it.src.items) {
+			it.src = nil
+			it.index = -1
+			return nil, ErrStopIteration
+		}
+		v := it.src.items[it.index]
+		it.index--
+		return v, nil
+	}
+	AddIterSlotWrappers(listRevIterType)
+	// __reduce__ returns (iter_fn, (list,), index) so pickle preserves
+	// the shared source list (test_reversed_pickle) and the current
+	// position. iter_fn is `reversed` so unpickling rebuilds a
+	// list_reverseiterator over the same list, then __setstate__
+	// restores the index.
+	//
+	// CPython: Objects/listobject.c:4207 listreviter_reduce
+	SetTypeDescr(listRevIterType, "__reduce__", NewMethodDescr(listRevIterType, "__reduce__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
+			}
+			it := args[0].(*listRevIterator)
+			if BuiltinLookup == nil {
+				return nil, fmt.Errorf("PicklingError: builtins not loaded")
+			}
+			revFn, err := BuiltinLookup("reversed")
+			if err != nil {
+				return nil, err
+			}
+			if it.src == nil {
+				return NewTuple([]Object{revFn, NewTuple([]Object{NewList(nil)})}), nil
+			}
+			return NewTuple([]Object{revFn, NewTuple([]Object{it.src}), NewInt(int64(it.index))}), nil
+		},
+	))
+	// __setstate__ restores the iterator index after unpickling. CPython
+	// clamps to [-1, len(seq)-1] so a bogus state can't drive the
+	// next pointer past either end.
+	//
+	// CPython: Objects/listobject.c:4213 listreviter_setstate
+	SetTypeDescr(listRevIterType, "__setstate__", NewMethodDescr(listRevIterType, "__setstate__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			it := args[0].(*listRevIterator)
+			pos, ok := args[1].(*Int)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __setstate__() argument must be int")
+			}
+			p, fits := pos.Int64()
+			if !fits {
+				return nil, fmt.Errorf("OverflowError: iterator position out of range")
+			}
+			if it.src != nil {
+				n := int64(len(it.src.items)) - 1
+				if p < -1 {
+					p = -1
+				} else if p > n {
+					p = n
+				}
+				it.index = int(p)
+			}
+			return None(), nil
+		},
+	))
+	// CPython: Objects/listobject.c:4196 listreviter_len
+	SetTypeDescr(listRevIterType, "__length_hint__", NewMethodDescr(listRevIterType, "__length_hint__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
+			}
+			it := args[0].(*listRevIterator)
+			if it.src == nil {
+				return NewInt(0), nil
+			}
+			n := it.index + 1
+			if n < 0 || n > len(it.src.items) {
+				n = 0
+			}
+			return NewInt(int64(n)), nil
+		},
+	))
+}
+
+// listRevIter is the constructor for list.__reversed__ used by
+// listReversedMethod. It holds the source list (so pickle preserves
+// identity) and starts at len-1.
+//
+// CPython: Objects/listobject.c:4140 list___reversed___impl
+func listRevIter(l *List) Object {
+	it := &listRevIterator{src: l, index: len(l.items) - 1}
+	it.init(listRevIterType)
+	return it
 }
 
 // ListIterNextFast advances o as a list_iterator without going through

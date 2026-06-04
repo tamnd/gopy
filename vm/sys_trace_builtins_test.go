@@ -82,12 +82,48 @@ func TestSysSetProfileInstallsBridge(t *testing.T) {
 	}
 }
 
+func TestSysCallTracing(t *testing.T) {
+	ts := state.NewThread()
+	prev, gid := setActiveThread(ts)
+	defer restoreActiveThread(prev, gid)
+
+	// call_tracing must run func(*args) with tracing zeroed during the
+	// call and the prior depth restored once it returns.
+	ts.Tracing = 5
+	var sawTracing int
+	fn := objects.NewBuiltinFunction("adder", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		sawTracing = ts.Tracing
+		a, _ := args[0].(*objects.Int).Int64()
+		b, _ := args[1].(*objects.Int).Int64()
+		return objects.NewInt(a + b), nil
+	})
+	out := callBuiltin(t, SysCallTracing(), fn, objects.NewTuple([]objects.Object{objects.NewInt(3), objects.NewInt(4)}))
+	if v, _ := out.(*objects.Int).Int64(); v != 7 {
+		t.Errorf("call_tracing result = %v, want 7", v)
+	}
+	if sawTracing != 0 {
+		t.Errorf("tracing during call = %d, want 0", sawTracing)
+	}
+	if ts.Tracing != 5 {
+		t.Errorf("tracing after call = %d, want 5 (restored)", ts.Tracing)
+	}
+
+	// Wrong arg count and non-tuple second argument both raise TypeError.
+	ct := SysCallTracing()
+	if _, err := ct.Type().Call(ct, []objects.Object{fn}, nil); err == nil {
+		t.Errorf("call_tracing with one arg should error")
+	}
+	if _, err := ct.Type().Call(ct, []objects.Object{fn, objects.NewList(nil)}, nil); err == nil {
+		t.Errorf("call_tracing with non-tuple args should error")
+	}
+}
+
 func TestRegisterSysTraceBuiltins(t *testing.T) {
 	d := objects.NewDict()
 	if err := RegisterSysTraceBuiltins(d); err != nil {
 		t.Fatalf("RegisterSysTraceBuiltins: %v", err)
 	}
-	for _, name := range []string{"settrace", "setprofile", "gettrace", "getprofile"} {
+	for _, name := range []string{"settrace", "setprofile", "gettrace", "getprofile", "call_tracing"} {
 		v, err := d.GetItem(objects.NewStr(name))
 		if err != nil {
 			t.Errorf("missing builtin %q: %v", name, err)

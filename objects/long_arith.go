@@ -53,10 +53,14 @@ func intMul(a, b Object) (Object, error) {
 	return NewIntFromBig(new(big.Int).Mul(&ai.v, &bi.v)), nil
 }
 
-// intTrueDiv implements `a / b` for ints. CPython returns a float
-// even for exact integer ratios, so we shadow that contract here.
+// intTrueDiv implements `a / b` for ints with last-bit-exact IEEE-754
+// rounding. Ports CPython's long_true_divide shift+divmod algorithm:
+// scale operands so the quotient lands in the float53 mantissa window,
+// take a bigint divmod, apply round-half-to-even on the remainder, then
+// ldexp the integer mantissa back into a float64. This is the only way
+// to get bit-exact parity with CPython on subnormals and half-way cases.
 //
-// CPython: Objects/longobject.c:4053 long_true_divide
+// CPython: Objects/longobject.c:4504 long_true_divide
 func intTrueDiv(a, b Object) (Object, error) {
 	ai, bi, ok := intPair(a, b)
 	if !ok {
@@ -65,9 +69,81 @@ func intTrueDiv(a, b Object) (Object, error) {
 	if bi.v.Sign() == 0 {
 		return nil, errors.New("ZeroDivisionError: division by zero")
 	}
-	af, _ := new(big.Float).SetInt(&ai.v).Float64()
-	bf, _ := new(big.Float).SetInt(&bi.v).Float64()
-	return NewFloat(af / bf), nil
+	negative := (ai.v.Sign() < 0) != (bi.v.Sign() < 0)
+	if ai.v.Sign() == 0 {
+		if negative {
+			return NewFloat(math.Copysign(0, -1)), nil
+		}
+		return NewFloat(0), nil
+	}
+	// Work with absolute values.
+	aAbs := new(big.Int).Abs(&ai.v)
+	bAbs := new(big.Int).Abs(&bi.v)
+
+	const dblMantDig = 53
+	const dblMaxExp = 1024
+	const dblMinExp = -1021
+
+	// Overflow threshold from long_true_divide: the smallest a/b that
+	// rounds to +Inf is 2 to the DBL_MAX_EXP minus 2 to the
+	// (DBL_MAX_EXP minus DBL_MANT_DIG minus 1).
+	dblMinOverflow := new(big.Int).Lsh(big.NewInt(1), dblMaxExp)
+	dblMinOverflow.Sub(dblMinOverflow, new(big.Int).Lsh(big.NewInt(1), dblMaxExp-dblMantDig-1))
+	threshold := new(big.Int).Mul(dblMinOverflow, bAbs)
+	if aAbs.Cmp(threshold) >= 0 {
+		return nil, errors.New("OverflowError: integer division result too large for a float")
+	}
+
+	// d satisfies 2**(d-1) <= a/b < 2**d
+	d := aAbs.BitLen() - bAbs.BitLen()
+	// Adjust: if a >= 2**d * b (positive d) or a*2**(-d) >= b (negative d), d += 1
+	if d >= 0 {
+		shifted := new(big.Int).Lsh(bAbs, uint(d))
+		if aAbs.Cmp(shifted) >= 0 {
+			d++
+		}
+	} else {
+		shifted := new(big.Int).Lsh(aAbs, uint(-d))
+		if shifted.Cmp(bAbs) >= 0 {
+			d++
+		}
+	}
+
+	var exp int
+	if d < dblMinExp {
+		exp = dblMinExp - dblMantDig
+	} else {
+		exp = d - dblMantDig
+	}
+
+	scaledA, scaledB := new(big.Int).Set(aAbs), new(big.Int).Set(bAbs)
+	if exp < 0 {
+		scaledA.Lsh(scaledA, uint(-exp))
+	} else if exp > 0 {
+		scaledB.Lsh(scaledB, uint(exp))
+	}
+
+	q, r := new(big.Int), new(big.Int)
+	q.QuoRem(scaledA, scaledB, r)
+
+	// Round half-to-even: 2*r > b, or 2*r == b and q odd.
+	twoR := new(big.Int).Lsh(r, 1)
+	cmp := twoR.Cmp(scaledB)
+	if cmp > 0 || (cmp == 0 && q.Bit(0) == 1) {
+		q.Add(q, bigOne)
+	}
+
+	// Convert q * 2^exp to float64 via math.Ldexp on the int mantissa.
+	// q fits in DBL_MANT_DIG+1 bits at this point.
+	qf, _ := new(big.Float).SetPrec(dblMantDig + 1).SetInt(q).Float64()
+	result := math.Ldexp(qf, exp)
+	if math.IsInf(result, 0) {
+		return nil, errors.New("OverflowError: integer division result too large for a float")
+	}
+	if negative {
+		result = -result
+	}
+	return NewFloat(result), nil
 }
 
 // intFloorDiv implements `a // b` with Python floor semantics: the

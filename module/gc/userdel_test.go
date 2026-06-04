@@ -66,8 +66,11 @@ func TestUserDelFiresDuringCycleCollect(t *testing.T) {
 	objects.Decref(a) // simulate del a
 	objects.Decref(b) // simulate del b
 
-	if got := Collect(2); got != 2 {
-		t.Fatalf("Collect = %d, want 2", got)
+	// Cycle is a -> a.dict -> b -> b.dict -> a; with dict tp_traverse
+	// matching CPython, both instances and their dicts are unreachable,
+	// so Collect reports 4. Only the two instances run __del__.
+	if got := Collect(2); got != 4 {
+		t.Fatalf("Collect = %d, want 4", got)
 	}
 	if calls != 2 {
 		t.Errorf("user __del__ fired %d times, want 2", calls)
@@ -107,11 +110,11 @@ func TestUserDelResurrectionSurvivesCycleCollect(t *testing.T) {
 		t.Fatalf("IsFinalized after resurrection = false, want true")
 	}
 
-	// Drop the resurrection ref and collect again. The instance must
-	// die this time, and __del__ must NOT re-fire.
+	// Drop the resurrection ref and collect again. The instance and
+	// its now-untracked-no-more dict both die; __del__ must NOT re-fire.
 	objects.Decref(a)
-	if got := Collect(2); got != 1 {
-		t.Fatalf("second Collect = %d, want 1", got)
+	if got := Collect(2); got != 2 {
+		t.Fatalf("second Collect = %d, want 2", got)
 	}
 	if calls != 1 {
 		t.Errorf("user __del__ re-fired across resurrections: %d calls", calls)

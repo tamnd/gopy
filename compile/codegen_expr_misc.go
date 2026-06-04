@@ -27,7 +27,7 @@ func (c *Compiler) visitNamedExpr(e *ast.NamedExpr) error {
 // The enclosing scope must be function-like; module / class scope
 // rejects yield with a SyntaxError at compile time.
 //
-// CPython: Python/codegen.c:5223 codegen_yield
+// CPython: Python/codegen.c:3168 codegen_addop_yield
 func (c *Compiler) visitYield(e *ast.Yield) error {
 	l := loc(e)
 	if c.scope == nil || !c.scope.IsFunctionLike() {
@@ -38,8 +38,21 @@ func (c *Compiler) visitYield(e *ast.Yield) error {
 	} else if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
-	c.addOpI(YIELD_VALUE, 0, l)
+	c.addopYield(l)
 	return nil
+}
+
+// addopYield emits the wrap intrinsic when the scope is an async
+// generator, then YIELD_VALUE. Centralizes the codegen so the
+// comprehension elt-tail and the `yield` expression visit go through
+// the same path, mirroring CPython's ADDOP_YIELD macro.
+//
+// CPython: Python/codegen.c:3168 codegen_addop_yield
+func (c *Compiler) addopYield(l ast.Pos) {
+	if c.scope != nil && c.scope.Generator && c.scope.Coroutine {
+		c.addOpI(CALL_INTRINSIC_1, intrinsicAsyncGenWrap, l)
+	}
+	c.addOpI(YIELD_VALUE, 0, l)
 }
 
 // visitYieldFrom lowers `yield from x` to GET_YIELD_FROM_ITER plus a
@@ -58,36 +71,59 @@ func (c *Compiler) visitYieldFrom(e *ast.YieldFrom) error {
 	}
 	c.addOp(GET_YIELD_FROM_ITER, loc(e))
 	c.addLoadConst(nil, loc(e))
-	loop := c.newLabel()
-	end := c.newLabel()
-	c.useLabel(loop)
-	c.addOpJump(SEND, end, loc(e))
+	send := c.newLabel()
+	fail := c.newLabel()
+	exit := c.newLabel()
+	c.useLabel(send)
+	c.addOpJump(SEND, exit, loc(e))
+	// Virtual try/except: route StopIteration raised by YIELD_VALUE on a
+	// close/throw through CLEANUP_THROW instead of letting PEP 479 turn
+	// it into a RuntimeError in the enclosing generator body.
+	//
+	// CPython: Python/codegen.c:480 SETUP_FINALLY around YIELD_VALUE
+	c.addOpJump(SETUP_FINALLY, fail, loc(e))
 	c.addOpI(YIELD_VALUE, 0, loc(e))
-	c.addOpI(RESUME, 2, loc(e))
-	c.addOpJump(JUMP_BACKWARD, loop, loc(e))
-	c.useLabel(end)
+	c.addOp(POP_BLOCK, loc(e))
+	c.addOpI(RESUME, resumeAfterYieldFrom, loc(e))
+	c.addOpJump(JUMP_NO_INTERRUPT, send, loc(e))
+	c.useLabel(fail)
+	c.addOp(CLEANUP_THROW, loc(e))
+	c.useLabel(exit)
 	c.addOp(END_SEND, loc(e))
 	return nil
 }
 
 // visitAwait emits the await sequence. CPython lowers this to
-// GET_AWAITABLE 0 / LOAD_CONST None / SEND / YIELD / RESUME 3 loop.
+// GET_AWAITABLE 0 then the shared codegen_add_yield_from helper, which
+// wraps YIELD_VALUE in a virtual try/except so that a StopIteration raised
+// during a close or throw routes through CLEANUP_THROW rather than being
+// turned into a RuntimeError by PEP 479.
 //
-// CPython: Python/codegen.c Await case in visit_expr
+// CPython: Python/codegen.c:5247 Await_kind plus codegen_add_yield_from
 func (c *Compiler) visitAwait(e *ast.Await) error {
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
 	c.addOpI(GET_AWAITABLE, 0, loc(e))
 	c.addLoadConst(nil, loc(e))
-	loop := c.newLabel()
-	end := c.newLabel()
-	c.useLabel(loop)
-	c.addOpJump(SEND, end, loc(e))
+	send := c.newLabel()
+	fail := c.newLabel()
+	exit := c.newLabel()
+	c.useLabel(send)
+	c.addOpJump(SEND, exit, loc(e))
+	// Virtual try/except: route StopIteration raised by YIELD_VALUE on a
+	// close/throw through CLEANUP_THROW instead of letting PEP 479 turn
+	// it into a RuntimeError in the enclosing coroutine body.
+	//
+	// CPython: Python/codegen.c:482 SETUP_FINALLY around YIELD_VALUE
+	c.addOpJump(SETUP_FINALLY, fail, loc(e))
 	c.addOpI(YIELD_VALUE, 1, loc(e))
-	c.addOpI(RESUME, 3, loc(e))
-	c.addOpJump(JUMP_BACKWARD, loop, loc(e))
-	c.useLabel(end)
+	c.addOp(POP_BLOCK, loc(e))
+	c.addOpI(RESUME, resumeAfterAwait, loc(e))
+	c.addOpJump(JUMP_NO_INTERRUPT, send, loc(e))
+	c.useLabel(fail)
+	c.addOp(CLEANUP_THROW, loc(e))
+	c.useLabel(exit)
 	c.addOp(END_SEND, loc(e))
 	return nil
 }

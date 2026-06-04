@@ -93,6 +93,11 @@ linters:
         - name: var-declaration
     misspell:
       locale: US
+      # CPython's compile() raises "unrecognised flags" with the British
+      # spelling; we keep the error text byte-for-byte for parity.
+      ignore-rules:
+        - unrecognised
+        - recognised
     gosec:
       excludes:
         # uint32 -> uint8 narrowing is intentional in pysync byte-flag
@@ -275,13 +280,41 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # twoWay / defaultFind / adaptiveFind port Objects/stringlib/fastsearch.h
+      # FASTSEARCH branch-for-branch (Boyer-Moore-Horspool plus the Two-Way
+      # escalation). The bound checks like `i+1 <= w` mirror the C index
+      # arithmetic exactly, so collapsing them would diverge from the source.
+      - path: objects/stringlib_fastsearch\.go
+        linters:
+          - gocognit
+          - gocyclo
+          - gocritic
+      # bytesFormat ports _PyBytes_FormatEx from Objects/bytesobject.c: the
+      # big per-conversion switch is the parity unit with CPython.
+      - path: objects/bytes_format\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # bytearray.go's init() wires the full bytearray method/getset table in
+      # one block, and byteArrayAssSubscript mirrors bytearray_ass_subscript
+      # (Objects/bytearrayobject.c) branch-for-branch across the single-index
+      # and slice (simple + extended step) assignment and deletion cases. The
+      # complexity is the parity surface, not collapsible branching.
+      - path: objects/bytearray\.go
+        linters:
+          - gocognit
+          - gocyclo
       # translateMethod and hexMethod mirror bytes_translate_impl and
       # bytes_hex_impl from Objects/bytesobject.c branch-for-branch; the
       # nested option/sep parsing and per-byte loop are the parity unit.
+      # hexSepByte carries the _Py_strhex_impl separator messages verbatim
+      # ("sep must be length 1.", "sep must be ASCII.") from Python/pystrhex.c,
+      # which end with periods, so ST1005 does not apply.
       - path: objects/bytes_methods_descr\.go
         linters:
           - gocognit
           - gocyclo
+          - staticcheck
       # funcTpNew mirrors func_new_impl from Objects/funcobject.c: the
       # six positional+keyword arguments each carry typed validation
       # branches that match the upstream signature one-for-one.
@@ -652,6 +685,27 @@ linters:
           - gocognit
           - gocyclo
           - nakedret
+      # minMax ports min_max from Python/bltinmodule.c: the default/key
+      # kwarg handling plus the single-arg-iterable vs varargs split is
+      # the branch tree that matches the upstream builtin.
+      - path: builtins/aggregate\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # copyNamespaceToType and installSlots mirror type_new_set_attrs and
+      # fixup_slot_dispatchers from Objects/typeobject.c: the per-dunder
+      # slot-wiring branches are the parity unit with CPython.
+      - path: objects/usertype\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # tryImport mirrors import_name plus _PyEval_ImportFrom from
+      # Python/ceval.c: the fromlist / submodule / fallback branches are the
+      # parity unit with CPython's import machinery.
+      - path: vm/eval_import\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:

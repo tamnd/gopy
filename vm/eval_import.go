@@ -38,6 +38,63 @@ func callerBuiltins(f *frame.Frame) objects.Object {
 	return f.Globals
 }
 
+// optionalImportFunc reads __import__ out of the frame's builtins
+// mapping. Mirrors the PyMapping_GetOptionalItemString call import_name
+// opens with: (func, true, nil) when present, (nil, false, nil) when
+// the mapping lacks the key, and (nil, false, err) for a real failure.
+//
+// CPython: Python/ceval.c:2805 PyMapping_GetOptionalItemString(f_builtins, "__import__")
+func optionalImportFunc(builtins objects.Object) (objects.Object, bool, error) {
+	if builtins == nil {
+		return nil, false, nil
+	}
+	return objects.MappingGetOptionalItem(builtins, objects.NewStr("__import__"))
+}
+
+// isDefaultImport reports whether fn is the built-in __import__ the
+// interpreter installs, the object import_name compares against before
+// taking its fast path. Identity against the builtins module's entry
+// matches `import_func == tstate->interp->import_func`.
+//
+// CPython: Python/ceval.c:2820 import_name (fast-path identity check)
+func isDefaultImport(fn objects.Object) bool {
+	bm, ok := imp.GetModule("builtins")
+	if !ok || bm == nil {
+		return false
+	}
+	def, err := bm.Dict().GetItem(objects.NewStr("__import__"))
+	if err != nil || def == nil {
+		return false
+	}
+	return fn == def
+}
+
+// frameHasExplicitBuiltins reports whether the frame's globals carry an
+// explicit __builtins__ binding. gopy falls back to using globals as the
+// builtins mapping when none was set, so a missing __import__ in that
+// fallback must not be mistaken for a namespace that deliberately
+// dropped __import__.
+func frameHasExplicitBuiltins(f *frame.Frame) bool {
+	if f == nil {
+		return false
+	}
+	d, ok := f.Globals.(*objects.Dict)
+	if !ok {
+		return false
+	}
+	v, _ := d.GetItem(objects.NewStr("__builtins__"))
+	return v != nil
+}
+
+// orNone returns o, or None when o is nil, so a Python callable never
+// receives a Go nil in its argument tuple.
+func orNone(o objects.Object) objects.Object {
+	if o == nil {
+		return objects.None()
+	}
+	return o
+}
+
 // vmExecutor implements imp.Executor using the current thread's eval loop.
 // It is created per-import inside the IMPORT_NAME arm. builtins is the
 // __builtins__ binding the importing frame is running under; it is
@@ -103,10 +160,45 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		modname := co.Names[oparg]
 
+		// import_name resolves __import__ out of f_builtins and calls it.
+		// A namespace that installs its own __builtins__ can override or
+		// drop __import__; an explicit builtins missing the key is the
+		// "__import__ not found" ImportError, and a custom callable is
+		// invoked with the full (name, globals, locals, fromlist, level)
+		// tuple rather than the fast path.
+		//
+		// CPython: Python/ceval.c:2799 import_name
+		builtinsNS := callerBuiltins(e.f)
+		importFunc, foundImport, ferr := optionalImportFunc(builtinsNS)
+		if ferr != nil {
+			return 0, true, ferr
+		}
+		if foundImport && !isDefaultImport(importFunc) {
+			locals := e.f.Locals
+			if locals == nil {
+				locals = e.f.Globals
+			}
+			res, cerr := objects.Call(importFunc, objects.NewTuple([]objects.Object{
+				objects.NewStr(modname),
+				orNone(e.f.Globals),
+				orNone(locals),
+				orNone(fromlistObj),
+				orNone(levelObj),
+			}), nil)
+			if cerr != nil {
+				return 0, true, cerr
+			}
+			e.pushObject(res)
+			return e.advance(), true, nil
+		}
+		if !foundImport && frameHasExplicitBuiltins(e.f) {
+			return 0, true, fmt.Errorf("ImportError: __import__ not found")
+		}
+
 		level := importLevel(levelObj)
 		pkgname := globalName(e.f.Globals)
 
-		exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
+		exec := &vmExecutor{ts: e.ts, builtins: builtinsNS}
 		mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, level)
 		if ierr != nil {
 			// Promote Go-level ErrModuleNotFound into a typed

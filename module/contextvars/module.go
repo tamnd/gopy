@@ -58,7 +58,7 @@ func buildModule() (*objects.Module, error) {
 // CPython: Python/context.c:434 context_tp_new
 func contextCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 0 || len(kwargs) != 0 {
-		return nil, fmt.Errorf("TypeError: Context() takes no arguments")
+		return nil, fmt.Errorf("TypeError: Context() does not accept any arguments")
 	}
 	return NewContext(), nil
 }
@@ -71,6 +71,19 @@ func contextCall(_ objects.Object, args []objects.Object, kwargs map[string]obje
 func contextVarCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: ContextVar() takes exactly 1 positional argument (%d given)", len(args))
+	}
+	// CPython: contextvar_new rejects a non-str name before anything
+	// else, then hashes the name (contextvar_generate_hash), which
+	// propagates the unhashable-type error for weird str subclasses
+	// (gh-132002).
+	//
+	// CPython: Python/context.c:866 contextvar_new (PyUnicode_Check)
+	// CPython: Python/context.c:833 contextvar_generate_hash
+	if !objects.IsSubtype(args[0].Type(), objects.StrType()) {
+		return nil, fmt.Errorf("TypeError: context variable name must be a str")
+	}
+	if _, herr := objects.Hash(args[0]); herr != nil {
+		return nil, herr
 	}
 	name, err := objects.Str(args[0])
 	if err != nil {
@@ -99,15 +112,20 @@ func tokenCall(_ objects.Object, _ []objects.Object, _ map[string]objects.Object
 	return nil, fmt.Errorf("RuntimeError: Tokens can only be created by ContextVars")
 }
 
-// copyContextBuiltin is the module-level copy_context() entry. The
-// real CPython function reads PyThreadState_GET; gopy threads its
-// thread state explicitly so the no-current-thread path returns a
-// RuntimeError until the lifecycle layer publishes a current pointer.
+// copyContextBuiltin is the module-level copy_context() entry. CPython
+// reads the running thread via PyThreadState_GET and snapshots its
+// context; gopy reaches the same thread state through the vm-installed
+// CurrentThreadHook (the same hook ContextVar.get/set already use) and
+// hands it to CopyCurrent.
 //
 // CPython: Python/context.c:114 _contextvars_copy_context_impl
 func copyContextBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 0 || len(kwargs) != 0 {
 		return nil, fmt.Errorf("TypeError: copy_context() takes no arguments")
 	}
-	return nil, fmt.Errorf("RuntimeError: copy_context() requires a thread state; call CopyCurrent(ts) directly until the lifecycle wires _PyThreadState_GET")
+	ts, err := currentTS()
+	if err != nil {
+		return nil, err
+	}
+	return CopyCurrent(ts), nil
 }

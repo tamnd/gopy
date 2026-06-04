@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tamnd/gopy/errors"
+	_warnings "github.com/tamnd/gopy/module/_warnings"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -50,8 +52,25 @@ func Import(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 	if err != nil {
 		return nil, err
 	}
+	// _sanity_check rejects an empty absolute module name before any
+	// finder runs. The level < 0 case is screened in parseImportArgs.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1380 _sanity_check
+	if parsed.name == "" && parsed.level == 0 {
+		return nil, fmt.Errorf("ValueError: Empty module name")
+	}
 	if currentImporter == nil {
 		return nil, fmt.Errorf("ImportError: __import__ not configured")
+	}
+	// The bound __import__ only computes the package anchor for a
+	// relative import; an absolute import (level == 0) never touches
+	// _calc___package__, so its ImportWarning fallback only fires here.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1390 __import__
+	if parsed.level > 0 {
+		if err := warnPackageFallback(parsed.globals); err != nil {
+			return nil, err
+		}
 	}
 	pkgname := pkgnameFromGlobals(parsed.globals)
 	return currentImporter(parsed.name, pkgname, parsed.level, parsed.fromlist)
@@ -208,10 +227,59 @@ func pkgnameFromGlobals(globals objects.Object) string {
 	if dictStringEntry(d, "__path__") != "" {
 		return name
 	}
+	// _calc___package__ computes __name__.rpartition('.')[0] when the
+	// module is not a package. For a top-level name like "__main__" that
+	// is the empty string, so a level>0 import from it has no anchor and
+	// _sanity_check raises ImportError.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__
 	if dot := strings.LastIndex(name, "."); dot >= 0 {
 		return name[:dot]
 	}
-	return name
+	return ""
+}
+
+// warnPackageFallback mirrors the else branch of _calc___package__:
+// when a relative import (level > 0) runs in a module whose globals
+// carry neither a non-None __package__ nor a non-None __spec__, the
+// machinery falls back to __name__/__path__ and emits an ImportWarning
+// before doing so (bpo-37409). A non-dict globals has nothing to read,
+// so it warns nothing.
+//
+// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__
+func warnPackageFallback(globals objects.Object) error {
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	if dictHasNonNone(d, "__package__") || dictHasNonNone(d, "__spec__") {
+		return nil
+	}
+	return emitImportWarning("can't resolve package from __spec__ or __package__, falling back on __name__ and __path__")
+}
+
+// dictHasNonNone reports whether d[key] exists and is not None. Used to
+// decide whether __package__ / __spec__ supply a usable anchor before
+// falling back to __name__.
+func dictHasNonNone(d *objects.Dict, key string) bool {
+	v, err := d.GetItem(objects.NewStr(key))
+	if err != nil || v == nil || objects.IsNone(v) {
+		return false
+	}
+	return true
+}
+
+// emitImportWarning routes message through the _warnings machinery
+// under ImportWarning so the emission walks the live filter list and
+// any recording context manager (catch_warnings / assertWarns). Like
+// CPython's _calc___package__ it calls _warnings directly rather than
+// re-entering the import hook for "warnings"; the C _warnings module is
+// always loaded, so the fallback warning cannot itself trip the import
+// it is reporting on.
+//
+// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__ (_warnings.warn ImportWarning, stacklevel=3)
+func emitImportWarning(message string) error {
+	return _warnings.WarnEx(errors.PyExc_ImportWarning, message, 3)
 }
 
 // dictStringEntry reads dict[key] and returns its string value, or ""

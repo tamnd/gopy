@@ -28,6 +28,26 @@ import (
 //
 // CPython: Python/compile.c:L353 _PyAST_Compile
 func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
+	return CompileFlags(mod, filename, optimize, 0)
+}
+
+// CompileFlags is Compile with the compile() PyCF_* flag word. Only
+// PyCF_ALLOW_TOP_LEVEL_AWAIT is consumed here: it is folded into the
+// future feature set so the symtable promotes the module to a coroutine
+// when the body has a top-level await / async for / async with. The bit
+// never reaches co_flags (compute_code_flags masks it out).
+//
+// CPython: Python/compile.c:353 _PyAST_Compile (cf->cf_flags merged into
+// st_future->ff_features)
+func CompileFlags(mod ast.Mod, filename string, optimize, flags int) (*Code, error) {
+	// optimize == -1 means "use the interpreter's optimization level".
+	// gopy has no -O switch yet, so that level is 0 (asserts kept,
+	// docstrings kept, __debug__ folds to True). Resolve it here so
+	// every downstream pass (preprocess __debug__ fold, assert removal,
+	// docstring stripping) sees a non-negative level.
+	//
+	// CPython: Python/compile.c:353 _PyAST_Compile (optimize == -1 -> config->optimization_level)
+	optimize = max(optimize, 0)
 	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
 	// CPython: Python/ast.c:1047 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
@@ -36,6 +56,9 @@ func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
 	ff, err := future.FromAST(mod, filename)
 	if err != nil {
 		return nil, err
+	}
+	if uint32(flags)&future.AllowTopLevelAwait != 0 {
+		ff.Bits |= future.AllowTopLevelAwait
 	}
 	// AST preprocess runs between future scan and symtable build, matching
 	// the CPython ordering in compiler_init. The pass applies printf-format

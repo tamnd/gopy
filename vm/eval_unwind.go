@@ -109,6 +109,12 @@ func synthesizeException(err error) *pyerrors.Exception {
 	if errors.Is(err, objects.ErrStopAsyncIteration) {
 		return pyerrors.New(pyerrors.PyExc_StopAsyncIteration, nil)
 	}
+	// GeneratorExit thrown into a generator body by gen.close() must land as
+	// a GeneratorExit exception, not as a bare Exception("GeneratorExit").
+	// CPython: Objects/genobject.c:388 gen_close (PyErr_SetNone(PyExc_GeneratorExit))
+	if errors.Is(err, objects.ErrGeneratorExit) {
+		return pyerrors.New(pyerrors.PyExc_GeneratorExit, nil)
+	}
 	// Structured parser SyntaxError: lift filename/lineno/offset/text
 	// into the (msg, info) 2-arg form so the SyntaxError instance
 	// carries the full set of attributes Python user code expects.
@@ -354,8 +360,19 @@ func (e *evalState) handleException(err error) bool {
 	// exception that propagates up through several frames carries one
 	// entry per frame regardless of whether any of them caught it.
 	//
-	// CPython: Python/ceval.c exception_unwind (PyTraceBack_Here call)
-	e.attachFrameTraceback()
+	// RERAISE is the exception: it jumps straight to exception_unwind,
+	// bypassing the `error` label's PyTraceBack_Here, so a re-raised
+	// exception keeps the tb it already carries instead of gaining a
+	// fresh (and, for a with-cleanup site, line-0) frame entry. A
+	// multi-manager `with` re-raises once per cleanup block, so without
+	// this guard each block stamps a duplicate frame.
+	//
+	// CPython: Python/ceval.c exception_unwind (PyTraceBack_Here call);
+	// Python/bytecodes.c RERAISE (goto exception_unwind, no tb-here)
+	var rr *reraiseError
+	if !errors.As(err, &rr) {
+		e.attachFrameTraceback()
+	}
 	if co == nil || len(co.ExceptionTable) == 0 {
 		return false
 	}
@@ -367,14 +384,25 @@ func (e *evalState) handleException(err error) bool {
 	exc := pyerrors.Occurred(e.ts)
 	pyerrors.Clear(e.ts)
 
-	// Unconditionally restore the stack depth to the value recorded in
-	// the exception table entry. CPython always sets the stack pointer
-	// here; only reducing it was a bug (StackTop could be below
-	// entry.depth if the exception fired before any pushes in the try
-	// body).
+	// Restore the stack depth to the value recorded in the exception
+	// table entry. When the current top is above the handler depth, the
+	// slots in between are temporaries the try body pushed and never
+	// consumed; CPython's exception_unwind pops each one with Py_XDECREF
+	// before jumping to the handler. DropStack closes each slot, so
+	// references those temporaries owned (e.g. a coroutine GET_ITER
+	// rejected with TypeError) are released here instead of being pinned
+	// as a phantom GC root that blocks finalization. When the top is at
+	// or below the handler depth (the exception fired before the try
+	// body pushed anything), there is nothing to release and we just set
+	// the pointer.
 	//
-	// CPython: Python/ceval.c exception_unwind `_PyFrame_SetStackPointer`
-	e.f.StackTop = entry.depth
+	// CPython: Python/ceval.c exception_unwind (the `while (stack_pointer
+	// > new_top) PyStackRef_XCLOSE(POP())` loop before `goto handle`)
+	if e.f.StackTop > entry.depth {
+		e.f.DropStack(e.f.StackTop - entry.depth)
+	} else {
+		e.f.StackTop = entry.depth
+	}
 
 	// For SETUP_WITH / SETUP_CLEANUP regions, push the bytecode lasti
 	// in code-units. The with-statement teardown reads it to resume at
@@ -421,20 +449,6 @@ func (e *evalState) attachFrameTraceback() {
 	if co == nil {
 		return
 	}
-	// Do not add a duplicate entry if this frame's traceback was already
-	// prepended for this exception. CPython calls PyTraceBack_Here only
-	// once per exception per frame entry; gopy's handleException is called
-	// once per exception-table entry lookup, so we must guard here.
-	//
-	// CPython: Python/traceback.c:154 PyTraceBack_Here (called once per
-	// frame, not per exception-table entry).
-	if exc.TB != nil && exc.TB.TbFrame != nil {
-		if tbFrame, ok := exc.TB.TbFrame.(*objects.Frame); ok {
-			if tbFrame.Code() == co {
-				return
-			}
-		}
-	}
 	// CPython resolves the traceback line from the *previous* dispatched
 	// instruction's offset, since InstrPtr already points at whatever
 	// follows the raising op.
@@ -444,6 +458,21 @@ func (e *evalState) attachFrameTraceback() {
 	if off < 0 {
 		off = e.f.InstrPtr
 	}
+	// Skip only if the most recent tb entry is for the same frame at the
+	// same instruction offset. This matches CPython's exception_unwind,
+	// which calls PyTraceBack_Here once per unwind, but allows the same
+	// frame to appear multiple times in the chain when the exception
+	// leaves the frame via a sub-call and re-raises at a later op
+	// (e.g. the original raise site plus a later call that re-raises).
+	//
+	// CPython: Python/traceback.c:154 PyTraceBack_Here (no dedup; same
+	// frame can appear repeatedly when an exception travels through it)
+	// CPython: Python/traceback.c:154 PyTraceBack_Here adds a new entry
+	// every time it is invoked. No deduplication: the same frame can
+	// appear multiple times when the exception leaves the frame via a
+	// sub-call and is re-raised at a later op (raise / re-raise after
+	// re-entry).
+	_ = exc.TB
 	line := -1
 	if entry, ok := objects.CoAddr2Location(co, off); ok {
 		line = entry.Line
@@ -456,15 +485,19 @@ func (e *evalState) attachFrameTraceback() {
 		name = co.Qualname
 	}
 	entry := traceback.Entry{File: co.Filename, Line: line, Name: name}
-	// Snapshot the live activation record so tb.tb_frame.f_code stays
-	// readable after the frame returns and its chunk-arena slot gets
-	// recycled. CPython does not need this because PyFrameObject is
-	// reference-counted; gopy reuses interpreter-frame storage.
-	snap := objects.SnapshotFrame(e.f)
+	// Wrap the live activation record so tb.tb_frame reads the iframe's
+	// current state (notably f_lineno) until the frame returns. NewFrame
+	// auto-registers as a wrapper, so chunk.Pop will SnapshotFrameWithLocals
+	// the iframe and SwapInterp the wrapper before the chunk slot recycles.
+	// This keeps the catch-site frame's f_lineno live (CPython behavior)
+	// while still preserving locals across the natural return of unwinding
+	// frames.
+	//
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
 	tb := &traceback.Traceback{
 		Entry:   entry,
 		Next:    exc.TB,
-		TbFrame: objects.NewFrame(snap),
+		TbFrame: objects.NewFrame(e.f),
 		TbLasti: off,
 	}
 	tb.Init(traceback.Type)

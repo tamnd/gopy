@@ -1,5 +1,7 @@
 package objects
 
+import "fmt"
+
 // notImplementedObject is the singleton for NotImplemented, returned
 // by binary slots when they cannot handle the operand types. The
 // abstract layer treats it as a signal to try the reflected slot.
@@ -20,6 +22,26 @@ var notImplementedSingleton = func() *notImplementedObject {
 func init() {
 	notImplementedType.Repr = func(_ Object) (string, error) { return "NotImplemented", nil }
 	notImplementedType.Str = notImplementedType.Repr
+	notImplementedType.Getattro = GenericGetAttr
+	notImplementedType.Setattro = GenericSetAttr
+	// NotImplemented must never be evaluated in a boolean context; the
+	// nb_bool slot raises rather than returning a truth value.
+	//
+	// CPython: Objects/object.c:2364 notimplemented_bool
+	notImplementedType.Number = &NumberMethods{
+		Bool: func(_ Object) (bool, error) {
+			return false, fmt.Errorf("TypeError: NotImplemented should not be used in a boolean context")
+		},
+	}
+	// NotImplementedType() returns the singleton and rejects any argument.
+	//
+	// CPython: Objects/object.c:2344 notimplemented_new
+	notImplementedType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 0 || len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: NotImplementedType takes no arguments")
+		}
+		return notImplementedSingleton, nil
+	}
 }
 
 // NotImplemented returns the singleton NotImplemented value. Mirrors

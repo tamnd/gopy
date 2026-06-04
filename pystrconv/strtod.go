@@ -77,6 +77,133 @@ func ParseFloat(s string) (float64, error) {
 	return v, nil
 }
 
+// StripUnderscores is the exported wrapper around stripUnderscores. Used
+// by callers like complex_from_string_inner that need to scrub
+// underscores from the whole literal before sub-parsing components.
+//
+// CPython: Python/pystrtod.c:344 _Py_string_to_number_with_underscores
+func StripUnderscores(s string) (string, bool) { return stripUnderscores(s) }
+
+// ParseFloatPrefix mirrors PyOS_string_to_double's strtod-like behavior:
+// it parses the longest valid float at the start of s, returning the
+// value and the byte index of the first character that is not part of
+// the float. When the prefix is not a float, the returned end index is
+// 0 (matching the CPython convention where complex_from_string_inner
+// checks "end != s"). Underscores are NOT consumed here because
+// PyOS_string_to_double goes straight to strtod without the
+// _Py_string_to_number_with_underscores wrapper; the caller (e.g.
+// complex_from_string_inner) is expected to have stripped underscores
+// from the full literal beforehand. Overflow returns +/-Inf with a nil
+// error, matching PyOS_string_to_double(s, &end, NULL).
+//
+// CPython: Python/pystrtod.c:298 PyOS_string_to_double
+func ParseFloatPrefix(s string) (float64, int, error) {
+	end := scanFloatPrefix(s)
+	if end == 0 {
+		return 0, 0, nil
+	}
+	v, err := ParseFloat(s[:end])
+	if err != nil {
+		if errors.Is(err, ErrFloatOverflow) {
+			return v, end, nil
+		}
+		return 0, 0, nil
+	}
+	return v, end, nil
+}
+
+// scanFloatPrefix returns the length of the longest float syntactically
+// at the start of s, or 0 when no float is present. The grammar matches
+// strtod: optional sign, then (inf|infinity|nan) or a decimal mantissa
+// (digits, optional fraction, optional exponent). Hex floats are not
+// part of the prefix: PyOS_string_to_double rejects them.
+func scanFloatPrefix(s string) int {
+	i := 0
+	n := len(s)
+	if i < n && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	if tokLen := matchInfNanPrefix(s[i:]); tokLen > 0 {
+		return i + tokLen
+	}
+	hasDigits := false
+	for i < n && isDigit(s[i]) {
+		hasDigits = true
+		i++
+	}
+	if i < n && s[i] == '.' {
+		i++
+		for i < n && isDigit(s[i]) {
+			hasDigits = true
+			i++
+		}
+	}
+	if !hasDigits {
+		return 0
+	}
+	return i + scanExponent(s[i:])
+}
+
+// matchInfNanPrefix returns the byte length of a leading inf/infinity/nan
+// token (case-insensitive), or 0 if none.
+func matchInfNanPrefix(s string) int {
+	if s == "" {
+		return 0
+	}
+	lower := asciiLower(s)
+	switch {
+	case strings.HasPrefix(lower, "infinity"):
+		return 8
+	case strings.HasPrefix(lower, "inf"):
+		return 3
+	case strings.HasPrefix(lower, "nan"):
+		return 3
+	}
+	return 0
+}
+
+// scanExponent returns the length of a valid [eE][+-]?digits suffix at the
+// start of s, or 0 if no full exponent is present.
+func scanExponent(s string) int {
+	n := len(s)
+	if n == 0 || (s[0] != 'e' && s[0] != 'E') {
+		return 0
+	}
+	j := 1
+	if j < n && (s[j] == '+' || s[j] == '-') {
+		j++
+	}
+	if j >= n || !isDigit(s[j]) {
+		return 0
+	}
+	for j < n && isDigit(s[j]) {
+		j++
+	}
+	return j
+}
+
+func asciiLower(s string) string {
+	needs := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
 // stripUnderscores removes PEP 515 digit-grouping underscores. Returns
 // the cleaned string and true, or ("", false) if any underscore is
 // misplaced. The placement rule: an underscore must have a digit on
@@ -112,6 +239,15 @@ func stripUnderscores(s string) (string, bool) {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// TransformDecimalAndSpaceToASCII is the exported wrapper. Callers
+// outside pystrconv (e.g. complex_from_string_inner) need to fold
+// Unicode digits/spaces before scanning byte positions.
+//
+// CPython: Objects/unicodeobject.c:9612 _PyUnicode_TransformDecimalAndSpaceToASCII
+func TransformDecimalAndSpaceToASCII(s string) string {
+	return transformDecimalAndSpaceToASCII(s)
+}
 
 // transformDecimalAndSpaceToASCII maps each rune in s to an ASCII byte:
 //   - runes < 128 pass through unchanged

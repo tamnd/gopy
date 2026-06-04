@@ -13,7 +13,6 @@ package builtins
 import (
 	"fmt"
 	"io"
-	"os"
 	"sync"
 
 	"github.com/tamnd/gopy/errors"
@@ -84,7 +83,7 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
-	inputFn := objects.NewBuiltinFunction("input", Input(os.Stdin, defaultFile))
+	inputFn := objects.NewBuiltinFunction("input", Input)
 	if err := setBuiltin(dict, "input", inputFn); err != nil {
 		return nil, err
 	}
@@ -137,6 +136,17 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	if err := setBuiltin(dict, "__import__", importFn); err != nil {
 		return nil, err
 	}
+
+	// breakpoint() forwards to sys.breakpointhook. Register the builtin
+	// here and hand the default hook to sys so sys.breakpointhook and
+	// sys.__breakpointhook__ resolve once the sys module is built.
+	//
+	// CPython: Python/bltinmodule.c:3359 breakpoint PyMethodDef
+	breakpointFn := objects.NewBuiltinFunction("breakpoint", Breakpoint)
+	if err := setBuiltin(dict, "breakpoint", breakpointFn); err != nil {
+		return nil, err
+	}
+	sys.SetBreakpointHook(objects.NewBuiltinFunction("breakpointhook", breakpointHook))
 
 	compileFn := objects.NewBuiltinFunction("compile", Compile)
 	if err := setBuiltin(dict, "compile", compileFn); err != nil {
@@ -241,7 +251,8 @@ func wireTypeCalls() {
 		// __new__ descriptor needs binding here.
 		bindCtorDescr(objects.TupleType, TupleCtor)
 		bindDictCtor(objects.DictType)
-		bindCtor(objects.ComplexType, ComplexCtor)
+		objects.SetComplexTpNewBase(ComplexCtor)
+		bindCtorDescr(objects.ComplexType, ComplexCtor)
 		// set/frozenset use subtype-aware TpNew so that class H(set): ...
 		// instances carry their own type (CPython: set_new passes subtype).
 		objects.SetType.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -252,13 +263,23 @@ func wireTypeCalls() {
 		// carry their own type (CPython: frozenset_new passes subtype).
 		objects.FrozensetType.TpNew = frozensetCtorWithType
 		bindCtorDescr(objects.FrozensetType, FrozensetCtor)
-		bindCtor(objects.BytesType, BytesCtor)
-		bindCtor(objects.ByteArrayType, ByteArrayCtor)
+		// bytes uses a subtype-aware TpNew so that class B(bytes): ...
+		// instances carry their own type and can hold instance attributes
+		// (CPython: bytes_subtype_new passes subtype to tp_alloc).
+		objects.BytesType.TpNew = bytesNewObject
+		bindCtorDescr(objects.BytesType, BytesCtor)
+		bindByteArrayCtor(objects.ByteArrayType)
 		bindCtor(objects.RangeType, Range)
 		bindCtor(ZipType, Zip)
 		bindCtor(objects.MapType, Map)
 		bindCtor(objects.FilterType, Filter)
-		bindCtor(objects.EnumerateType, Enumerate)
+		// enumerate uses a subtype-aware TpNew so class E(enumerate): ...
+		// instances carry their own type (CPython: enum_new_impl allocates
+		// with type->tp_alloc(type)).
+		objects.EnumerateType.TpNew = Enumerate
+		bindCtorDescr(objects.EnumerateType, func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+			return Enumerate(objects.EnumerateType, args, kwargs)
+		})
 		bindCtor(objects.ReversedType, Reversed)
 		bindCtor(objects.MemoryViewType, memoryViewCtor)
 	})

@@ -10,13 +10,14 @@ package objects
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 )
 
 // Enumerate backs enumerate(iterable, start=0). Index uses big.Int so
 // it stays correct past 2**63 the way CPython's enumobject does.
 //
-// CPython: Python/bltinmodule.c:1390 enumobject
+// CPython: Objects/enumobject.c:18 enumobject
 type Enumerate struct {
 	Header
 	iter  Object
@@ -25,19 +26,37 @@ type Enumerate struct {
 
 // EnumerateType is the type singleton for enumerate.
 //
-// CPython: Python/bltinmodule.c:1455 PyEnum_Type
+// CPython: Objects/enumobject.c:319 PyEnum_Type
 var EnumerateType = NewType("enumerate", []*Type{objectType})
 
 func init() {
-	EnumerateType.Iter = func(o Object) (Object, error) { return o, nil }
+	EnumerateType.Iter = SelfIter
 	EnumerateType.IterNext = enumerateNext
 	AddIterSlotWrappers(EnumerateType)
+	SetTypeDescr(EnumerateType, "__reduce__", NewMethodDescr(EnumerateType, "__reduce__", enumerateReduce))
+}
+
+// NewEnumerateOfType is the gopy port of enum_new_impl. It builds an
+// enumerate of the given (sub)type around an already-constructed
+// iterator and a starting index. CPython allocates with type->tp_alloc
+// so a subclass instance keeps its own type, which is why cls is
+// threaded through here rather than hardwired to EnumerateType.
+//
+// CPython: Objects/enumobject.c:48 enum_new_impl
+func NewEnumerateOfType(cls *Type, iter Object, index *big.Int) *Enumerate {
+	idx := new(big.Int)
+	if index != nil {
+		idx.Set(index)
+	}
+	e := &Enumerate{iter: iter, index: idx}
+	e.init(cls)
+	return e
 }
 
 // NewEnumerate wraps an iterable as enumerate(iterable, start). The
 // iterable must expose a tp_iter slot.
 //
-// CPython: Python/bltinmodule.c:1404 enum_new_impl
+// CPython: Objects/enumobject.c:48 enum_new_impl
 func NewEnumerate(iterable Object, start *Int) (*Enumerate, error) {
 	if iterable.Type().Iter == nil {
 		return nil, errors.New("TypeError: 'enumerate' requires an iterable")
@@ -46,13 +65,35 @@ func NewEnumerate(iterable Object, start *Int) (*Enumerate, error) {
 	if err != nil {
 		return nil, err
 	}
-	idx := new(big.Int)
+	var idx *big.Int
 	if start != nil {
-		idx.Set(&start.v)
+		idx = &start.v
 	}
-	e := &Enumerate{iter: it, index: idx}
-	e.init(EnumerateType)
-	return e, nil
+	return NewEnumerateOfType(EnumerateType, it, idx), nil
+}
+
+// Iter exposes the wrapped secondary iterator (en_sit) so the builtin
+// pickle path can rebuild the enumerate.
+func (e *Enumerate) Iter() Object { return e.iter }
+
+// Index exposes the current enumeration counter (en_index) for pickling.
+func (e *Enumerate) Index() *big.Int { return e.index }
+
+// enumerateReduce ports enum_reduce: pickle an enumerate as
+// (type(self), (en_sit, en_index)) so unpickling re-runs the
+// constructor with the live sub-iterator and resumes counting.
+//
+// CPython: Objects/enumobject.c:288 enum_reduce
+func enumerateReduce(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
+	}
+	e, ok := args[0].(*Enumerate)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reduce__' for 'enumerate' objects doesn't apply to a '%s' object", args[0].Type().Name)
+	}
+	inner := NewTuple([]Object{e.iter, NewIntFromBig(e.index)})
+	return NewTuple([]Object{e.Type(), inner}), nil
 }
 
 // enumerateNext mirrors enum_next: fetch next item from the inner
@@ -98,7 +139,7 @@ type Reversed struct {
 var ReversedType = NewType("reversed", []*Type{objectType})
 
 func init() {
-	ReversedType.Iter = func(o Object) (Object, error) { return o, nil }
+	ReversedType.Iter = SelfIter
 	ReversedType.IterNext = reversedNext
 	AddIterSlotWrappers(ReversedType)
 }

@@ -32,12 +32,16 @@ func TestMappingSize(t *testing.T) {
 	}
 }
 
-func TestMappingSizeRejectsSequence(t *testing.T) {
-	// Tuple does not expose mp_length (no mp_subscript either), so
-	// PyMapping_Size on a tuple still raises. List on the other hand
-	// carries mp_length and is a valid PyMapping_Size target.
-	if _, err := MappingSize(NewTuple(nil)); err == nil {
-		t.Error("tuple should fail MappingSize (no mp_length)")
+func TestMappingSizeTuple(t *testing.T) {
+	// CPython gives tuple a tuple_as_mapping with mp_length (tuple_length)
+	// and mp_subscript (tuple_subscript), so PyMapping_Size on a tuple
+	// returns its length just like on a list.
+	got, err := MappingSize(NewTuple([]Object{NewInt(1), NewInt(2)}))
+	if err != nil {
+		t.Fatalf("tuple should pass MappingSize (has mp_length): %v", err)
+	}
+	if got != 2 {
+		t.Errorf("size = %d, want 2", got)
 	}
 }
 

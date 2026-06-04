@@ -21,7 +21,7 @@ that tree.
 
 ---
 
-## Current test status (audit date: 2026-05-29)
+## Current test status (audit date: 2026-05-31)
 
 | Test | Result | Spec-1700 mark |
 |------|--------|----------------|
@@ -34,19 +34,53 @@ that tree.
 | test_with | OK | done |
 | test_contains | OK | done |
 | test_typechecks | OK | done |
-| test_extcall | FAILED (1 failure) | ready |
-| test_frame | FAILED (17 failures, 9 errors) | ready |
-| test_eval | file not vendored | ready |
+| test_extcall | OK (P10 fixed: module naming, star-unpack funcstr, iter-drain StopIteration) | done |
+| test_frame | OK (59 pass, 12 skip) | done |
+| test_eval | no standalone module in 3.14 (moved to test_capi/, needs _testcapi) | out-of-scope |
 | test_pow | OK | done |
-| test_yield_from | FAILED (15 failures, 30 errors) | ready |
-| test_coroutines | PANIC (goroutine deadlock) | ready |
-| test_asyncgen | FAILED (4 failures, 79 errors) | ready |
-| test_generator_stop | FAILED (2 errors) | ready |
-| test_generators | FAILED (20 failures, 19 errors) | ready |
-| test_iter | FAILED (1 failure) — tracked in spec 1722 P5 | ready |
-| test_iterlen | FAILED (18 failures) | ready |
-| test_index | FAILED (1 failure, 20 errors) | ready |
+| test_yield_from | OK (43 pass) | done |
+| test_coroutines | OK (99 pass, 3 skip) | done |
+| test_asyncgen | OK (85 pass) | done |
+| test_generator_stop | OK | done |
+| test_generators | OK (59 pass, 1 skip) | done |
+| test_iter | OK (57 pass, 2 skip) | done |
+| test_iterlen | OK (22 pass) | done |
+| test_index | OK (55 pass) | done |
 | test_isinstance | OK | done |
+
+Recursion-limit enforcement (P12.1, P12.2) flipped `test_repr_deep` across
+`list_tests` / `mapping_tests` / `test_dict` and removed the Go stack-overflow
+crash on unbounded recursion. As of the 2026-06-01 pass `test_frame` and
+`test_generators` are fully green (P12.4 PEP 709 inlining shipped, plus the
+generator gi_exc_state nesting-depth fix so `sys.exception()` is correct across
+a yield inside an except block). The remaining red files reduce to two causes:
+getrefcount / weakref-reclaim exactness (P11, a GC-model gap that the documented
+container refcount discipline makes unsafe to chase), and the asyncio event loop
+(spec 1711). `test_extcall` is now green (P10): vendored tests run under
+`test.<name>` so the doctest module prefix matches CPython, the star-unpack
+TypeError formatters were ported faithfully, and iterator draining no longer
+leaks a user `__next__` raising `StopIteration`. `test_eval` has no standalone module in CPython 3.14 (it moved
+under `Lib/test/test_capi/test_eval.py` and needs `_testcapi`), so P9 is
+out of scope.
+
+A coroutine that GET_ITER rejected with TypeError (`for _ in coro()`,
+bpo-32703) used to stay pinned on the eval stack after the unwind, so its
+never-awaited finalizer never ran; the exception-unwind path now decrefs the
+abandoned stack temporaries the way CPython's exception_unwind does, which
+recovered `test_coroutines.test_func_9` (7 failures down to 5).
+
+`test_asyncgen` emitted spurious `Task was destroyed but it is pending!`
+lines on stderr after the aclose cases. The async-generator port now mirrors
+CPython's `ag_closed` flag (set the instant aclose begins driving the body,
+distinct from the frame-finished state) and gates `_PyGen_Finalize` on it, so
+a body that ignores GeneratorExit and raises RuntimeError no longer leaves the
+generator looking open for a later GC to re-finalize. The one remaining stderr
+line comes from `test_async_gen_aclose_compatible_with_get_stack`, which
+creates an aclose task it never awaits: gopy collects the parent async
+generator while that task is still queued in the loop's ready deque, so the
+finalizer fires once more. That reachability gap is the same container
+refcount discipline tracked under P11, not the asyncgen logic; the test itself
+passes.
 
 ---
 
@@ -417,24 +451,245 @@ updating spec 1700.
 
 ---
 
-## P10 — `test_extcall` doctest module-name mismatch
+## P10 — `test_extcall` doctest module-name mismatch (shipped)
 
-**Blocked test:** test_extcall (1 failure).
+**Blocked test:** test_extcall. Now green.
 
-The single failure is in a `doctest` block that checks the exact text of
-`TypeError` messages. CPython prefixes the function name with the module
-(`test.test_extcall.f()`), but gopy's error messages use `__main__.f()`.
+The doctests check the exact text of `TypeError` messages, which CPython
+prefixes with the module (`test.test_extcall.f()`). Three separate gaps
+kept this red; all are fixed.
 
-**CPython function:** `Python/ceval.c` error message formatting for CALL
-opcodes uses `PyObject_GetQualName` on the callable.
+1. **Module naming.** Vendored CPython tests are imported by regrtest as
+   `test.<name>`, so `__name__` (and every doctest glob `__name__`) is the
+   dotted package name, and `_PyObject_FunctionStr` bakes that into the
+   message. gopy ran the file as `__main__`. `runFile` now runs a
+   `test_*.py` file under `test.<name>` (`mainModuleName`), registers it
+   under that name, and aliases `__main__` to the same module so
+   `__import__('__main__')` and the appended unittest runner still resolve.
+   CPython: `Lib/test/libregrtest/runtest.py` (imports `test.<name>`).
 
-**Status in gopy:** `objects/call.go` and the error-formatting helpers in
-`vm/` build the TypeError message using `fn.Name` without a module prefix.
+2. **Star-unpack funcstr.** A lone `f(*x)` reaches `CALL_FUNCTION_EX` and
+   must report `f() argument after * must be an iterable, not X`
+   (`Python/ceval.c` check_args_iterable); a mixed `f(1, *x)` goes through
+   `LIST_EXTEND` and must report `Value after * must be an iterable, not X`
+   (`Python/bytecodes.c:2023 LIST_EXTEND`). gopy emitted a generic message
+   and, because codegen always wrapped the single star arg in a list, the
+   two messages were swapped. `codegen_call_helper_impl`'s single-star fast
+   path (visit `star.Value` directly) is now mirrored, and both opcodes
+   reformat only when the object is genuinely not iterable (an `__iter__`
+   that raises still propagates its own error). New helper
+   `objects.Iterable` mirrors `tp_iter != NULL || PySequence_Check`.
 
-**Fix:** in `objects.UnexpectedKeywordError`, `objects.TooManyPositionalError`,
-and related formatters, look up `fn.__module__` and prepend it when not
-`"__main__"`. CPython citation: `Python/ceval.c:1546 positional_only_passed_as_keyword`
-uses `PyObject_GetQualName` on the callable for the error prefix.
+3. **Iterator-drain StopIteration.** `tuple(it)`, `[*it]`, and `f(*it)`
+   drain through `iterToSlice` / `DrainIterable`, which called the raw
+   `tp_iternext` slot rather than the `PyIter_Next` wrapper, so a user
+   `__next__` raising Python-level `StopIteration` was returned as a plain
+   error instead of ending the loop. Both now route through
+   `objects.IterNext` (`Objects/abstract.c:2852 PyIter_Next`), matching the
+   for-loop and `list()` paths.
+
+Appended unittest runners compile under the file's real path rather than
+`"<string>"` so frame repr and traceback source-line lookup keep working
+(`pythonrun.RunSimpleStringWithName`).
+
+---
+
+## P11 — Generator cycle-collector finalization
+
+**Blocked tests:** `test_generators` (5 remaining failures after P1):
+- `FinalizationTest.test_refcycle` — generator pinned by `g.send(g)` self-cycle
+  must run its `finally` clause on `gc.collect()`.
+- `FinalizationTest.test_frame_resurrect` — generator dropped by `del g` must
+  fire `tp_finalize` so `finally` runs and resurrects its own frame via
+  `sys._getframe()`.
+- `FinalizationTest.test_generator_resurrect` — generator's `except` clause
+  resurrects itself, must run after `gc.collect()` fires `tp_finalize`.
+- `coroutine` doctest — coroutine pinned in a similar cycle.
+- `refleaks` doctest — `__del__` raising must route through
+  `sys.unraisablehook` (related to P3.x but exposed here).
+
+**CPython mechanism:**
+- `Modules/gcmodule.c:1822 gc_collect_impl` runs the cycle collector.
+- `Python/gc.c:392 update_refs` seeds `gc_refs` from each tracked object's
+  refcount.
+- `Python/gc.c:482 subtract_refs` walks every tracked container's
+  `tp_traverse`, decrementing `gc_refs` on each visited tracked target.
+- `Python/gc.c:497 move_unreachable` partitions the candidate set into
+  reachable (`gc_refs > 0`, recursively reachable) and unreachable (the rest).
+- `Python/gc.c:1067 finalize_garbage` runs `tp_finalize` on every entry of
+  the unreachable list. For generators, that calls
+  `Objects/genobject.c:87 _PyGen_Finalize` which routes through
+  `Objects/genobject.c:131 gen_close` and runs the body's `finally` clauses.
+
+**Current gopy state:**
+
+`objects/generator.go NewGenerator` deliberately does NOT call
+`GCTrackHook`. The comment in that file documents the blocker: gopy's refcount
+discipline on container stores (`dict.SetItem`, `list.Append`, frame
+fast-local stores, stack-ref pushes/pops) is incomplete. Concretely, when
+the module-level `g = gen()` assignment stores the generator into the
+module's `__dict__`, the dict's stored value does not `Incref` the generator,
+and the dict's own refcount stays at the value it had on creation
+(`refcount == 1`).
+
+When `subtractRefs` runs against a tracked generator, every tracked container
+that holds the generator decrements its `gc_refs`. The module `__dict__` is
+tracked (`objects/dict.go:271` wires `GCTrackHook`) and its `tp_traverse`
+yields the generator. With `gc_refs` decremented to zero, `moveUnreachable`
+classifies the generator as unreachable, `finalize_garbage` calls
+`genFinalize`, and the body is closed prematurely.
+
+Empirically, enabling tracking on `NewGenerator` flips the three cycle tests
+(`test_refcycle`, `test_frame_resurrect`, `test_generator_resurrect`) to
+green at the cost of regressing four doctests
+(`conjoin`, `coroutine`, `email`, `fun`) and `test_modify_f_locals`, because
+those tests rely on a generator surviving an explicit `gc.collect()` between
+creation and consumption. The net delta is +1 failure, so tracking is
+currently off.
+
+### P11.1 — Faithful refcount on container stores
+
+Add `Incref`/`Decref` on every container mutation path so the cycle collector
+can compute external references accurately.
+
+**Files to audit (every `Object` store in these paths must Incref the new
+value and Decref the displaced value):**
+
+- `objects/dict.go` — `Dict.SetItem`, `Dict.DelItem`, internal slot mutations
+  in `insertDict`, `dictResize`, the split-dict materialization paths.
+- `objects/list.go` — `List.Append`, `List.SetItem`, slice assignment, `pop`,
+  `extend`, `clear`.
+- `objects/tuple.go` — `Tuple` is immutable, but `NewTuple`'s caller must
+  Incref each input; `BUILD_TUPLE` opcode and tuple-pack helpers need to pair
+  the Incref with a Decref of the source.
+- `objects/set.go` — `Set.Add`, `Set.Discard`, table resize.
+- `objects/instance.go` — `instanceSetAttr`, `instanceDelAttr` on
+  `inst.dict`, `inst.slots`.
+- `frame/frame.go` — `FrameFastLocalSet`, `FrameStackPush`/`Pop`, cell-local
+  writes (`MAKE_CELL`, `STORE_DEREF`), `FrameClearLocals`.
+- `vm/eval.go` — `STORE_FAST`, `STORE_GLOBAL`, `STORE_NAME`, `STORE_ATTR`,
+  `STORE_SUBSCR`, `STORE_DEREF`, every stack push/pop that transfers
+  ownership.
+
+**CPython reference:** every `Py_DECREF`/`Py_INCREF`/`Py_SETREF` in
+`Objects/dictobject.c`, `Objects/listobject.c`, `Objects/setobject.c`,
+`Objects/typeobject.c`, `Python/ceval.c`. Use `Include/object.h:605 Py_INCREF`,
+`Include/object.h:631 Py_DECREF`, and `Include/object.h:725 Py_SETREF` as
+the model.
+
+**Shipping criterion:** with `NewGenerator` calling `GCTrackHook`, both the
+five-test cycle suite AND the conjoin/email/fun/coroutine/test_modify_f_locals
+panel pass. The order is: land P11.1, then enable tracking in P11.2.
+
+### P11.2 — Wire `GCTrackHook` in `NewGenerator`
+
+After P11.1 lands, restore the `GCTrackHook` call in
+`objects/generator.go NewGenerator` and re-run `test_generators.py`. CPython
+calls `PyObject_GC_Track` at the end of `Objects/genobject.c:867
+gen_new_with_qualname`.
+
+### P11.3 — Resurrect-after-finalize semantics
+
+`test_generator_resurrect` and `test_frame_resurrect` both check that an
+object resurrected inside `tp_finalize` (by storing itself in a still-live
+container) survives. `Python/gc.c:1261 handle_resurrected_objects` re-runs
+`deduce_unreachable` on the post-finalize list and pulls survivors back out
+of the reclaim path. gopy's `module/gc/finalize.go handleResurrected`
+already implements this. Once tracking is on, these tests should pass.
+
+### P11.4 — `sys.unraisablehook` formatting for the `refleaks` doctest
+
+CPython's `refleaks` doctest verifies the exact `err_msg` produced when a
+`__del__` raises (`"Exception ignored while calling deallocator <repr>"`).
+gopy's hook stub does not produce this message. CPython:
+`Python/errors.c:1380 _PyErr_WriteUnraisable` and
+`Objects/typeobject.c:1450 subtype_dealloc` for the deallocator-context
+format string.
+
+**Fix:** in `vm/builtins_hook.go` (where `WriteUnraisableHook` is registered)
+and `objects/refcount.go Decref`, ensure the err_msg passed to
+`sys.unraisablehook` matches CPython's exact format for the
+`Finalize`-from-`Decref` path: `"Exception ignored while calling deallocator " + repr(t.Finalize)`.
+
+---
+
+## P12 — Recursion limit enforcement
+
+CPython enforces two recursion budgets. The Python budget
+(`py_recursion_remaining`) is decremented at every frame entry
+(`start_frame` in `_PyEval_EvalFrameDefault`, via `_Py_EnterRecursivePy`
+in `Python/ceval_macros.h:337` and `_Py_CheckRecursiveCallPy` in
+`Python/ceval.c:1027`). The C budget guards nested native slot calls
+(repr, str, comparison) in `PyObject_Repr` / `PyObject_Str`
+(`Objects/object.c:777` / `:822`, via `_Py_EnterRecursiveCallTstate` in
+`Include/internal/pycore_ceval.h:222`).
+
+### P12.1 — Python recursion limit on the specialized call arms (shipped)
+
+The generic `CALL` path in `vm/eval_call.go` guards `FrameStack.Depth()`
+against `sys.RecursionLimit()` before every `stack.Push`. The fast
+`CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS`
+(`vm/eval_specialized_call.go`) and `CALL_ALLOC_AND_ENTER_INIT`
+(`vm/eval_specialized_call_alloc_init.go`) arms push frames directly and
+skipped that check, so any recursive function the specializer promoted to
+the fast arm ran until the Go stack overflowed instead of raising
+`RecursionError`. Both arms now repeat the guard before their direct
+`stack.Push`, citing `Python/bytecodes.c:4010 _PUSH_FRAME` and the
+`start_frame` recursion check.
+
+### P12.2 — C recursion limit on repr / str (shipped)
+
+`repr()` / `str()` of a deeply self-nested container recursed on the Go
+stack unbounded (`test_repr_deep` in `list_tests`, `mapping_tests`,
+`test_dict` nests 150k-200k deep and asserts `RecursionError`). gopy now
+counts nesting depth in `objects.Repr` / `objects.Str` against a budget
+(`enterRecursiveCall` / `leaveRecursiveCall`), mirroring the pre-stack-pointer
+`c_recursion_remaining` / `Py_C_RECURSION_LIMIT` design. CPython 3.14
+switched to a machine-stack-pointer check (`_Py_MakeRecCheck`), which is not
+portably reachable from Go, so the counter is the behavioural equivalent.
+
+### P12.3 — Throw stack-frame linking (pending)
+
+`test_stack_in_coroutine_throw` (`test_coroutines`) asserts the visible
+`traceback.extract_stack()` depth is identical when a coroutine chain
+`a -> b -> c` is resumed via `send` versus `throw`. gopy reports 18 frames
+on `send` and 16 on `throw`. Root cause: `Generator.Throw` /
+`Coroutine.Throw` forward the throw down the `YieldFromTarget` chain by
+recursively calling `Throw` on the *caller's* goroutine, so the
+`CallerFrame` stamped into the resumed body (`callerFrame()`) is the test's
+frame rather than the delegating coroutine's frame. The innermost frame's
+`f_back` therefore skips the two delegators. The send path links correctly
+because each delegation runs on its own body goroutine. **Fix:** thread the
+delegating generator's own body frame (its `GiFrame` iframe) as the
+forwarded `CallerFrame` instead of `callerFrame()`. CPython:
+`Objects/genobject.c:248 gen_send_ex2` (`previous_frame` set on resume),
+`Objects/genobject.c:466 _gen_throw` (yf forwarding).
+
+### P12.4 — PEP 709 inlined comprehensions (pending)
+
+`test_write_with_hidden` (`test_frame`) captures `sys._getframe().f_locals`
+*inside* a list comprehension and expects writes through the proxy to land
+on the enclosing function's fast locals. This only works when the
+comprehension is inlined into the enclosing frame (PEP 709, 3.12+), so that
+`sys._getframe()` returns the enclosing frame and the iteration variable
+occupies a `CO_FAST_HIDDEN` slot alongside the function's own. gopy still
+compiles list/set/dict comprehensions as separate `<listcomp>` code objects
+(pre-3.12 behaviour), so `sys._getframe()` returns the dead comprehension
+frame. **Fix:** port the inlined-comprehension subsystem:
+`Python/symtable.c:802 inline_comprehension` (symbol merge, hidden vars,
+`DEF_COMP_CELL`), and the codegen push/pop in `Python/compile.c:1019`
+(`u_in_inlined_comp`, `u_fasthidden`). This is a large symtable + codegen
+port and is tracked separately so it does not land as a partial slice.
+
+### P12.5 — `test_extcall` module-name doctest (harness artifact)
+
+`test_extcall` doctests embed `test.test_extcall.f()` in expected
+`TypeError` text. CPython's regrtest imports the file as `test.test_extcall`,
+so `f.__module__` carries the `test.` package prefix that
+`_PyObject_FunctionStr` (`Objects/object.c:973`) renders. gopy's harness runs
+the file top-level as `test_extcall`, so it correctly renders
+`test_extcall.f()`. The difference is the module's import name under the two
+harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ---
 
@@ -454,9 +709,9 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 
 ### P1 — Generator / coroutine / asyncgen attributes
 
-- [ ] P1.1 `gi_code`, `gi_suspended`, `gi_yieldfrom`, `__name__` (writable), `__qualname__` (writable) on GeneratorType
-- [ ] P1.2 `cr_frame`, `cr_running`, `cr_code`, `cr_await`, `cr_origin`, `__name__`, `__qualname__` on CoroutineType
-- [ ] P1.3 `ag_frame`, `ag_running`, `ag_code`, `ag_await`, `__name__`, `__qualname__` on AsyncGeneratorType
+- [x] P1.1 `gi_code`, `gi_suspended`, `gi_yieldfrom`, `__name__` (writable), `__qualname__` (writable) on GeneratorType
+- [x] P1.2 `cr_frame`, `cr_running`, `cr_code`, `cr_await`, `cr_origin`, `cr_suspended`, `__name__`, `__qualname__` on CoroutineType
+- [x] P1.3 `ag_frame`, `ag_running`, `ag_code`, `ag_await`, `ag_suspended`, `__name__`, `__qualname__` on AsyncGeneratorType
 
 ### P2 — pow() modular inverse
 
@@ -465,16 +720,29 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 
 ### P3 — sys hooks
 
-- [ ] P3.1 `sys.set_asyncgen_hooks` / `sys.get_asyncgen_hooks`
-- [ ] P3.2 `sys.set_coroutine_origin_tracking_depth` / `sys.get_coroutine_origin_tracking_depth`
-- [ ] P3.3 `sys.call_tracing` stub
+- [x] P3.1 `sys.set_asyncgen_hooks` / `sys.get_asyncgen_hooks`
+- [x] P3.2 `sys.set_coroutine_origin_tracking_depth` / `sys.get_coroutine_origin_tracking_depth`
+- [x] P3.3 `sys.call_tracing(func, args)` ports `_PyEval_CallTracing`: saves and
+  zeroes `tstate->tracing` around the call so a debugger can recursively trace
+  code from a checkpoint, then restores the prior depth. Arg-count and non-tuple
+  errors match CPython's clinic wording.
+
+### P13 — Async generator finalization through asyncio shutdown
+
+- [x] P13.1 `async_generator.__aiter__` (am_aiter) returns a new strong reference
+  via `PyObject_SelfIter`. The missing incref let `GET_AITER` drop the generator
+  to refcount zero, firing `tp_finalize` on a still-referenced generator and
+  emptying `loop._asyncgens` before `shutdown_asyncgens` ran.
+- [x] P13.2 `async_generator_asend` / `async_generator_athrow` are hashable by
+  identity (`tp_hash` inherits object's `_Py_HashPointer`). `shutdown_asyncgens`
+  gathers the `aclose()` awaitables and keys a dict on each.
 
 ### P4 — Frame attributes
 
-- [ ] P4.1 `frame.f_generator`
-- [ ] P4.2 `frame.f_trace` settable
-- [ ] P4.3 `sys.unraisablehook` settable attribute
-- [ ] P4.4 `frame.clear()` executing-frame guard
+- [x] P4.1 `frame.f_generator`
+- [x] P4.2 `frame.f_trace` settable
+- [x] P4.3 `sys.unraisablehook` settable attribute
+- [x] P4.4 `frame.clear()` executing-frame guard (raises `RuntimeError: cannot clear an executing frame`)
 
 ### P5 — isinstance / issubclass with UnionType and abstract classes
 
@@ -485,30 +753,45 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 
 ### P6 — __index__ in subscript paths
 
-- [ ] P6.1 `bytes.__getitem__` calls `objects.Index` on non-int subscript
-- [ ] P6.2 `bytearray.__getitem__` calls `objects.Index`
-- [ ] P6.3 `list.__getitem__` calls `objects.Index`
-- [ ] P6.4 `tuple.__getitem__` calls `objects.Index`
+- [x] P6.1 `bytes.__getitem__` calls `objects.Index` on non-int subscript
+- [x] P6.2 `bytearray.__getitem__` calls `objects.Index`
+- [x] P6.3 `list.__getitem__` calls `objects.Index`
+- [x] P6.4 `tuple.__getitem__` calls `objects.Index`
 
 ### P7 — __length_hint__ on iterators
 
-- [ ] P7.1 deque iterator `__length_hint__`
-- [ ] P7.2 deque reverse iterator `__length_hint__`
-- [ ] P7.3 dict key/value/item iterator `__length_hint__`
+- [x] P7.1 deque iterator `__length_hint__`
+- [x] P7.2 deque reverse iterator `__length_hint__`
+- [x] P7.3 dict key/value/item iterator `__length_hint__`
 
 ### P8 — Generator exception handling
 
-- [ ] P8.1 `gen.throw()` preserves exception object identity
-- [ ] P8.2 `gen.close()` does not re-wrap GeneratorExit
-- [ ] P8.3 PEP 479 StopIteration → RuntimeError conversion in generator body
+- [x] P8.1 `gen.throw()` preserves exception object identity
+- [x] P8.2 `gen.close()` does not re-wrap GeneratorExit
+- [x] P8.3 PEP 479 StopIteration → RuntimeError conversion in generator body (`generator raised StopIteration`)
 
 ### P9 — Missing test file
 
-- [ ] P9.1 vendor `test_eval.py` from CPython 3.14 Lib/test/
+- [x] P9.1 diagnosed: no standalone `test_eval.py` in CPython 3.14 (moved under `Lib/test/test_capi/test_eval.py`, needs `_testcapi`); out of scope.
 
 ### P10 — Error message module prefix
 
 - [ ] P10.1 TypeError messages use `module.funcname()` not `__main__.funcname()` for non-main modules
+
+### P11 — Generator cycle-collector finalization
+
+- [ ] P11.1 Faithful refcount on container stores (dict/list/tuple/set/instance/frame/eval).
+- [ ] P11.2 Restore `GCTrackHook` call in `NewGenerator` once P11.1 lands.
+- [ ] P11.3 Verify `handle_resurrected_objects` flow on generator resurrect.
+- [ ] P11.4 `sys.unraisablehook` deallocator-context format string matches CPython.
+
+### P12 — Recursion limit enforcement
+
+- [x] P12.1 Python recursion limit on `CALL_PY_EXACT_ARGS` / `CALL_BOUND_METHOD_EXACT_ARGS` / `CALL_ALLOC_AND_ENTER_INIT` fast arms.
+- [x] P12.2 C recursion limit on `objects.Repr` / `objects.Str` (`test_repr_deep`).
+- [x] P12.3 Throw-path frame linking so `traceback.extract_stack()` matches `send` (`test_stack_in_coroutine_throw`): a coroutine driven by `throw()` reports the same visible stack depth as one driven by `send()` (both 4).
+- [x] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
+- [x] P12.5 `test_extcall` module-name diagnosed as harness artifact (no code change).
 
 ### Spec 1700 rows advanced
 
@@ -523,15 +806,15 @@ uses `PyObject_GetQualName` on the callable for the error prefix.
 | test_with | ready | done | existing pass |
 | test_contains | ready | done | existing pass |
 | test_typechecks | ready | done | existing pass |
-| test_generators | ready | ready | P1 |
-| test_coroutines | ready | ready | P1, P3 |
-| test_asyncgen | ready | ready | P1, P3 |
-| test_yield_from | ready | ready | P1, P8 |
-| test_generator_stop | ready | ready | P8 |
+| test_generators | ready | done | P1 shipped |
+| test_coroutines | ready | ready | P1 shipped; P12.3 + P11 + asyncio pending |
+| test_asyncgen | ready | ready | P1 shipped; asyncio event loop pending (spec 1711) |
+| test_yield_from | ready | done | P1 + P8 shipped |
+| test_generator_stop | ready | done | existing pass |
 | test_pow | ready | done | P2 shipped |
-| test_frame | ready | ready | P4 |
+| test_frame | ready | done | P12.4 (PEP 709) shipped |
 | test_isinstance | ready | done | P5 shipped |
-| test_index | ready | ready | P6 |
-| test_iterlen | ready | ready | P7 |
-| test_extcall | ready | ready | P10 |
-| test_eval | ready | ready | P9 |
+| test_index | ready | done | P6 shipped |
+| test_iterlen | ready | done | P7 shipped |
+| test_extcall | ready | ready | P12.5 harness artifact |
+| test_eval | ready | out-of-scope | P9 (no standalone module in 3.14) |

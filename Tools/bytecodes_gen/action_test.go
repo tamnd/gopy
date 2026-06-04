@@ -85,27 +85,37 @@ func TestTranslateBodyUnrecognizedFalls(t *testing.T) {
 	}
 }
 
-func TestTranslateBodyStackRefClose(t *testing.T) {
+func TestTranslateBodyStackRefCloseInputElided(t *testing.T) {
+	// Closing a consumed input is redundant: the epilogue stack shrink is
+	// the single decref site for it. Emitting a real .Close() here would
+	// double-free the input. The translator drops it to a comment instead.
 	body := tokLine("PyStackRef_CLOSE(value);")
 	sig := &SignatureAnalysis{Name: "POP_TOP", Inputs: []StackBinding{{Name: "value"}}}
 	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
-	if !strings.Contains(got, "value.Close()") {
-		t.Errorf("expected value.Close(), got:\n%s", got)
+	if strings.Contains(got, "value.Close()") {
+		t.Errorf("close of consumed input must be elided, got:\n%s", got)
+	}
+	if !strings.Contains(got, "value consumed input dropped by stack shrink") {
+		t.Errorf("expected elision comment, got:\n%s", got)
 	}
 }
 
-func TestTranslateBodyStackRefCloseKeywordSlot(t *testing.T) {
+func TestTranslateBodyStackRefCloseKeywordSlotElided(t *testing.T) {
+	// Keyword-named inputs keep the `_v` rename even in the elision comment.
 	body := tokLine("PyStackRef_CLOSE(type);")
 	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "type"}}}
 	got, _, ok, note := TranslateBody(body, sig)
 	if !ok {
 		t.Fatalf("translate failed: %s", note)
 	}
-	if !strings.Contains(got, "type_v.Close()") {
-		t.Errorf("expected type_v.Close() (keyword rename), got:\n%s", got)
+	if strings.Contains(got, "type_v.Close()") {
+		t.Errorf("close of consumed input must be elided, got:\n%s", got)
+	}
+	if !strings.Contains(got, "type_v consumed input dropped by stack shrink") {
+		t.Errorf("expected elision comment with keyword rename, got:\n%s", got)
 	}
 }
 

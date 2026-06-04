@@ -23,8 +23,11 @@ import (
 // during startup so the dependency stays builtins -> objects, vm ->
 // builtins without a cycle.
 //
-// CPython: equivalent of PyEval_EvalCode (Python/ceval.c)
-type Evaluator func(code *objects.Code, globals, locals objects.Object) (objects.Object, error)
+// CPython: equivalent of PyEval_EvalCode (Python/ceval.c). closure is
+// the optional tuple of cells exec() forwards to PyEval_EvalCodeEx so a
+// code object with free variables can be run outside its defining
+// function; it is nil for the common no-closure path.
+type Evaluator func(code *objects.Code, globals, locals, closure objects.Object) (objects.Object, error)
 
 var currentEvaluator Evaluator
 
@@ -42,7 +45,7 @@ func SetEvaluator(p Evaluator) {
 //
 // CPython: Python/bltinmodule.c:956 builtin_eval_impl
 func Eval(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	source, globals, locals, err := parseEvalExecArgs("eval", args, kwargs)
+	source, globals, locals, _, err := parseEvalExecArgs("eval", false, args, kwargs)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +80,7 @@ func Eval(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 	if len(code.Freevars) > 0 {
 		return nil, fmt.Errorf("TypeError: code object passed to eval() may not contain free variables")
 	}
-	return runCode(code, globals, locals)
+	return runCode(code, globals, locals, nil)
 }
 
 // Exec implements builtins.exec(source, globals=None, locals=None).
@@ -87,27 +90,65 @@ func Eval(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 //
 // CPython: Python/bltinmodule.c:1081 builtin_exec_impl
 func Exec(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	source, globals, locals, err := parseEvalExecArgs("exec", args, kwargs)
+	source, globals, locals, closure, err := parseEvalExecArgs("exec", true, args, kwargs)
 	if err != nil {
 		return nil, err
+	}
+	// closure == None is the same as no closure at all.
+	//
+	// CPython: Python/bltinmodule.c:1141 builtin_exec_impl
+	if closure != nil && objects.IsNone(closure) {
+		closure = nil
+	}
+	// A string / bytes source compiles to fresh code with no free
+	// variables, so a closure argument is meaningless there.
+	//
+	// CPython: Python/bltinmodule.c:1191 builtin_exec_impl
+	if _, isCode := source.(*objects.Code); !isCode && closure != nil {
+		return nil, fmt.Errorf("TypeError: closure can only be used when source is a code object")
 	}
 	code, err := codeForSource(source, "exec", parser.ModeFile)
 	if err != nil {
 		return nil, err
 	}
-	// builtin_exec_impl rejects a closure-less code object with
-	// nfreevars > 0 because there is no enclosing function to supply
-	// the cells. gopy doesn't accept a closure kwarg yet, so the
-	// presence of any free var is unconditionally an error.
-	//
-	// CPython: Python/bltinmodule.c:1146 builtin_exec_impl
-	if len(code.Freevars) > 0 {
-		return nil, fmt.Errorf("TypeError: code object requires a closure of exactly length %d", len(code.Freevars))
+	if err := checkExecClosure(code, closure); err != nil {
+		return nil, err
 	}
-	if _, err := runCode(code, globals, locals); err != nil {
+	if _, err := runCode(code, globals, locals, closure); err != nil {
 		return nil, err
 	}
 	return objects.None(), nil
+}
+
+// checkExecClosure validates the closure argument against the code
+// object's free variables, mirroring builtin_exec_impl: a code object
+// with no free vars must not be handed a closure, and one with free
+// vars needs an exact-length tuple of cells. closure is already
+// normalized so None reads as nil.
+//
+// CPython: Python/bltinmodule.c:1145 builtin_exec_impl
+func checkExecClosure(code *objects.Code, closure objects.Object) error {
+	numFree := len(code.Freevars)
+	if numFree == 0 {
+		if closure != nil {
+			return fmt.Errorf("TypeError: cannot use a closure with this code object")
+		}
+		return nil
+	}
+	ok := false
+	if t, isTuple := closure.(*objects.Tuple); isTuple && t.Len() == numFree {
+		ok = true
+		for i := 0; i < t.Len(); i++ {
+			if _, isCell := t.Item(i).(*objects.Cell); !isCell {
+				ok = false
+				break
+			}
+		}
+	}
+	if !ok {
+		return fmt.Errorf("TypeError: code object requires a closure of exactly length %d", numFree)
+	}
+	return nil
 }
 
 // parseEvalExecArgs binds the (source, globals, locals) trio shared by
@@ -115,14 +156,22 @@ func Exec(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 // when the caller did not pass them. fnName is the builtin's own name
 // for error reporting ("eval" or "exec"), since CPython's wording
 // includes it.
-func parseEvalExecArgs(fnName string, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, objects.Object, objects.Object, error) {
+func parseEvalExecArgs(fnName string, allowClosure bool, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, objects.Object, objects.Object, objects.Object, error) {
 	if len(args) > 3 {
-		return nil, nil, nil, fmt.Errorf("TypeError: %s() takes at most 3 arguments (%d given)", fnName, len(args))
+		return nil, nil, nil, nil, fmt.Errorf("TypeError: %s() takes at most 3 arguments (%d given)", fnName, len(args))
 	}
 	names := []string{"source", "globals", "locals"}
 	bound := make([]objects.Object, 3)
 	copy(bound, args)
+	var closure objects.Object
 	for k, v := range kwargs {
+		// closure is keyword-only and only exec() accepts it.
+		//
+		// CPython: Python/clinic/bltinmodule.c.h builtin_exec
+		if allowClosure && k == "closure" {
+			closure = v
+			continue
+		}
 		idx := -1
 		for i, n := range names {
 			if n == k {
@@ -131,21 +180,21 @@ func parseEvalExecArgs(fnName string, args []objects.Object, kwargs map[string]o
 			}
 		}
 		if idx < 0 {
-			return nil, nil, nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument %q", fnName, k)
+			return nil, nil, nil, nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument %q", fnName, k)
 		}
 		if bound[idx] != nil {
-			return nil, nil, nil, fmt.Errorf("TypeError: %s() got multiple values for argument %q", fnName, k)
+			return nil, nil, nil, nil, fmt.Errorf("TypeError: %s() got multiple values for argument %q", fnName, k)
 		}
 		bound[idx] = v
 	}
 	if bound[0] == nil {
-		return nil, nil, nil, fmt.Errorf("TypeError: %s() missing required argument: 'source'", fnName)
+		return nil, nil, nil, nil, fmt.Errorf("TypeError: %s() missing required argument: 'source'", fnName)
 	}
 	globals, locals, err := resolveScope(fnName, bound[1], bound[2])
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return bound[0], globals, locals, nil
+	return bound[0], globals, locals, closure, nil
 }
 
 // resolveScope picks the globals + locals for the eval/exec call. When
@@ -272,10 +321,11 @@ func sourceAsString(cmd objects.Object, fnName string) (string, bool, error) {
 }
 
 // runCode dispatches a compiled code object through the vm via the
-// installed evaluator hook.
-func runCode(code *objects.Code, globals, locals objects.Object) (objects.Object, error) {
+// installed evaluator hook. closure is nil for eval() and for exec()
+// without a closure argument.
+func runCode(code *objects.Code, globals, locals, closure objects.Object) (objects.Object, error) {
 	if currentEvaluator == nil {
 		return nil, fmt.Errorf("SystemError: eval/exec evaluator not installed")
 	}
-	return currentEvaluator(code, globals, locals)
+	return currentEvaluator(code, globals, locals, closure)
 }

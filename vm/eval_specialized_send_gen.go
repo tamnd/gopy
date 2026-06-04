@@ -34,8 +34,6 @@
 package vm
 
 import (
-	"errors"
-
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 )
@@ -51,37 +49,51 @@ func (e *evalState) fastSendGen(oparg uint32) (int, bool, error) {
 		val  objects.Object
 		serr error
 	)
+	// Mirror execSend's YieldFromTarget + genCallerFrames maintenance:
+	// the fast path must register the caller frame so that sys._getframe()
+	// inside the sub-generator body can walk f_back, and stash recv on
+	// the running gen-like so gi_yieldfrom / cr_await / ag_await stay in
+	// sync. CPython derives both from the suspended frame; gopy stores
+	// them explicitly because of the goroutine-driven body model.
 	switch r := recv.(type) {
 	case *objects.Generator:
 		v := e.popObject()
+		setRunningYieldFrom(e.genRunning, r)
+		genCallerFrames.Store(r, e.f)
 		val, serr = r.Send(v)
+		if retVal, isStop := stopIterRetval(serr); isStop {
+			setRunningYieldFrom(e.genRunning, nil)
+			genCallerFrames.Delete(r)
+			// Leave receiver on stack and push the StopIteration return
+			// value (args[0] or None). The trailing END_SEND will pop both.
+			//
+			// CPython: Python/bytecodes.c _SEND (StopIteration path)
+			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+			e.pushObject(retVal)
+			return e.cacheAdvance(compile.SEND) + 2*int(oparg), true, nil
+		}
+		if serr != nil {
+			setRunningYieldFrom(e.genRunning, nil)
+			genCallerFrames.Delete(r)
+			return 0, true, serr
+		}
 	case *objects.Coroutine:
 		v := e.popObject()
+		setRunningYieldFrom(e.genRunning, r)
 		val, serr = r.Send(v)
+		if retVal, isStop := stopIterRetval(serr); isStop {
+			setRunningYieldFrom(e.genRunning, nil)
+			e.pushObject(retVal)
+			return e.cacheAdvance(compile.SEND) + 2*int(oparg), true, nil
+		}
+		if serr != nil {
+			setRunningYieldFrom(e.genRunning, nil)
+			return 0, true, serr
+		}
 	default:
 		// Type guard failed. CPython's _SEND_GEN_FRAME has the same
 		// DEOPT_IF on Py_TYPE(gen); we route back through maybeDeopt.
 		return 0, false, nil
-	}
-	if errors.Is(serr, objects.ErrStopIteration) {
-		// Leave receiver on stack and push the StopIteration return
-		// value (None for generators without an explicit return). The
-		// trailing END_SEND will pop both.
-		//
-		// The jump anchor is cacheAdvance(SEND) + 2*oparg, not the
-		// usual jumpBy(oparg+1): e.advance() reads the opcode byte at
-		// InstrPtr, and the opcodeCaches table only carries the base
-		// SEND row, so on a SEND_GEN byte CacheCount returns 0 and the
-		// stride undershoots by one codeunit. forIterJump in
-		// eval_specialized_for_iter.go uses the same anchor for the
-		// same reason.
-		//
-		// CPython: Python/bytecodes.c _SEND (StopIteration path)
-		e.pushObject(objects.None())
-		return e.cacheAdvance(compile.SEND) + 2*int(oparg), true, nil
-	}
-	if serr != nil {
-		return 0, true, serr
 	}
 	e.pushObject(val)
 	return e.cacheAdvance(compile.SEND), true, nil

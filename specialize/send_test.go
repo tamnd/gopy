@@ -15,7 +15,7 @@ func sendBuf() []byte {
 
 func TestSendGenerator(t *testing.T) {
 	buf := sendBuf()
-	Send(objects.NewGenerator("g"), buf, 0)
+	Send(objects.NewGenerator("g", "g"), buf, 0)
 	if got := compile.Opcode(buf[0]); got != compile.SEND_GEN {
 		t.Fatalf("opcode: got %s want SEND_GEN", got.Name())
 	}

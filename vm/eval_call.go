@@ -10,15 +10,41 @@ package vm
 // See website/docs/specs/1700/1714_bytecodes_dsl_codegen.md.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/frame"
 	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
 )
+
+// forceGenPrev wires the next stack.Push to use the running generator's
+// saved frame as f_back instead of the FrameStack top. Generator frames
+// live in activeEvalFrames (not on the FrameStack), so a regular function
+// called from a generator body would otherwise inherit f_back from
+// whatever the main goroutine pushed before the generator was resumed,
+// dropping the generator out of sys._getframe() walks.
+//
+// CPython: pycore_frame.h _PyThreadState_PushFrame uses tstate->current_frame
+// which is updated to the gen/coro/asyncgen frame on resume.
+func forceGenPrev(stack *frame.FrameStack) {
+	g := goid()
+	v, ok := activeEvalFrames.Load(g)
+	if !ok {
+		return
+	}
+	d, ok2 := genEntryDepths.Load(g)
+	if !ok2 || stack.Depth() != d.(int) {
+		return
+	}
+	if gf, ok3 := v.(*frame.Frame); ok3 {
+		stack.ForcedPrev = gf
+	}
+}
 
 // activeThreads maps a goroutine ID to the *state.Thread Eval is
 // running on that goroutine. Mirrors what CPython gets from
@@ -32,6 +58,46 @@ import (
 //
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
 var activeThreads sync.Map // map[uint64]*state.Thread
+
+// activeEvalFrames maps a goroutine ID to the *frame.Frame for the
+// generator body currently suspended or running on that goroutine.
+// Generator goroutines register here on resume and deregister on yield.
+//
+// CPython: _PyThreadState_GetFrame returns tstate->current_frame,
+// which is always current because CPython uses a single C-stack per
+// OS thread. gopy uses goroutines, so we maintain this per-goroutine.
+var activeEvalFrames sync.Map // map[uint64]*frame.Frame
+
+// genEntryDepths maps a generator goroutine ID to the frame-stack depth
+// at the moment the generator body last entered (started or resumed). When
+// the depth of frameStackFor(ts) exceeds this value, callPyFunction has
+// pushed at least one frame on behalf of the generator body and
+// currentInterpreterFrame should return the stack top rather than the
+// generator's own saved frame.
+//
+// CPython: no direct equivalent — CPython's current_frame pointer is always
+// the innermost frame regardless of whether it is a generator body or a
+// regular call; gopy needs this extra bookkeeping because the generator
+// frame is not on the shared FrameStack.
+var genEntryDepths sync.Map // map[uint64]int
+
+// genCallerFrames maps a *objects.Generator to the *frame.Frame that
+// most recently drove it via SEND. Set by execSend before forwarding,
+// read by the sub-generator goroutine on resume to establish f_back.
+//
+// CPython: Objects/genobject.c gen_send_ex2 sets previous_frame on the
+// sub-generator's _PyInterpreterFrame before entering the body.
+var genCallerFrames sync.Map // map[*objects.Generator]*frame.Frame
+
+// genOwnFrames maps a *objects.Generator to the *frame.Frame that IS the
+// generator's own suspended frame. Set when the generator goroutine starts,
+// cleared when the body returns. Used by genThrowForwardHook to temporarily
+// install the generator frame as the calling-thread's "current frame" before
+// forwarding a throw to a custom iterator, mirroring CPython's
+// tstate->current_frame = frame dance in _gen_throw.
+//
+// CPython: Objects/genobject.c:523 _gen_throw (frame->previous = prev; tstate->current_frame = frame)
+var genOwnFrames sync.Map // map[*objects.Generator]*frame.Frame
 
 // setActiveThread primes the current goroutine's Eval slot and
 // returns the previous occupant + goid so the caller can restore it
@@ -102,6 +168,28 @@ func init() {
 		}
 		ts.SetException(nil)
 	}
+	// Let genFinalize save and restore the active thread's pending
+	// exception across Close(). Mirrors CPython's PyErr_GetRaisedException
+	// / PyErr_SetRaisedException sandwich around gen_close in
+	// _PyGen_Finalize: a finalize that fires during normal evaluation
+	// must not let the body's GeneratorExit leak into the caller's slot.
+	//
+	// CPython: Objects/genobject.c:98 _PyGen_Finalize
+	objects.SaveCurrentExceptionHook = func() any {
+		ts := currentThread()
+		if ts == nil {
+			return nil
+		}
+		return ts.SwapException(nil)
+	}
+	objects.RestoreCurrentExceptionHook = func(saved any) {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		exc, _ := saved.(state.Exception)
+		ts.SetException(exc)
+	}
 	// Let typeSetNames attach a __notes__ string to the live exception
 	// when __set_name__ raises during class creation, matching
 	// _PyErr_FormatNote inside type_new_set_names. When the hook fires
@@ -126,6 +214,69 @@ func init() {
 		}
 		exc.Notes.Append(objects.NewStr(note))
 	}
+	// Let frameClear ask whether the target frame is still on this
+	// thread's FrameStack so f.clear() raises RuntimeError when the
+	// eval loop is running on f or any of its callees. CPython makes
+	// the equivalent check by inspecting f_frame->owner == FRAME_OWNED_BY_THREAD.
+	//
+	// CPython: Objects/frameobject.c:2007 frame_clear_impl
+	objects.CurrentStackProbe = frameIsLiveOnCurrentStack
+}
+
+// frameIsLiveOnCurrentStack walks the running thread's FrameStack
+// and reports whether wrapper's underlying activation record is on
+// it. Used by objects.frameClear to mirror CPython's executing-frame
+// guard.
+//
+// CPython: Objects/frameobject.c:2007 frame_clear_impl (FRAME_OWNED_BY_THREAD)
+func frameIsLiveOnCurrentStack(w *objects.Frame) bool {
+	if w == nil {
+		return false
+	}
+	// Two wrapper shapes hit clear(): a *Frame whose interp is the live
+	// *frame.Frame (sys._getframe, locals proxy) and a *Frame whose
+	// interp is a *FrameSnapshot built at unwind time (tb_frame). The
+	// snapshot remembers SrcFrame so we can still test stack membership.
+	var want *frame.Frame
+	var wantCode *objects.Code
+	switch ip := w.Interp().(type) {
+	case *frame.Frame:
+		want = ip
+		wantCode = ip.FrameCode()
+	case *objects.FrameSnapshot:
+		if src, ok := ip.SrcFrame.(*frame.Frame); ok {
+			want = src
+		}
+		wantCode = ip.Code
+	}
+	if want == nil {
+		return false
+	}
+	ts := currentThread()
+	if ts == nil {
+		return false
+	}
+	for f := frameStackFor(ts).Top(); f != nil; f = f.Previous {
+		if f != want {
+			continue
+		}
+		// Pointer match alone is not enough: the chunk arena recycles
+		// Frame slots on Pop, so a long-since-returned activation
+		// record can share a pointer with whatever frame later
+		// reoccupied that slot. Compare Code identity too: a snapshot
+		// remembers the Code at snapshot time, and the live slot's
+		// Code becomes the new push's Code after recycling. Different
+		// Code => stale match => not on the current stack.
+		//
+		// CPython: Include/internal/pycore_frame.h _PyInterpreterFrame
+		// (each push writes f_executable / f_code into the slot, so the
+		// equivalent comparison is implicit there)
+		if wantCode != nil && f.FrameCode() != wantCode {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // pendingNotes carries __notes__ strings that FormatNoteHook produced
@@ -157,12 +308,30 @@ func drainPendingNotes() []string {
 	return v.([]string)
 }
 
-// currentInterpreterFrame returns the top of the active thread's frame
-// stack, or nil when no Python frame is live on this goroutine. Used by
-// objects.superInitNoArgs to read __class__ and self off the caller.
+// currentInterpreterFrame returns the currently executing frame on this
+// goroutine. For regular code the frame is on the chunk-based FrameStack.
+// For generator bodies the frame is in activeEvalFrames, but when the
+// generator body has called a Python function via callPyFunction the
+// FrameStack grows beyond genEntryDepths and the stack top is the
+// innermost frame.
 //
 // CPython: pycore_frame.h _PyThreadState_GetFrame
 func currentInterpreterFrame() objects.InterpreterFrame {
+	g := goid()
+	if v, ok := activeEvalFrames.Load(g); ok {
+		// Running on a generator goroutine. Check whether callPyFunction
+		// pushed frames after the generator's entry point.
+		ts := currentThread()
+		if ts != nil {
+			if d, ok2 := genEntryDepths.Load(g); ok2 {
+				if frameStackFor(ts).Depth() > d.(int) {
+					// callPyFunction pushed at least one frame; return it.
+					return frameStackFor(ts).Top()
+				}
+			}
+		}
+		return v.(*frame.Frame)
+	}
 	ts := currentThread()
 	if ts == nil {
 		return nil
@@ -206,6 +375,16 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	if stack.Depth() >= sys.RecursionLimit() {
 		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
 	}
+	// When the caller is a generator body, the saved frame is registered in
+	// activeEvalFrames but is not on the FrameStack. Force the new frame's
+	// f_back to the generator's saved frame so sys._getframe() walks
+	// through nested generator activations rather than skipping straight to
+	// whatever frame the main goroutine left on top.
+	//
+	// CPython: pycore_frame.h _PyThreadState_PushFrame sets
+	// frame->previous = tstate->current_frame, and current_frame is the
+	// innermost gen/coro/asyncgen frame when one is running.
+	forceGenPrev(stack)
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
@@ -391,7 +570,32 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		}
 		return nil, objects.TooManyPositionalError(qualname, len(args), atLeast, atMost, kwonlyGiven)
 	}
-	return Eval(ts, f)
+	ret, err := Eval(ts, f)
+	return wrapCallError(ts, ret, err)
+}
+
+// wrapCallError surfaces the live thread-state exception alongside the
+// textual unwind sentinel that Eval returns. CPython leaves the raised
+// exception set on the tstate for the C caller, which inspects it with
+// PyErr_ExceptionMatches; gopy's Go-level callers (builtin next/any/all,
+// the comprehension drivers, map/filter) need the same introspection, so
+// the Python-function call boundary returns a RaisedError carrying the
+// exception object instead of a bare string. Already-wrapped errors and
+// the no-exception case pass through untouched.
+//
+// CPython: Objects/call.c:370 PyObject_Call (exception stays on tstate)
+func wrapCallError(ts *state.Thread, ret objects.Object, err error) (objects.Object, error) {
+	if err == nil {
+		return ret, nil
+	}
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		return ret, err
+	}
+	if exc := pyerrors.Occurred(ts); exc != nil {
+		return ret, objects.NewRaisedError(exc, err.Error())
+	}
+	return ret, err
 }
 
 // pyFunctionVectorcall is the PEP 590 vectorcall entry for Python functions.
@@ -530,6 +734,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 	if stack.Depth() >= sys.RecursionLimit() {
 		return nil, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
 	}
+	forceGenPrev(stack)
 	f := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	defer stack.Pop()
 
@@ -544,6 +749,18 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		extra := posArgs[bound:]
 		items := make([]objects.Object, len(extra))
 		copy(items, extra)
+		// The *args tuple keeps a reference to each extra positional, so
+		// it increfs them: the caller treats the argument stack as
+		// borrowed and releases it via DECREF_INPUTS once the call
+		// returns.
+		//
+		// CPython: Python/ceval.c initialize_locals (the *args tuple is
+		// built with PyTuple_SET_ITEM after Py_INCREF on each surplus arg)
+		for _, it := range items {
+			if it != nil {
+				objects.Incref(it)
+			}
+		}
 		f.SetLocal(npos, stackref.FromObject(objects.NewTuple(items)))
 	}
 	var kwSlot int
@@ -615,7 +832,14 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
 		}
-		f.SetLocal(idx, stackref.FromObject(v))
+		// The slot keeps its own reference. The keyword value reached us
+		// borrowed from the argument stack (CALL_KW / CALL_FUNCTION_EX
+		// release it via DECREF_INPUTS) or from the caller's tuple/dict
+		// on the tp_call path, so we incref rather than steal.
+		//
+		// CPython: Python/ceval.c initialize_locals (Py_INCREF before the
+		// localsplus store in the keyword bind loop)
+		f.SetLocal(idx, stackref.FromObjectNew(v))
 	}
 	// Inject raw-object entries directly into **kwargs dict.
 	// These have already been determined to have no varname match.
@@ -720,5 +944,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		}
 		return nil, objects.TooManyPositionalError(qualname, len(posArgs), atLeast, atMost, kwonlyGiven)
 	}
-	return Eval(ts, f)
+	ret, err := Eval(ts, f)
+	return wrapCallError(ts, ret, err)
 }

@@ -1,6 +1,9 @@
 package symtable
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // nameSet is a small set-of-strings helper so the analyze pass reads
 // the way CPython's PySet_*-driven version does. add/discard/contains/
@@ -74,7 +77,7 @@ func analyzeBlock(t *Table, ste *Entry, bound, free, global, typeParams nameSet,
 		dropClassFree(ste, scopes, newfree)
 	}
 	classflag := ste.Type == ClassBlock || ste.CanSeeClassScope
-	updateSymbols(ste.Symbols, scopes, bound, newfree, inlinedCells, classflag)
+	updateSymbols(ste, scopes, bound, newfree, inlinedCells, classflag)
 
 	free.union(newfree)
 	return nil
@@ -124,17 +127,16 @@ func analyzeChildren(t *Table, ste *Entry, classEntry *Entry, scopes map[string]
 ) error {
 	for _, child := range ste.Children {
 		newClassEntry := pickClassEntry(ste, child, classEntry)
-		// CPython 3.12 (PEP 709) inlines non-generator comprehensions
-		// into their parent scope; the symtable side records that with
-		// child.CompInlined. gopy's codegen still emits a separate code
-		// object for the comp body (real inlining is spec 1696), so the
-		// inline path leaves Free vars in the comp pointing at no cell.
-		// Until codegen actually inlines, treat every comp as a normal
-		// nested scope so analyzeCells promotes captured outer locals
-		// to Cell and the closure tuple is built.
+		// CPython 3.12 (PEP 709) inlines all non-generator comprehensions
+		// into their parent scope, except those in annotation scopes that
+		// are nested in classes. The comp's symbols are folded into the
+		// parent and codegen emits the comp body inline (no separate code
+		// object); see compileComprehension's inlined path.
 		//
-		// CPython: Python/symtable.c:1265 inline_comprehension branch
-		inlineComp := false
+		// CPython: Python/symtable.c:1259 analyze_block inline_comp
+		inlineComp := child.Comprehension != NoComprehension &&
+			!child.Generator &&
+			!ste.CanSeeClassScope
 
 		childFree, err := analyzeChildBlock(t, child, newbound, newfree, newglobal, typeParams, newClassEntry)
 		if err != nil {
@@ -336,7 +338,7 @@ func stampImplicitCell(ste *Entry, scopes map[string]Scope, name string) {
 	flags := ste.Symbols[name]
 	flags |= DefLocal
 	flags &^= ScopeMask << ScopeOffset
-	ste.Symbols[name] = flags
+	ste.SetSymbol(name, flags)
 	scopes[name] = Cell
 }
 
@@ -344,10 +346,15 @@ func stampImplicitCell(ste *Entry, scopes map[string]Scope, name string) {
 // records still-unresolved free variables.
 //
 // CPython: Python/symtable.c:L985 update_symbols
-func updateSymbols(symbols map[string]SymbolFlags, scopes map[string]Scope,
+func updateSymbols(ste *Entry, scopes map[string]Scope,
 	bound, free, inlinedCells nameSet, classflag bool,
 ) {
-	for name, flags := range symbols {
+	symbols := ste.Symbols
+	// Update existing names in place. Iterating SymbolOrder (not the Go
+	// map) keeps the walk deterministic; the keys already exist so no
+	// reordering happens.
+	for _, name := range ste.SymbolOrder {
+		flags := symbols[name]
 		if inlinedCells.contains(name) {
 			flags |= DefCompCell
 		}
@@ -359,7 +366,15 @@ func updateSymbols(symbols map[string]SymbolFlags, scopes map[string]Scope,
 		symbols[name] = flags
 	}
 	freeFlag := SymbolFlags(Free) << ScopeOffset
+	// Promote free variables. Sorting the names keeps the order in which
+	// they enter ste_symbols deterministic across runs (CPython draws
+	// from a PySet here, so any stable order is acceptable).
+	freeNames := make([]string, 0, len(free))
 	for name := range free {
+		freeNames = append(freeNames, name)
+	}
+	sort.Strings(freeNames)
+	for _, name := range freeNames {
 		if existing, ok := symbols[name]; ok {
 			if classflag {
 				existing |= DefFreeClass
@@ -370,7 +385,7 @@ func updateSymbols(symbols map[string]SymbolFlags, scopes map[string]Scope,
 		if bound != nil && !bound.contains(name) {
 			continue
 		}
-		symbols[name] = freeFlag
+		ste.SetSymbol(name, freeFlag)
 	}
 }
 
@@ -411,7 +426,7 @@ func inlineComprehension(ste, comp *Entry, scopes map[string]Scope, compFree, in
 			}
 		}
 		if !existing {
-			ste.Symbols[k] = onlyFlags
+			ste.SetSymbol(k, onlyFlags)
 			scopes[k] = scope
 			continue
 		}

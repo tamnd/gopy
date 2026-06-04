@@ -202,6 +202,30 @@ func SequenceDelItem(s Object, i int) error {
 	return SequenceSetItem(s, i, nil)
 }
 
+// SequenceSetSlice is s[i1:i2] = o on the sequence protocol. CPython
+// builds a slice from the two indices and routes through the mapping
+// slot's mp_ass_subscript; gopy has no separate sq_ass_slice, so it
+// forwards to SetItem with a slice key, which dispatches the same way.
+//
+// CPython: Objects/abstract.c:1932 PySequence_SetSlice
+func SequenceSetSlice(s Object, i1, i2 int, o Object) error {
+	if s.Type().Mapping == nil || s.Type().Mapping.SetItem == nil {
+		return fmt.Errorf("TypeError: '%s' object doesn't support slice assignment", s.Type().Name)
+	}
+	return SetItem(s, NewSlice(NewInt(int64(i1)), NewInt(int64(i2)), nil), o)
+}
+
+// SequenceDelSlice is del s[i1:i2] on the sequence protocol, the
+// deletion counterpart of SequenceSetSlice.
+//
+// CPython: Objects/abstract.c:1956 PySequence_DelSlice
+func SequenceDelSlice(s Object, i1, i2 int) error {
+	if s.Type().Mapping == nil || s.Type().Mapping.DelItem == nil {
+		return fmt.Errorf("TypeError: '%s' object doesn't support slice deletion", s.Type().Name)
+	}
+	return DelItem(s, NewSlice(NewInt(int64(i1)), NewInt(int64(i2)), nil))
+}
+
 // SequenceCount returns the number of times o equals an element of s.
 // Walks the iterator and compares with RichCmpBool, matching
 // _PySequence_IterSearch in PY_ITERSEARCH_COUNT mode.

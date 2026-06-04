@@ -1,5 +1,7 @@
 package objects
 
+import "fmt"
+
 // ellipsisObject is the singleton for `...`, the Ellipsis literal.
 // It surfaces in slice expressions (`a[..., 0]`), in stub function
 // bodies (`def f(): ...`), and as a sentinel in typing.
@@ -23,6 +25,17 @@ var ellipsisSingleton = func() *ellipsisObject {
 func init() {
 	ellipsisType.Repr = func(_ Object) (string, error) { return "Ellipsis", nil }
 	ellipsisType.Str = ellipsisType.Repr
+	ellipsisType.Getattro = GenericGetAttr
+	ellipsisType.Setattro = GenericSetAttr
+	// EllipsisType() returns the singleton and rejects any argument.
+	//
+	// CPython: Objects/sliceobject.c:28 ellipsis_new
+	ellipsisType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 0 || len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: EllipsisType takes no arguments")
+		}
+		return ellipsisSingleton, nil
+	}
 	// CPython: Objects/object.c ellipsis_reduce - returning a string causes
 	// pickle to serialize as "builtins.Ellipsis" (GLOBAL opcode) so loads
 	// returns the singleton rather than creating a new instance.

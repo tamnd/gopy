@@ -7,6 +7,8 @@ are not yet ported; this stub covers the surface gettext and argparse need.
 CPython: Lib/locale.py
 """
 
+import sys
+
 # CPython: Lib/locale.py:66 LC category constants (from _locale C module)
 LC_CTYPE = 0
 LC_COLLATE = 1
@@ -58,3 +60,24 @@ def localeconv():
 # CPython: Lib/locale.py:386 normalize
 def normalize(localename):
     return localename
+
+
+# gopy has no _locale C module, so getencoding falls back to the Python
+# filesystem encoding the same way CPython does when _locale.getencoding
+# is unavailable. open() uses this as the default text encoding.
+#
+# CPython: Lib/locale.py:624 getencoding (ImportError fallback)
+def getencoding():
+    return sys.getfilesystemencoding()
+
+
+# gopy never defines CODESET, so getpreferredencoding takes the
+# no-CODESET branch: utf-8 mode wins, otherwise it defers to
+# getencoding(). The do_setlocale argument is accepted for signature
+# parity and ignored because setlocale is a stub.
+#
+# CPython: Lib/locale.py:635 getpreferredencoding (no-CODESET branch)
+def getpreferredencoding(do_setlocale=True):
+    if sys.flags.utf8_mode:
+        return 'utf-8'
+    return getencoding()

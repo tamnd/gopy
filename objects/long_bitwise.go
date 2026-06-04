@@ -52,30 +52,54 @@ func intXor(a, b Object) (Object, error) {
 	return NewIntFromBig(new(big.Int).Xor(&ai.v, &bi.v)), nil
 }
 
-// intLshift / intRshift use uint shift counts; CPython raises on
-// negative shift counts and on counts that overflow C long.
+// intLshift mirrors long_lshift_method: 0 << anything is 0 even when
+// the shift count is huge, a negative shift count is a ValueError, and
+// a count that does not fit in int64 is "too many digits in integer".
 //
-// CPython: Objects/longobject.c long_lshift / long_rshift
+// CPython: Objects/longobject.c:5406 long_lshift_method
 func intLshift(a, b Object) (Object, error) {
-	ai, n, err := shiftOperands(a, b)
-	if err != nil {
-		return nil, err
-	}
-	if ai == nil {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
 		return notImplemented(), nil
 	}
-	return NewIntFromBig(new(big.Int).Lsh(&ai.v, n)), nil
+	if bi.v.Sign() < 0 {
+		return nil, errors.New("ValueError: negative shift count")
+	}
+	if ai.v.Sign() == 0 {
+		return NewInt(0), nil
+	}
+	n, fits := bi.Int64()
+	if !fits || n > shiftCountLimit {
+		return nil, errors.New("OverflowError: too many digits in integer")
+	}
+	return NewIntFromBig(new(big.Int).Lsh(&ai.v, uint(n))), nil
 }
 
+// intRshift mirrors long_rshift: 0 >> anything is 0, a count beyond
+// int64 collapses to 0 for a non-negative left operand and -1 for a
+// negative one (matching the sign-extending shift semantics), and a
+// negative shift count is a ValueError.
+//
+// CPython: Objects/longobject.c:5308 long_rshift
 func intRshift(a, b Object) (Object, error) {
-	ai, n, err := shiftOperands(a, b)
-	if err != nil {
-		return nil, err
-	}
-	if ai == nil {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
 		return notImplemented(), nil
 	}
-	return NewIntFromBig(new(big.Int).Rsh(&ai.v, n)), nil
+	if bi.v.Sign() < 0 {
+		return nil, errors.New("ValueError: negative shift count")
+	}
+	if ai.v.Sign() == 0 {
+		return NewInt(0), nil
+	}
+	n, fits := bi.Int64()
+	if !fits || n > shiftCountLimit {
+		if ai.v.Sign() < 0 {
+			return NewInt(-1), nil
+		}
+		return NewInt(0), nil
+	}
+	return NewIntFromBig(new(big.Int).Rsh(&ai.v, uint(n))), nil
 }
 
 // intInvert returns the bitwise complement, matching ~x == -(x+1).
@@ -169,24 +193,4 @@ func boolXor(a, b Object) (Object, error) {
 		return NewBool(r.Sign() != 0), nil
 	}
 	return NewIntFromBig(r), nil
-}
-
-// shiftOperands extracts the (int, shift count) pair shared by lshift
-// and rshift. Returns (nil, 0, nil) when the second operand is not an
-// int so the caller can return NotImplemented.
-//
-// CPython: Objects/longobject.c long_lshift (operand validation)
-func shiftOperands(a, b Object) (*Int, uint, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return nil, 0, nil
-	}
-	if bi.v.Sign() < 0 {
-		return nil, 0, errors.New("ValueError: negative shift count")
-	}
-	n, fits := bi.Int64()
-	if !fits || n > shiftCountLimit {
-		return nil, 0, errors.New("OverflowError: shift count too large")
-	}
-	return ai, uint(n), nil
 }

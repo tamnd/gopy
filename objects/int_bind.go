@@ -28,8 +28,12 @@ func init() {
 	bind("__ceil__", intIndexMethod)
 	bind("conjugate", intIndexMethod)
 	bind("to_bytes", intToBytesMethod)
+	bind("as_integer_ratio", intAsIntegerRatioMethod)
+	bind("is_integer", intIsIntegerMethod)
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
+	bind("__sizeof__", intSizeofMethod)
+	bind("__getnewargs__", intGetNewArgsMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
@@ -41,6 +45,22 @@ func init() {
 	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
 		NewBuiltinFunction("from_bytes", intFromBytesMethod),
 	))
+}
+
+// intGetNewArgsMethod implements int.__getnewargs__. It returns a
+// 1-tuple holding a plain int copy of self's value so an int subclass
+// reconstructs through __newobj__(cls, int(self)) under pickle.
+//
+// CPython: Objects/longobject.c:6178 long___getnewargs___impl
+func intGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := asInt(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'int' object")
+	}
+	return NewTuple([]Object{NewIntFromBig(i.BigInt())}), nil
 }
 
 // intRealGetter backs int.real and int.numerator: returns self when
@@ -102,7 +122,83 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewStr(v.String()), nil
+	if err := checkIntToStrLimit(v.BitLen()); err != nil {
+		return nil, err
+	}
+	s := v.String()
+	if IntMaxStrDigitsHook != nil {
+		if limit := IntMaxStrDigitsHook(); limit > 0 {
+			n := len(s)
+			if n > 0 && s[0] == '-' {
+				n--
+			}
+			if int32(n) > limit {
+				return nil, fmt.Errorf("ValueError: Exceeds the limit (%d digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit", limit)
+			}
+		}
+	}
+	return NewStr(s), nil
+}
+
+// intSizeofMethod ports int.__sizeof__: tp_basicsize + tp_itemsize *
+// max(ndigits, 1) where ndigits is the count of 30-bit limbs needed to
+// hold abs(self). CPython always allocates space for at least one
+// digit even when the value is zero.
+//
+// CPython: Objects/longobject.c:6176 int___sizeof___impl
+func intSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := args[0].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	const shift = 30
+	bits := i.v.BitLen()
+	ndigits := (bits + shift - 1) / shift
+	if ndigits < 1 {
+		ndigits = 1
+	}
+	bs := typeBasicSize(i.Type())
+	is := typeItemSize(i.Type())
+	return NewInt(int64(bs + is*ndigits)), nil
+}
+
+// intAsIntegerRatioMethod ports int.as_integer_ratio(): for an int v
+// returns (v, 1). Mirrors float.as_integer_ratio's API so callers can
+// duck-type over Real-protocol numbers.
+//
+// CPython: Objects/longobject.c:6263 int_as_integer_ratio_impl
+func intAsIntegerRatioMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: as_integer_ratio() takes no arguments (%d given)", len(args)-1)
+	}
+	i, ok := asInt(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'as_integer_ratio' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	// Subclasses (including bool) return a fresh plain int as the
+	// numerator, matching long_long's behavior.
+	num := args[0]
+	if args[0].Type() != IntType {
+		num = NewIntFromBig(i.BigInt())
+	}
+	return NewTuple([]Object{num, NewInt(1)}), nil
+}
+
+// intIsIntegerMethod ports int.is_integer(): always True. Exists for
+// duck-type compatibility with float.is_integer.
+//
+// CPython: Objects/longobject.c:6415 int_is_integer_impl
+func intIsIntegerMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: is_integer() takes no arguments (%d given)", len(args)-1)
+	}
+	if _, ok := asInt(args[0]); !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'is_integer' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	return True(), nil
 }
 
 // intBitLengthMethod ports int.bit_length(): the number of bits needed
@@ -260,7 +356,9 @@ func intFromBytesMethod(args []Object, kwargs map[string]Object) (Object, error)
 	if typ == BoolType {
 		return NewBool(val.Sign() != 0), nil
 	}
-	return newIntAs(val, typ), nil
+	// Subclass path: invoke type(long_obj) so user-defined __new__ runs.
+	// CPython: Objects/longobject.c:6402 PyObject_CallOneArg((PyObject *)type, long_obj)
+	return Call(typ, NewTuple([]Object{NewIntFromBig(val)}), nil)
 }
 
 // byteorderFrom validates the `byteorder` argument. Returns true for
@@ -301,8 +399,12 @@ func signedFromKwarg(kwargs map[string]Object) (bool, error) {
 }
 
 // bytesLike extracts the underlying byte slice from a bytes/bytearray/iterable
-// object. CPython 3.14 int.from_bytes accepts any iterable of ints.
+// object. Mirrors PyObject_Bytes followed by PyBytes_FromObject: first call
+// __bytes__ when present (which must return bytes), otherwise reject str and
+// int explicitly and fall back to iterating an iterable of 0..255 ints.
 //
+// CPython: Objects/object.c:870 PyObject_Bytes
+// CPython: Objects/bytesobject.c:2818 PyBytes_FromObject
 // CPython: Objects/longobject.c:6380 int_from_bytes_impl
 func bytesLike(o Object) ([]byte, error) {
 	switch v := o.(type) {
@@ -311,7 +413,25 @@ func bytesLike(o Object) ([]byte, error) {
 	case *ByteArray:
 		return v.Bytes(), nil
 	}
-	// Fall back: try to iterate and collect int values 0-255.
+	if descr, _ := LookupDescriptor(o.Type(), "__bytes__"); descr != nil {
+		fn, err := bindDescriptor(descr, o)
+		if err != nil {
+			return nil, err
+		}
+		out, err := Call(fn, NewTuple(nil), nil)
+		if err != nil {
+			return nil, err
+		}
+		b, ok := out.(*Bytes)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __bytes__ returned non-bytes (type %s)", typeNameOf(out))
+		}
+		return b.Bytes(), nil
+	}
+	switch o.(type) {
+	case *Unicode, *Int, *Bool, *Float, *Complex:
+		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))
+	}
 	iter, err := Iter(o)
 	if err != nil {
 		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", typeNameOf(o))
@@ -366,12 +486,19 @@ func intToByteArray(v *big.Int, length int, littleEndian, signed bool) ([]byte, 
 		}
 	} else {
 		u = v
-		maxBits := length * 8
-		if signed {
-			maxBits = length*8 - 1
-		}
-		if maxBits < 0 || u.BitLen() > maxBits {
-			return nil, fmt.Errorf("OverflowError: int too big to convert")
+		// CPython: Objects/longobject.c:1031 _PyLong_AsByteArray treats the
+		// zero case as trivially fitting in any non-negative length, so
+		// (0).to_bytes(0, signed=True) returns b''. Without the explicit
+		// guard, length=0 with signed=True would compute maxBits = -1 and
+		// reject a perfectly valid call.
+		if u.Sign() != 0 {
+			maxBits := length * 8
+			if signed {
+				maxBits = length*8 - 1
+			}
+			if maxBits < 0 || u.BitLen() > maxBits {
+				return nil, fmt.Errorf("OverflowError: int too big to convert")
+			}
 		}
 	}
 
@@ -426,8 +553,13 @@ func intIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: this method takes no arguments (%d given)", len(args)-1)
 	}
-	i, ok := args[0].(*Int)
-	if !ok {
+	var i *Int
+	switch v := args[0].(type) {
+	case *Int:
+		i = v
+	case *Bool:
+		i = &v.Int
+	default:
 		return nil, fmt.Errorf("TypeError: descriptor 'this' for 'int' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
 	}
 	if i.Type() == IntType {

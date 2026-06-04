@@ -74,7 +74,23 @@ func stdlibCompiler(src []byte, filename string) (*objects.Code, error) {
 type stdlibExec struct{ ts *state.Thread }
 
 func (e *stdlibExec) ExecCode(code *objects.Code, mod *objects.Module) (objects.Object, error) {
-	return vm.EvalCode(e.ts, code, mod.Dict(), nil)
+	// Seed __builtins__ on the module dict the way the production entry
+	// point does (cmd/gopy/main.go stamps it on __main__) so the module
+	// frame runs with the real builtins mapping. Without this the frame
+	// falls back to using its own globals as builtins, and that polluted
+	// "builtins" then propagates to every submodule the body imports;
+	// the first submodule import that finds an explicit __builtins__
+	// lacking __import__ raises "ImportError: __import__ not found".
+	//
+	// CPython: Python/import.c:657 module_init_dunder_attrs sets
+	// __builtins__ to interp->builtins on every imported module.
+	d := mod.Dict()
+	if v, _ := d.GetItem(objects.NewStr("__builtins__")); v == nil {
+		if bm, ok := imp.GetModule("builtins"); ok {
+			_ = d.SetItem(objects.NewStr("__builtins__"), bm.Dict())
+		}
+	}
+	return vm.EvalCode(e.ts, code, d, nil)
 }
 
 // importStdlib attempts to import name via the real PathFinder+VM and
@@ -107,6 +123,17 @@ func importStdlib(t *testing.T, name string) (mod *objects.Module, err error) {
 	}()
 
 	exec := &stdlibExec{ts: state.NewThread()}
+	// Bootstrap the builtins module the way cmd/gopy does at startup so
+	// the import chain has a real __import__ to resolve. buildModule
+	// (registered in the inittab) calls builtins.Init, which registers
+	// the module and populates __import__; without this preload the
+	// first module body that imports a submodule trips
+	// "ImportError: __import__ not found".
+	if _, ok := imp.GetModule("builtins"); !ok {
+		if _, err := imp.ImportModule(exec, "builtins"); err != nil {
+			t.Fatalf("bootstrap builtins: %v", err)
+		}
+	}
 	return imp.ImportModule(exec, name)
 }
 

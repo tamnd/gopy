@@ -23,7 +23,10 @@ import (
 // outgoing edges traversed via visit_reachable, which can pull
 // already-moved nodes back when a survivor turns out to point at
 // them. Nodes with refs == 0 move to the unreachable list with the
-// UNREACHABLE flag set.
+// UNREACHABLE flag set. subtract_refs floors refs at 0 so a node
+// over-decremented by gopy's no-Incref-on-store containers (Frame
+// f_funcobj, closure cells, etc.) lands here too and gets pulled back
+// by visit_reachable from its reachable parent.
 //
 // CPython: Python/gc.c:497 move_unreachable
 func moveUnreachable(young, unreachable *gcHead, tracked map[objects.Object]*gcHead) error {

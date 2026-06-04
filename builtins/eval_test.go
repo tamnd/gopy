@@ -22,10 +22,11 @@ func captureEvaluator(t *testing.T, ret objects.Object, retErr error) *evalCall 
 	t.Cleanup(func() { SetEvaluator(prev) })
 
 	got := &evalCall{}
-	SetEvaluator(func(code *objects.Code, globals, locals objects.Object) (objects.Object, error) {
+	SetEvaluator(func(code *objects.Code, globals, locals, closure objects.Object) (objects.Object, error) {
 		got.code = code
 		got.globals = globals
 		got.locals = locals
+		got.closure = closure
 		return ret, retErr
 	})
 	return got
@@ -35,6 +36,7 @@ type evalCall struct {
 	code    *objects.Code
 	globals objects.Object
 	locals  objects.Object
+	closure objects.Object
 }
 
 func TestEvalCompilesStringInExpressionMode(t *testing.T) {

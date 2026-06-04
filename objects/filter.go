@@ -26,7 +26,7 @@ type Filter struct {
 var FilterType = NewType("filter", []*Type{objectType})
 
 func init() {
-	FilterType.Iter = func(o Object) (Object, error) { return o, nil }
+	FilterType.Iter = SelfIter
 	FilterType.IterNext = filterNext
 	AddIterSlotWrappers(FilterType)
 	SetTypeDescr(FilterType, "__reduce__", NewMethodDescr(FilterType, "__reduce__", filterReduce))

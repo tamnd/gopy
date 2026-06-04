@@ -68,6 +68,33 @@ type Unicode struct {
 	attrs *Dict
 }
 
+// PEP 393 compact-unicode struct sizes on a 64-bit (non-free-threaded)
+// build, matching sizeof(PyASCIIObject) and sizeof(PyCompactUnicodeObject).
+// str.__sizeof__ and the unicode_repeat allocation guard report storage
+// the way CPython lays it out: a compact ASCII string is the ASCII
+// header plus (len+1) bytes; any other compact string is the compact
+// header plus (len+1)*kind bytes.
+//
+// CPython: Include/cpython/unicodeobject.h:71 PyASCIIObject
+// CPython: Include/cpython/unicodeobject.h:97 PyCompactUnicodeObject
+const (
+	asciiStructSize   = 40
+	compactStructSize = 56
+)
+
+// charSizeAndStruct returns the per-character byte width and the header
+// struct size CPython would use for this string's kind. ASCII strings
+// use the smaller ASCII header; every other kind uses the compact
+// header keyed on the PEP 393 kind tag.
+//
+// CPython: Objects/unicodeobject.c:1208 PyUnicode_New
+func (u *Unicode) charSizeAndStruct() (charSize, structSize int) {
+	if u.ascii {
+		return 1, asciiStructSize
+	}
+	return int(u.kind), compactStructSize
+}
+
 // AttrDict implements AttrDictHolder so MemberDescr can store __slots__
 // values in the attrs dict for str subclasses.
 // CPython: Objects/object.c _PyObject_GetDictPtr (str-subclass path)
@@ -251,6 +278,21 @@ func init() {
 			if n == 1 && s.Type() == strType {
 				return s, nil
 			}
+			// unicode_repeat first rejects products that overflow
+			// Py_ssize_t, then hands the character count to
+			// PyUnicode_New, which raises MemoryError when the backing
+			// store would exceed the allocator's reach.
+			//
+			// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+			const maxSsize = int(^uint(0) >> 1)
+			if s.length > maxSsize/n {
+				return nil, fmt.Errorf("OverflowError: repeated string is too long")
+			}
+			nchars := s.length * n
+			charSize, structSize := s.charSizeAndStruct()
+			if nchars > (maxSsize-structSize)/charSize-1 {
+				return nil, fmt.Errorf("MemoryError")
+			}
 			b := make([]byte, 0, len(s.v)*n)
 			for range n {
 				b = append(b, s.v...)
@@ -333,7 +375,7 @@ type strIterator struct {
 var strIterType = NewType("str_iterator", []*Type{objectType})
 
 func init() {
-	strIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	strIterType.Iter = SelfIter
 	strIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*strIterator)
 		if it.src == nil || it.pos >= it.src.length {
@@ -604,8 +646,17 @@ func (u *Unicode) RuneAt(i int) rune {
 func unicodeRepr(o Object) (string, error) {
 	s := o.(*Unicode).v
 
+	// Decode through strLenientRunes rather than Go's range loop: a lone
+	// surrogate (U+D800..U+DFFF) is stored as 3-byte pseudo-UTF-8, which
+	// Go's range rejects byte-by-byte as three U+FFFD runes. strLenientRunes
+	// recovers the single surrogate code point so the escape loop emits one
+	// \udXXX escape (surrogates are non-printable) instead of � repeated.
+	//
+	// CPython: Objects/unicodeobject.c:12956 unicode_repr
+	runes := strLenientRunes(s)
+
 	squote, dquote := 0, 0
-	for _, ch := range s {
+	for _, ch := range runes {
 		switch ch {
 		case '\'':
 			squote++
@@ -622,7 +673,7 @@ func unicodeRepr(o Object) (string, error) {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
 	b.WriteByte(quote)
-	for _, ch := range s {
+	for _, ch := range runes {
 		switch {
 		case ch == rune(quote) || ch == '\\':
 			b.WriteByte('\\')

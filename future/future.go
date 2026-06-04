@@ -33,6 +33,16 @@ const (
 	Annotations     uint32 = 0x1000000
 )
 
+// AllowTopLevelAwait is the PyCF_ALLOW_TOP_LEVEL_AWAIT compiler flag.
+// compile() folds it into ff_features so the symtable's
+// allows_top_level_await check can read it off the future feature set.
+// Unlike the CO_FUTURE_* bits it is never copied into a code object's
+// co_flags (compute_code_flags masks it out), so it only steers the
+// module-coroutine promotion during symbol-table construction.
+//
+// CPython: Include/cpython/compile.h:20 PyCF_ALLOW_TOP_LEVEL_AWAIT
+const AllowTopLevelAwait uint32 = 0x2000
+
 // Feature name strings recognized inside `from __future__ import X`.
 //
 // CPython: Include/cpython/compile.h:L37

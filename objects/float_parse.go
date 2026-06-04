@@ -67,7 +67,14 @@ func FloatFromString(s string) (*Float, error) {
 
 	v, err := strconv.ParseFloat(digits, 64)
 	if err != nil {
-		return nil, fmtFloatInvalid(s)
+		// ErrRange means the value is finite but rounds to +/-Inf or 0;
+		// CPython treats overflow as +/-Inf rather than ValueError so
+		// float('1e500') == inf. Only ErrSyntax stays a ValueError.
+		// CPython: Python/pystrtod.c:418 _PyOS_ascii_strtod (ERANGE path)
+		var ne *strconv.NumError
+		if !errors.As(err, &ne) || !errors.Is(ne.Err, strconv.ErrRange) {
+			return nil, fmtFloatInvalid(s)
+		}
 	}
 	if negative {
 		v = -v

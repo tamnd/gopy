@@ -21,6 +21,7 @@ import (
 const (
 	intrinsicPrint              int32 = 1
 	intrinsicStopIterationError int32 = 3
+	intrinsicAsyncGenWrap       int32 = 4
 	intrinsicTypeVar            int32 = 7
 	intrinsicParamSpec          int32 = 8
 	intrinsicTypeVarTuple       int32 = 9
@@ -102,6 +103,14 @@ type Unit struct {
 	// a non-(-1) CondIdx so the __annotate__ function can guard their inclusion.
 	// Mirrors CPython's Python/compile.c:64 u_in_conditional_block.
 	InConditionalBlock int
+	// InInlinedComp is the nesting depth of inlined comprehensions whose
+	// body is currently being emitted into this unit. Used to compute the
+	// in_class_block flag (a comprehension directly in a class body
+	// isolates its locals, but one nested inside another inlined comp does
+	// not re-isolate).
+	//
+	// CPython: Python/compile.c:70 compiler_unit.u_in_inlined_comp
+	InInlinedComp int
 	// Private is the enclosing class name used for PEP 8 private name
 	// mangling. Set when entering a class scope and inherited by nested
 	// function / comprehension scopes so `self.__x` inside a method
@@ -177,6 +186,16 @@ type Compiler struct {
 	// fblocks is the per-unit frame block stack. Cleared on each
 	// enterScope.
 	fblocks []fblock
+
+	// interactive marks compile-mode='single' (REPL / doctest). When
+	// set, expression-statements at module nest level emit
+	// CALL_INTRINSIC_1 INTRINSIC_PRINT so each result reaches
+	// sys.displayhook, even when the statement sits inside a compound
+	// block such as `with` or `if`.
+	//
+	// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
+	// c->c_nestlevel <= 1 fires PRINT_EXPR)
+	interactive bool
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built
@@ -288,6 +307,15 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	switch sc.Type {
 	case symtable.ModuleBlock:
 		u.Flags = 0
+		// PyCF_ALLOW_TOP_LEVEL_AWAIT: a module whose body awaits is a
+		// coroutine. A module can never be a generator (yield at module
+		// scope is a syntax error), so the coroutine bit stands alone.
+		//
+		// CPython: Python/codegen.c compute_code_flags (ste_coroutine on
+		// the module entry sets CO_COROUTINE)
+		if sc.Coroutine {
+			u.Flags |= CoCoroutine
+		}
 	case symtable.FunctionBlock:
 		u.Flags = CoOptimized | CoNewLocals
 		if sc.Method {
@@ -354,9 +382,21 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	var cellNames []string
 	var freeNames []string
 	for name, flags := range sc.Symbols {
-		switch flags.Scope() {
-		case symtable.Cell:
+		// dictbytype(ste_symbols, CELL, DEF_COMP_CELL, 0): a name lands in
+		// u_cellvars when its scope is CELL or it is an inlined-comprehension
+		// cell (DEF_COMP_CELL). The hidden loop variable of an inlined
+		// comprehension that a nested function captures is a cell in the
+		// enclosing code object even though the name's own scope resolved to
+		// a global/name binding (e.g. a same-named global referenced
+		// elsewhere in the parent), so it must be pre-allocated here so deref
+		// offsets stay stable regardless of emission order.
+		//
+		// CPython: Python/compile.c:605 u_cellvars = dictbytype(..., CELL, DEF_COMP_CELL, 0)
+		if flags.Scope() == symtable.Cell || flags&symtable.DefCompCell != 0 {
 			cellNames = append(cellNames, name)
+			continue
+		}
+		switch flags.Scope() {
 		case symtable.Free:
 			freeNames = append(freeNames, name)
 		default:

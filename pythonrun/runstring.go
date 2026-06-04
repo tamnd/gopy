@@ -86,6 +86,19 @@ func RunBytes(ts *state.Thread, src []byte, filename string, mode parser.Mode, g
 //
 // CPython: Python/pythonrun.c:592 PyRun_SimpleStringFlags
 func RunSimpleString(ts *state.Thread, command string, globals objects.Object, stderr io.Writer) int {
+	return RunSimpleStringWithName(ts, command, "<string>", globals, stderr)
+}
+
+// RunSimpleStringWithName is RunSimpleString with a caller-supplied
+// co_filename rather than the "<string>" default. A file driven through
+// an in-memory source rewrite (for example a vendored test that gets a
+// unittest runner appended) passes its real path here so the compiled
+// code object carries the script's filename: frame repr shows it and
+// linecache can pull the original source lines for tracebacks.
+//
+// CPython: Python/pythonrun.c:592 PyRun_SimpleStringFlags
+// (_PyRun_SimpleStringFlagsWithName variant)
+func RunSimpleStringWithName(ts *state.Thread, command, filename string, globals objects.Object, stderr io.Writer) int {
 	// Stamp __name__ = "__main__" on the globals if absent. CPython
 	// does this through the import-machinery dance in run_command:
 	// _PyImport_AddModuleObject builds the __main__ module, and its
@@ -101,7 +114,7 @@ func RunSimpleString(ts *state.Thread, command string, globals objects.Object, s
 			_ = d.SetItem(nameKey, objects.NewStr("__main__"))
 		}
 	}
-	if _, err := RunString(ts, command, "<string>", parser.ModeFile, globals, nil); err != nil {
+	if _, err := RunString(ts, command, filename, parser.ModeFile, globals, nil); err != nil {
 		return printRunError(ts, err, stderr)
 	}
 	return 0

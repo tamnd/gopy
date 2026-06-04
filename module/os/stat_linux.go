@@ -39,11 +39,15 @@ func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	return objects.NewInt(int64(syscall.Getuid())), nil
 }
 
-// osPipe creates a pipe and returns (read_fd, write_fd).
-// CPython: Modules/posixmodule.c:8024 os_pipe_impl
+// osPipe creates a pipe and returns (read_fd, write_fd). Both descriptors
+// are made non-inheritable (FD_CLOEXEC), matching CPython's PEP 446 default:
+// pipe fds must not leak into spawned children, or a child holding the write
+// end of an error/data pipe deadlocks the parent's blocking read. Linux gets
+// the atomic pipe2(O_CLOEXEC) path.
+// CPython: Modules/posixmodule.c:8024 os_pipe_impl (HAVE_PIPE2 branch)
 func osPipe(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	fds := make([]int, 2)
-	if err := syscall.Pipe(fds); err != nil {
+	if err := syscall.Pipe2(fds, syscall.O_CLOEXEC); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.NewTuple([]objects.Object{

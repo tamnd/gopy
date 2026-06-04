@@ -136,3 +136,43 @@ func bigIntToFloat64(v *big.Int) (float64, error) {
 	}
 	return f, nil
 }
+
+// IntToFloat64 is the exported PyLong_AsDouble used by modules outside
+// objects/ (math, cmath). Returns OverflowError when magnitude exceeds
+// the float64 range, matching CPython behavior.
+//
+// CPython: Objects/longobject.c:3038 PyLong_AsDouble
+func IntToFloat64(i *Int) (float64, error) {
+	return bigIntToFloat64(&i.v)
+}
+
+// IntFrexp mirrors _PyLong_Frexp: split a non-zero int into a normalised
+// double mantissa and integer exponent so callers can compute log(v) as
+// log(m) + log(2) * e even when v is too large for float64. The mantissa
+// is in [0.5, 1.0); the exponent equals v.BitLen() since we take the
+// top 53 bits of the integer.
+//
+// CPython: Objects/longobject.c:3092 _PyLong_Frexp
+func IntFrexp(i *Int) (float64, int) {
+	v := &i.v
+	if v.Sign() == 0 {
+		return 0, 0
+	}
+	abs := new(big.Int).Abs(v)
+	e := abs.BitLen()
+	const mantissaBits = 53
+	var m float64
+	if e <= mantissaBits {
+		mInt, _ := new(big.Float).SetInt(abs).Float64()
+		m = mInt / float64(int64(1)<<uint(e))
+	} else {
+		shift := uint(e - mantissaBits)
+		top := new(big.Int).Rsh(abs, shift)
+		mInt, _ := new(big.Float).SetInt(top).Float64()
+		m = mInt / float64(int64(1)<<mantissaBits)
+	}
+	if v.Sign() < 0 {
+		m = -m
+	}
+	return m, e
+}

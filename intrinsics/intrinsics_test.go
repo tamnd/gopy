@@ -96,6 +96,7 @@ func TestStubHelpersReturnNotImplemented(t *testing.T) {
 		UnaryPrintID:            true,
 		UnaryListToTupleID:      true,
 		UnaryStopIterErrorID:    true,
+		UnaryAsyncGenWrapID:     true,
 		UnaryPositiveID:         true,
 		UnaryTypevarID:          true,
 		UnaryParamspecID:        true,

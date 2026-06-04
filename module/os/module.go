@@ -236,6 +236,8 @@ func buildOS() (*objects.Module, error) {
 		{"write", objects.NewBuiltinFunction("write", osWrite)},
 		{"lseek", objects.NewBuiltinFunction("lseek", osLseek)},
 		{"dup", objects.NewBuiltinFunction("dup", osDup)},
+		{"get_inheritable", objects.NewBuiltinFunction("get_inheritable", osGetInheritable)},
+		{"set_inheritable", objects.NewBuiltinFunction("set_inheritable", osSetInheritable)},
 		{"replace", objects.NewBuiltinFunction("replace", osReplace)},
 		{"pipe", objects.NewBuiltinFunction("pipe", osPipe)},
 		{"getppid", objects.NewBuiltinFunction("getppid", osGetppid)},
@@ -812,7 +814,7 @@ func walk(args []objects.Object, kwargs map[string]objects.Object) (objects.Obje
 		followlinks = objectBool(v)
 	}
 
-	g := objects.NewGenerator("walk")
+	g := objects.NewGenerator("walk", "walk")
 	go func() {
 		walkDir(g, top, topdown, followlinks)
 		g.YieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}

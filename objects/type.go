@@ -199,6 +199,16 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
 
+	// HasWeakref is true when instances of this type carry weak-reference
+	// support, mirroring a non-zero tp_weaklistoffset. Every plain user
+	// class (no __slots__, or __slots__ that names __weakref__) gets it,
+	// and it inherits down the base chain. __slots__ validation reads it
+	// to reject a redundant __weakref__ slot when a base already provides
+	// one.
+	//
+	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
+	HasWeakref bool
+
 	// ClassAttrDict is the live attribute dict for user types, mirroring
 	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
 	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the
@@ -296,6 +306,23 @@ type Type struct {
 // CPython: Include/cpython/object.h:L83 visitproc
 type Visitor func(Object) error
 
+// GCRoot marks objects the cycle collector must treat as roots even
+// when no tracked container references them. gopy runs every generator,
+// coroutine, and async generator body on its own goroutine; while that
+// body is mid-execution the goroutine stack holds the only live
+// reference to the gen-like object and to the chain of sub-generators
+// it is iterating. That reference is a plain Go pointer, invisible to
+// the refcount-based collector, so subtract_refs drives the whole
+// active spine to gc_refs == 0 and move_unreachable would reclaim the
+// suspended sub-generators hanging off it mid-iteration. An object whose
+// GCRoot reports true is pinned as a root, mirroring CPython where an
+// executing frame is kept reachable through tstate->current_frame.
+//
+// CPython: Python/gc.c:1208 gc_collect_main (tstate roots stay reachable)
+type GCRoot interface {
+	GCRoot() bool
+}
+
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //
 // CPython: Include/object.h:L284 Py_TPFLAGS_MAPPING / Py_TPFLAGS_SEQUENCE
@@ -341,6 +368,13 @@ const (
 	//
 	// CPython: Include/object.h:264 Py_TPFLAGS_BASETYPE
 	TpFlagBasetype uint64 = 1 << 10
+	// TpFlagHeapType mirrors Py_TPFLAGS_HEAPTYPE: set on types allocated
+	// at runtime (user/heap types). gopy tracks this via Type.IsUser and
+	// only materializes the bit in the type.__flags__ getset, which
+	// copyreg._reduce_ex consults to find the nearest built-in base.
+	//
+	// CPython: Include/object.h:280 Py_TPFLAGS_HEAPTYPE
+	TpFlagHeapType uint64 = 1 << 9
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
@@ -486,12 +520,17 @@ func init() {
 			if !ok {
 				return fmt.Errorf("TypeError: __type_params__ can only be set on types")
 			}
-			if v == None() || v == nil {
-				t.TypeParams = nil
-				return nil
+			// check_set_special_type_attr: an immutable type rejects the
+			// write, and a delete (value nil) is reported the same way.
+			// Any other value is stored verbatim, with no tuple check.
+			//
+			// CPython: Objects/typeobject.c:2226 type_set_type_params
+			// CPython: Objects/typeobject.c check_set_special_type_attr
+			if t.TpFlags&TpFlagImmutable != 0 {
+				return fmt.Errorf("TypeError: cannot set '__type_params__' attribute of immutable type '%s'", t.Name)
 			}
-			if _, ok := v.(*Tuple); !ok {
-				return fmt.Errorf("TypeError: __type_params__ must be a tuple")
+			if v == nil {
+				return fmt.Errorf("TypeError: cannot delete '__type_params__' attribute of immutable type '%s'", t.Name)
 			}
 			t.TypeParams = v
 			return nil
@@ -535,6 +574,15 @@ func NewType(name string, bases []*Type) *Type {
 	if err != nil {
 		panic(err)
 	}
+	// Built-in (static) types are immortal in CPython 3.12+: their
+	// refcount is stamped with _Py_IMMORTAL_REFCNT so Decref never drops
+	// them. gopy depends on this so weakrefs registered against the type
+	// (e.g. Mapping.register(FrameLocalsProxy) in _collections_abc) do
+	// not get cleared the moment a transient refcount blip hits zero.
+	//
+	// CPython: Objects/object.c _PyObject_Init (immortal stamp for static
+	// types via _PyStaticType_InitBuiltin)
+	t.MakeImmortal()
 	return t
 }
 

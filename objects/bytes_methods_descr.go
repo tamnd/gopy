@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/codecs"
 )
@@ -54,22 +55,21 @@ func bytesArgAsBuffer(obj Object, methodName string) ([]byte, error) {
 	if buf, ok := asBytesLike(obj); ok {
 		return buf, nil
 	}
+	// PEP 688: a pure-Python object can expose the buffer protocol through
+	// __buffer__(flags). PyObject_GetBuffer runs it (with PyBUF_SIMPLE = 0)
+	// and reads the resulting view, so a re-entrant resize inside it can
+	// raise BufferError under a buffer export.
+	if m, err := LookupSpecial(obj, "__buffer__"); err == nil && m != nil {
+		res, cerr := Call(m, NewTuple([]Object{NewInt(0)}), nil)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if buf, ok := asBytesLike(res); ok {
+			return buf, nil
+		}
+	}
 	return nil, fmt.Errorf("TypeError: a bytes-like object is required, not '%s' (in %s)",
 		obj.Type().Name, methodName)
-}
-
-// bytesIntInRange unpacks an *Int to a value in [0, 255]. Used by the
-// single-byte branch of find/rfind/index/rindex/count/contains.
-func bytesIntInRange(obj Object) (byte, bool, error) {
-	i, ok := obj.(*Int)
-	if !ok {
-		return 0, false, nil
-	}
-	n, fits := i.Int64()
-	if !fits || n < 0 || n > 255 {
-		return 0, true, fmt.Errorf("ValueError: byte must be in range(0, 256)")
-	}
-	return byte(n), true, nil
 }
 
 // bytesIntArg pulls an integer out of args[i] when present, otherwise
@@ -97,17 +97,57 @@ func bytesIntArg(args []Object, idx int, methodName string, def int) (int, error
 	return int(v), nil
 }
 
+// bytesSliceIndexArg pulls a start/end slice bound out of args[i]. Unlike
+// bytesIntArg it mirrors CPython's slice_index converter: an out-of-range
+// integer is clamped to the Py_ssize_t extremes rather than raising
+// OverflowError, so b.find(sub, sys.maxsize+1, 0) returns -1 instead of
+// blowing up.
+//
+// CPython: Python/ceval.c _PyEval_SliceIndex (the slice_index clinic converter)
+func bytesSliceIndexArg(args []Object, idx int, methodName string, def int) (int, error) {
+	if idx >= len(args) || args[idx] == nil || args[idx] == None() {
+		return def, nil
+	}
+	n, ok := args[idx].(*Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: %s indices must be integers, not %s",
+			methodName, args[idx].Type().Name)
+	}
+	v, fits := n.Int64()
+	if !fits {
+		if n.Sign() < 0 {
+			return -bytesMaxIndex, nil
+		}
+		return bytesMaxIndex, nil
+	}
+	if v > math.MaxInt32 {
+		return bytesMaxIndex, nil
+	}
+	if v < math.MinInt32 {
+		return -bytesMaxIndex, nil
+	}
+	return int(v), nil
+}
+
 // bytesSubArg unpacks the (sub) argument used by find/rfind/index/
 // rindex/count: either an int byte value or a bytes-like sequence.
 // The returned []byte is a single-byte slice when sub is an Int.
 func bytesSubArg(obj Object, methodName string) ([]byte, error) {
-	if b, isInt, err := bytesIntInRange(obj); err != nil {
-		return nil, err
-	} else if isInt {
-		return []byte{b}, nil
-	}
+	// parse_args_finds_byte checks the buffer protocol before __index__,
+	// so a bytes-like needle wins over an object that is also index-able.
 	if buf, ok := asBytesLike(obj); ok {
 		return buf, nil
+	}
+	if IndexCheck(obj) {
+		iv, err := NumberIndex(obj)
+		if err != nil {
+			return nil, err
+		}
+		n, fits := iv.(*Int).Int64()
+		if !fits || n < 0 || n > 255 {
+			return nil, errors.New("ValueError: byte must be in range(0, 256)")
+		}
+		return []byte{byte(n)}, nil
 	}
 	return nil, fmt.Errorf("TypeError: argument should be integer or bytes-like object, not '%s' (in %s)",
 		obj.Type().Name, methodName)
@@ -120,6 +160,39 @@ type methodFn = func(args []Object, kwargs map[string]Object) (Object, error)
 // arityErr is the CPython-shaped wrong-arg-count message.
 func arityErr(name string, want, got int) error {
 	return fmt.Errorf("TypeError: %s() takes %d positional argument(s) but %d were given", name, want, got)
+}
+
+// bindKwargs folds keyword arguments onto positional slots following the
+// parameter order in names (names[0] is args[1], the first slot after the
+// receiver). It mirrors how CPython's Argument Clinic binds a
+// keyword-or-positional signature: a keyword that duplicates a position
+// raises TypeError, an unknown keyword raises TypeError, and a missing
+// leading slot becomes a nil so callers see "not supplied".
+func bindKwargs(method string, args []Object, kwargs map[string]Object, names ...string) ([]Object, error) {
+	if len(kwargs) == 0 {
+		return args, nil
+	}
+	out := append([]Object(nil), args...)
+	for k, val := range kwargs {
+		idx := -1
+		for i, n := range names {
+			if n == k {
+				idx = i + 1
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for %s()", k, method)
+		}
+		if idx < len(args) {
+			return nil, fmt.Errorf("TypeError: argument for %s() given by name ('%s') and position (%d)", method, k, idx)
+		}
+		for len(out) <= idx {
+			out = append(out, nil)
+		}
+		out[idx] = val
+	}
+	return out, nil
 }
 
 // arityRangeErr reports "expected X to Y arguments, got Z".
@@ -170,27 +243,40 @@ func findMethod(name string, reverse, raiseOnMiss bool) methodFn {
 		if err != nil {
 			return nil, err
 		}
+		// gh-142560: lock the receiver's buffer while the needle is
+		// converted so a re-entrant resize (the needle's __index__ or
+		// __buffer__ mutating self) raises BufferError.
+		unlock := lockSearchSelf(args[0])
 		sub, err := bytesSubArg(args[1], name)
+		unlock()
 		if err != nil {
 			return nil, err
 		}
-		start, err := bytesIntArg(args, 2, name, 0)
+		start, err := bytesSliceIndexArg(args, 2, name, 0)
 		if err != nil {
 			return nil, err
 		}
-		end, err := bytesIntArg(args, 3, name, bytesMaxIndex)
+		end, err := bytesSliceIndexArg(args, 3, name, bytesMaxIndex)
 		if err != nil {
 			return nil, err
 		}
-		lo, hi := clampBytesSlice(len(v), start, end)
-		var idx int
-		if reverse {
-			idx = lastIndex(v[lo:hi], sub)
-		} else {
-			idx = firstIndex(v[lo:hi], sub)
+		lo, hi := adjustBytesIndices(len(v), start, end)
+		idx := -1
+		// CPython: Objects/bytes_methods.c:483 (end - start < sub_len) => -1.
+		// This also keeps v[lo:hi] in bounds since hi <= len(v) and a
+		// non-negative slice implies lo <= hi.
+		if hi-lo >= len(sub) {
+			if reverse {
+				idx = lastIndex(v[lo:hi], sub)
+			} else {
+				idx = firstIndex(v[lo:hi], sub)
+			}
+			if idx >= 0 {
+				idx += lo
+			}
 		}
 		if idx >= 0 {
-			return NewInt(int64(lo + idx)), nil
+			return NewInt(int64(idx)), nil
 		}
 		if raiseOnMiss {
 			return nil, fmt.Errorf("ValueError: subsection not found")
@@ -199,45 +285,41 @@ func findMethod(name string, reverse, raiseOnMiss bool) methodFn {
 	}
 }
 
-// firstIndex returns the lowest index of sub in v, or -1.
+// lockSearchSelf bumps the receiver's buffer-export count for the
+// duration of search-argument conversion, mirroring CPython's
+// _bytearray_with_buffer (it raises ob_exports around the find/count op).
+// The returned closure drops the lock; it is a no-op for immutable bytes.
+//
+// CPython: Objects/bytearrayobject.c:90 _bytearray_with_buffer
+func lockSearchSelf(self Object) func() {
+	if ba, ok := self.(*ByteArray); ok {
+		ba.ExportInc()
+		return ba.ExportDec
+	}
+	return func() {}
+}
+
+// firstIndex returns the lowest index of sub in v, or -1. The empty
+// needle matches at 0; otherwise it drives the stringlib fastsearch so
+// large needles stay O(n + m) rather than quadratic.
+//
+// CPython: Objects/stringlib/find.h:7 STRINGLIB(find)
 func firstIndex(v, sub []byte) int {
 	if len(sub) == 0 {
 		return 0
 	}
-	n := len(v) - len(sub)
-	for i := 0; i <= n; i++ {
-		match := true
-		for j, c := range sub {
-			if v[i+j] != c {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+	return stringlibFastSearch(v, sub, math.MaxInt, fastSearch)
 }
 
-// lastIndex returns the highest index of sub in v, or -1.
+// lastIndex returns the highest index of sub in v, or -1. The empty
+// needle matches at len(v).
+//
+// CPython: Objects/stringlib/find.h:34 STRINGLIB(rfind)
 func lastIndex(v, sub []byte) int {
 	if len(sub) == 0 {
 		return len(v)
 	}
-	for i := len(v) - len(sub); i >= 0; i-- {
-		match := true
-		for j, c := range sub {
-			if v[i+j] != c {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+	return stringlibFastSearch(v, sub, math.MaxInt, fastRSearch)
 }
 
 // countMethod backs bytes.count / bytearray.count.
@@ -252,39 +334,33 @@ func countMethod() methodFn {
 		if err != nil {
 			return nil, err
 		}
+		unlock := lockSearchSelf(args[0])
 		sub, err := bytesSubArg(args[1], "count")
+		unlock()
 		if err != nil {
 			return nil, err
 		}
-		start, err := bytesIntArg(args, 2, "count", 0)
+		start, err := bytesSliceIndexArg(args, 2, "count", 0)
 		if err != nil {
 			return nil, err
 		}
-		end, err := bytesIntArg(args, 3, "count", bytesMaxIndex)
+		end, err := bytesSliceIndexArg(args, 3, "count", bytesMaxIndex)
 		if err != nil {
 			return nil, err
 		}
-		lo, hi := clampBytesSlice(len(v), start, end)
+		lo, hi := adjustBytesIndices(len(v), start, end)
+		// CPython: Objects/stringlib/count.h:13 (str_len < 0) => 0.
+		if hi-lo < 0 {
+			return NewInt(0), nil
+		}
 		slice := v[lo:hi]
 		if len(sub) == 0 {
 			return NewInt(int64(len(slice) + 1)), nil
 		}
-		count := 0
-		for i := 0; i+len(sub) <= len(slice); {
-			match := true
-			for j, c := range sub {
-				if slice[i+j] != c {
-					match = false
-					break
-				}
-			}
-			if match {
-				count++
-				i += len(sub)
-			} else {
-				i++
-			}
-		}
+		// fastsearch FAST_COUNT returns -1 when no match is possible
+		// (needle longer than haystack); normalize that to 0.
+		// CPython: Objects/stringlib/count.h:13 STRINGLIB(count)
+		count := max(stringlibFastSearch(slice, sub, math.MaxInt, fastCount), 0)
 		return NewInt(int64(count)), nil
 	}
 }
@@ -303,24 +379,34 @@ func tailMatchMethod(name string, suffix bool) methodFn {
 		if err != nil {
 			return nil, err
 		}
-		start, err := bytesIntArg(args, 2, name, 0)
+		start, err := bytesSliceIndexArg(args, 2, name, 0)
 		if err != nil {
 			return nil, err
 		}
-		end, err := bytesIntArg(args, 3, name, bytesMaxIndex)
+		end, err := bytesSliceIndexArg(args, 3, name, bytesMaxIndex)
 		if err != nil {
 			return nil, err
 		}
-		lo, hi := clampBytesSlice(len(v), start, end)
-		slice := v[lo:hi]
+		lo, hi := adjustBytesIndices(len(v), start, end)
+		// CPython: Objects/bytes_methods.c:632 tailmatch. suffix==true is
+		// endswith (direction +1), suffix==false is startswith (-1).
 		check := func(buf []byte) bool {
-			if len(buf) > len(slice) {
+			slen := len(buf)
+			s := lo
+			if suffix {
+				if hi-s < slen || s > len(v) {
+					return false
+				}
+				if hi-slen > s {
+					s = hi - slen
+				}
+			} else if s > len(v)-slen {
 				return false
 			}
-			if suffix {
-				return bytesEqualAt(slice, len(slice)-len(buf), buf)
+			if hi-s < slen {
+				return false
 			}
-			return bytesEqualAt(slice, 0, buf)
+			return bytesEqualAt(v, s, buf)
 		}
 		if t, ok := args[1].(*Tuple); ok {
 			for i := 0; i < t.Len(); i++ {
@@ -334,9 +420,13 @@ func tailMatchMethod(name string, suffix bool) methodFn {
 			}
 			return NewBool(false), nil
 		}
-		buf, err := bytesArgAsBuffer(args[1], name)
-		if err != nil {
-			return nil, err
+		buf, ok := asBytesLike(args[1])
+		if !ok {
+			// CPython: Objects/bytes_methods.c:702 reframes a failed buffer
+			// fetch on the single-arg path into the tailmatch-specific
+			// message that names both bytes and tuple.
+			return nil, fmt.Errorf("TypeError: %s first arg must be bytes or a tuple of bytes, not %s",
+				name, args[1].Type().Name)
 		}
 		return NewBool(check(buf)), nil
 	}
@@ -366,6 +456,16 @@ func joinMethod() methodFn {
 		sep, err := bytesLikeView(args[0], "join")
 		if err != nil {
 			return nil, err
+		}
+		// Lock the separator's buffer for the whole join: bytearray.join
+		// bumps ob_exports so an iterator that mutates the receiver
+		// mid-iteration (e.g. self.clear()) raises BufferError instead
+		// of corrupting the in-flight read.
+		//
+		// CPython: Objects/bytearrayobject.c:2370 bytearray_join (ob_exports)
+		if ba, ok := args[0].(*ByteArray); ok {
+			ba.ExportInc()
+			defer ba.ExportDec()
 		}
 		items, err := IterToSlice(args[1])
 		if err != nil {
@@ -467,7 +567,7 @@ func replaceMethod() methodFn {
 //
 // CPython: Objects/stringlib/transmogrify.h:444 stringlib_replace
 func bytesReplaceN(v, old, repl []byte, count int) []byte {
-	if count == 0 || len(old) == 0 && count < 0 && len(v) == 0 {
+	if count == 0 {
 		out := make([]byte, len(v))
 		copy(out, v)
 		return out
@@ -520,6 +620,10 @@ func bytesReplaceN(v, old, repl []byte, count int) []byte {
 // CPython: Objects/bytesobject.c:1768 bytes_split_impl / 1853 rsplit_impl
 func splitMethod(name string, reverse bool) methodFn {
 	return func(args []Object, kwargs map[string]Object) (Object, error) {
+		args, err := bindKwargs(name, args, kwargs, "sep", "maxsplit")
+		if err != nil {
+			return nil, err
+		}
 		if len(args) < 1 || len(args) > 3 {
 			return nil, arityRangeErr(name, 0, 2, len(args)-1)
 		}
@@ -530,7 +634,12 @@ func splitMethod(name string, reverse bool) methodFn {
 		var sep []byte
 		hasSep := false
 		if len(args) >= 2 && args[1] != nil && args[1] != None() {
+			// gh-142560: lock the receiver while the separator buffer is
+			// acquired so a re-entrant resize inside sep.__buffer__ raises
+			// BufferError (CPython bumps ob_exports around the GetBuffer).
+			unlock := lockSearchSelf(args[0])
 			sep, err = bytesArgAsBuffer(args[1], name)
+			unlock()
 			if err != nil {
 				return nil, err
 			}
@@ -586,8 +695,11 @@ func splitOnSep(v, sep []byte, maxsplit int) [][]byte {
 }
 
 func splitOnSepRight(v, sep []byte, maxsplit int) [][]byte {
-	if maxsplit < 0 || maxsplit >= len(v) {
-		return splitOnSep(v, sep, -1)
+	// rsplit must always scan right-to-left: with overlapping matches
+	// (e.g. "bb" in "abbbc") the rightmost match differs from the leftmost,
+	// so delegating to the forward splitter would give the wrong partition.
+	if maxsplit < 0 {
+		maxsplit = bytesMaxIndex
 	}
 	var rev [][]byte
 	end := len(v)
@@ -740,14 +852,21 @@ func translateMethod() methodFn {
 				return nil, fmt.Errorf("ValueError: translation table must be 256 characters long")
 			}
 		}
+		// deletechars accepts None for the table but NOT for the delete
+		// argument: bytes_translate_impl only special-cases Py_None for the
+		// table. A delete value of None falls through to PyObject_GetBuffer,
+		// which raises TypeError. So once delete is supplied (positionally or
+		// by keyword) it must be a bytes-like object even if it is None.
+		//
+		// CPython: Objects/bytesobject.c:2193 bytes_translate_impl
 		var del []byte
-		if len(args) == 3 && args[2] != nil && args[2] != None() {
+		if len(args) == 3 && args[2] != nil {
 			del, err = bytesArgAsBuffer(args[2], "translate")
 			if err != nil {
 				return nil, err
 			}
 		}
-		if d, ok := kwargs["delete"]; ok && d != nil && d != None() {
+		if d, ok := kwargs["delete"]; ok && d != nil {
 			del, err = bytesArgAsBuffer(d, "translate")
 			if err != nil {
 				return nil, err
@@ -776,7 +895,11 @@ func translateMethod() methodFn {
 //
 // CPython: Objects/stringlib/transmogrify.h:62 stringlib_expandtabs
 func expandTabsMethod() methodFn {
-	return func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
+		args, err := bindKwargs("expandtabs", args, kwargs, "tabsize")
+		if err != nil {
+			return nil, err
+		}
 		if len(args) < 1 || len(args) > 2 {
 			return nil, arityRangeErr("expandtabs", 0, 1, len(args)-1)
 		}
@@ -798,7 +921,7 @@ func expandTabsMethod() methodFn {
 			case '\t':
 				if tabsize > 0 {
 					pad := tabsize - col%tabsize
-					for i := 0; i < pad; i++ {
+					for range pad {
 						out = append(out, ' ')
 					}
 					col += pad
@@ -910,7 +1033,11 @@ func zfillMethod() methodFn {
 //
 // CPython: Objects/bytesobject.c:2647 bytes_hex_impl
 func hexMethod() methodFn {
-	return func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, kwargs map[string]Object) (Object, error) {
+		args, err := bindKwargs("hex", args, kwargs, "sep", "bytes_per_sep")
+		if err != nil {
+			return nil, err
+		}
 		if len(args) < 1 || len(args) > 3 {
 			return nil, arityRangeErr("hex", 0, 2, len(args)-1)
 		}
@@ -919,25 +1046,20 @@ func hexMethod() methodFn {
 			return nil, err
 		}
 		var sep byte
+		hasSep := false
 		bytesPerSep := 1
-		if len(args) >= 2 && args[1] != nil && args[1] != None() {
-			buf, err := bytesArgAsBuffer(args[1], "hex")
-			if err != nil {
-				if s, ok := args[1].(*Unicode); ok {
-					val := s.Value()
-					if len(val) != 1 {
-						return nil, fmt.Errorf("ValueError: sep must be length 1")
-					}
-					sep = val[0]
-				} else {
-					return nil, err
-				}
-			} else {
-				if len(buf) != 1 {
-					return nil, fmt.Errorf("ValueError: sep must be length 1")
-				}
-				sep = buf[0]
+		if len(args) >= 2 && args[1] != nil {
+			// _Py_strhex_impl reads PyObject_Length(sep) before inspecting
+			// the type, so a re-entrant __len__ (or a None argument) is
+			// observed here. Locking the receiver makes a mutation inside
+			// that __len__ raise BufferError (gh-143195).
+			unlock := lockSearchSelf(args[0])
+			s, perr := hexSepByte(args[1])
+			unlock()
+			if perr != nil {
+				return nil, perr
 			}
+			sep, hasSep = s, true
 		}
 		if len(args) == 3 && args[2] != nil && args[2] != None() {
 			bytesPerSep, err = bytesIntArg(args, 2, "hex", 1)
@@ -945,15 +1067,45 @@ func hexMethod() methodFn {
 				return nil, err
 			}
 		}
-		return NewStr(hexEncode(v, sep, bytesPerSep)), nil
+		return NewStr(hexEncode(v, sep, hasSep, bytesPerSep)), nil
 	}
 }
 
-func hexEncode(v []byte, sep byte, bytesPerSep int) string {
+// hexSepByte validates a hex() separator and returns its single byte.
+// PyObject_Length runs first (so None or a re-entrant __len__ is observed),
+// then the str / bytes type split decides the byte value. A non-ASCII
+// separator is rejected because hex() produces a str (return_bytes == 0).
+//
+// CPython: Python/pystrhex.c:7 _Py_strhex_impl
+func hexSepByte(sepObj Object) (byte, error) {
+	seplen, err := Length(sepObj)
+	if err != nil {
+		return 0, err
+	}
+	if seplen != 1 {
+		return 0, errors.New("ValueError: sep must be length 1.")
+	}
+	if uni, ok := sepObj.(*Unicode); ok {
+		r, _ := utf8.DecodeRuneInString(uni.Value())
+		if r > 127 {
+			return 0, errors.New("ValueError: sep must be ASCII.")
+		}
+		return byte(r), nil
+	}
+	if buf, ok := asBytesLike(sepObj); ok {
+		if buf[0] > 127 {
+			return 0, errors.New("ValueError: sep must be ASCII.")
+		}
+		return buf[0], nil
+	}
+	return 0, errors.New("TypeError: sep must be str or bytes.")
+}
+
+func hexEncode(v []byte, sep byte, hasSep bool, bytesPerSep int) string {
 	if len(v) == 0 {
 		return ""
 	}
-	if sep == 0 || bytesPerSep == 0 {
+	if !hasSep || bytesPerSep == 0 {
 		out := make([]byte, len(v)*2)
 		for i, c := range v {
 			out[i*2] = hexAlphabet[c>>4]
@@ -996,16 +1148,40 @@ func fromHexMethod(produceBytearray bool) methodFn {
 		if len(args) != 2 {
 			return nil, arityErr("fromhex", 2, len(args))
 		}
-		s, ok := args[1].(*Unicode)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: fromhex() argument must be str, not %s", args[1].Type().Name)
+		// 3.14 accepts a str or any bytes-like object (the buffer
+		// protocol); other types are TypeError.
+		//
+		// CPython: Objects/bytesobject.c:2514 _PyBytes_FromHex
+		var src string
+		if s, ok := args[1].(*Unicode); ok {
+			src = s.Value()
+		} else if buf, ok := AsBytesLike(args[1]); ok {
+			src = string(buf)
+		} else {
+			return nil, fmt.Errorf("TypeError: fromhex() argument must be str or bytes-like, not %s", args[1].Type().Name)
 		}
-		b, err := BytesFromHex(s.Value())
+		b, err := BytesFromHex(src)
 		if err != nil {
 			return nil, err
 		}
+		// args[0] is the class the classmethod was invoked on. For the
+		// base type return the raw result; for a subtype rebuild the
+		// value by calling the subtype with the decoded bytes so the
+		// subclass __new__/__init__ runs (and the result carries the
+		// subtype). Mirrors the `type != &Py..._Type` branch.
+		//
+		// CPython: Objects/bytesobject.c:2503 bytes_fromhex_impl
+		// CPython: Objects/bytearrayobject.c:2225 bytearray_fromhex_impl
+		cls, _ := args[0].(*Type)
 		if produceBytearray {
-			return NewByteArray(b.v), nil
+			ba := NewByteArray(b.v)
+			if cls != nil && cls != ByteArrayType {
+				return CallOneArg(cls, ba)
+			}
+			return ba, nil
+		}
+		if cls != nil && cls != BytesType {
+			return CallOneArg(cls, b)
 		}
 		return b, nil
 	}

@@ -12,6 +12,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Length returns len(o). Routes through Mapping.Length first, then
@@ -185,6 +186,68 @@ func Iter(o Object) (Object, error) {
 	return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
 }
 
+// Iterable reports whether o can be iterated without actually starting
+// iteration: it has a tp_iter slot (or an __iter__ descriptor) or it
+// satisfies the sequence protocol (sq_item / __getitem__). This mirrors
+// the (tp_iter != NULL || PySequence_Check(o)) probe CPython runs in
+// check_args_iterable and the LIST_EXTEND opcode before reformatting an
+// "argument after *" error, so an object whose __iter__ itself raises
+// still reports as iterable and lets the real error propagate.
+//
+// CPython: Python/ceval.c check_args_iterable (tp_iter / PySequence_Check)
+func Iterable(o Object) bool {
+	tp := o.Type()
+	if tp.Iter != nil {
+		return true
+	}
+	if descr, _ := LookupDescriptor(tp, "__iter__"); descr != nil {
+		return true
+	}
+	if s := tp.Sequence; s != nil && s.GetItem != nil {
+		return true
+	}
+	if descr, _ := LookupDescriptor(tp, "__getitem__"); descr != nil {
+		return true
+	}
+	return false
+}
+
+// LengthHint mirrors PyObject_LengthHint. Returns __len__'s result when
+// available, then __length_hint__, else default. A non-TypeError out of
+// either dunder propagates to the caller, matching CPython's behavior.
+//
+// CPython: Objects/abstract.c:64 PyObject_LengthHint
+func LengthHint(o Object, defaultVal int64) (int64, error) {
+	if n, err := Length(o); err == nil {
+		return int64(n), nil
+	} else if !strings.HasPrefix(err.Error(), "TypeError") {
+		return 0, err
+	}
+	hint, hintErr := GetAttr(o, NewStr("__length_hint__"))
+	if hintErr != nil {
+		return defaultVal, nil //nolint:nilerr // CPython: missing __length_hint__ → default
+	}
+	res, callErr := Call(hint, NewTuple(nil), nil)
+	if callErr != nil {
+		if strings.HasPrefix(callErr.Error(), "TypeError") {
+			return defaultVal, nil
+		}
+		return 0, callErr
+	}
+	if IsNotImplemented(res) {
+		return defaultVal, nil
+	}
+	n, ok := res.(*Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __length_hint__ must be integer, not %s", res.Type().Name)
+	}
+	v, _ := n.Int64()
+	if v < 0 {
+		return 0, fmt.Errorf("ValueError: __length_hint__() should return >= 0")
+	}
+	return v, nil
+}
+
 // IterNext advances o by one. Equivalent to next(o), and propagates
 // ErrStopIteration when the iterator is exhausted.
 //
@@ -227,10 +290,11 @@ func TypeOf(o Object) Object {
 }
 
 // indexAsInt coerces a subscripting key to int the same way CPython's
-// PyNumber_Index/PyNumber_AsSsize_t does for the small range of
-// integer-like values gopy currently exposes.
+// PyNumber_Index/PyNumber_AsSsize_t does. Calls __index__ on non-int
+// objects so a class with only __index__ defined is accepted as a
+// sequence subscript or repeat count.
 //
-// CPython: Objects/abstract.c:1356 PyNumber_AsSsize_t
+// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
 func indexAsInt(o Object) (int, error) {
 	if i, ok := o.(*Int); ok {
 		v, fits := i.Int64()
@@ -245,5 +309,17 @@ func indexAsInt(o Object) (int, error) {
 		}
 		return 0, nil
 	}
-	return 0, fmt.Errorf("TypeError: indices must be integers, not '%s'", o.Type().Name)
+	idx, err := NumberIndex(o)
+	if err != nil {
+		return 0, fmt.Errorf("TypeError: indices must be integers, not '%s'", o.Type().Name)
+	}
+	i, ok := idx.(*Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idx.Type().Name)
+	}
+	v, fits := i.Int64()
+	if !fits {
+		return 0, fmt.Errorf("OverflowError: cannot fit integer into index")
+	}
+	return int(v), nil
 }

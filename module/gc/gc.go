@@ -110,3 +110,49 @@ func IsTracked(o objects.Object) bool {
 	state.mu.Unlock()
 	return ok
 }
+
+// RunShutdownFinalizers runs the tp_finalize slot of every still-tracked
+// object that defines one, the observable half of interpreter teardown.
+// CPython's Py_FinalizeEx clears the module dicts and runs a final GC
+// pass, which drops the last references to module globals and fires
+// tp_finalize on whatever __del__-bearing objects survived to shutdown
+// (Issue #19255 keeps the builtins reachable so __del__ can still run).
+// gopy leans on the Go runtime for memory, so this reproduces just the
+// __del__ dispatch: collect the survivors that carry a tp_finalize slot
+// under the lock, then call each one outside the lock since __del__ runs
+// arbitrary Python and may re-enter the collector.
+//
+// Only the tp_finalize slot participates, not gopy's out-of-band
+// registered finalizers (generator close, never-awaited coroutine
+// warnings): those fire on their own through the Go runtime's GC during
+// normal operation, and forcing the whole set at teardown would run them
+// against objects the program never reached, which CPython's shutdown
+// pass does not do.
+//
+// An object already finalized through Decref carries the header flag and
+// is skipped, so __del__ never runs twice.
+//
+// CPython: Python/pylifecycle.c:1750 Py_FinalizeEx (finalize_modules ->
+// gc collection running tp_finalize)
+func RunShutdownFinalizers() {
+	state.mu.Lock()
+	var pending []objects.Object
+	for o := range state.tracked {
+		if o.Hdr().Finalized() {
+			continue
+		}
+		if typeFinalize(o) != nil {
+			pending = append(pending, o)
+		}
+	}
+	state.mu.Unlock()
+	for _, o := range pending {
+		if o.Hdr().Finalized() {
+			continue
+		}
+		o.Hdr().SetFinalized()
+		if slot := typeFinalize(o); slot != nil {
+			slot(o)
+		}
+	}
+}

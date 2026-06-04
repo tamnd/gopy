@@ -61,7 +61,60 @@ func init() {
 			if setErr != nil {
 				return nil, setErr
 			}
-			return d, nil
+			// type_dict wraps the namespace in a read-only mappingproxy so
+			// callers cannot mutate a class's tp_dict through __dict__.
+			// CPython: Objects/typeobject.c:1064 type_dict returns
+			// PyDictProxy_New(type->tp_dict).
+			return NewMappingProxy(d)
+		},
+		nil,
+	))
+	// type.__basicsize__ / type.__itemsize__ getsets expose tp_basicsize
+	// and tp_itemsize so int.__basicsize__ + int.__itemsize__ * ndigits
+	// reproduces CPython's PyLongObject allocation footprint. Lookup walks
+	// the MRO so a user subclass of int inherits the parent's layout
+	// sizes without needing every type to stamp its own.
+	//
+	// CPython: Objects/typeobject.c:1245 type_basicsize (getset entry)
+	// CPython: Objects/typeobject.c:1252 type_itemsize (getset entry)
+	SetTypeDescr(typeType, "__basicsize__", NewGetSetDescr("__basicsize__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__basicsize__' requires 'type' object")
+			}
+			return NewInt(int64(typeBasicSize(tp))), nil
+		},
+		nil,
+	))
+	SetTypeDescr(typeType, "__itemsize__", NewGetSetDescr("__itemsize__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__itemsize__' requires 'type' object")
+			}
+			return NewInt(int64(typeItemSize(tp))), nil
+		},
+		nil,
+	))
+	// type.__flags__ exposes tp_flags. copyreg._reduce_ex walks the MRO
+	// and stops at the first base whose Py_TPFLAGS_HEAPTYPE bit is clear
+	// (the nearest built-in base), so a subclass of bytes/list/... reduces
+	// through that base's __new__ on protocols 0 and 1. IsUser is gopy's
+	// stand-in for HEAPTYPE, so OR the bit in for user (heap) types.
+	//
+	// CPython: Objects/typeobject.c:1109 type_flags (getset entry)
+	SetTypeDescr(typeType, "__flags__", NewGetSetDescr("__flags__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__flags__' requires 'type' object")
+			}
+			flags := tp.TpFlags
+			if tp.IsUser {
+				flags |= TpFlagHeapType
+			}
+			return NewInt(int64(flags)), nil
 		},
 		nil,
 	))
@@ -81,6 +134,34 @@ func init() {
 			return typeSetAnnotate(tp, v)
 		},
 	))
+}
+
+// typeBasicSize walks the MRO and returns the first non-zero BaseSize.
+// A user subclass of int inherits the parent's tp_basicsize this way
+// rather than having every NewUserTypeMetaE call stamp its own.
+//
+// CPython: Objects/typeobject.c:1245 type_basicsize (getter reads
+// tp_basicsize on self directly; gopy stores BaseSize on the built-in
+// type alone and falls back via MRO for heap subclasses)
+func typeBasicSize(t *Type) int {
+	for _, cls := range t.MRO {
+		if cls.BaseSize != 0 {
+			return cls.BaseSize
+		}
+	}
+	return 0
+}
+
+// typeItemSize is the tp_itemsize companion of typeBasicSize.
+//
+// CPython: Objects/typeobject.c:1252 type_itemsize
+func typeItemSize(t *Type) int {
+	for _, cls := range t.MRO {
+		if cls.ItemSize != 0 {
+			return cls.ItemSize
+		}
+	}
+	return 0
 }
 
 // typeGetAttr is the tp_getattro slot for typeType. The receiver is a
@@ -114,7 +195,10 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 		if setErr != nil {
 			return nil, setErr
 		}
-		return d, nil
+		// type_dict hands back a read-only mappingproxy, not the bare
+		// namespace, so a class's tp_dict cannot be mutated through
+		// __dict__. CPython: Objects/typeobject.c:1064 type_dict.
+		return NewMappingProxy(d)
 	}
 
 	metaAttr, _ := LookupDescriptor(metatype, nameStr)

@@ -175,7 +175,7 @@ func (p *WeakProxy) Clear() Object {
 	p.callback = nil
 	p.entry = nil
 	p.mu.Unlock()
-	if entry != nil && r != nil {
+	if entry != nil {
 		if list := r.Hdr().weakrefs; list != nil {
 			list.mu.Lock()
 			detachLocked(entry, list)

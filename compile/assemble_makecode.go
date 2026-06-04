@@ -64,7 +64,13 @@ func computeLocalsplusInfo(unit *Unit, nlocalsplus int, codeFlags uint32) (names
 		for pos < bucketMax && pos < len(unit.VarNames) {
 			name := unit.VarNames[pos]
 			kind := FastLocal | argvarkinds[i].kind
-			if unit.FastHidden[name] {
+			// CO_FAST_HIDDEN is assigned by key presence, not the bool
+			// value: a name that was temporarily made a fast local for an
+			// inlined comprehension is marked hidden whether it is still
+			// active (True) or has been reverted (False).
+			//
+			// CPython: Python/assemble.c:517 PyDict_Contains(u_fasthidden, k)
+			if _, ok := unit.FastHidden[name]; ok {
 				kind |= FastHidden
 			}
 			if cellset[name] {

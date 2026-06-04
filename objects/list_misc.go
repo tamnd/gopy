@@ -13,11 +13,13 @@ import (
 
 // Count returns the number of elements equal to value.
 //
-// CPython: Objects/listobject.c:1502 list_count
+// CPython: Objects/listobject.c:1502 list_count. The loop reads
+// Py_SIZE live so an __eq__ that clears or grows the list does not
+// drive Count past the current end (bpo-38610 hardening).
 func (l *List) Count(value Object) (int, error) {
 	n := 0
-	for _, it := range l.items {
-		eq, err := RichCmpBool(it, value, CompareEQ)
+	for i := 0; i < len(l.items); i++ {
+		eq, err := RichCmpBool(l.items[i], value, CompareEQ)
 		if err != nil {
 			return 0, err
 		}
@@ -32,7 +34,10 @@ func (l *List) Count(value Object) (int, error) {
 // [start, stop). Negative bounds are normalised the same way
 // list_index_impl does, and a missing match raises ValueError.
 //
-// CPython: Objects/listobject.c:1430 list_index_impl
+// CPython: Objects/listobject.c:1430 list_index_impl. The loop reads
+// Py_SIZE(self) live each iteration so __eq__ side effects (clearing
+// the list, growing it) shorten or extend the walk in step with the
+// observed state, matching the patch from bpo-1005778.
 func (l *List) Index(value Object, start, stop int) (int, error) {
 	n := len(l.items)
 	if start < 0 {
@@ -50,7 +55,7 @@ func (l *List) Index(value Object, start, stop int) (int, error) {
 	if stop > n {
 		stop = n
 	}
-	for i := start; i < stop; i++ {
+	for i := start; i < stop && i < len(l.items); i++ {
 		eq, err := RichCmpBool(l.items[i], value, CompareEQ)
 		if err != nil {
 			return 0, err
@@ -83,16 +88,21 @@ func (l *List) Insert(where int, value Object) {
 	l.size = int64(len(l.items))
 }
 
-// Remove deletes the first occurrence equal to value.
+// Remove deletes the first occurrence equal to value. The loop reads
+// len(l.items) live so an __eq__ that mutates the list mid-search
+// cannot drive Remove past the current end (bpo-38610 hardening).
 //
 // CPython: Objects/listobject.c:1408 list_remove
 func (l *List) Remove(value Object) error {
-	for i, it := range l.items {
-		eq, err := RichCmpBool(it, value, CompareEQ)
+	for i := 0; i < len(l.items); i++ {
+		eq, err := RichCmpBool(l.items[i], value, CompareEQ)
 		if err != nil {
 			return err
 		}
 		if eq {
+			if i >= len(l.items) {
+				break
+			}
 			l.items = append(l.items[:i], l.items[i+1:]...)
 			l.size = int64(len(l.items))
 			return nil
@@ -146,12 +156,16 @@ func (l *List) Copy() *List {
 	return NewList(l.items)
 }
 
-// listRichCmp implements the rich-compare slot for lists. EQ/NE
-// short-circuit on length; the ordered ops walk pairwise until the
-// first non-equal pair and defer to that pair's comparison, falling
-// back to length when one list is a prefix of the other.
+// listRichCmp implements the rich-compare slot for lists. The loop
+// reads len(al.items) and len(bl.items) live on every iteration so
+// that side effects from element __eq__ (e.g., clearing the operand
+// list) shorten the walk immediately, and the post-loop size
+// comparison observes the resulting sizes. This is the exact shape
+// bpo-38588 fixed in CPython.
 //
-// CPython: Objects/listobject.c:2999 list_richcompare
+// CPython: Objects/listobject.c:3396 list_richcompare_impl
+//
+//nolint:gocyclo // mirrors list_richcompare_impl: per-op dispatch plus live-size element walk
 func listRichCmp(a, b Object, op CompareOp) (Object, error) {
 	al, ok := a.(*List)
 	if !ok {
@@ -161,49 +175,48 @@ func listRichCmp(a, b Object, op CompareOp) (Object, error) {
 	if !ok {
 		return notImplemented(), nil
 	}
-	switch op {
-	case CompareEQ, CompareNE:
-		eq := len(al.items) == len(bl.items)
-		if eq {
-			for i := range al.items {
-				ok, err := RichCmpBool(al.items[i], bl.items[i], CompareEQ)
-				if err != nil {
-					return nil, err
-				}
-				if !ok {
-					eq = false
-					break
-				}
-			}
-		}
-		if op == CompareNE {
-			eq = !eq
-		}
-		return NewBool(eq), nil
+	if (op == CompareEQ || op == CompareNE) && len(al.items) != len(bl.items) {
+		return NewBool(op == CompareNE), nil
 	}
-	// Ordered: find first differing index, then compare those items.
-	n := min(len(al.items), len(bl.items))
-	for i := range n {
-		eq, err := RichCmpBool(al.items[i], bl.items[i], CompareEQ)
+	var i int
+	for i = 0; i < len(al.items) && i < len(bl.items); i++ {
+		vitem := al.items[i]
+		witem := bl.items[i]
+		if vitem == witem {
+			continue
+		}
+		eq, err := RichCmpBool(vitem, witem, CompareEQ)
 		if err != nil {
 			return nil, err
 		}
 		if !eq {
-			return RichCmp(al.items[i], bl.items[i], op)
+			break
 		}
 	}
-	// All shared items equal: decide by length.
-	la, lb := len(al.items), len(bl.items)
-	var r bool
-	switch op {
-	case CompareLT:
-		r = la < lb
-	case CompareLE:
-		r = la <= lb
-	case CompareGT:
-		r = la > lb
-	case CompareGE:
-		r = la >= lb
+	if i >= len(al.items) || i >= len(bl.items) {
+		la, lb := len(al.items), len(bl.items)
+		var r bool
+		switch op {
+		case CompareLT:
+			r = la < lb
+		case CompareLE:
+			r = la <= lb
+		case CompareEQ:
+			r = la == lb
+		case CompareNE:
+			r = la != lb
+		case CompareGT:
+			r = la > lb
+		case CompareGE:
+			r = la >= lb
+		}
+		return NewBool(r), nil
 	}
-	return NewBool(r), nil
+	if op == CompareEQ {
+		return False(), nil
+	}
+	if op == CompareNE {
+		return True(), nil
+	}
+	return RichCmp(al.items[i], bl.items[i], op)
 }

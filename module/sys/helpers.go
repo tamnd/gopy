@@ -2,6 +2,7 @@ package sys
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/tamnd/gopy/errors"
@@ -43,6 +44,13 @@ func init() {
 	//
 	// CPython: Objects/longobject.c:30 _MAX_STR_DIGITS_ERROR_FMT_TO_INT
 	pegen.IntMaxStrDigitsHook = intMaxStrDigits.Load
+	// Wire the runtime hook so int(str) and str(int) at the objects
+	// layer reject values past the ceiling, matching what the parser
+	// rejects at compile time.
+	//
+	// CPython: Objects/longobject.c:2049 long_to_decimal_string_internal,
+	// Objects/longobject.c:2943 long_from_string_base
+	objects.IntMaxStrDigitsHook = intMaxStrDigits.Load
 }
 
 // Bind stamps the runtime helpers onto d: exit, setrecursionlimit,
@@ -64,6 +72,10 @@ func Bind(d *objects.Dict, ts *state.Thread) error {
 		{"intern", makeIntern(ts)},
 		{"get_int_max_str_digits", getIntMaxStrDigits},
 		{"set_int_max_str_digits", setIntMaxStrDigits},
+		{"get_coroutine_origin_tracking_depth", getCoroutineOriginTrackingDepth},
+		{"set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth},
+		{"get_asyncgen_hooks", getAsyncgenHooks},
+		{"set_asyncgen_hooks", setAsyncgenHooks},
 	}
 	for _, h := range helpers {
 		if err := setItem(d, h.name, objects.NewBuiltinFunction(h.name, h.fn)); err != nil {
@@ -161,6 +173,57 @@ func setIntMaxStrDigits(args []objects.Object, _ map[string]objects.Object) (obj
 	return objects.None(), nil
 }
 
+// resolveThread returns the active thread via CurrentThreadHook, which
+// the vm installs once the interpreter starts. inittab-built sys has no
+// thread of its own, so every coroutine-origin and asyncgen-hook entry
+// point routes through this hook.
+func resolveThread() *state.Thread {
+	if CurrentThreadHook != nil {
+		return CurrentThreadHook()
+	}
+	return nil
+}
+
+// getCoroutineOriginTrackingDepth ports
+// sys.get_coroutine_origin_tracking_depth() -> int. CPython reads the
+// per-thread depth via _PyEval_GetCoroutineOriginTrackingDepth.
+//
+// CPython: Python/sysmodule.c:1402 sys_get_coroutine_origin_tracking_depth_impl
+// CPython: Python/ceval.c:2690 _PyEval_GetCoroutineOriginTrackingDepth
+func getCoroutineOriginTrackingDepth(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	ts := resolveThread()
+	if ts == nil {
+		return objects.NewInt(0), nil
+	}
+	return objects.NewInt(int64(ts.CoroutineOriginTrackingDepth)), nil
+}
+
+// setCoroutineOriginTrackingDepth ports
+// sys.set_coroutine_origin_tracking_depth(depth). Negative depths raise
+// ValueError, matching CPython.
+//
+// CPython: Python/sysmodule.c:1379 sys_set_coroutine_origin_tracking_depth_impl
+// CPython: Python/ceval.c:2677 _PyEval_SetCoroutineOriginTrackingDepth
+func setCoroutineOriginTrackingDepth(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: set_coroutine_origin_tracking_depth() takes exactly one argument (%d given)", len(args))
+	}
+	iv, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	v, _ := iv.Int64()
+	if v < 0 {
+		return nil, fmt.Errorf("ValueError: depth must be >= 0")
+	}
+	ts := resolveThread()
+	if ts == nil {
+		return objects.None(), nil
+	}
+	ts.CoroutineOriginTrackingDepth = int(v)
+	return objects.None(), nil
+}
+
 // getRefcount ports sys.getrefcount. CPython warns the value is one
 // higher than expected because the argument hand-off bumps it; gopy
 // inherits the same off-by-one because its calling convention also
@@ -172,6 +235,96 @@ func getRefcount(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 		return nil, fmt.Errorf("TypeError: getrefcount() takes exactly one argument (%d given)", len(args))
 	}
 	return objects.NewInt(args[0].Hdr().Refcnt()), nil
+}
+
+// getSizeof ports sys.getsizeof(object[, default]). It calls the
+// object's __sizeof__ and validates the result is non-negative,
+// matching _PySys_GetSizeOf. When the type does not define __sizeof__ a
+// TypeError is raised, and the optional default is returned in its
+// place when one was supplied. gopy stores objects on the Go heap with
+// no PyGC_Head, so the GC-tracked header addition CPython performs has
+// no faithful analog here; the reported size is the __sizeof__ value
+// for non-GC objects (str, int, float, bytes, ...), which is exactly
+// what CPython reports for them.
+//
+// CPython: Python/sysmodule.c:1841 sys_getsizeof_impl
+// CPython: Python/sysmodule.c:1791 _PySys_GetSizeOf
+func getSizeof(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: getsizeof() takes at most 2 arguments (%d given)", len(args))
+	}
+	var obj, dflt objects.Object
+	hasDefault := false
+	if len(args) >= 1 {
+		obj = args[0]
+	}
+	if len(args) >= 2 {
+		dflt = args[1]
+		hasDefault = true
+	}
+	for k, v := range kwargs {
+		switch k {
+		case "object":
+			if obj != nil {
+				return nil, fmt.Errorf("TypeError: argument for getsizeof() given by name ('object') and position (1)")
+			}
+			obj = v
+		case "default":
+			dflt = v
+			hasDefault = true
+		default:
+			return nil, fmt.Errorf("TypeError: getsizeof() got an unexpected keyword argument '%s'", k)
+		}
+	}
+	if obj == nil {
+		return nil, fmt.Errorf("TypeError: getsizeof() missing required argument 'object' (pos 1)")
+	}
+
+	size, err := sizeOfObject(obj)
+	if err != nil {
+		// CPython only substitutes the default when the failure is the
+		// "type doesn't define __sizeof__" TypeError; other exceptions
+		// (a misbehaving __sizeof__) propagate.
+		if hasDefault && isTypeError(err) {
+			return dflt, nil
+		}
+		return nil, err
+	}
+	return objects.NewInt(size), nil
+}
+
+// sizeOfObject calls obj.__sizeof__() and returns the validated
+// non-negative size. A type with no __sizeof__ yields a TypeError that
+// matches CPython's _PyObject_LookupSpecial-miss message.
+//
+// CPython: Python/sysmodule.c:1791 _PySys_GetSizeOf
+func sizeOfObject(obj objects.Object) (int64, error) {
+	method, err := objects.GetAttr(obj, objects.NewStr("__sizeof__"))
+	if err != nil {
+		return 0, fmt.Errorf("TypeError: Type %.100s doesn't define __sizeof__", obj.Type().Name)
+	}
+	res, err := objects.CallNoArgs(method)
+	if err != nil {
+		return 0, err
+	}
+	iv, ok := res.(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: 'NoneType' object cannot be interpreted as an integer")
+	}
+	size, fits := iv.Int64()
+	if !fits {
+		return 0, fmt.Errorf("OverflowError: cannot fit '%s' into an index-sized integer", res.Type().Name)
+	}
+	if size < 0 {
+		return 0, fmt.Errorf("ValueError: __sizeof__() should return >= 0")
+	}
+	return size, nil
+}
+
+// isTypeError reports whether err is a Python TypeError, so getsizeof
+// can decide whether the supplied default should stand in.
+func isTypeError(err error) bool {
+	return strings.HasPrefix(err.Error(), "TypeError:")
 }
 
 // makeIntern ports sys.intern. The interned table lands with the

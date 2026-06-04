@@ -1,5 +1,7 @@
 package objects
 
+import "fmt"
+
 // noneObject is the singleton for None.
 //
 // CPython: Objects/object.c:L1881 _Py_NoneStruct
@@ -20,6 +22,17 @@ func init() {
 	noneType.Repr = func(_ Object) (string, error) { return "None", nil }
 	noneType.Str = noneType.Repr
 	noneType.Hash = func(_ Object) (int64, error) { return 0, nil }
+	noneType.Getattro = GenericGetAttr
+	noneType.Setattro = GenericSetAttr
+	// NoneType() returns the singleton and rejects any argument.
+	//
+	// CPython: Objects/object.c:2218 none_new
+	noneType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) != 0 || len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: NoneType takes no arguments")
+		}
+		return noneSingleton, nil
+	}
 }
 
 // None returns the singleton None value. Mirrors Py_None.

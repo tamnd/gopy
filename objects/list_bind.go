@@ -58,6 +58,196 @@ func init() {
 	bindConv("reverse", MethNoArgs, listReverseMethod)
 	bindConv("copy", MethNoArgs, listCopyMethod)
 	bindConv("__len__", MethNoArgs, listLenMethod)
+
+	// Slot wrappers for sequence dunders. CPython generates these via
+	// add_operators -> slotdefs so attribute lookup finds list.__add__
+	// etc. without bouncing through type(list).__getattribute__.
+	//
+	// CPython: Objects/typeobject.c add_operators (slotdefs entries
+	// for sq_item, sq_concat, sq_repeat, sq_inplace_concat,
+	// sq_inplace_repeat).
+	bindConv("__getitem__", MethO, listGetItemMethod)
+	bindConv("__setitem__", MethFastcall, listSetItemMethod)
+	bindConv("__delitem__", MethO, listDelItemMethod)
+	bindConv("__add__", MethO, listAddMethod)
+	bindConv("__mul__", MethO, listMulMethod)
+	bindConv("__rmul__", MethO, listMulMethod)
+	bindConv("__iadd__", MethO, listIAddMethod)
+	bindConv("__imul__", MethO, listIMulMethod)
+	bindConv("__iter__", MethNoArgs, listIterMethod)
+	bindConv("__reversed__", MethNoArgs, listReversedMethod)
+	bindConv("__eq__", MethO, listEqMethod)
+	bindConv("__ne__", MethO, listNeMethod)
+	bindConv("__lt__", MethO, listLtMethod)
+	bindConv("__le__", MethO, listLeMethod)
+	bindConv("__gt__", MethO, listGtMethod)
+	bindConv("__ge__", MethO, listGeMethod)
+}
+
+// listGetItemMethod backs list.__getitem__. Routes through
+// listMappingGet which handles both int (sq_item) and slice
+// (mp_subscript) keys.
+//
+// CPython: Objects/listobject.c:3216 list_as_mapping (mp_subscript)
+func listGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	return listMappingGet(args[0], args[1])
+}
+
+// listSetItemMethod backs list.__setitem__(key, value).
+//
+// CPython: Objects/listobject.c list_ass_subscript
+func listSetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("TypeError: __setitem__() takes exactly 2 arguments (%d given)", len(args)-1)
+	}
+	if err := listMappingSet(args[0], args[1], args[2]); err != nil {
+		return nil, err
+	}
+	return None(), nil
+}
+
+// listDelItemMethod backs list.__delitem__(key).
+//
+// CPython: Objects/listobject.c list_ass_subscript (delete branch)
+func listDelItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __delitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if err := listMappingDel(args[0], args[1]); err != nil {
+		return nil, err
+	}
+	return None(), nil
+}
+
+// listAddMethod backs list.__add__(other). Returns NotImplemented when
+// other is not a list, matching list_concat's PyList_Check guard.
+//
+// CPython: Objects/listobject.c:520 list_concat
+func listAddMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	if _, ok := args[1].(*List); !ok {
+		return NotImplemented(), nil
+	}
+	return listConcat(args[0], args[1])
+}
+
+// listMulMethod backs list.__mul__ / list.__rmul__. n is coerced via
+// PyNumber_Index, mirroring list_repeat's PyIndex_Check guard.
+//
+// CPython: Objects/listobject.c:551 list_repeat
+func listMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __mul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return when other can't be coerced to an index
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, errors.New("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return listRepeat(args[0], int(v))
+}
+
+// listIAddMethod backs list.__iadd__(other).
+//
+// CPython: Objects/listobject.c list_inplace_concat
+func listIAddMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __iadd__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	return listInPlaceConcat(args[0], args[1])
+}
+
+// listIMulMethod backs list.__imul__(n). Coerces via __index__.
+//
+// CPython: Objects/listobject.c list_inplace_repeat
+func listIMulMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __imul__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	idx, err := NumberIndex(args[1])
+	if err != nil {
+		return nil, err
+	}
+	n, ok := idx.(*Int)
+	if !ok {
+		return nil, errors.New("TypeError: __index__ did not return int")
+	}
+	v, ok := n.Int64()
+	if !ok {
+		return nil, errors.New("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
+	return listInPlaceRepeat(args[0], int(v))
+}
+
+// listIterMethod backs list.__iter__.
+func listIterMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __iter__() takes no arguments (%d given)", len(args)-1)
+	}
+	return listIter(args[0])
+}
+
+// listReversedMethod backs list.__reversed__ by allocating a real
+// list_reverseiterator over the source list. The iterator keeps a
+// reference to the source so pickle round-trips share identity and
+// list mutations after pickle.loads are visible to the loaded
+// iterator (test_reversed_pickle).
+//
+// CPython: Objects/listobject.c:4140 list___reversed___impl
+func listReversedMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
+	}
+	l, ok := args[0].(*List)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__reversed__' requires a 'list' object")
+	}
+	return listRevIter(l), nil
+}
+
+func listRichCmpMethod(name string, op CompareOp) func(args []Object, _ map[string]Object) (Object, error) {
+	return func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", name, len(args)-1)
+		}
+		return listRichCmp(args[0], args[1], op)
+	}
+}
+
+func listEqMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__eq__", CompareEQ)(args, kw)
+}
+
+func listNeMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__ne__", CompareNE)(args, kw)
+}
+
+func listLtMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__lt__", CompareLT)(args, kw)
+}
+
+func listLeMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__le__", CompareLE)(args, kw)
+}
+
+func listGtMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__gt__", CompareGT)(args, kw)
+}
+
+func listGeMethod(args []Object, kw map[string]Object) (Object, error) {
+	return listRichCmpMethod("__ge__", CompareGE)(args, kw)
 }
 
 func selfList(args []Object, name string) (*List, error) {
@@ -133,6 +323,12 @@ func listPopMethod(args []Object, _ map[string]Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// CPython: Objects/clinic/listobject.c.h list_pop accepts at most one
+	// positional argument; _PyArg_CheckPositional reports the count
+	// before the body runs (test_pop expects TypeError, not IndexError).
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: list.pop() takes at most 1 argument (%d given)", len(args)-1)
+	}
 	i := -1
 	if len(args) >= 2 {
 		idx, ok := args[1].(*Int)
@@ -179,23 +375,25 @@ func listIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: index() takes at least 1 argument")
 	}
+	// CPython: Objects/listobject.c:1430 list_index_impl uses the
+	// _PyEval_SliceIndex converter so start / stop accept any
+	// integer-like value, including ones larger than PY_SSIZE_T_MAX
+	// (clamped to the ssize_t range).
 	start := 0
 	stop := len(l.items)
 	if len(args) >= 3 {
-		i, ok := args[2].(*Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: 'start' must be an integer")
+		v, ierr := sliceIndex(args[2])
+		if ierr != nil {
+			return nil, ierr
 		}
-		n, _ := i.Int64()
-		start = int(n)
+		start = v
 	}
 	if len(args) >= 4 {
-		i, ok := args[3].(*Int)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: 'stop' must be an integer")
+		v, ierr := sliceIndex(args[3])
+		if ierr != nil {
+			return nil, ierr
 		}
-		n, _ := i.Int64()
-		stop = int(n)
+		stop = v
 	}
 	idx, ierr := l.Index(args[1], start, stop)
 	if ierr != nil {

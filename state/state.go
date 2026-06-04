@@ -162,6 +162,28 @@ type Thread struct {
 	//
 	// CPython: Include/cpython/pystate.h:128 tracing
 	Tracing int
+
+	// CoroutineOriginTrackingDepth is how many traceback frames to
+	// capture on coroutine creation, set by
+	// sys.set_coroutine_origin_tracking_depth. Depth 0 disables
+	// capture; cr_origin then reads None.
+	//
+	// CPython: Include/cpython/pystate.h:185 coroutine_origin_tracking_depth
+	CoroutineOriginTrackingDepth int
+
+	// AsyncGenFirstIter and AsyncGenFinalizer hold the per-thread async
+	// generator hooks installed by sys.set_asyncgen_hooks. The first is
+	// invoked the first time an async generator is iterated; the second
+	// is stashed on each async generator at that point and run when the
+	// generator is finalized so the event loop can schedule aclose().
+	// They are stored as any so the state package stays free of an
+	// objects import; the sys builtins and the objects async-gen path
+	// cast them back to objects.Object.
+	//
+	// CPython: Include/cpython/pystate.h async_gen_firstiter,
+	//          async_gen_finalizer
+	AsyncGenFirstIter any
+	AsyncGenFinalizer any
 }
 
 // HandledException returns the currently-handled exception (the one a

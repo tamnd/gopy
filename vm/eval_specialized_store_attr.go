@@ -46,8 +46,13 @@ func (e *evalState) fastStoreAttrSlot(_ uint32) (int, bool) {
 	if !inst.SetSlotAt(slot, value) {
 		return 0, false
 	}
+	// Stack is (value, owner) with owner on top. SetSlotAt stole the
+	// value's stack reference into the slot, so the value entry is
+	// dropped without a close; the owner reference is released.
+	// CPython: _STORE_ATTR_SLOT closes owner after stealing value.
+	owner := e.pop()
 	e.pop()
-	e.pop()
+	owner.Close()
 	return e.cacheAdvance(compile.STORE_ATTR), true
 }
 
@@ -92,8 +97,14 @@ func (e *evalState) fastStoreAttrInstanceValue(oparg uint32) (int, bool) {
 	if !d.StoreEntryAtName(slot, co.Names[nameIdx], value) {
 		return 0, false
 	}
+	// Stack is (value, owner) with owner on top. StoreEntryAtName stole
+	// the value's stack reference into the dict slot, so the value entry
+	// is dropped without a close; the owner reference is released.
+	// CPython: _STORE_ATTR_INSTANCE_VALUE/_WITH_HINT close owner after
+	// stealing value and decref'ing any previous slot value.
+	owner := e.pop()
 	e.pop()
-	e.pop()
+	owner.Close()
 	return e.cacheAdvance(compile.STORE_ATTR), true
 }
 

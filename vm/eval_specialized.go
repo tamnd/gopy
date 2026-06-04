@@ -182,15 +182,23 @@ func (e *evalState) trySpecialized(op compile.Opcode, oparg uint32) (next int, o
 // hit: pop the owner, push the attribute, and emit a NULL self slot
 // when oparg requests the unbound-method shape (bit 0 set).
 //
+// Every caller passes a borrowed attr (read out of an instance dict,
+// a slot, or the inline cache), so the value is incref'd before it
+// lands on the stack and the owner reference the arm popped is
+// released. This mirrors _LOAD_ATTR's exit: Py_INCREF(attr_o) on the
+// resolved value followed by DECREF_INPUTS() on the owner. Skipping
+// either half corrupts the refcount: a missing owner decref pins the
+// owner forever (so an otherwise-dead reference cycle through it never
+// collects), and a missing attr incref under-counts the value.
+//
 // CPython: Python/bytecodes.c _LOAD_ATTR exit path.
 func (e *evalState) pushAttrResult(attr objects.Object, oparg uint32) {
-	e.pop()
+	owner := e.pop()
+	e.push(stackref.FromObjectNew(attr))
 	if oparg&1 != 0 {
-		e.pushObject(attr)
 		e.push(stackref.Null)
-	} else {
-		e.pushObject(attr)
 	}
+	owner.Close()
 }
 
 // fastLoadAttrModule implements LOAD_ATTR_MODULE.
@@ -346,7 +354,11 @@ func (e *evalState) fastLoadAttrMethodNoDict(oparg uint32) (int, bool) {
 		return 0, false
 	}
 	self := e.pop()
-	e.pushObject(descr)
+	// descr is borrowed from the inline cache; the unbound-method shape
+	// keeps the owner as the self slot (so self's stack ref transfers
+	// straight through) but the method itself needs its own reference.
+	// CPython: _LOAD_ATTR_METHOD_* does Py_INCREF(descr).
+	e.push(stackref.FromObjectNew(descr))
 	e.push(self)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
@@ -380,8 +392,13 @@ func (e *evalState) fastLoadAttrNondescriptorNoDict(oparg uint32) (int, bool) {
 	if descr == nil {
 		return 0, false
 	}
-	e.pop()
-	e.pushObject(descr)
+	owner := e.pop()
+	// descr is borrowed from the inline cache and the owner reference is
+	// consumed (no self slot in the nondescriptor shape), so incref the
+	// pushed value and release the owner. CPython:
+	// _LOAD_ATTR_NONDESCRIPTOR_* does Py_INCREF(descr) then DECREF_INPUTS().
+	e.push(stackref.FromObjectNew(descr))
+	owner.Close()
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
 
@@ -434,7 +451,11 @@ func (e *evalState) fastLoadAttrMethodWithValues(oparg uint32) (int, bool) {
 		return 0, false
 	}
 	self := e.pop()
-	e.pushObject(descr)
+	// descr is borrowed from the inline cache; the unbound-method shape
+	// keeps the owner as the self slot (so self's stack ref transfers
+	// straight through) but the method itself needs its own reference.
+	// CPython: _LOAD_ATTR_METHOD_* does Py_INCREF(descr).
+	e.push(stackref.FromObjectNew(descr))
 	e.push(self)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
@@ -476,8 +497,13 @@ func (e *evalState) fastLoadAttrNondescriptorWithValues(oparg uint32) (int, bool
 	if descr == nil {
 		return 0, false
 	}
-	e.pop()
-	e.pushObject(descr)
+	owner := e.pop()
+	// descr is borrowed from the inline cache and the owner reference is
+	// consumed (no self slot in the nondescriptor shape), so incref the
+	// pushed value and release the owner. CPython:
+	// _LOAD_ATTR_NONDESCRIPTOR_* does Py_INCREF(descr) then DECREF_INPUTS().
+	e.push(stackref.FromObjectNew(descr))
+	owner.Close()
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }
 
@@ -524,7 +550,11 @@ func (e *evalState) fastLoadAttrMethodLazyDict(oparg uint32) (int, bool) {
 		return 0, false
 	}
 	self := e.pop()
-	e.pushObject(descr)
+	// descr is borrowed from the inline cache; the unbound-method shape
+	// keeps the owner as the self slot (so self's stack ref transfers
+	// straight through) but the method itself needs its own reference.
+	// CPython: _LOAD_ATTR_METHOD_* does Py_INCREF(descr).
+	e.push(stackref.FromObjectNew(descr))
 	e.push(self)
 	return e.cacheAdvance(compile.LOAD_ATTR), true
 }

@@ -14,6 +14,7 @@ package io
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
@@ -265,9 +266,9 @@ func stripTextBit(mode string) string {
 func ioFileArg(o objects.Object) (string, error) {
 	switch v := o.(type) {
 	case *objects.Unicode:
-		return v.Value(), nil
+		return checkNoEmbeddedNull(v.Value())
 	case *objects.Bytes:
-		return string(v.Bytes()), nil
+		return checkNoEmbeddedNull(string(v.Bytes()))
 	}
 	// os.PathLike: call __fspath__() and recurse.
 	//
@@ -281,6 +282,18 @@ func ioFileArg(o objects.Object) (string, error) {
 		return ioFileArg(result)
 	}
 	return "", fmt.Errorf("TypeError: invalid file: %s", o.Type().Name)
+}
+
+// checkNoEmbeddedNull rejects a path containing a NUL byte, the way
+// CPython's path_converter raises before handing the name to open().
+// Both the str and bytes forms of the file argument flow through here.
+//
+// CPython: Modules/posixmodule.c:1295 path_converter "embedded null byte"
+func checkNoEmbeddedNull(s string) (string, error) {
+	if strings.IndexByte(s, 0) >= 0 {
+		return "", fmt.Errorf("ValueError: embedded null byte")
+	}
+	return s, nil
 }
 
 // ioModeArg returns the mode string, defaulting to "r".

@@ -133,6 +133,27 @@ type Weakref struct {
 
 	entry *weakrefEntry
 	kind  weakrefKind
+
+	// attrs holds instance attributes / __slots__ values for weakref
+	// subclass objects (e.g. weakref.WeakValueDictionary's KeyedRef,
+	// which adds a "key" slot). Nil for plain weakref.ref instances.
+	// Mirrors the managed dict CPython gives a heap subtype of ref.
+	//
+	// CPython: Objects/weakrefobject.c:498 _PyWeakref_RefType
+	//          (BASETYPE: subtypes pick up __dict__/__slots__ storage)
+	attrs *Dict
+}
+
+// AttrDict implements AttrDictHolder so weakref subclasses can carry
+// instance attributes and __slots__ members. Nil until the first store.
+func (w *Weakref) AttrDict() *Dict { return w.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first use.
+func (w *Weakref) EnsureAttrDict() *Dict {
+	if w.attrs == nil {
+		w.attrs = NewDict()
+	}
+	return w.attrs
 }
 
 type weakrefKind uint8
@@ -155,8 +176,8 @@ func init() {
 	WeakrefType.Call = weakrefCall
 	WeakrefType.RichCmp = weakrefRichCompare
 	// weakref_ref_new: ref(object[, callback])
-	// CPython: Objects/weakrefobject.c weakref_ref_new
-	WeakrefType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	// CPython: Objects/weakrefobject.c:276 weakref___new__
+	WeakrefType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 		var referent, callback Object
 		if len(args) >= 1 {
 			referent = args[0]
@@ -173,8 +194,71 @@ func init() {
 		if referent == nil {
 			return nil, errors.New("TypeError: ref() requires an object argument")
 		}
+		return pyWeakrefNewRefOfType(referent, callback, cls)
+	}
+	// ref.__new__(cls, object[, callback]) so a Python subclass such as
+	// weakref.WeakValueDictionary's KeyedRef can call ref.__new__(type, ob,
+	// cb) explicitly. Without this descriptor the lookup walks to
+	// object.__new__, which rejects the extra arguments.
+	//
+	// CPython: Objects/typeobject.c:9952 add_tp_new_wrapper
+	SetTypeDescr(WeakrefType, "__new__", NewBuiltinFunction("weakref.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, errors.New("TypeError: ref.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: ref.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return WeakrefType.TpNew(cls, args[1:], kwargs)
+	}))
+	// weakref___init__ only validates its arguments (the ref state is set
+	// up entirely in tp_new). A subclass such as KeyedRef calls
+	// super().__init__(ob, callback), which lands here; without this slot
+	// the call falls to object.__init__, which rejects the extra args.
+	//
+	// CPython: Objects/weakrefobject.c:473 weakref___init__
+	SetTypeDescr(WeakrefType, "__init__", NewMethodDescr(WeakrefType, "__init__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(kwargs) != 0 {
+			return nil, errors.New("TypeError: ref() takes no keyword arguments")
+		}
+		// PyArg_UnpackTuple(args, "__init__", 1, 2): self plus 1-2 args.
+		n := len(args) - 1
+		if n < 1 || n > 2 {
+			return nil, fmt.Errorf("TypeError: __init__ expected at most 2 arguments, got %d", n)
+		}
+		return None(), nil
+	}))
+}
+
+// pyWeakrefNewRefOfType is PyWeakref_NewRef with an explicit result type.
+// When cls is exactly weakref.ref the basic-ref reuse path applies; a
+// strict subtype always gets its own freshly allocated object (it carries
+// extra per-instance state, so it can never alias a cached basic ref) and
+// the result is stamped with cls.
+//
+// CPython: Objects/weakrefobject.c:276 weakref___new__ (type != ref branch)
+func pyWeakrefNewRefOfType(referent, callback Object, cls *Type) (*Weakref, error) {
+	if cls == nil || cls == WeakrefType {
 		return PyWeakref_NewRef(referent, callback)
 	}
+	if referent == nil {
+		return nil, errors.New("TypeError: cannot create weak reference to None")
+	}
+	if callback == None() {
+		callback = nil
+	}
+	list := getOrCreateWeakrefList(referent)
+	list.mu.Lock()
+	w := allocateWeakref(referent, callback, weakrefKindRef)
+	w.typ = cls
+	insertEntryLocked(list, &weakrefEntry{ref: w}, w, nil)
+	list.mu.Unlock()
+	armWeakrefFinalizer(referent)
+	if h := GCWeakrefRegisterHook; h != nil {
+		h(w)
+	}
+	return w, nil
 }
 
 // GCWeakrefRegisterHook is called from PyWeakref_NewRef whenever a
@@ -592,10 +676,20 @@ func clearListAndFire(list *weakrefList) {
 		if tp == nil || tp.Call == nil {
 			continue
 		}
-		// CPython logs callback errors through sys.unraisablehook;
-		// gopy has no equivalent so we drop them, matching what
-		// module/gc/weakref.go invokeWeakrefCallbacks already does.
-		_, _ = tp.Call(p.cb, []Object{p.w}, nil)
+		// CPython routes weakref callback errors through
+		// sys.unraisablehook with the "Exception ignored on calling
+		// callback for %R" prefix, then keeps draining the rest of the
+		// list.
+		//
+		// CPython: Objects/weakrefobject.c:97 handle_callback
+		_, err := tp.Call(p.cb, []Object{p.w}, nil)
+		if err != nil && WriteUnraisableHook != nil {
+			s, sErr := Repr(p.w)
+			if sErr != nil {
+				s = "<weakref>"
+			}
+			WriteUnraisableHook(p.cb, "Exception ignored on calling callback for "+s, err)
+		}
 	}
 }
 

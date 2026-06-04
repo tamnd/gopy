@@ -44,9 +44,9 @@ func init() {
 	bind("join", strJoinMethod)
 	bind("partition", strPartitionMethod)
 	bind("rpartition", strRPartitionMethod)
-	bind("isdigit", strBoolMethod(func(s string) bool { return s != "" && allDigits(s) }))
-	bind("isalpha", strBoolMethod(func(s string) bool { return s != "" && allAlpha(s) }))
-	bind("isalnum", strBoolMethod(func(s string) bool { return s != "" && allAlnum(s) }))
+	bind("isdigit", strBoolMethod(StrIsDigit))
+	bind("isalpha", strBoolMethod(StrIsAlpha))
+	bind("isalnum", strBoolMethod(StrIsAlnum))
 	bind("isspace", strBoolMethod(func(s string) bool { return s != "" && allSpace(s) }))
 	bind("isascii", strBoolMethod(StrIsASCII))
 	bind("islower", strBoolMethod(StrIsLower))
@@ -76,6 +76,27 @@ func init() {
 	bind("__rmul__", strRMulMethod)
 	bind("__add__", strAddMethod)
 	bind("__mod__", strModMethod)
+	bind("__sizeof__", strSizeofMethod)
+}
+
+// strSizeofMethod ports str.__sizeof__. CPython reports the compact
+// unicode layout: a compact ASCII string is sizeof(PyASCIIObject) plus
+// one byte per code point plus the trailing NUL; any other compact
+// string is sizeof(PyCompactUnicodeObject) plus (len+1) units of the
+// PEP 393 kind width. gopy stores text as UTF-8 but mirrors the same
+// reported size so sys.getsizeof and __sizeof__ stay byte-compatible.
+//
+// CPython: Objects/unicodeobject.c:13991 unicode_sizeof_impl
+func strSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)
+	}
+	u, ok := args[0].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' for 'str' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	charSize, structSize := u.charSizeAndStruct()
+	return NewInt(int64(structSize + charSize*(u.length+1))), nil
 }
 
 func selfStr(args []Object, name string) (string, error) {
@@ -663,6 +684,9 @@ func strEncodeMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	// CPython: Objects/unicodeobject.c:L13262 unicode_encode_impl _is_text_encoding check
 	if !codecs.IsTextEncoding(encoding) {
 		return nil, fmt.Errorf("LookupError: '%s' is not a text encoding; use codecs.encode() to handle arbitrary codecs", encoding)
+	}
+	if cerr := codecs.CheckEncodingErrors(encoding, errorsName); cerr != nil {
+		return nil, cerr
 	}
 	out, _, encErr := codecs.Encode(s, encoding, errorsName)
 	if encErr != nil {
@@ -1470,37 +1494,6 @@ func strListFromGoSlice(parts []string) Object {
 	return NewList(items)
 }
 
-func allDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func isAlpha(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-}
-
-func allAlpha(s string) bool {
-	for _, r := range s {
-		if !isAlpha(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func allAlnum(s string) bool {
-	for _, r := range s {
-		if !isAlpha(r) && (r < '0' || r > '9') {
-			return false
-		}
-	}
-	return true
-}
-
 func allSpace(s string) bool {
 	for _, r := range s {
 		if !IsSpaceRune(r) {
@@ -1594,15 +1587,24 @@ func strMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__mul__' requires a 'str' object")
 	}
+	// str.__mul__ is the sq_repeat slot wrapped by wrap_indexargfunc, which
+	// coerces the count through PyNumber_AsSsize_t and raises TypeError when
+	// the argument has no __index__. That differs from the nb_multiply
+	// operator path, which returns NotImplemented; the bound method raises.
+	//
+	// CPython: Objects/typeobject.c wrap_indexargfunc / Objects/abstract.c PyNumber_AsSsize_t
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return nil, err
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", args[1].Type().Name)
 	}
-	nv, _ := ni.Int64()
+	nv, fits := ni.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
 	return strType.Sequence.Repeat(u, int(nv))
 }
 
@@ -1617,15 +1619,22 @@ func strRMulMethod(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__rmul__' requires a 'str' object")
 	}
+	// Like __mul__, str.__rmul__ wraps sq_repeat and raises TypeError for a
+	// non-index argument rather than returning NotImplemented.
+	//
+	// CPython: Objects/typeobject.c wrap_indexargfunc / Objects/abstract.c PyNumber_AsSsize_t
 	n, err := NumberIndex(args[1])
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return nil, err
 	}
 	ni, ok2 := n.(*Int)
 	if !ok2 {
-		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", typeNameOf(args[1]))
+		return nil, fmt.Errorf("TypeError: '%s' object cannot be interpreted as an integer", args[1].Type().Name)
 	}
-	nv, _ := ni.Int64()
+	nv, fits := ni.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: cannot fit 'int' into an index-sized integer")
+	}
 	return strType.Sequence.Repeat(u, int(nv))
 }
 

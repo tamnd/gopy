@@ -73,6 +73,34 @@ func init() {
 		}
 		return None(), nil
 	}))
+
+	// module.__dir__(): the keys of the module's __dict__, unless the
+	// dict itself defines __dir__. A __dict__ that is not a dictionary
+	// (a subclass can shadow it) raises TypeError.
+	//
+	// CPython: Objects/moduleobject.c:1190 module_dir
+	SetTypeDescr(ModuleType, "__dir__", NewMethodDescr(ModuleType, "__dir__", moduleDir))
+}
+
+// moduleDir backs module.__dir__.
+//
+// CPython: Objects/moduleobject.c:1190 module_dir
+func moduleDir(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __dir__() takes no arguments")
+	}
+	dict, err := GetAttr(args[0], NewStr("__dict__"))
+	if err != nil {
+		return nil, err
+	}
+	d, ok := dict.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: <module>.__dict__ is not a dictionary")
+	}
+	if dirfunc, _ := d.GetItem(NewStr("__dir__")); dirfunc != nil {
+		return Call(dirfunc, NewTuple(nil), nil)
+	}
+	return NewList(d.Keys()), nil
 }
 
 // NewModule creates an empty module with the given name in its __dict__.
@@ -166,6 +194,37 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	//
 	// CPython: Objects/moduleobject.c:88 module_init_dict
 	if key == "__dict__" {
+		// A subclass may shadow __dict__ with a plain class attribute, e.g.
+		// `class M(ModuleType): __dict__ = 8`. CPython resolves __dict__
+		// through generic getattr, which returns that shadowing attribute
+		// when it is not a data descriptor and the instance namespace holds
+		// no "__dict__" key, rather than always handing back md_dict. Mirror
+		// that ordering so dir() on such an instance sees the non-dict value
+		// and raises TypeError, matching CPython.
+		//
+		// CPython: Objects/object.c:1450 _PyObject_GenericGetAttrWithDict
+		if descr, owner := LookupDescriptor(o.Type(), "__dict__"); descr != nil && owner != objectType {
+			dt := descr.Type()
+			if dt.DescrGet != nil && dt.DescrSet != nil {
+				return dt.DescrGet(descr, o, o.Type())
+			}
+			if _, err := m.dict.GetItem(name); err != nil {
+				if dt.DescrGet != nil {
+					return dt.DescrGet(descr, o, o.Type())
+				}
+				Incref(descr)
+				return descr, nil
+			}
+		}
+		// Borrowed slot handed to a caller that treats the result as a
+		// new strong reference (pushObject decrefs it later), so incref
+		// to keep the module's own ownership intact. Without this the
+		// caller's Decref drives the namespace dict toward refcount zero
+		// and dict_dealloc clears a live module's globals.
+		//
+		// CPython: Objects/moduleobject.c:147 module_getattro (Py_INCREF
+		// before returning the dict via the __dict__ getset)
+		Incref(m.dict)
 		return m.dict, nil
 	}
 	// PEP 649: __annotations__ on a module is lazy when the body
@@ -182,6 +241,13 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	}
 	v, err := m.dict.GetItem(name)
 	if err == nil {
+		// dict.GetItem returns a borrowed reference; callers in the eval
+		// loop (pushObject) treat the return as a new strong ref and
+		// will Decref it later. Incref so the borrowed dict slot stays
+		// valid and the caller's Decref balances correctly.
+		//
+		// CPython: Objects/moduleobject.c:875 module_getattro
+		Incref(v)
 		return v, nil
 	}
 	// PEP 562: look for __getattr__ in the module dict.

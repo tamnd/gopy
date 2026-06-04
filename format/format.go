@@ -348,6 +348,11 @@ func FormatInt(v *big.Int, spec Spec) (string, error) {
 	if t == 0 {
 		t = 'd'
 	}
+	// CPython: Python/formatter_unicode.c:1370 parse_internal_render_format_spec
+	// rejects the 'z' coerce-negative-zero modifier on integer types.
+	if spec.NoNegZero {
+		return "", errors.New("Negative zero coercion (z) not allowed with integer format specifier") //nolint:staticcheck // Mirror CPython error text.
+	}
 	if spec.Precision != -1 && t != 'c' {
 		// Precision is only valid for non-numeric types when formatting ints.
 		return "", ErrInvalidSpec
@@ -379,6 +384,15 @@ func FormatInt(v *big.Int, spec Spec) (string, error) {
 			prefix = "0X"
 		}
 	case 'c':
+		// CPython: Python/formatter_unicode.c:1020 format_long_internal ('c' branch)
+		// rejects '+' / ' ' sign with the character format and only allows '-'
+		// (the default for ints).
+		if spec.Sign != 0 && spec.Sign != '-' {
+			return "", errors.New("Sign not allowed with integer format specifier 'c'") //nolint:staticcheck // Mirror CPython error text.
+		}
+		if spec.Alt {
+			return "", errors.New("Alternate form (#) not allowed with integer format specifier 'c'") //nolint:staticcheck // Mirror CPython error text.
+		}
 		if !v.IsInt64() {
 			return "", ErrInvalidSpec
 		}

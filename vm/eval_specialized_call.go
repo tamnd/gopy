@@ -31,7 +31,10 @@
 package vm
 
 import (
+	"fmt"
+
 	"github.com/tamnd/gopy/compile"
+	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/specialize"
 	"github.com/tamnd/gopy/stackref"
@@ -105,6 +108,19 @@ func (e *evalState) callPyExactArgsCommon(fn *objects.Function, selfOrNull objec
 		return 0, false, nil
 	}
 	stack := frameStackFor(e.ts)
+	// _PUSH_FRAME drives the new frame into the eval loop, where
+	// start_frame runs the Python recursion check on every entry. The
+	// generic CALL path guards before Push; the fast arms push frames
+	// directly, so the same guard has to live here or hot recursive
+	// calls bypass the limit and overflow the Go stack.
+	//
+	// CPython: Python/bytecodes.c:4010 _PUSH_FRAME
+	// CPython: Python/ceval_macros.h:337 _Py_EnterRecursivePy
+	// CPython: Python/ceval.c:1027 _Py_CheckRecursiveCallPy
+	if stack.Depth() >= sys.RecursionLimit() {
+		return 0, true, fmt.Errorf("RecursionError: maximum recursion depth exceeded")
+	}
+	forceGenPrev(stack)
 	f2 := stack.Push(co, fn.Globals, fn.Builtins, fn)
 	if hasSelf == 1 {
 		f2.SetLocal(0, stackref.FromObjectNew(selfOrNull))

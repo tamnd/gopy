@@ -83,8 +83,32 @@ type Frame struct {
 	//   [ nlocalsplus .. nlocalsplus + stacktop              )  stack
 	LocalsPlus []stackref.Ref
 
+	// snapshot is a take_ownership-style mirror of LocalsPlus. Set
+	// once by TakeOwnership before a suspended generator's body is
+	// closed so that frame.f_locals and gi_frame consumers continue
+	// to see fast-local / cell / free data after the body unwinds and
+	// FrameClearLocals zeroes LocalsPlus. Each Ref carries an
+	// independent strong reference (Dup at take time) so the
+	// underlying objects survive the body's clear.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	snapshot []stackref.Ref
+
 	// Owner discriminates teardown / suspend behavior.
 	Owner OwnerKind
+
+	// GenOwner is the generator / coroutine / async-generator that
+	// holds this activation record when Owner == OwnedByGenerator.
+	// nil for thread-owned and eval-owned frames. Used by frameClear
+	// to mirror CPython's FRAME_OWNED_BY_GENERATOR liveness check: any
+	// *Frame wrapper that references this activation record resolves
+	// to the same generator state via this back-pointer, including
+	// wrappers minted on demand by tb_frame.
+	//
+	// CPython: Include/internal/pycore_frame.h _PyInterpreterFrame f_executable
+	// + Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame (back-derive
+	// via PyGenObject layout; gopy stores the pointer explicitly).
+	GenOwner objects.Object
 
 	// ReturnOffset is set on a callee frame when the caller wants
 	// the eval loop to resume at a non-default offset on return
@@ -115,6 +139,18 @@ type Frame struct {
 	//
 	// CPython: Include/cpython/frameobject.h PyFrameObject.f_lineno
 	Lineno int
+
+	// Wrappers is the list of Python-visible frame objects that point
+	// at this activation record (sys._getframe, traceback walks, etc).
+	// FrameStack.Pop reads this list to rebind each wrapper to a
+	// FrameSnapshot before the chunk slot is recycled, so f_code / f_globals
+	// / f_locals reads continue to work after the call returns. Held as
+	// opaque objects.Object so the *Frame layout does not pull in the
+	// objects package's wrapper type for every slot.
+	//
+	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+	// PyFrameObject linkage CPython gets for free from refcounting).
+	Wrappers []objects.Object
 }
 
 // NLocalsOf returns the count of fast-local slots a code object owns.
@@ -125,6 +161,9 @@ type Frame struct {
 //
 // CPython: Include/cpython/code.h:87 co_nlocals
 func NLocalsOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Nlocals
 	}
@@ -135,6 +174,9 @@ func NLocalsOf(co *objects.Code) int {
 //
 // CPython: Include/cpython/code.h:88 co_ncellvars
 func NCellsOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Ncellvars
 	}
@@ -145,6 +187,9 @@ func NCellsOf(co *objects.Code) int {
 //
 // CPython: Include/cpython/code.h:89 co_nfreevars
 func NFreeOf(co *objects.Code) int {
+	if co == nil {
+		return 0
+	}
 	if co.Nlocalsplus != 0 {
 		return co.Nfreevars
 	}
@@ -220,6 +265,7 @@ func (f *Frame) Init(co *objects.Code, globals, builtins objects.Object, fn obje
 	f.TraceLines = true
 	f.TraceOpcodes = false
 	f.Lineno = 0
+	f.Wrappers = nil
 	size := SizeFor(co)
 	if cap(f.LocalsPlus) >= size {
 		f.LocalsPlus = f.LocalsPlus[:size]
@@ -267,6 +313,19 @@ func (f *Frame) SetPeekStack(depth int, r stackref.Ref) {
 	i := f.StackBase + f.StackTop - 1 - depth
 	f.LocalsPlus[i].Close()
 	f.LocalsPlus[i] = r
+}
+
+// PokeStack writes r into the slot at depth from the top without
+// touching the prior occupant's refcount. This is the faithful POKE:
+// it relocates a live reference rather than replacing a consumed one.
+// Passthrough writebacks (SWAP, COPY) use it because the value being
+// written is a live input being moved, and the slot's prior occupant
+// is itself a live input relocated elsewhere in the same instruction;
+// closing it here would double-free.
+//
+// CPython: Python/ceval_macros.h POKE macro (stack_pointer[-(depth)] = ref).
+func (f *Frame) PokeStack(depth int, r stackref.Ref) {
+	f.LocalsPlus[f.StackBase+f.StackTop-1-depth] = r
 }
 
 // DropStack removes the top n stack entries, closing each slot's
@@ -372,15 +431,44 @@ func (f *Frame) FrameBack() objects.InterpreterFrame {
 	return f.Previous
 }
 
+// FrameSetBack rewires f_back. A nil argument (or an interface holding a
+// nil *Frame) unlinks the frame, matching _gen_throw's
+// frame->previous = NULL restore after a forwarded throw returns.
+//
+// CPython: Objects/genobject.c:496 _gen_throw (frame->previous)
+func (f *Frame) FrameSetBack(back objects.InterpreterFrame) {
+	if back == nil {
+		f.Previous = nil
+		return
+	}
+	if p, ok := back.(*Frame); ok {
+		f.Previous = p
+		return
+	}
+	f.Previous = nil
+}
+
 // FrameLasti returns the offset of the next instruction.
 func (f *Frame) FrameLasti() int { return f.InstrPtr }
+
+// FrameGenOwner returns the generator / coroutine / async-generator
+// that owns this activation record, or nil for thread-owned frames.
+// objects.frameClear uses this to mirror CPython's
+// FRAME_OWNED_BY_GENERATOR branch in frame_clear_impl.
+//
+// CPython: Objects/genobject.c:107 _PyGen_GetGeneratorFromFrame
+func (f *Frame) FrameGenOwner() objects.Object { return f.GenOwner }
 
 // FrameNumLocals returns the count of fast-local slots.
 func (f *Frame) FrameNumLocals() int { return NLocalsOf(f.Code) }
 
 // FrameFastLocal returns the fast local at index i, or nil if the
-// slot is unbound.
+// slot is unbound. Reads the take_ownership snapshot when set so
+// reads survive a generator's body-close.
 func (f *Frame) FrameFastLocal(i int) objects.Object {
+	if f.snapshot != nil && i < len(f.snapshot) {
+		return f.snapshot[i].AsObject()
+	}
 	return f.LocalsPlus[i].AsObject()
 }
 
@@ -388,29 +476,164 @@ func (f *Frame) FrameFastLocal(i int) objects.Object {
 func (f *Frame) FrameNumCells() int { return NCellsOf(f.Code) }
 
 // FrameCellLocal returns the cell var at index i, or nil if unbound.
+// Reads the take_ownership snapshot when set.
 func (f *Frame) FrameCellLocal(i int) objects.Object {
-	return f.LocalsPlus[CellsStart(f.Code)+i].AsObject()
+	idx := CellsStart(f.Code) + i
+	if f.snapshot != nil && idx < len(f.snapshot) {
+		return f.snapshot[idx].AsObject()
+	}
+	return f.LocalsPlus[idx].AsObject()
 }
 
 // FrameNumFrees returns the count of free-var slots.
 func (f *Frame) FrameNumFrees() int { return NFreeOf(f.Code) }
 
 // FrameFreeLocal returns the free var at index i, or nil if unbound.
+// Reads the take_ownership snapshot when set.
 func (f *Frame) FrameFreeLocal(i int) objects.Object {
-	return f.LocalsPlus[FreesStart(f.Code)+i].AsObject()
+	idx := FreesStart(f.Code) + i
+	if f.snapshot != nil && idx < len(f.snapshot) {
+		return f.snapshot[idx].AsObject()
+	}
+	return f.LocalsPlus[idx].AsObject()
+}
+
+// FrameClearLocals releases every live stackref in LocalsPlus (fast
+// locals, cells, frees, and the value stack) without touching Code /
+// Globals / Builtins / Locals / Func / Previous. Matches CPython's
+// _PyFrame_ClearExceptCode: a generator that finished or was closed
+// still exposes gi_code, so the code pointer must survive even though
+// the per-call data is gone.
+//
+// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
+func (f *Frame) FrameClearLocals() {
+	for i := range f.LocalsPlus {
+		f.LocalsPlus[i].Close()
+		f.LocalsPlus[i] = stackref.Null
+	}
+	f.StackTop = 0
+}
+
+// FrameDropSnapshot releases the take_ownership snapshot. It is the
+// explicit counterpart to FrameClearLocals: the natural generator
+// unwind keeps the snapshot so an externally-held gi_frame can still
+// read the locals after the body is gone (test_frame_outlives_generator),
+// but frame.clear() asks for the locals to truly disappear, so the
+// duplicated strong references the snapshot holds must drop too.
+// Without this, an object bound only to a generator argument lives
+// forever once gi_frame.clear() has snapshotted it (gh-142766).
+//
+// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode (the single
+// owned copy is the one cleared; gopy keeps the snapshot separate).
+func (f *Frame) FrameDropSnapshot() {
+	for i := range f.snapshot {
+		f.snapshot[i].Close()
+		f.snapshot[i] = stackref.Null
+	}
+	f.snapshot = nil
 }
 
 // FrameLocalsPlusItem returns LocalsPlus[i] at the absolute slot
 // (post-fix_cell_offsets). Used by kinds-driven walks like
 // FrameFastToLocals where the slot semantics live in
 // LocalsplusKinds rather than the legacy varnames/cellvars/freevars
-// split.
+// split. Reads the take_ownership snapshot when set.
 //
 // CPython: Objects/frameobject.c:2199 frame_get_var (the
 // frame->localsplus[i] read).
 func (f *Frame) FrameLocalsPlusItem(i int) objects.Object {
+	if f.snapshot != nil {
+		if i < 0 || i >= len(f.snapshot) {
+			return nil
+		}
+		return f.snapshot[i].AsObject()
+	}
 	if i < 0 || i >= len(f.LocalsPlus) {
 		return nil
 	}
 	return f.LocalsPlus[i].AsObject()
+}
+
+// FrameSetLocalsPlusItem stores v in LocalsPlus[i] via
+// stackref.FromObject. Used by the FrameLocalsProxy write-through
+// path (f_locals[name] = v).
+//
+// CPython: Objects/frameobject.c:246 framelocalsproxy_setitem (the
+// fast[i] = PyStackRef_FromPyObjectNew(value) store)
+func (f *Frame) FrameSetLocalsPlusItem(i int, v objects.Object) {
+	if i < 0 || i >= len(f.LocalsPlus) {
+		return
+	}
+	f.LocalsPlus[i].Close()
+	f.LocalsPlus[i] = stackref.FromObject(v)
+}
+
+// FrameNumStack returns the count of live operand-stack entries.
+// frame_traverse walks LocalsPlus[StackBase:StackBase+StackTop] so the
+// cycle collector sees values held on the running stack (e.g., a
+// generator object passed as an argument to list()).
+//
+// CPython: Objects/frameobject.c:1163 frame_traverse (PyTrace_VISITOR
+// over PyFrame.localsplus[0:StackTop])
+func (f *Frame) FrameNumStack() int { return f.StackTop }
+
+// FrameStackItem returns the operand-stack entry at depth i from the
+// stack base (0 == bottom of the live region).
+//
+// CPython: Objects/frameobject.c:1163 frame_traverse
+func (f *Frame) FrameStackItem(i int) objects.Object {
+	if i < 0 || i >= f.StackTop {
+		return nil
+	}
+	return f.LocalsPlus[f.StackBase+i].AsObject()
+}
+
+// FrameRegisterWrapper records a Python-level wrapper for this
+// activation record. FrameStack.Pop walks the list and calls SwapInterp
+// on each wrapper with a FrameSnapshot so reads through the wrapper
+// survive the chunk slot's recycle.
+//
+// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
+func (f *Frame) FrameRegisterWrapper(w objects.Object) {
+	if w == nil {
+		return
+	}
+	f.Wrappers = append(f.Wrappers, w)
+}
+
+// FrameWrapper returns the previously-registered Python-level wrapper
+// for this activation record, or nil if no wrapper has been minted yet.
+// objects.NewFrame reads this to avoid creating a duplicate PyFrameObject
+// equivalent so f_locals readers share the same extraLocals dict.
+//
+// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
+// PyFrameObject pointer cached on the activation record).
+func (f *Frame) FrameWrapper() objects.Object {
+	if len(f.Wrappers) == 0 {
+		return nil
+	}
+	return f.Wrappers[0]
+}
+
+// FrameTakeOwnership snapshots the activation record's LocalsPlus into
+// the frame's own backing store so a subsequent FrameClearLocals (the
+// body's natural unwind on GeneratorExit) does not break reads through
+// the Python-level frame object. Each snapshot ref is a Dup of the
+// corresponding LocalsPlus ref, so the snapshot owns an independent
+// strong reference. Idempotent: a second call after the snapshot is
+// installed is a no-op.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership
+func (f *Frame) FrameTakeOwnership() {
+	if f.snapshot != nil {
+		return
+	}
+	if len(f.LocalsPlus) == 0 {
+		return
+	}
+	snap := make([]stackref.Ref, len(f.LocalsPlus))
+	for i := range f.LocalsPlus {
+		snap[i] = f.LocalsPlus[i].Dup()
+	}
+	f.snapshot = snap
 }

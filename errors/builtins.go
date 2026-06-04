@@ -112,25 +112,40 @@ func init() {
 	// CPython: Objects/exceptions.c:684 StopIteration_init
 	objects.SetTypeDescr(PyExc_StopIteration, "value",
 		objects.NewGetSetDescr("value", stopIterValueGet, stopIterValueSet))
+	// AsyncGenStopIterationHook lets objects/async_gen.go raise a typed
+	// StopIteration(value) without importing this package. Mirrors
+	// _PyGen_SetStopIterationValue in the async_gen_unwrap_value path.
+	//
+	// CPython: Objects/genobject.c:652 _PyGen_SetStopIterationValue
+	objects.AsyncGenStopIterationHook = func(value objects.Object) error {
+		if value == nil {
+			value = objects.None()
+		}
+		exc := New(PyExc_StopIteration, objects.NewTuple([]objects.Object{value}))
+		return &objects.RaisedError{Exc: exc, Msg: "StopIteration"}
+	}
 }
 
-// stopIterValueGet returns args[0] when StopIteration was constructed
-// with a value, else None.
+// stopIterValueGet returns the dedicated StopValue slot, seeded by
+// StopIteration_init from args[0] or None at construction.
 //
-// CPython: Objects/exceptions.c:684 StopIteration_init (value field)
+// CPython: Objects/exceptions.c:741 PyStopIterationObject value member
 func stopIterValueGet(owner objects.Object) (objects.Object, error) {
 	e, ok := owner.(*Exception)
-	if !ok || e.Args == nil || e.Args.Len() == 0 {
+	if !ok {
 		return objects.None(), nil
 	}
-	return e.Args.Item(0), nil
+	if e.StopValue != nil {
+		return e.StopValue, nil
+	}
+	return objects.None(), nil
 }
 
-// stopIterValueSet rewrites args[0] so reassigning .value also surfaces
-// through args. CPython has a dedicated field for value; gopy keeps
-// args and value in lock-step.
+// stopIterValueSet writes only the dedicated StopValue slot, leaving
+// args untouched. Mirrors CPython's _Py_T_OBJECT setter on
+// PyStopIterationObject.value: assigning .value does not rewrite args.
 //
-// CPython: Objects/exceptions.c:711 StopIteration_members
+// CPython: Objects/exceptions.c:741 PyStopIterationObject value member
 func stopIterValueSet(owner objects.Object, value objects.Object) error {
 	e, ok := owner.(*Exception)
 	if !ok {
@@ -139,16 +154,7 @@ func stopIterValueSet(owner objects.Object, value objects.Object) error {
 	if value == nil {
 		value = objects.None()
 	}
-	if e.Args == nil || e.Args.Len() == 0 {
-		e.Args = objects.NewTuple([]objects.Object{value})
-		return nil
-	}
-	items := make([]objects.Object, e.Args.Len())
-	items[0] = value
-	for i := 1; i < e.Args.Len(); i++ {
-		items[i] = e.Args.Item(i)
-	}
-	e.Args = objects.NewTuple(items)
+	e.StopValue = value
 	return nil
 }
 

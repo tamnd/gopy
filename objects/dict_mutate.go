@@ -78,13 +78,18 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	}
 	slot := &d.entries[idx]
 	if found {
-		Decref(slot.value)
+		// Install the new value and only then release the old one, so a
+		// Decref-triggered __del__ that reads back the same key sees the
+		// new value rather than a freed slot. CPython:
+		// Objects/dictobject.c:1875 sets ep->me_value to value before
+		// the matching Py_DECREF on the replaced pointer.
+		oldValue := slot.value
 		slot.value = value
 		Incref(value)
-		// CPython fires MODIFIED in insertdict's replace branch
-		// (dictobject.c:1875). The key set didn't change, but
-		// watchers still need to know the value did.
 		notifyDictEvent(DictEventModified, d, key, value)
+		if oldValue != nil {
+			Decref(oldValue)
+		}
 		return nil
 	}
 	if !slot.dummy {
@@ -94,12 +99,51 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	Incref(value)
 	d.order = append(d.order, idx)
 	d.used++
+	d.structVersion++
 	d.downgradeKindOnInsert(key)
 	d.invalidateKeysVersion()
 	// CPython fires ADDED at the same site once the new entry is in
 	// the table (dictobject.c:1806/1869).
 	notifyDictEvent(DictEventAdded, d, key, value)
 	return nil
+}
+
+// dictSetDefault is the single-lookup form behind dict.setdefault. It
+// probes once: a hit returns the stored value, a miss inserts dflt at
+// the reusable slot the same probe already found, so the key's __hash__
+// and __eq__ each run exactly once (Issue #13521). A split dict
+// materializes to combined first so the insert lands in the local table.
+//
+// CPython: Objects/dictobject.c:4400 dict_setdefault_ref_lock_held
+func dictSetDefault(d *Dict, h int64, key, dflt Object) (Object, error) {
+	if d.sharedKeys != nil {
+		d.ensureCombined()
+	}
+	if loadAtCapacity(d.fill, len(d.entries)) {
+		if err := dictResize(d, growthRate(d)); err != nil {
+			return nil, err
+		}
+	}
+	idx, found, err := d.lookup(h, key)
+	if err != nil {
+		return nil, err
+	}
+	slot := &d.entries[idx]
+	if found {
+		return slot.value, nil
+	}
+	if !slot.dummy {
+		d.fill++
+	}
+	*slot = dictEntry{hash: h, key: key, value: dflt, used: true}
+	Incref(dflt)
+	d.order = append(d.order, idx)
+	d.used++
+	d.structVersion++
+	d.downgradeKindOnInsert(key)
+	d.invalidateKeysVersion()
+	notifyDictEvent(DictEventAdded, d, key, dflt)
+	return dflt, nil
 }
 
 // dictInsertSplit handles inserts on a split dict. Three cases:
@@ -115,8 +159,14 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 //
 // CPython: Objects/dictobject.c:1832 insert_split_key
 func dictInsertSplit(d *Dict, h int64, key, value Object) error {
+	// insertdict only takes the split fast path for an exact str
+	// (PyUnicode_CheckExact). A str subclass such as MyStr matches an
+	// existing shared key under __eq__ but must be stored as the subclass
+	// instance, so it materializes to combined and inserts there (gh-143189).
+	//
+	// CPython: Objects/dictobject.c:1898 insertdict
 	u, isUnicode := key.(*Unicode)
-	if !isUnicode {
+	if !isUnicode || key.Type() != StrType() {
 		d.ensureCombined()
 		return dictInsert(d, h, key, value)
 	}
@@ -132,16 +182,20 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 		return dictInsert(d, h, key, value)
 	}
 	if d.splitValues[idx] != nil {
-		Decref(d.splitValues[idx])
+		// Install before Decref so a re-entrant lookup from __del__
+		// observes the new value, matching the dictInsert replace path.
+		oldValue := d.splitValues[idx]
 		d.splitValues[idx] = value
 		Incref(value)
 		notifyDictEvent(DictEventModified, d, key, value)
+		Decref(oldValue)
 		return nil
 	}
 	Incref(value)
 	d.splitValues[idx] = value
 	d.order = append(d.order, idx)
 	d.used++
+	d.structVersion++
 	d.invalidateKeysVersion()
 	notifyDictEvent(DictEventAdded, d, key, value)
 	return nil
@@ -155,7 +209,7 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 //
 // CPython: Objects/dictobject.c:2790 delitem_common
 func dictDelete(d *Dict, key Object) error {
-	h, err := Hash(key)
+	h, err := dictKeyHash(key)
 	if err != nil {
 		return err
 	}
@@ -166,18 +220,20 @@ func dictDelete(d *Dict, key Object) error {
 	if !found {
 		return errKeyNotFound
 	}
+	// Clear the entry and update bookkeeping BEFORE running any Decref
+	// that may trigger __del__ re-entrancy through Finalize. CPython's
+	// delitem_common does the same dance: tombstone the slot, decrement
+	// ma_used, bump the version tag, and only then release the old key
+	// and value so a re-entrant lookup sees a consistent dict.
+	//
+	// CPython: Objects/dictobject.c:2853 delitem_common
+	var oldKey, oldValue Object
 	if d.sharedKeys != nil {
-		if d.splitValues[idx] != nil {
-			Decref(d.splitValues[idx])
-		}
+		oldValue = d.splitValues[idx]
 		d.splitValues[idx] = nil
 	} else {
-		if d.entries[idx].key != nil {
-			Decref(d.entries[idx].key)
-		}
-		if d.entries[idx].value != nil {
-			Decref(d.entries[idx].value)
-		}
+		oldKey = d.entries[idx].key
+		oldValue = d.entries[idx].value
 		d.entries[idx] = dictEntry{dummy: true}
 	}
 	for i, slot := range d.order {
@@ -187,10 +243,17 @@ func dictDelete(d *Dict, key Object) error {
 		}
 	}
 	d.used--
+	d.structVersion++
 	d.invalidateKeysVersion()
 	// CPython fires DELETED from delitem_common (dictobject.c:2872).
 	// Pass nil for value (the old value isn't part of the contract).
 	notifyDictEvent(DictEventDeleted, d, key, nil)
+	if oldKey != nil {
+		Decref(oldKey)
+	}
+	if oldValue != nil {
+		Decref(oldValue)
+	}
 	return nil
 }
 

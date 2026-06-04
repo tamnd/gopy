@@ -17,25 +17,26 @@ func listCompXs(elt ast.Expr, target *ast.Name) *ast.ListComp {
 	}
 }
 
-// TestListCompMakesInnerFunc covers `[i for i in xs]`. The outer scope
-// should MAKE_FUNCTION the inner code object, evaluate xs, GET_ITER,
-// and CALL with the iter as the implicit .0 argument.
+// TestListCompMakesInnerFunc covers `[i for i in xs]`. Under PEP 709
+// the comprehension is inlined into the enclosing scope: no
+// MAKE_FUNCTION / CALL and no nested <listcomp> code object. The outer
+// scope evaluates xs, GET_ITERs it, isolates the loop var with
+// LOAD_FAST_AND_CLEAR / STORE_FAST_MAYBE_NULL, then BUILD_LIST and
+// LIST_APPEND directly.
 func TestListCompMakesInnerFunc(t *testing.T) {
 	lc := listCompXs(nameLoad("i"), nameStore("i"))
 	body := &ast.Assign{Targets: []ast.Expr{nameStore("y")}, Value: lc}
 	u := compileMod(t, module(body))
 	got := opNames(u)
-	mustContain(t, got, "MAKE_FUNCTION", "GET_ITER", "CALL")
-
-	innerUnit := findInnerUnitNamed(t, u, "<listcomp>")
-	if innerUnit.Argcount != 1 {
-		t.Errorf("inner argcount = %d, want 1", innerUnit.Argcount)
+	mustContain(t, got, "GET_ITER", "LOAD_FAST_AND_CLEAR", "BUILD_LIST",
+		"FOR_ITER", "LIST_APPEND", "STORE_FAST_MAYBE_NULL")
+	mustNotContain(t, got, "MAKE_FUNCTION", "CALL")
+	if findInnerUnitMaybe(u, "<listcomp>") != nil {
+		t.Errorf("inlined listcomp should not emit a nested <listcomp> unit")
 	}
-	innerOps := opNames(innerUnit)
-	mustContain(t, innerOps, "RESUME", "BUILD_LIST", "FOR_ITER", "LIST_APPEND", "RETURN_VALUE")
 }
 
-// TestSetCompUsesSetAdd covers `{i for i in xs}`.
+// TestSetCompUsesSetAdd covers `{i for i in xs}`, inlined per PEP 709.
 func TestSetCompUsesSetAdd(t *testing.T) {
 	sc := &ast.SetComp{
 		Elt: nameLoad("i"),
@@ -46,12 +47,12 @@ func TestSetCompUsesSetAdd(t *testing.T) {
 	}
 	body := &ast.Assign{Targets: []ast.Expr{nameStore("y")}, Value: sc}
 	u := compileMod(t, module(body))
-	innerUnit := findInnerUnitNamed(t, u, "<setcomp>")
-	innerOps := opNames(innerUnit)
-	mustContain(t, innerOps, "BUILD_SET", "SET_ADD")
+	got := opNames(u)
+	mustContain(t, got, "BUILD_SET", "SET_ADD")
+	mustNotContain(t, got, "MAKE_FUNCTION", "CALL")
 }
 
-// TestDictCompUsesMapAdd covers `{k: v for k in xs}`.
+// TestDictCompUsesMapAdd covers `{k: v for k in xs}`, inlined per PEP 709.
 func TestDictCompUsesMapAdd(t *testing.T) {
 	dc := &ast.DictComp{
 		Key:   nameLoad("k"),
@@ -63,9 +64,9 @@ func TestDictCompUsesMapAdd(t *testing.T) {
 	}
 	body := &ast.Assign{Targets: []ast.Expr{nameStore("y")}, Value: dc}
 	u := compileMod(t, module(body))
-	innerUnit := findInnerUnitNamed(t, u, "<dictcomp>")
-	innerOps := opNames(innerUnit)
-	mustContain(t, innerOps, "BUILD_MAP", "MAP_ADD")
+	got := opNames(u)
+	mustContain(t, got, "BUILD_MAP", "MAP_ADD")
+	mustNotContain(t, got, "MAKE_FUNCTION", "CALL")
 }
 
 // TestGenExprWrapsStopIteration covers `(i for i in xs)`. The genexpr
@@ -100,4 +101,29 @@ func findInnerUnitNamed(t *testing.T, u *Unit, name string) *Unit {
 	}
 	t.Fatalf("inner unit %q not found in consts %v", name, u.Consts)
 	return nil
+}
+
+// findInnerUnitMaybe returns the embedded inner Unit with the matching
+// Name, or nil if none is present. Used to assert that inlined
+// comprehensions emit no nested code object.
+func findInnerUnitMaybe(u *Unit, name string) *Unit {
+	for _, c := range u.Consts {
+		if inner, ok := c.(*Unit); ok && inner.Name == name {
+			return inner
+		}
+	}
+	return nil
+}
+
+// mustNotContain fails if any of the named opcodes appears in ops.
+func mustNotContain(t *testing.T, ops []string, unwanted ...string) {
+	t.Helper()
+	for _, w := range unwanted {
+		for _, op := range ops {
+			if op == w {
+				t.Errorf("op %q should not appear in %v", w, ops)
+				break
+			}
+		}
+	}
 }

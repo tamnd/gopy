@@ -151,6 +151,32 @@ var (
 	pendingStderr io.Writer
 )
 
+// pendingBreakpointHook holds the default breakpoint hook supplied by
+// the builtins package before sys is built. The hook lives in builtins
+// because its body imports modules and calls warnings.warn, neither of
+// which module/sys can reach without an import cycle. SetBreakpointHook
+// records it here so buildModule can stamp sys.breakpointhook and
+// sys.__breakpointhook__ once the module dict exists.
+//
+// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+var pendingBreakpointHook objects.Object
+
+// SetBreakpointHook records the default breakpoint hook and, when sys
+// is already live, installs it as both sys.breakpointhook and
+// sys.__breakpointhook__. builtins.Init calls this with its
+// sys_breakpointhook port so breakpoint() has a hook to dispatch to.
+//
+// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+func SetBreakpointHook(hook objects.Object) {
+	pendingBreakpointHook = hook
+	d := liveSysDict()
+	if d == nil {
+		return
+	}
+	_ = d.SetItem(objects.NewStr("breakpointhook"), hook)
+	_ = d.SetItem(objects.NewStr("__breakpointhook__"), hook)
+}
+
 // SetStdio records the io.Writers the next sys-module build should
 // expose as sys.stdout and sys.stderr. nil means "use os.Stdout /
 // os.Stderr". If sys is already in the module cache, the live
@@ -372,6 +398,19 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "__excepthook__", excepthookFn); err != nil {
 		return nil, err
 	}
+	// sys.unraisablehook is invoked by the runtime when an exception
+	// occurs in a destructor, in a generator close callback, or during
+	// GC, where there is no caller to re-raise into.
+	//
+	// CPython: Python/sysmodule.c:893 sys_unraisablehook
+	// CPython: Python/errors.c:1600 _PyErr_WriteUnraisableDefaultHook
+	unraisableHookFn := objects.NewBuiltinFunction("unraisablehook", unraisableHookShim)
+	if err := setItem(md, "unraisablehook", unraisableHookFn); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__unraisablehook__", unraisableHookFn); err != nil {
+		return nil, err
+	}
 	if err := setItem(md, "exit", objects.NewBuiltinFunction("exit", exitShim)); err != nil {
 		return nil, err
 	}
@@ -384,6 +423,12 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "getrefcount", objects.NewBuiltinFunction("getrefcount", getRefcount)); err != nil {
 		return nil, err
 	}
+	if err := setItem(md, "getsizeof", objects.NewBuiltinFunction("getsizeof", getSizeof)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "is_finalizing", objects.NewBuiltinFunction("is_finalizing", isFinalizing)); err != nil {
+		return nil, err
+	}
 	// sys.get_int_max_str_digits / sys.set_int_max_str_digits guard
 	// integer-to-string conversion length. Added in CPython 3.11 to
 	// mitigate quadratic-time attacks via enormous int repr.
@@ -394,6 +439,32 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := setItem(md, "set_int_max_str_digits", objects.NewBuiltinFunction("set_int_max_str_digits", setIntMaxStrDigits)); err != nil {
+		return nil, err
+	}
+	// sys.get_coroutine_origin_tracking_depth /
+	// sys.set_coroutine_origin_tracking_depth track how many traceback
+	// frames to capture when a coroutine is created. asyncio uses these
+	// to surface where an unawaited coroutine originated.
+	//
+	// CPython: Python/sysmodule.c:1379 sys_set_coroutine_origin_tracking_depth_impl,
+	// Python/sysmodule.c:1402 sys_get_coroutine_origin_tracking_depth_impl
+	if err := setItem(md, "get_coroutine_origin_tracking_depth", objects.NewBuiltinFunction("get_coroutine_origin_tracking_depth", getCoroutineOriginTrackingDepth)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_coroutine_origin_tracking_depth", objects.NewBuiltinFunction("set_coroutine_origin_tracking_depth", setCoroutineOriginTrackingDepth)); err != nil {
+		return nil, err
+	}
+	// sys.get_asyncgen_hooks / sys.set_asyncgen_hooks manage the
+	// per-thread firstiter / finalizer hooks the event loop installs so
+	// it can drive aclose() on async generators that the collector
+	// reclaims. base_events._run_forever_setup swaps them in and out.
+	//
+	// CPython: Python/sysmodule.c:1443 sys_set_asyncgen_hooks_impl,
+	// Python/sysmodule.c:1480 sys_get_asyncgen_hooks_impl
+	if err := setItem(md, "get_asyncgen_hooks", objects.NewBuiltinFunction("get_asyncgen_hooks", getAsyncgenHooks)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "set_asyncgen_hooks", objects.NewBuiltinFunction("set_asyncgen_hooks", setAsyncgenHooks)); err != nil {
 		return nil, err
 	}
 	// sys._getframe([depth]) returns the frame depth levels up the call
@@ -483,6 +554,19 @@ func buildModule() (*objects.Module, error) {
 	}
 	if err := setItem(md, "__stderr__", makeStderrFile()); err != nil {
 		return nil, err
+	}
+	// breakpoint() dispatches to sys.breakpointhook; the default
+	// (sys.__breakpointhook__) is the builtins-side sys_breakpointhook
+	// port, registered via SetBreakpointHook before sys is built.
+	//
+	// CPython: Python/sysmodule.c:2826 breakpointhook PyMethodDef
+	if pendingBreakpointHook != nil {
+		if err := setItem(md, "breakpointhook", pendingBreakpointHook); err != nil {
+			return nil, err
+		}
+		if err := setItem(md, "__breakpointhook__", pendingBreakpointHook); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }

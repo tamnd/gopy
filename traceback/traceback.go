@@ -48,10 +48,47 @@ var Type *objects.Type
 
 func init() {
 	Type = objects.NewType("traceback", []*objects.Type{objects.ObjectType()})
-	Type.Getattro = tracebackGetattr
-	Type.Setattro = tracebackSetattr
+	// CPython exposes tb_frame/tb_lasti/tb_lineno as read-only members
+	// and tb_next as a getset, all living in the type dict so that
+	// generic attribute access and dir() see them. The gopy port mirrors
+	// that with getset descriptors and the default generic getattr.
+	//
+	// CPython: Python/traceback.c:229 tb_memberlist
+	// CPython: Python/traceback.c:235 tb_getsetters
+	objects.SetTypeDescr(Type, "tb_frame", objects.NewGetSetDescr("tb_frame", tbGetFrame, nil))
+	objects.SetTypeDescr(Type, "tb_lasti", objects.NewGetSetDescr("tb_lasti", tbGetLasti, nil))
+	objects.SetTypeDescr(Type, "tb_lineno", objects.NewGetSetDescr("tb_lineno", tbGetLineno, nil))
+	objects.SetTypeDescr(Type, "tb_next", objects.NewGetSetDescr("tb_next", tbGetNext, tbSetNext))
+	// The traceback type ships its own __dir__ that returns exactly the
+	// four attribute names, rather than inheriting object.__dir__ (which
+	// would also surface every object dunder). dir(tb) is therefore the
+	// fixed list below.
+	//
+	// CPython: Python/traceback.c:129 tb_dir
+	objects.SetTypeDescr(Type, "__dir__", objects.NewMethodDescr(Type, "__dir__", tbDir))
+	// Route attribute access through the generic getattr/setattr so the
+	// getset descriptors above drive both reads and the single writable
+	// slot (tb_next). CPython inherits tp_getattro/tp_setattro from object
+	// (PyObject_GenericGetAttr/SetAttr) for the traceback type.
+	//
+	// CPython: Python/traceback.c:269 PyTraceBack_Type (slots left to object)
+	Type.Getattro = objects.GenericGetAttr
+	Type.Setattro = objects.GenericSetAttr
 	Type.Repr = tracebackRepr
 	Type.Str = tracebackRepr
+}
+
+// tbDir backs the traceback __dir__ method. CPython returns the literal
+// four-name list and nothing else.
+//
+// CPython: Python/traceback.c:129 tb_dir
+func tbDir(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewList([]objects.Object{
+		objects.NewStr("tb_frame"),
+		objects.NewStr("tb_next"),
+		objects.NewStr("tb_lasti"),
+		objects.NewStr("tb_lineno"),
+	}), nil
 }
 
 // New builds a single-entry traceback. The errors package uses this
@@ -73,50 +110,50 @@ func Push(tb *Traceback, entry Entry) *Traceback {
 	return out
 }
 
-// tracebackGetattr serves the type's tb_frame / tb_lasti / tb_lineno
-// / tb_next attributes. Mirrors the union of tb_memberlist and
-// tb_getsetters in CPython.
+// tbGetFrame backs the tb_frame member (read-only).
 //
 // CPython: Python/traceback.c:229 tb_memberlist
-// CPython: Python/traceback.c:235 tb_getsetters
-func tracebackGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
+func tbGetFrame(o objects.Object) (objects.Object, error) {
 	tb := o.(*Traceback)
-	n, ok := name.(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", name.Type().Name)
+	if tb.TbFrame == nil {
+		return objects.None(), nil
 	}
-	switch n.Value() {
-	case "tb_frame":
-		if tb.TbFrame == nil {
-			return objects.None(), nil
-		}
-		return tb.TbFrame, nil
-	case "tb_lasti":
-		return objects.NewInt(int64(tb.TbLasti)), nil
-	case "tb_lineno":
-		return objects.NewInt(int64(tb.Entry.Line)), nil
-	case "tb_next":
-		if tb.Next == nil {
-			return objects.None(), nil
-		}
-		return tb.Next, nil
-	}
-	return nil, fmt.Errorf("AttributeError: 'traceback' object has no attribute %q", n.Value())
+	return tb.TbFrame, nil
 }
 
-// tracebackSetattr handles tb_next assignment, which is the only
-// settable attribute CPython exposes through tb_getsetters.
+// tbGetLasti backs the tb_lasti member (read-only).
+//
+// CPython: Python/traceback.c:229 tb_memberlist
+func tbGetLasti(o objects.Object) (objects.Object, error) {
+	tb := o.(*Traceback)
+	return objects.NewInt(int64(tb.TbLasti)), nil
+}
+
+// tbGetLineno backs the tb_lineno member (read-only).
+//
+// CPython: Python/traceback.c:229 tb_memberlist
+func tbGetLineno(o objects.Object) (objects.Object, error) {
+	tb := o.(*Traceback)
+	return objects.NewInt(int64(tb.Entry.Line)), nil
+}
+
+// tbGetNext backs the tb_next getset.
+//
+// CPython: Python/traceback.c:131 tb_next_get
+func tbGetNext(o objects.Object) (objects.Object, error) {
+	tb := o.(*Traceback)
+	if tb.Next == nil {
+		return objects.None(), nil
+	}
+	return tb.Next, nil
+}
+
+// tbSetNext backs the tb_next getset; it is the only settable
+// traceback attribute CPython exposes.
 //
 // CPython: Python/traceback.c:148 traceback_tb_next_set
-func tracebackSetattr(o objects.Object, name, value objects.Object) error {
+func tbSetNext(o objects.Object, value objects.Object) error {
 	tb := o.(*Traceback)
-	n, ok := name.(*objects.Unicode)
-	if !ok {
-		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", name.Type().Name)
-	}
-	if n.Value() != "tb_next" {
-		return fmt.Errorf("AttributeError: 'traceback' object attribute %q is read-only", n.Value())
-	}
 	if value == nil || value == objects.None() {
 		tb.Next = nil
 		return nil

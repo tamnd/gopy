@@ -379,10 +379,27 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		return e.cacheAdvance(compile.UNPACK_SEQUENCE), true, nil
 
 	case compile.STORE_SUBSCR:
-		key := e.popObject()
-		container := e.popObject()
-		v := e.popObject()
-		if serr := setItem(container, key, v); serr != nil {
+		keyR := e.pop()
+		containerR := e.pop()
+		valueR := e.pop()
+		keepKey, keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
+		// CPython's STORE_SUBSCR runs DECREF_INPUTS on container, sub, and
+		// value after the store, whether it succeeded or raised. gopy's
+		// container ownership contracts are not uniform: an exact dict
+		// increfs the value it keeps but steals the key (dictInsert), and
+		// an exact list steals the value. keepKey / keepValue report which
+		// input the container adopted so we leave that stack reference in
+		// place and release the rest.
+		//
+		// CPython: Python/bytecodes.c STORE_SUBSCR DECREF_INPUTS
+		containerR.Close()
+		if !keepKey {
+			keyR.Close()
+		}
+		if !keepValue {
+			valueR.Close()
+		}
+		if serr != nil {
 			return 0, true, serr
 		}
 		return e.cacheAdvance(compile.STORE_SUBSCR), true, nil
@@ -549,7 +566,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if cell.Contents == nil {
 			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
-		e.pushObject(cell.Contents)
+		// PyStackRef_FromPyObjectNew bumps refcount: the cell retains
+		// its strong ref to Contents, the pushed ref owns its own. The
+		// caller (CALL, BINARY_OP, ...) will Decref when it pops.
+		//
+		// CPython: Python/bytecodes.c LOAD_DEREF (PyStackRef_FromPyObjectNew)
+		e.push(stackref.FromObjectNew(cell.Contents))
 		return e.advance(), true, nil
 
 	case compile.STORE_DEREF:
@@ -562,7 +584,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			cell = objects.NewCell(nil)
 			e.f.LocalsPlus[int(oparg)] = stackref.FromObject(cell)
 		}
-		cell.Contents = v
+		e.cellSetTakeRef(cell, v)
 		return e.advance(), true, nil
 
 	case compile.DELETE_DEREF:
@@ -572,7 +594,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if !ok || cell.Contents == nil {
 			return 0, true, formatExcUnbound(e.f.Code, int(oparg))
 		}
-		cell.Contents = nil
+		e.cellSetTakeRef(cell, nil)
 		return e.advance(), true, nil
 
 	case compile.COPY_FREE_VARS:
@@ -599,15 +621,38 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		v := e.popObject()
 		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
 		if !ok {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("LIST_EXTEND: target not a list")
 		}
 		items, eerr := iterToSlice(v)
 		if eerr != nil {
+			// LIST_EXTEND clears a not-iterable TypeError and reformats it
+			// as "Value after * must be an iterable" so `f(1, *x)` and
+			// `[*x]` report the unpack site rather than a bare iter error.
+			// An object whose __iter__ raises stays iterable, so its error
+			// propagates unchanged.
+			//
+			// CPython: Python/bytecodes.c:2023 LIST_EXTEND
+			if !objects.Iterable(v) {
+				eerr = fmt.Errorf("TypeError: Value after * must be an iterable, not %s", v.Type().Name)
+			}
+			// CPython closes the iterable on the error path too, before
+			// raising. popObject stole the stack reference, so this arm
+			// owns it and has to release it here as well.
+			objects.Decref(v)
 			return 0, true, eerr
 		}
 		for _, it := range items {
 			l.Append(it)
 		}
+		// PyStackRef_CLOSE(iterable_st): popObject stole the source
+		// iterable's stack reference, so the arm owns it and must drop it
+		// once its items have been copied into the target list. Leaving it
+		// pinned keeps the iterable alive as a cycle-collector root, and
+		// its traverse then repins every element so a weakref never fires.
+		//
+		// CPython: Python/bytecodes.c:2023 LIST_EXTEND (PyStackRef_CLOSE)
+		objects.Decref(v)
 		return e.advance(), true, nil
 
 	case compile.DICT_MERGE:
@@ -622,12 +667,25 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		src := e.popObject()
 		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
 		if !ok {
+			objects.Decref(src)
 			return 0, true, fmt.Errorf("DICT_MERGE: target not a dict")
 		}
 		callable := e.peek(int(oparg) + 2).AsObject()
+		// DECREF_INPUTS: popObject stole the source mapping's stack
+		// reference, so this arm owns it and must release it once the
+		// merge has copied the entries into the kwargs dict (each value
+		// was incref'd on insertion). CPython closes `update` on both the
+		// success and the format-error paths; without the release the
+		// source mapping's refcount never returns to zero and the cycle
+		// collector cannot reclaim it or anything it holds.
+		//
+		// CPython: Python/bytecodes.c:2122 DICT_MERGE (PyStackRef_CLOSE(update))
 		if merr := dictMergeKwargs(d, src); merr != nil {
-			return 0, true, formatKwargsError(callable, merr)
+			err := formatKwargsError(callable, merr)
+			objects.Decref(src)
+			return 0, true, err
 		}
+		objects.Decref(src)
 		return e.advance(), true, nil
 
 	case compile.BUILD_SET:
@@ -650,13 +708,24 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 
 	case compile.CALL_INTRINSIC_1:
 		v := e.popObject()
+		// PyStackRef_CLOSE(value): the intrinsic only borrows its input,
+		// so this arm owns the popped reference and releases it on every
+		// exit. Skipping the release pins the input as a cycle-collector
+		// root (a list built for LIST_TO_TUPLE, the operand of an unary
+		// intrinsic), and its traverse then keeps every element alive so
+		// a weakref to one never fires.
+		//
+		// CPython: Python/bytecodes.c:1148 CALL_INTRINSIC_1 (PyStackRef_CLOSE)
 		if int(oparg) >= len(intrinsicsUnary) {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
 		}
 		// IMPORT_STAR needs the current frame's locals, which the generic
 		// intrinsic signature doesn't carry. Route it directly.
 		if oparg == intrinsics.UnaryImportStarID {
-			if ierr := e.importStar(v); ierr != nil {
+			ierr := e.importStar(v)
+			objects.Decref(v)
+			if ierr != nil {
 				return 0, true, ierr
 			}
 			e.pushObject(objects.None())
@@ -664,9 +733,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		fn := intrinsicsUnary[oparg]
 		if fn == nil {
+			objects.Decref(v)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_1: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, v)
+		objects.Decref(v)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -676,14 +747,25 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 	case compile.CALL_INTRINSIC_2:
 		rhs := e.popObject()
 		lhs := e.popObject()
+		// DECREF_INPUTS(): both operands are borrowed by the intrinsic, so
+		// the arm owns the two popped references and releases them on every
+		// exit, matching CALL_INTRINSIC_1 above.
+		//
+		// CPython: Python/bytecodes.c:1159 CALL_INTRINSIC_2 (DECREF_INPUTS)
 		if int(oparg) >= len(intrinsicsBinary) {
+			objects.Decref(rhs)
+			objects.Decref(lhs)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: oparg %d out of range", oparg)
 		}
 		fn := intrinsicsBinary[oparg]
 		if fn == nil {
+			objects.Decref(rhs)
+			objects.Decref(lhs)
 			return 0, true, fmt.Errorf("CALL_INTRINSIC_2: id %d unbound", oparg)
 		}
 		out, cerr := fn(e.ts, lhs, rhs)
+		objects.Decref(rhs)
+		objects.Decref(lhs)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -722,7 +804,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		if pyExc, ok := exc.(*pyerrors.Exception); ok {
 			pyerrors.Raise(e.ts, pyExc)
-			return 0, true, excSentinel(pyExc)
+			return 0, true, &reraiseError{exc: pyExc}
 		}
 		return 0, true, fmt.Errorf("%s", objectRepr(exc))
 
@@ -772,17 +854,37 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		npos := total - nkw
 		// Lay out args[] flat: positionals first, then keyword values
 		// in the same order as kwnames, matching the vectorcall ABI.
-		all := make([]objects.Object, total)
+		origArgs := make([]objects.Object, total)
 		for i := total - 1; i >= 0; i-- {
-			all[i] = e.popObject()
+			origArgs[i] = e.popObject()
 		}
 		selfOrNull := e.popObject()
 		callable := e.popObject()
+		all := origArgs
 		if selfOrNull != nil {
-			all = append([]objects.Object{selfOrNull}, all...)
+			all = append([]objects.Object{selfOrNull}, origArgs...)
 			npos++
 		}
 		out, cerr := objects.Vectorcall(callable, all, uint(npos), kwnames)
+		// DECREF_INPUTS: the bound callee increfs every argument it
+		// keeps (positional slots, keyword slots, and the **kwargs dict
+		// copy), so the references this handler popped off the stack are
+		// borrowed and must be released once the call returns. Without
+		// this the caller's stack reference outlives the call and keeps
+		// the argument's refcount above zero, so the cycle collector can
+		// never prove it unreachable and its weakrefs never fire.
+		//
+		// CPython: Python/bytecodes.c CALL_KW (DECREF_INPUTS at the tail)
+		objects.Decref(callable)
+		if selfOrNull != nil {
+			objects.Decref(selfOrNull)
+		}
+		for _, arg := range origArgs {
+			if arg != nil {
+				objects.Decref(arg)
+			}
+		}
+		objects.Decref(kwnamesObj)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -804,13 +906,62 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			kwargs = d
 		}
 		argsObj := e.popObject()
+		selfOrNull := e.popObject() // NULL_or_self placeholder
+		callable := e.popObject()
 		argsSlice, ierr := iterToSlice(argsObj)
 		if ierr != nil {
+			// check_args_iterable: when the unpacked object is not iterable
+			// at all (no tp_iter and not a sequence), CPython clears the raw
+			// error and reformats it with the callable's funcstr. An object
+			// whose __iter__ raises stays iterable, so its error propagates.
+			//
+			// CPython: Python/ceval.c check_args_iterable
+			if !objects.Iterable(argsObj) {
+				ierr = fmt.Errorf("TypeError: %s argument after * must be an iterable, not %s",
+					objectFunctionStr(callable), argsObj.Type().Name)
+			}
+			objects.Decref(callable)
+			if selfOrNull != nil {
+				objects.Decref(selfOrNull)
+			}
+			if argsObj != nil {
+				objects.Decref(argsObj)
+			}
+			if kwargs != nil {
+				objects.DecrefThrowawayKwargs(kwargs)
+			}
 			return 0, true, ierr
 		}
-		_ = e.popObject() // NULL_or_self placeholder
-		callable := e.popObject()
-		out, cerr := objects.Call(callable, objects.NewTuple(argsSlice), kwargs)
+		// NewTuple holds the unpacked positional arguments for the call.
+		// It starts at refcount 1 and is owned right here, so it has to be
+		// released once the call returns. Leaving it pinned keeps the
+		// tuple alive as a cycle-collector root, and its traverse then
+		// repins every unpacked argument so a weakref to one never fires.
+		argsTuple := objects.NewTuple(argsSlice)
+		out, cerr := objects.Call(callable, argsTuple, kwargs)
+		objects.Decref(argsTuple)
+		// DECREF_INPUTS: the callee increfs the arguments it keeps, so
+		// the references popped off the stack here (callable, the
+		// self/NULL placeholder, the positional iterable, and the
+		// keyword dict) are borrowed and released once the call returns.
+		// Holding them would keep an argument's refcount above zero and
+		// block the cycle collector from proving it unreachable.
+		//
+		// CPython: Python/bytecodes.c CALL_FUNCTION_EX (DECREF_INPUTS tail)
+		objects.Decref(callable)
+		if selfOrNull != nil {
+			objects.Decref(selfOrNull)
+		}
+		if argsObj != nil {
+			objects.Decref(argsObj)
+		}
+		if kwargs != nil {
+			// The keyword dict here is the throwaway BUILD_MAP + DICT_MERGE
+			// built for this unpack. Releasing it must also drop the values
+			// the merge incref'd into it; gopy dicts have no synchronous
+			// tp_dealloc, so do it explicitly once the final reference goes.
+			objects.DecrefThrowawayKwargs(kwargs)
+		}
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -1118,23 +1269,37 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 
 	switch op {
 	case compile.LOAD_NAME:
-		if v, ok := lookupIn(e.f.Locals, keyObj); ok {
-			e.pushObject(v)
+		// PyMapping_GetOptionalItem semantics: a non-dict locals mapping
+		// whose __getitem__ raises KeyError reads as "absent" (and the
+		// KeyError is cleared so it cannot leak past a later NameError);
+		// any other error propagates.
+		//
+		// CPython: Python/bytecodes.c LOAD_NAME
+		v, found, err := e.loadFromScope(e.f.Locals, keyObj)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			// Borrowed reference from the locals dict. Use FromObjectNew
+			// so the stack owns its own strong reference; the CALL /
+			// STORE_NAME / Close consumers balance with Decref.
+			e.push(stackref.FromObjectNew(v))
 			return v, nil
 		}
 		fallthrough
 	case compile.LOAD_GLOBAL:
-		// Stack effect (CPython 3.14, bytecodes.c:1769):
-		//     ( -- res, null if oparg & 1 )
-		// res is pushed first (deeper slot), the NULL marker on top.
-		// That matches the codegen pair LOAD_GLOBAL + PUSH_NULL: the
-		// callable lands below, NULL above, so an insert_superinstructions
-		// fold to LOAD_GLOBAL with bit 0 set is a no-op for the stack.
+		// Stack effect (CPython 3.14, bytecodes.c:1769. res is pushed first
+		// (deeper slot), the NULL marker on top. That matches the codegen
+		// pair LOAD_GLOBAL + PUSH_NULL: the callable lands below, NULL
+		// above, so an insert_superinstructions fold to LOAD_GLOBAL with
+		// bit 0 set is a no-op for the stack.
 		var v objects.Object
-		if w, ok := lookupIn(e.f.Globals, keyObj); ok {
+		if w, found, err := e.loadFromScope(e.f.Globals, keyObj); err != nil {
+			return nil, err
+		} else if found {
 			v = w
 		} else {
-			// CPython: Python/bytecodes.c LOAD_GLOBAL — when builtins is not
+			// CPython: Python/bytecodes.c LOAD_GLOBAL, when builtins is not
 			// an exact dict, PyObject_GetItem is used and its TypeError
 			// propagates (e.g. exec(code, {'__builtins__': 123}) raises
 			// TypeError, not NameError).
@@ -1148,7 +1313,8 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 				return nil, fmt.Errorf("vm: NameError: name '%s' is not defined", name)
 			}
 		}
-		e.pushObject(v)
+		// Borrowed reference from globals/builtins. See LOAD_NAME above.
+		e.push(stackref.FromObjectNew(v))
 		if pushNull {
 			e.push(stackref.Null)
 		}
@@ -1171,10 +1337,20 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 				dst = e.f.Globals
 			}
 		}
-		return nil, storeIn(dst, keyObj, v)
+		// CPython: Python/bytecodes.c STORE_NAME calls PyObject_SetItem
+		// (which Increfs the value into the dict) and then DECREFs v.
+		// storeIn → dictInsert Increfs the value; we Decref the popped
+		// stack ref to balance.
+		err := storeIn(dst, keyObj, v)
+		objects.Decref(v)
+		return nil, err
 	case compile.STORE_GLOBAL:
 		v := e.popObject()
-		return nil, storeIn(e.f.Globals, keyObj, v)
+		// CPython: Python/bytecodes.c STORE_GLOBAL, same Incref/Decref
+		// pairing as STORE_NAME.
+		err := storeIn(e.f.Globals, keyObj, v)
+		objects.Decref(v)
+		return nil, err
 	case compile.DELETE_NAME:
 		dst := e.f.Locals
 		if dst == nil {
@@ -1444,6 +1620,45 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	return v, true
 }
 
+// loadFromScope reads key from a LOAD_NAME / LOAD_GLOBAL scope with
+// PyMapping_GetOptionalItem semantics: an exact dict takes the fast
+// path; for any other mapping a KeyError means "absent" (and the
+// exception the nested __getitem__ recorded on the thread state is
+// cleared so it cannot leak past a later NameError), while every other
+// error propagates. eval('b', g, M()) where M.__getitem__ raises
+// KeyError must therefore surface NameError, not KeyError.
+//
+// CPython: Objects/abstract.c:207 PyMapping_GetOptionalItem
+func (e *evalState) loadFromScope(scope, key objects.Object) (objects.Object, bool, error) {
+	if scope == nil {
+		return nil, false, nil
+	}
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		if u, ok := key.(*objects.Unicode); ok {
+			v, err := d.GetItemKnownHash(u, u.HashCached())
+			if err != nil {
+				// A miss on an exact dict is "name not found", not an
+				// error to propagate; the caller turns it into NameError.
+				return nil, false, nil //nolint:nilerr // dict miss is not-found, not an error
+			}
+			return v, true, nil
+		}
+		v, err := d.GetItem(key)
+		if err != nil {
+			return nil, false, nil //nolint:nilerr // dict miss is not-found, not an error
+		}
+		return v, true, nil
+	}
+	v, found, err := objects.MappingGetOptionalItem(scope, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		pyerrors.Clear(e.ts)
+	}
+	return v, found, nil
+}
+
 func storeIn(scope objects.Object, key, value objects.Object) error {
 	if scope == nil {
 		return fmt.Errorf("vm: cannot store name: scope is nil")
@@ -1526,6 +1741,32 @@ func exactBuiltinLen(v objects.Object) (int, bool) {
 	return 0, false
 }
 
+// indexAsSsize coerces key to an int64 via PyNumber_AsSsize_t, calling
+// __index__ on non-int keys. Returns an error when key has no __index__
+// or the call fails.
+//
+// CPython: Objects/abstract.c:1486 PyNumber_AsSsize_t
+func indexAsSsize(key objects.Object) (int64, error) {
+	if idx, ok := key.(*objects.Int); ok {
+		v, _ := idx.Int64()
+		return v, nil
+	}
+	if b, ok := key.(*objects.Bool); ok {
+		v, _ := b.Int64()
+		return v, nil
+	}
+	idxObj, err := objects.NumberIndex(key)
+	if err != nil {
+		return 0, err
+	}
+	idx, ok := idxObj.(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: __index__ returned non-int (type %s)", idxObj.Type().Name)
+	}
+	v, _ := idx.Int64()
+	return v, nil
+}
+
 // getItem mirrors PyObject_GetItem against the v0.6 container surface.
 // Mappings (Dict) take a key; sequences (List/Tuple/Str) take an int
 // index that may be negative (counted from the end).
@@ -1541,11 +1782,15 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 		if sl, ok := key.(*objects.Slice); ok {
 			return sliceSequence(container, sl)
 		}
-		idx, ok := key.(*objects.Int)
-		if !ok {
+		// CPython routes the subscript through PyNumber_AsSsize_t which
+		// calls __index__ on non-int objects. Without this, a class with
+		// only __index__ is rejected as "indices must be integers".
+		//
+		// CPython: Objects/abstract.c:1666 PySequence_GetItem
+		i, ierr := indexAsSsize(key)
+		if ierr != nil {
 			return nil, fmt.Errorf("TypeError: '%s' indices must be integers, not %s", t.Name, key.Type().Name)
 		}
-		i, _ := idx.Int64()
 		if sq.Length != nil {
 			n, lerr := sq.Length(container)
 			if lerr != nil {
@@ -1654,8 +1899,12 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 		return t.Sequence.Contains(haystack, needle)
 	}
 	if d, ok := haystack.(*objects.Dict); ok {
-		v, _ := d.GetItem(needle)
-		return v != nil, nil
+		// dict.__contains__ runs the hash lookup, so an unhashable needle
+		// raises TypeError and a key whose __eq__ raises propagates that
+		// exception instead of silently reporting "not found".
+		//
+		// CPython: Objects/dictobject.c:2495 PyDict_Contains
+		return d.Contains(needle)
 	}
 	it, ierr := objects.Iter(haystack)
 	if ierr != nil {
@@ -1686,17 +1935,50 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 // readiness; gopy does the walk on each call instead.
 //
 // CPython: Objects/abstract.c PyObject_SetItem
+// storeSubscr performs container[key] = value and reports whether the
+// container adopted ownership of the key and/or value reference, so the
+// STORE_SUBSCR arm can release exactly the inputs CPython's
+// DECREF_INPUTS would. gopy's container storage contracts are not
+// uniform: an exact dict increfs the value it stores but steals the key
+// (dictInsert), an exact list steals the value it stores (listSetItem),
+// and every other path (user __setitem__, bytearray, dict/list
+// subclasses) treats its arguments as borrowed. keepKey / keepValue
+// stay false unless the container took the matching reference.
+//
+// CPython: Python/bytecodes.c STORE_SUBSCR
+func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool, err error) {
+	if objects.IsExactDict(container) {
+		if serr := setItem(container, key, value); serr != nil {
+			return false, false, serr
+		}
+		// dictInsert steals the key reference and increfs its own copy of
+		// the value, so the key transfers into the dict and the value
+		// stack reference is released by the caller.
+		return true, false, nil
+	}
+	if objects.IsExactList(container) {
+		if serr := setItem(container, key, value); serr != nil {
+			return false, false, serr
+		}
+		// listSetItem steals the value; the integer index is not stored.
+		return false, true, nil
+	}
+	if serr := setItem(container, key, value); serr != nil {
+		return false, false, serr
+	}
+	return false, false, nil
+}
+
 func setItem(container, key, value objects.Object) error {
 	mp, sq := mappingAndSequence(container.Type())
 	if mp != nil && mp.SetItem != nil {
 		return mp.SetItem(container, key, value)
 	}
 	if sq != nil && sq.SetItem != nil {
-		idx, ok := key.(*objects.Int)
-		if !ok {
+		i, ierr := indexAsSsize(key)
+		if ierr != nil {
 			return fmt.Errorf("TypeError: %s indices must be integers, not %s", container.Type().Name, key.Type().Name)
 		}
-		i, _ := idx.Int64()
 		return sq.SetItem(container, int(i), value)
 	}
 	return fmt.Errorf("TypeError: '%s' object does not support item assignment", container.Type().Name)
@@ -1774,6 +2056,22 @@ func normalizeCause(cause objects.Object) (*pyerrors.Exception, error) {
 		return nil, nil
 	}
 	return normalizeRaise(cause)
+}
+
+// reraiseError marks an error that originated from the RERAISE opcode.
+// CPython's RERAISE jumps straight to exception_unwind, bypassing the
+// `error` label's PyTraceBack_Here, so the unwind loop must not prepend
+// a fresh traceback entry for it. The exception already carries the tb
+// from its original raise site; a with-statement cleanup that re-raises
+// must not stamp a second (and line-0) frame entry over it.
+//
+// CPython: Python/bytecodes.c RERAISE (goto exception_unwind)
+type reraiseError struct {
+	exc *pyerrors.Exception
+}
+
+func (r *reraiseError) Error() string {
+	return excSentinel(r.exc).Error()
 }
 
 // excSentinel returns the Go error the unwind loop sees once the

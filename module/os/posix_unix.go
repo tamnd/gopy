@@ -192,6 +192,76 @@ func osDup(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 	return objects.NewInt(int64(newfd)), nil
 }
 
+// osGetInheritable returns whether the file descriptor will be
+// inherited by child processes. On POSIX a descriptor is inheritable
+// exactly when FD_CLOEXEC is clear, so the result is read off
+// fcntl(fd, F_GETFD).
+//
+// CPython: Modules/posixmodule.c:9531 os_get_inheritable_impl
+func osGetInheritable(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: get_inheritable() missing required argument: 'fd'")
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	flags, err := fcntlGetFD(int(fdVal))
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	return objects.NewBool(flags&syscall.FD_CLOEXEC == 0), nil
+}
+
+// osSetInheritable sets or clears the descriptor's inheritable flag by
+// toggling FD_CLOEXEC through fcntl.
+//
+// CPython: Modules/posixmodule.c:9554 os_set_inheritable_impl
+func osSetInheritable(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: set_inheritable() takes exactly 2 arguments (%d given)", len(args))
+	}
+	fdObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: an integer is required")
+	}
+	fdVal, _ := fdObj.Int64()
+	flags, err := fcntlGetFD(int(fdVal))
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	if objects.IsTrue(args[1]) {
+		flags &^= syscall.FD_CLOEXEC
+	} else {
+		flags |= syscall.FD_CLOEXEC
+	}
+	if err := fcntlSetFD(int(fdVal), flags); err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	return objects.None(), nil
+}
+
+// fcntlGetFD reads the F_GETFD descriptor flags. The std syscall
+// package does not export FcntlInt on every GOOS, so the raw fcntl
+// syscall is invoked directly.
+func fcntlGetFD(fd int) (int, error) {
+	r, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_GETFD), 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(r), nil
+}
+
+// fcntlSetFD writes the F_SETFD descriptor flags.
+func fcntlSetFD(fd, flags int) error {
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_SETFD), uintptr(flags))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 // posixIdentityEntries returns the geteuid / getegid / getgid /
 // getgroups bindings. These exist only on builds with HAVE_GETEUID.
 //

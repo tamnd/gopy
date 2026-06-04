@@ -1,10 +1,8 @@
 // Port of builtin_aiter and builtin_anext_impl. Both dispatch through
 // the type's tp_as_async slots: am_aiter for aiter(), am_anext for
-// anext(). The default-aware wrapper that anext(iterator, default)
-// returns when the iterator is exhausted is not modeled; gopy's
-// awaitable surface is still narrow and the wrapper would need
-// PyAnextAwaitable_New, which depends on the broader async iterator
-// protocol (#358).
+// anext(). The two-argument anext(iterator, default) wraps the
+// awaitable in objects.AnextAwaitable so a StopAsyncIteration during
+// iteration falls back to StopIteration(default).
 //
 // CPython: Python/bltinmodule.c:1846 builtin_aiter
 // CPython: Python/bltinmodule.c:1868 builtin_anext_impl
@@ -59,5 +57,10 @@ func ANext(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	if len(args) == 1 {
 		return awaitable, nil
 	}
-	return nil, fmt.Errorf("NotImplementedError: anext() default wrapper requires PyAnextAwaitable_New")
+	// anext(iter, default): wrap the awaitable so a raised
+	// StopAsyncIteration falls back to StopIteration(default).
+	//
+	// CPython: Python/bltinmodule.c:1909 builtin_anext_impl (default arg)
+	// CPython: Objects/iterobject.c:529 PyAnextAwaitable_New
+	return objects.NewAnextAwaitable(awaitable, args[1]), nil
 }

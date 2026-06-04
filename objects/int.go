@@ -36,6 +36,15 @@ func init() {
 	IntType.Hash = intHash
 	IntType.RichCmp = intRichCmp
 	IntType.TpFlags |= TpFlagMatchSelf
+	// PyLongObject layout sizes on a 64-bit build: tp_basicsize is the
+	// offset of long_value.ob_digit (PyObject_HEAD = 16 bytes plus
+	// _PyLongValue.lv_tag = 8 bytes), tp_itemsize is sizeof(digit) with
+	// PYLONG_BITS_IN_DIGIT == 30.
+	//
+	// CPython: Objects/longobject.c:6542 PyLong_Type.tp_basicsize
+	// CPython: Include/cpython/longintrepr.h:43 typedef uint32_t digit
+	IntType.BaseSize = 24
+	IntType.ItemSize = 4
 	IntType.Number = &NumberMethods{
 		Add:         intAdd,
 		Subtract:    intSub,

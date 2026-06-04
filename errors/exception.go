@@ -24,6 +24,17 @@ type Exception struct {
 	TB       *traceback.Traceback
 	attrs    *objects.Dict
 
+	// StopValue stores StopIteration's separate value slot per
+	// PyStopIterationObject. CPython keeps args and value independent:
+	// `e = StopIteration("spam"); e.value = "eggs"` leaves args[0] as
+	// "spam" but flips value to "eggs", so str(e) still prints "spam".
+	// Populated by StopIteration_init from args[0] or None; only
+	// meaningful when ExcType is StopIteration or a subclass.
+	//
+	// CPython: Objects/exceptions.c:746 PyStopIterationObject
+	// CPython: Objects/exceptions.c:754 StopIteration_init
+	StopValue objects.Object
+
 	// SyntaxErr carries the SyntaxError-specific PyMemberDef payload
 	// (msg, filename, lineno, offset, text, end_lineno, end_offset,
 	// print_file_and_line, _metadata). Non-nil only when ExcType is a
@@ -90,7 +101,37 @@ func New(t *objects.Type, args *objects.Tuple) *Exception {
 	if t != nil {
 		e.Init(t)
 	}
+	// StopIteration_init seeds value from args[0] or None.
+	//
+	// CPython: Objects/exceptions.c:754 StopIteration_init
+	if t != nil && isStopIterationType(t) {
+		if args.Len() > 0 {
+			e.StopValue = args.Item(0)
+		} else {
+			e.StopValue = objects.None()
+		}
+	}
 	return e
+}
+
+// isStopIterationType reports whether t is StopIteration or a subclass
+// of it, mirroring the C inheritance check in StopIteration_init.
+func isStopIterationType(t *objects.Type) bool {
+	for cur := t; cur != nil; cur = parentType(cur) {
+		if cur.Name == "StopIteration" {
+			return true
+		}
+	}
+	return false
+}
+
+// parentType returns the first base of t (its primary parent), or nil
+// when t has no bases. Used by isStopIterationType to walk the MRO.
+func parentType(t *objects.Type) *objects.Type {
+	if len(t.Bases) == 0 {
+		return nil
+	}
+	return t.Bases[0]
 }
 
 // Message returns the exception's args[0] as a string when args has

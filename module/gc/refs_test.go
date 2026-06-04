@@ -11,6 +11,7 @@ import (
 )
 
 func TestUpdateRefsCopiesRefcount(t *testing.T) {
+	defer untrackAll()
 	containers := newListHead()
 	a := objects.NewList(nil)
 	g := &gcHead{obj: a}
@@ -27,6 +28,7 @@ func TestUpdateRefsCopiesRefcount(t *testing.T) {
 }
 
 func TestSubtractRefsCycleCollapsesToZero(t *testing.T) {
+	defer untrackAll()
 	// Self-referential list: l.append(l). Refcount is 2 (the test's
 	// local plus the slot inside the list); the inner reference is
 	// the only one inside the candidate set, so subtract_refs should
@@ -55,6 +57,7 @@ func TestSubtractRefsCycleCollapsesToZero(t *testing.T) {
 }
 
 func TestSubtractRefsTwoNodeCycle(t *testing.T) {
+	defer untrackAll()
 	// Build a -> b -> a. Each list holds the other; both are in the
 	// candidate set. After subtract_refs, the only references each
 	// list has left are the two locals here, so refs should equal 1.
@@ -91,6 +94,7 @@ func TestSubtractRefsTwoNodeCycle(t *testing.T) {
 }
 
 func TestSubtractRefsExternalOwnerStaysPositive(t *testing.T) {
+	defer untrackAll()
 	// Tuple containing a list, only the tuple is in the candidate
 	// set. The list is NOT tracked; visit_decref skips it. Refs on
 	// the tuple stays equal to its refcount.
@@ -113,6 +117,7 @@ func TestSubtractRefsExternalOwnerStaysPositive(t *testing.T) {
 }
 
 func TestSubtractRefsSkipsNonCollectingNodes(t *testing.T) {
+	defer untrackAll()
 	// A node in the tracked map but without the COLLECTING flag (eg.
 	// it lives on a different generation) must not be touched by
 	// subtract_refs.
