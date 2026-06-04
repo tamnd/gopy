@@ -555,10 +555,14 @@ func namespaceKeyOrder(ns *Dict) []Object {
 }
 
 func copyNamespaceToType(t *Type, ns *Dict) error {
+	sawDoc := false
 	for _, k := range namespaceKeyOrder(ns) {
 		s, ok := k.(*Unicode)
 		if !ok || s.v == "__slots__" {
 			continue
+		}
+		if s.v == "__doc__" {
+			sawDoc = true
 		}
 		v, err := ns.GetItem(k)
 		if err != nil {
@@ -641,6 +645,21 @@ func copyNamespaceToType(t *Type, ns *Dict) error {
 			continue
 		}
 		SetTypeDescr(t, s.v, v)
+	}
+	// type_dict_set_doc: when the type dictionary lacks a __doc__ entry, set it
+	// from tp_doc when present and to None otherwise. A user class has no
+	// tp_doc, so it defaults to None. This is why every class (docstring or
+	// not) has __doc__ in __dict__, and it lets instance __doc__ lookups
+	// resolve to the class value instead of falling through to __getattr__.
+	//
+	// The check is against the type's own dict, not just the namespace: a
+	// __slots__ entry named "__doc__" installs a member descriptor under
+	// "__doc__" (handled by installSlots above), and that entry must not be
+	// clobbered with None.
+	//
+	// CPython: Objects/typeobject.c:8551 type_dict_set_doc
+	if !sawDoc && lookupTypeMember(t, "__doc__") == nil {
+		SetTypeDescr(t, "__doc__", None())
 	}
 	return nil
 }

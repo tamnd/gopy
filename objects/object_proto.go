@@ -143,6 +143,13 @@ func LookupAttr(o Object, name Object) (Object, error) {
 	v, err := GetAttr(o, name)
 	if err != nil {
 		if isAttributeError(err) {
+			// Mirror PyErr_Clear: suppressing the AttributeError must also
+			// drop the thread-state's current exception, otherwise a stale
+			// AttributeError raised inside the attribute lookup (e.g. a
+			// __doc__ getter that raises) leaks into the next operation.
+			if ClearCurrentExceptionHook != nil {
+				ClearCurrentExceptionHook()
+			}
 			return nil, nil
 		}
 		return nil, err
