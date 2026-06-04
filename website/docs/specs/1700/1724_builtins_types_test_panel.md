@@ -48,7 +48,7 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_structseq | **PANIC** | structseq-as-tuple cast (P0) | ready |
 | test_range | GREEN | range getset + methods + pickle compat (P1, shipped) | done |
 | test_dictviews | GREEN | dict-view set ops + __contains__ + recursive repr (P2, shipped) | done |
-| test_property | FAIL (18f, 5e) | property descriptor surface (P3) | ready |
+| test_property | green | property descriptor surface (P3) | done |
 | test_memoryview | FAIL (49f, 36e) | memoryview buffer protocol (P4) | ready |
 | test_strtod | GREEN | float.hex mantissa padding + long-mantissa parse (P5, shipped) | done |
 | test_unicodedata | FAIL (4f, 1e) | hashlib blake2 + data file (P6) | ready |
@@ -468,7 +468,7 @@ alone), CI green before moving on:
 - [x] P0.2 structseq routes through tuple slots without unchecked cast (test_structseq)
 - [x] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ + _compat_pickle two-to-three mapping (test_range)
 - [x] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
-- [ ] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
+- [x] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
 - [ ] P4.a memoryview item/slice assignment + hash + context manager/release + count/index (test_memoryview bulk)
 - [ ] P4.b memoryview cast edge cases + PEP 688 __buffer__ + PickleBuffer (test_memoryview tail)
 - [x] P5 float.hex full mantissa zero-padding + exact long-mantissa decimal parsing (test_strtod)
