@@ -50,7 +50,7 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_dictviews | FAIL (1f, 2e) | dict-view set ops (P2) | ready |
 | test_property | FAIL (18f, 5e) | property descriptor surface (P3) | ready |
 | test_memoryview | FAIL (49f, 36e) | memoryview buffer protocol (P4) | ready |
-| test_strtod | FAIL (8f) | float.hex mantissa padding (P5) | ready |
+| test_strtod | GREEN | float.hex mantissa padding + long-mantissa parse (P5, shipped) | done |
 | test_unicodedata | FAIL (4f, 1e) | hashlib blake2 + data file (P6) | ready |
 | test_ucn | FAIL (2f) | hashlib blake2 + named sequences (P6) | ready |
 | test_unicode_file | **CRASH** | os.supports_unicode_filenames (P7) | ready |
@@ -317,7 +317,20 @@ including the `0x0.0p+0` form for zero and the full mantissa for normals.
 Confirm `float.fromhex` round-trips (already green via test_float, keep it
 green).
 
-**Acceptance:** test_strtod green; test_float stays green.
+**Port plan (parsing).** test_strtod also exercises the decimal-to-double
+boundary. Go's `strconv.ParseFloat` caps the mantissa digits it reads, so a
+literal with a long digit run can round to the wrong binade (values near the
+overflow boundary become inf, tiny values spelled with thousands of zeros
+underflow to 0). When the mantissa carries more than 17 significant digits,
+recompute the value exactly via `big.Rat` and take its correctly rounded
+`float64`, matching `_Py_dg_strtod`. The fix lives in `pystrconv.ParseFloat`,
+the path `float()` actually uses (not `objects.FloatFromString`).
+
+**Acceptance:** test_strtod green and stable across runs; test_float stays
+green.
+
+**Shipped.** float.hex ported in objects/float_methods.go; long-mantissa
+exact recompute added to pystrconv/strtod.go. test_strtod OK across 3 runs.
 
 ---
 
@@ -434,7 +447,7 @@ alone), CI green before moving on:
 - [ ] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
 - [ ] P4.a memoryview item/slice assignment + hash + context manager/release + count/index (test_memoryview bulk)
 - [ ] P4.b memoryview cast edge cases + PEP 688 __buffer__ + PickleBuffer (test_memoryview tail)
-- [ ] P5 float.hex full mantissa zero-padding (test_strtod)
+- [x] P5 float.hex full mantissa zero-padding + exact long-mantissa decimal parsing (test_strtod)
 - [ ] P6.a hashlib blake2b / blake2s (test_unicodedata, test_ucn checksums)
 - [ ] P6.b vendor NormalizationTest-3.2.0.txt (test_unicodedata normalization)
 - [ ] P6.c named-sequence resolver table (test_ucn named sequences)
