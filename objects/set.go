@@ -1075,6 +1075,23 @@ func toSet(o Object) (*Set, bool) {
 	return s, ok
 }
 
+// mutableSetCopy returns a fresh mutable set holding s's elements,
+// whether or not s is frozen. The dict view set operators use it so
+// their result is always a plain `set`, matching PySet_New.
+//
+// CPython: Objects/dictobject.c:6300 dictviews_or (PySet_New base)
+func mutableSetCopy(s *Set) (*Set, error) {
+	out := NewSet()
+	for _, e := range s.entries {
+		if e.used {
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
 // Set binary operations (Number slots).
 //
 // CPython: Objects/setobject.c set_and, set_or, set_sub, set_xor

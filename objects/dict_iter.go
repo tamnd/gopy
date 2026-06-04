@@ -14,6 +14,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // dictIterKind tags which payload the iterator yields. Three CPython
@@ -526,6 +527,32 @@ func init() {
 	// CPython: Objects/dictobject.c:6650 dictkeys_methods / dictitems_methods
 	SetTypeDescr(dictKeysViewType, "isdisjoint", NewMethodDescr(dictKeysViewType, "isdisjoint", dictViewIsDisjoint))
 	SetTypeDescr(dictItemsViewType, "isdisjoint", NewMethodDescr(dictItemsViewType, "isdisjoint", dictViewIsDisjoint))
+
+	// The sq_contains slot is also surfaced as a callable __contains__ on
+	// the set-like views, matching the slot wrapper CPython synthesizes
+	// for tp_as_sequence->sq_contains.
+	//
+	// CPython: Objects/typeobject.c slotdefs (__contains__ <- sq_contains)
+	SetTypeDescr(dictKeysViewType, "__contains__", NewMethodDescr(dictKeysViewType, "__contains__", dictViewContainsMethod))
+	SetTypeDescr(dictItemsViewType, "__contains__", NewMethodDescr(dictItemsViewType, "__contains__", dictViewContainsMethod))
+}
+
+// dictViewContainsMethod backs view.__contains__(x), forwarding to the
+// view type's sq_contains slot so the keys/items membership semantics
+// (and any exception a bad __eq__ raises) are shared with `x in view`.
+//
+// CPython: Objects/typeobject.c slot_sq_contains
+func dictViewContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	self := args[0]
+	contains := self.Type().Sequence.Contains
+	ok, err := contains(self, args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok), nil
 }
 
 // dictViewReversed implements view.__reversed__(): a reverse iterator
@@ -645,8 +672,18 @@ func dictItemsViewContains(o, key Object) (bool, error) {
 	return RichCmpBool(got, t.Item(1), CompareEQ)
 }
 
+// dictViewRepr renders "dict_keys([...])" and friends. A view that
+// contains itself (a dict mapping to its own values/items view) would
+// recurse forever, so Py_ReprEnter short-circuits the second visit with
+// "...".
+//
+// CPython: Objects/dictobject.c:6109 dictview_repr
 func dictViewRepr(o Object) (string, error) {
 	v := o.(*dictView)
+	if ReprEnter(v) {
+		return "...", nil
+	}
+	defer ReprLeave(v)
 	name := v.Type().Name
 	body, err := dictViewIterRepr(v)
 	if err != nil {
@@ -660,7 +697,8 @@ func dictViewRepr(o Object) (string, error) {
 //
 // CPython: Objects/dictobject.c:6109 dictview_repr
 func dictViewIterRepr(v *dictView) (string, error) {
-	out := "["
+	var out strings.Builder
+	out.WriteByte('[')
 	first := true
 	it, err := dictViewIter(v)
 	if err != nil {
@@ -675,17 +713,17 @@ func dictViewIterRepr(v *dictView) (string, error) {
 			return "", err
 		}
 		if !first {
-			out += ", "
+			out.WriteString(", ")
 		}
 		first = false
 		s, err := Repr(item)
 		if err != nil {
 			return "", err
 		}
-		out += s
+		out.WriteString(s)
 	}
-	out += "]"
-	return out, nil
+	out.WriteByte(']')
+	return out.String(), nil
 }
 
 // View set algebra: keys() and items() are set-like, so &, |, -, ^
@@ -765,6 +803,16 @@ func dictViewBinop(a, b Object, op func(left, right *Set) (*Set, error)) (Object
 		return nil, err
 	}
 	right, err := otherToSet(b)
+	if err != nil {
+		return nil, err
+	}
+	// The view set operators always build a fresh plain set (PySet_New),
+	// so the result is `set` even when an operand is a frozenset or a
+	// set subclass. The set-op helpers below clone the shape of `left`,
+	// so force `left` to a mutable set first.
+	//
+	// CPython: Objects/dictobject.c:6256 _PyDictView_Intersect (PySet_New)
+	left, err = mutableSetCopy(left)
 	if err != nil {
 		return nil, err
 	}
