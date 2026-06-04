@@ -35,6 +35,20 @@ type MemoryView struct {
 	//
 	// CPython: Objects/memoryobject.c mbuf_release / bytearray_releasebuffer
 	exporter *ByteArray
+	// obj is the object this view was opened on (CPython's view->obj). It is
+	// kept so memory_hash can pin the view across the underlying object's
+	// own hash (gh-142664) and so a re-entrant release during that hash is
+	// rejected. nil for a view that owns its bytes outright.
+	//
+	// CPython: Objects/memoryobject.c:3235 memory_hash (view->obj)
+	obj Object
+	// exports counts the buffers handed out of this view. A release() while
+	// exports > 0 raises BufferError, matching memoryview_release_impl. The
+	// hash path bumps it for the duration of the underlying object's hash so
+	// a re-entrant release() inside that hash is turned into a BufferError.
+	//
+	// CPython: Objects/memoryobject.c:1131 memoryview_release_impl (get_exports)
+	exports  int
 	released bool
 	// hash caches the result of the first successful hash(). Like CPython
 	// (and weakrefs), the cached value survives release(): hashing a view
@@ -93,6 +107,26 @@ func init() {
 	SetTypeDescr(MemoryViewType, "hex", NewMethodDescr(MemoryViewType, "hex", memoryViewHexMethod))
 	SetTypeDescr(MemoryViewType, "release", NewMethodDescr(MemoryViewType, "release", memoryViewReleaseMethod))
 	SetTypeDescr(MemoryViewType, "toreadonly", NewMethodDescr(MemoryViewType, "toreadonly", memoryViewToreadonlyMethod))
+	// Expose the tp_hash slot as memoryview.__hash__ so an explicit
+	// mv.__hash__() call routes through memory_hash rather than falling back
+	// to object.__hash__ (the identity hash). The use-after-free guard lives
+	// in memory_hash, so the explicit call must reach it.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	SetTypeDescr(MemoryViewType, "__hash__", NewMethodDescr(MemoryViewType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
+		}
+		m, ok := args[0].(*MemoryView)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: descriptor '__hash__' requires a 'memoryview' object")
+		}
+		h, err := memoryViewHash(m)
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	SetTypeDescr(MemoryViewType, "count", NewMethodDescr(MemoryViewType, "count", memoryViewCountMethod))
 	SetTypeDescr(MemoryViewType, "index", NewMethodDescr(MemoryViewType, "index", memoryViewIndexMethod))
 	SetTypeDescr(MemoryViewType, "__enter__", NewMethodDescr(MemoryViewType, "__enter__", memoryViewEnterMethod))
@@ -162,16 +196,16 @@ func formatItemsize(format string) int {
 func NewMemoryView(src Object) (*MemoryView, error) {
 	switch s := src.(type) {
 	case *Bytes:
-		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, contiguous: true}
+		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, contiguous: true, obj: s}
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *ByteArray:
-		mv := &MemoryView{buf: s.Bytes(), readonly: false, format: "B", itemsize: 1, contiguous: true, exporter: s}
+		mv := &MemoryView{buf: s.Bytes(), readonly: false, format: "B", itemsize: 1, contiguous: true, exporter: s, obj: s}
 		s.ExportInc()
 		mv.init(MemoryViewType)
 		return mv, nil
 	case *MemoryView:
-		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize, contiguous: s.contiguous}
+		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize, contiguous: s.contiguous, obj: s.obj}
 		mv.init(MemoryViewType)
 		return mv, nil
 	}
@@ -185,7 +219,7 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 			if format == "" {
 				format = "B"
 			}
-			mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true}
+			mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true, obj: src}
 			mv.init(MemoryViewType)
 			return mv, nil
 		}
@@ -518,6 +552,22 @@ func memoryViewHash(o Object) (int64, error) {
 	case "B", "b", "c", "":
 	default:
 		return 0, fmt.Errorf("ValueError: memoryview: hashing is restricted to formats 'B', 'b' or 'c'")
+	}
+	if m.obj != nil {
+		// Hash the exporter so its own __hash__ runs (an unhashable exporter
+		// such as bytearray raises TypeError here). Bumping exports first
+		// pins the view: a re-entrant __hash__ that calls release() sees a
+		// non-zero export count and raises BufferError instead of freeing the
+		// buffer mid-hash (gh-142664). The result is discarded; the cached
+		// hash comes from the buffer bytes below.
+		//
+		// CPython: Objects/memoryobject.c:3235 memory_hash
+		m.exports++
+		_, err := Hash(m.obj)
+		m.exports--
+		if err != nil {
+			return 0, err
+		}
 	}
 	m.hashValue = HashBytes(m.buf)
 	m.hashSet = true
@@ -876,6 +926,19 @@ func memoryViewReleaseMethod(args []Object, _ map[string]Object) (Object, error)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'release' requires a 'memoryview' object")
 	}
+	// A view with live exported buffers cannot be released; CPython raises
+	// BufferError rather than freeing memory another consumer still holds
+	// (this is also what turns a re-entrant release() during hash() into a
+	// BufferError, gh-142664).
+	//
+	// CPython: Objects/memoryobject.c:1138 memoryview_release_impl
+	if m.exports > 0 {
+		plural := "s"
+		if m.exports == 1 {
+			plural = ""
+		}
+		return nil, fmt.Errorf("BufferError: memoryview has %d exported buffer%s", m.exports, plural)
+	}
 	// Drop the export held on the source bytearray (idempotent: a
 	// second release() is a no-op in CPython too).
 	//
@@ -903,7 +966,7 @@ func memoryViewToreadonlyMethod(args []Object, _ map[string]Object) (Object, err
 	if err := m.checkReleased(); err != nil {
 		return nil, err
 	}
-	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize, contiguous: m.contiguous}
+	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize, contiguous: m.contiguous, obj: m.obj}
 	view.init(MemoryViewType)
 	return view, nil
 }
