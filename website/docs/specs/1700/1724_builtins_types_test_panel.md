@@ -427,8 +427,8 @@ alone), CI green before moving on:
 
 ## Checklist
 
-- [ ] P0.1 getset setter nil-value deletion guard (test_funcattrs)
-- [ ] P0.2 structseq routes through tuple slots without unchecked cast (test_structseq)
+- [x] P0.1 getset setter nil-value deletion guard (test_funcattrs)
+- [x] P0.2 structseq routes through tuple slots without unchecked cast (test_structseq)
 - [ ] P1 range getset start/stop/step + count/index/richcompare/reduce/__index__ (test_range)
 - [ ] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
 - [ ] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
