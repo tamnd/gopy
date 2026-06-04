@@ -28,6 +28,25 @@ func init() {
 	RangeType.Str = rangeRepr
 	RangeType.RichCmp = rangeRichCmp
 	RangeType.Iter = rangeIter
+	// range_hash hashes the (length, start, step) triple, collapsing
+	// empty/length-1 ranges so equal ranges hash equal.
+	//
+	// CPython: Objects/rangeobject.c:579 range_hash
+	RangeType.Hash = rangeHash
+	// range_as_number only fills nb_bool. bool(range) goes through the
+	// stored length, so bool(range(-sys.maxsize, sys.maxsize)) is True
+	// even though len() of that range overflows Py_ssize_t.
+	//
+	// CPython: Objects/rangeobject.c:743 range_bool
+	RangeType.Number = &NumberMethods{
+		Bool: rangeBool,
+	}
+	// range inherits tp_setattro from object (PyObject_GenericSetAttr),
+	// so assigning to the read-only start/stop/step getsets raises
+	// AttributeError rather than the "no attributes" fallback.
+	//
+	// CPython: Objects/rangeobject.c:781 PyRange_Type (tp_setattro inherited)
+	RangeType.Setattro = GenericSetAttr
 	RangeType.Sequence = &SequenceMethods{
 		Length:   rangeLen,
 		GetItem:  rangeItem,
@@ -37,6 +56,34 @@ func init() {
 		Length:  rangeLen,
 		GetItem: rangeSubscript,
 	}
+	// range_members: start, stop, step are read-only int attributes.
+	//
+	// CPython: Objects/rangeobject.c:774 range_members
+	SetTypeDescr(RangeType, "start", NewGetSetDescr("start",
+		func(o Object) (Object, error) { return o.(*Range).Start, nil }, nil))
+	SetTypeDescr(RangeType, "stop", NewGetSetDescr("stop",
+		func(o Object) (Object, error) { return o.(*Range).Stop, nil }, nil))
+	SetTypeDescr(RangeType, "step", NewGetSetDescr("step",
+		func(o Object) (Object, error) { return o.(*Range).Step, nil }, nil))
+	// range_methods: count and index, both METH_O.
+	//
+	// CPython: Objects/rangeobject.c:769 range_methods
+	SetTypeDescr(RangeType, "count", NewMethodDescr(RangeType, "count",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: count() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return rangeCount(args[0], args[1])
+		},
+	))
+	SetTypeDescr(RangeType, "index", NewMethodDescr(RangeType, "index",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: index() takes exactly one argument (%d given)", len(args)-1)
+			}
+			return rangeIndex(args[0], args[1])
+		},
+	))
 	// CPython: Objects/rangeobject.c:939 range_reduce
 	SetTypeDescr(RangeType, "__reduce__", NewMethodDescr(RangeType, "__reduce__",
 		func(args []Object, _ map[string]Object) (Object, error) {
@@ -122,6 +169,167 @@ func rangeReverse(o Object) (Object, error) {
 	prod := new(big.Int).Mul(nm1, &r.Step.v)
 	newStart := NewIntFromBig(new(big.Int).Add(&r.Start.v, prod))
 	return newRangeIterator(newStart, newStop, newStep), nil
+}
+
+// rangeBool ports range_bool: the truth value is whether the stored
+// length is non-zero. Going through the length keeps bool(range(...))
+// correct for ranges whose length overflows Py_ssize_t.
+//
+// CPython: Objects/rangeobject.c:743 range_bool
+func rangeBool(o Object) (bool, error) {
+	r := o.(*Range)
+	n := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
+	return n.Sign() != 0, nil
+}
+
+// rangeHash ports range_hash. The hash is computed over a (length,
+// start, step) tuple. An empty range substitutes None for start and
+// step, and a length-1 range substitutes None for step, so ranges that
+// compare equal under range_equals also hash equal.
+//
+// CPython: Objects/rangeobject.c:579 range_hash
+func rangeHash(o Object) (int64, error) {
+	r := o.(*Range)
+	n := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
+	lenObj := NewIntFromBig(n)
+	var t1, t2 Object
+	switch {
+	case n.Sign() == 0:
+		t1, t2 = None(), None()
+	case n.Cmp(big.NewInt(1)) == 0:
+		t1, t2 = r.Start, None()
+	default:
+		t1, t2 = r.Start, r.Step
+	}
+	return Hash(NewTuple([]Object{lenObj, t1, t2}))
+}
+
+// rangeCount ports range_count: exact int / bool values resolve through
+// the O(1) containment test (a range holds each value at most once);
+// other objects fall back to the generic iterator search.
+//
+// CPython: Objects/rangeobject.c:616 range_count
+func rangeCount(o, ob Object) (Object, error) {
+	if rangeIsExactIntOrBool(ob) {
+		in, err := rangeContains(o, ob)
+		if err != nil {
+			return nil, err
+		}
+		if in {
+			return NewInt(1), nil
+		}
+		return NewInt(0), nil
+	}
+	n := 0
+	it, err := Iter(o)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		x, err := IterNext(it)
+		if err != nil {
+			if errors.Is(err, ErrStopIteration) {
+				break
+			}
+			return nil, err
+		}
+		eq, err := RichCmpBool(x, ob, CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			n++
+		}
+	}
+	return NewInt(int64(n)), nil
+}
+
+// rangeIndex ports range_index. For an exact int / bool it computes the
+// position arithmetically as (ob - start) // step when the value is in
+// range, raising ValueError otherwise. Other objects fall back to an
+// iterator search.
+//
+// CPython: Objects/rangeobject.c:634 range_index
+func rangeIndex(o, ob Object) (Object, error) {
+	r := o.(*Range)
+	if !rangeIsExactIntOrBool(ob) {
+		it, err := Iter(o)
+		if err != nil {
+			return nil, err
+		}
+		i := 0
+		for {
+			x, err := IterNext(it)
+			if err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					break
+				}
+				return nil, err
+			}
+			eq, err := RichCmpBool(x, ob, CompareEQ)
+			if err != nil {
+				return nil, err
+			}
+			if eq {
+				return NewInt(int64(i)), nil
+			}
+			i++
+		}
+		return nil, fmt.Errorf("ValueError: %s is not in range", mustRepr(ob))
+	}
+	in, err := rangeContains(o, ob)
+	if err != nil {
+		return nil, err
+	}
+	if !in {
+		return nil, errors.New("ValueError: range.index(x): x not in range")
+	}
+	bv := rangeIntValue(ob)
+	idx := new(big.Int).Sub(bv, &r.Start.v)
+	if r.Step.v.Cmp(big.NewInt(1)) == 0 {
+		return NewIntFromBig(idx), nil
+	}
+	idx.Quo(idx, &r.Step.v)
+	return NewIntFromBig(idx), nil
+}
+
+// rangeIsExactIntOrBool reports whether ob is an exact int (not a
+// subclass) or a bool, matching CPython's PyLong_CheckExact ||
+// PyBool_Check guard on the fast containment / index paths.
+//
+// CPython: Objects/rangeobject.c:616 range_count, :634 range_index
+func rangeIsExactIntOrBool(ob Object) bool {
+	switch v := ob.(type) {
+	case *Bool:
+		return true
+	case *Int:
+		return v.Type() == IntType
+	}
+	return false
+}
+
+// rangeIntValue returns the big.Int value of an exact int or bool.
+func rangeIntValue(ob Object) *big.Int {
+	switch v := ob.(type) {
+	case *Bool:
+		if v == True() {
+			return big.NewInt(1)
+		}
+		return big.NewInt(0)
+	case *Int:
+		return &v.v
+	}
+	return big.NewInt(0)
+}
+
+// mustRepr returns repr(o) for error messages, falling back to the type
+// name when repr itself fails.
+func mustRepr(o Object) string {
+	s, err := Repr(o)
+	if err != nil {
+		return o.Type().Name
+	}
+	return s
 }
 
 // NewRange builds a range. Step must be non-zero.
@@ -308,11 +516,29 @@ func rangeSubscript(o, key Object) (Object, error) {
 		}
 		return out, nil
 	}
-	i, err := indexAsInt(key)
+	idx, err := NumberIndex(key)
 	if err != nil {
 		return nil, err
 	}
-	return rangeItem(r, i)
+	return rangeItemBig(r, idx.(*Int).BigInt())
+}
+
+// rangeItemBig computes range[i] for an arbitrary-precision index,
+// applying the negative-index wrap and bounds check entirely in
+// math/big so subscripts beyond Py_ssize_t (e.g. range(-maxsize,
+// maxsize)[maxsize+1]) stay exact.
+//
+// CPython: Objects/rangeobject.c:335 compute_range_item
+func rangeItemBig(r *Range, i *big.Int) (Object, error) {
+	lenBig := rangeLengthBig(&r.Start.v, &r.Stop.v, &r.Step.v)
+	idx := new(big.Int).Set(i)
+	if idx.Sign() < 0 {
+		idx.Add(idx, lenBig)
+	}
+	if idx.Sign() < 0 || idx.Cmp(lenBig) >= 0 {
+		return nil, fmt.Errorf("IndexError: range object index out of range")
+	}
+	return NewIntFromBig(computeRangeItem(r, idx)), nil
 }
 
 // rangeContains implements `x in r`. CPython has a fast path for
@@ -322,18 +548,15 @@ func rangeSubscript(o, key Object) (Object, error) {
 // CPython: Objects/rangeobject.c:488 range_contains
 func rangeContains(o, v Object) (bool, error) {
 	r := o.(*Range)
-	var bv *big.Int
-	switch x := v.(type) {
-	case *Int:
-		bv = &x.v
-	case *Bool:
-		bv = big.NewInt(0)
-		if x == True() {
-			bv.SetInt64(1)
-		}
-	default:
+	// CPython gates the arithmetic fast path on PyLong_CheckExact ||
+	// PyBool_Check, so an int subclass (which may override __eq__) takes
+	// the iterator search instead.
+	//
+	// CPython: Objects/rangeobject.c:466 range_contains
+	if !rangeIsExactIntOrBool(v) {
 		return rangeContainsIter(o, v)
 	}
+	bv := rangeIntValue(v)
 	step := &r.Step.v
 	start := &r.Start.v
 	stop := &r.Stop.v

@@ -258,46 +258,62 @@ func Zip(args []objects.Object, kwargs map[string]objects.Object) (objects.Objec
 	return newZip(iters, strict), nil
 }
 
-// Range ports the range() builtin. CPython's range_new accepts
-// (stop), (start, stop), or (start, stop, step). All three operands
-// must be ints; step must be non-zero.
+// Range ports the range() builtin. CPython's range_from_array accepts
+// (stop), (start, stop), or (start, stop, step). Each operand is
+// converted through PyNumber_Index (so __index__ objects and bools are
+// accepted), and step must be non-zero.
 //
-// CPython: Objects/rangeobject.c:97 range_new
+// CPython: Objects/rangeobject.c:81 range_from_array
 func Range(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	switch len(args) {
 	case 1:
-		stop, err := indexAsInt(args[0])
+		stop, err := rangeIndex(args[0])
 		if err != nil {
 			return nil, err
 		}
 		return objects.NewRange(objects.NewInt(0), stop, objects.NewInt(1))
 	case 2:
-		start, err := indexAsInt(args[0])
+		start, err := rangeIndex(args[0])
 		if err != nil {
 			return nil, err
 		}
-		stop, err := indexAsInt(args[1])
+		stop, err := rangeIndex(args[1])
 		if err != nil {
 			return nil, err
 		}
 		return objects.NewRange(start, stop, objects.NewInt(1))
 	case 3:
-		start, err := indexAsInt(args[0])
+		start, err := rangeIndex(args[0])
 		if err != nil {
 			return nil, err
 		}
-		stop, err := indexAsInt(args[1])
+		stop, err := rangeIndex(args[1])
 		if err != nil {
 			return nil, err
 		}
-		step, err := indexAsInt(args[2])
+		step, err := rangeIndex(args[2])
 		if err != nil {
 			return nil, err
 		}
 		return objects.NewRange(start, stop, step)
+	case 0:
+		return nil, fmt.Errorf("TypeError: range expected at least 1 argument, got 0")
 	default:
-		return nil, fmt.Errorf("TypeError: range expected 1 to 3 arguments, got %d", len(args))
+		return nil, fmt.Errorf("TypeError: range expected at most 3 arguments, got %d", len(args))
 	}
+}
+
+// rangeIndex converts a range() operand through PyNumber_Index. The
+// result is always a plain int (bools and __index__ objects fold to
+// int), which is what range stores for start/stop/step.
+//
+// CPython: Objects/rangeobject.c:88 PyNumber_Index in range_from_array
+func rangeIndex(o objects.Object) (*objects.Int, error) {
+	idx, err := objects.NumberIndex(o)
+	if err != nil {
+		return nil, err
+	}
+	return idx.(*objects.Int), nil
 }
 
 // indexAsInt unwraps an Int argument or raises TypeError. CPython
