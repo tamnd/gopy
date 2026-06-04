@@ -19,6 +19,30 @@ func init() {
 	objects.CopyregLookup = copyregLookup
 	objects.BuiltinLookup = builtinLookup
 	objects.CurrentBuiltinsHook = currentBuiltins
+	objects.ImportModuleHook = importModuleByName
+}
+
+// importModuleByName imports an absolute module name, returning the
+// cached module when sys.modules already holds it and otherwise driving
+// a fresh import through the path/finder machinery. The _pickle decoder
+// reaches for this when resolving GLOBAL references and when loading
+// _compat_pickle for the proto < 3 name mapping.
+//
+// CPython: Python/import.c:1450 PyImport_ImportModule
+func importModuleByName(name string) (objects.Object, error) {
+	if mod, ok := imp.GetModule(name); ok && mod != nil {
+		return mod, nil
+	}
+	ts := currentThread()
+	if ts == nil {
+		ts = state.NewThread()
+	}
+	exec := &vmExecutor{ts: ts}
+	mod, err := imp.ImportModule(exec, name)
+	if err != nil {
+		return nil, err
+	}
+	return mod, nil
 }
 
 // currentBuiltins returns the builtins namespace a function built under
