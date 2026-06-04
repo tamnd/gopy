@@ -315,7 +315,21 @@ func funcSetCodeAttr(o Object, v Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: __code__ must be set to a code object")
 	}
-	return o.(*Function).SetCode(c)
+	f := o.(*Function)
+	// Swapping in a code object whose generator/coroutine/async-generator
+	// bits differ from the current code changes the call protocol, so
+	// CPython emits a DeprecationWarning (e.g. plain function to generator).
+	//
+	// CPython: Objects/funcobject.c:691 func_set_code (CO_GENERATOR mask)
+	const coTypeMask = 0x0020 | 0x0080 | 0x0200 // CO_GENERATOR|CO_COROUTINE|CO_ASYNC_GENERATOR
+	if f.Code != nil && (f.Code.Flags&coTypeMask) != (c.Flags&coTypeMask) {
+		if DeprecWarnHook != nil {
+			if err := DeprecWarnHook("Assigning a code object of non-matching type is deprecated (e.g., from a generator to a plain function)"); err != nil {
+				return err
+			}
+		}
+	}
+	return f.SetCode(c)
 }
 
 // funcSetDefaultsAttr is the __defaults__ setter. None clears the
@@ -537,17 +551,16 @@ func registerFunctionTypeParamsGetSet() {
 			}
 			return t, nil
 		},
+		// Deletion is rejected and the value must be a tuple; CPython
+		// raises the same TypeError for both cases.
+		//
+		// CPython: Objects/funcobject.c:962 function___type_params___set_impl
 		func(o Object, v Object) error {
-			f := o.(*Function)
-			if v == nil {
-				f.Typeparams = nil
-				return nil
-			}
 			t, ok := v.(*Tuple)
 			if !ok {
-				return fmt.Errorf("TypeError: __type_params__ must be a tuple, not '%s'", v.Type().Name)
+				return fmt.Errorf("TypeError: __type_params__ must be set to a tuple")
 			}
-			f.Typeparams = t
+			o.(*Function).Typeparams = t
 			return nil
 		}))
 }
@@ -604,15 +617,18 @@ func funcGetDict(o Object) (Object, error) {
 }
 
 func funcSetDict(o Object, v Object) error {
-	f := o.(*Function)
+	// PyObject_GenericSetDict refuses deletion outright, then requires a
+	// dict value via _PyObject_SetDict.
+	//
+	// CPython: Objects/object.c:2046 PyObject_GenericSetDict
 	if v == nil {
-		f.Dict = nil
-		return nil
+		return fmt.Errorf("TypeError: cannot delete __dict__")
 	}
 	d, ok := v.(*Dict)
 	if !ok {
 		return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
 	}
+	f := o.(*Function)
 	f.Dict = d
 	return nil
 }
@@ -774,6 +790,15 @@ func newFunction(name string, code *Code, globals Object, qualname string) (*Fun
 			}
 			f.Builtins = b
 		}
+	}
+	// bpo-42990: when globals carries no __builtins__ key, the function
+	// inherits the current builtins namespace rather than leaving the
+	// field unset, so fn.__builtins__ is never None for a live function.
+	//
+	// CPython: Objects/dictobject.c _PyDict_LoadBuiltinsFromGlobals
+	// (PyEval_GetBuiltins fallback)
+	if f.Builtins == nil && CurrentBuiltinsHook != nil {
+		f.Builtins = CurrentBuiltinsHook()
 	}
 	f.init(FunctionType)
 	return f, nil

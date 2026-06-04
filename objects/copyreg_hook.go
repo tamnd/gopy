@@ -20,3 +20,11 @@ var CopyregLookup func(name string) (Object, error)
 //
 // CPython: Python/bltinmodule.c:_PyEval_GetBuiltin
 var BuiltinLookup func(name string) (Object, error)
+
+// CurrentBuiltinsHook returns the builtins namespace a freshly built
+// function should inherit when its globals dict carries no
+// __builtins__ key. Wired by vm.init() to the running frame's
+// f_builtins, falling back to the builtins module dict.
+//
+// CPython: Objects/dictobject.c _PyDict_LoadBuiltinsFromGlobals
+var CurrentBuiltinsHook func() Object

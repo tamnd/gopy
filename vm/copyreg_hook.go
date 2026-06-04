@@ -18,6 +18,28 @@ import (
 func init() {
 	objects.CopyregLookup = copyregLookup
 	objects.BuiltinLookup = builtinLookup
+	objects.CurrentBuiltinsHook = currentBuiltins
+}
+
+// currentBuiltins returns the builtins namespace a function built under
+// the running frame should inherit when its globals lack an explicit
+// __builtins__ key: the frame's f_builtins, else the builtins module
+// dict.
+//
+// CPython: Objects/dictobject.c _PyDict_LoadBuiltinsFromGlobals
+// (PyEval_GetBuiltins fallback)
+func currentBuiltins() objects.Object {
+	if ts := currentThread(); ts != nil {
+		if f := frameStackFor(ts).Top(); f != nil && frameHasExplicitBuiltins(f) {
+			if b := callerBuiltins(f); b != nil {
+				return b
+			}
+		}
+	}
+	if mod, ok := imp.GetModule("builtins"); ok && mod != nil {
+		return mod.Dict()
+	}
+	return nil
 }
 
 // builtinLookup retrieves the named object the way _PyEval_GetBuiltin
