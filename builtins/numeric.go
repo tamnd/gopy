@@ -6,7 +6,6 @@ package builtins
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tamnd/gopy/abstract"
 	"github.com/tamnd/gopy/objects"
@@ -115,11 +114,10 @@ func Chr(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 		return nil, fmt.Errorf("ValueError: chr() arg not in range(0x110000)")
 	}
 	// CPython: Python/bltinmodule.c:809 PyUnicode_FromOrdinal short-circuit
-	// to get_latin1_char for ordinals < 256.
-	if v < 256 {
-		return objects.GetLatin1Char(int(v)), nil
-	}
-	return objects.NewStr(string(rune(v))), nil
+	// to get_latin1_char for ordinals < 256. StrFromCodepoint preserves
+	// lone surrogates (U+D800..U+DFFF) instead of collapsing them to the
+	// replacement character the way Go's string(rune) would.
+	return objects.StrFromCodepoint(rune(v)), nil
 }
 
 // Ord ports builtin_ord: takes a one-character string and returns its
@@ -136,12 +134,13 @@ func Ord(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	// Accepts str (length-1), bytes (length-1), or bytearray (length-1).
 	switch v := args[0].(type) {
 	case *objects.Unicode:
-		s := v.Value()
-		if utf8.RuneCountInString(s) != 1 {
-			return nil, fmt.Errorf("TypeError: ord() expected a character, but string of length %d found", utf8.RuneCountInString(s))
+		// Read through Runes (not utf8.DecodeRuneInString) so a lone
+		// surrogate stored as pseudo-UTF-8 returns its real ordinal
+		// instead of decoding to U+FFFD.
+		if v.Length() != 1 {
+			return nil, fmt.Errorf("TypeError: ord() expected a character, but string of length %d found", v.Length())
 		}
-		r, _ := utf8.DecodeRuneInString(s)
-		return objects.NewInt(int64(r)), nil
+		return objects.NewInt(int64(v.Runes()[0])), nil
 	case *objects.Bytes:
 		b := v.Bytes()
 		if len(b) != 1 {

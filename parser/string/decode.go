@@ -21,6 +21,11 @@ type DecodeError struct {
 	Reason string
 	Start  int
 	End    int
+	// Plain marks an error that CPython raises with PyErr_SetString on a
+	// bare PyExc_UnicodeError rather than through the codec error
+	// machinery, so it carries no "'unicodeescape' codec can't decode
+	// bytes in position N-M:" prefix (e.g. the \N-module-load failure).
+	Plain bool
 }
 
 func (e *DecodeError) Error() string {
@@ -31,6 +36,12 @@ func (e *DecodeError) Error() string {
 // PyUnicodeDecodeError raised inside the C decoder.
 func newDecodeError(reason string, start, end int) *DecodeError {
 	return &DecodeError{Reason: reason, Start: start, End: end}
+}
+
+// newPlainDecodeError constructs a DecodeError for the cases CPython
+// raises directly on PyExc_UnicodeError (no codec position prefix).
+func newPlainDecodeError(reason string) *DecodeError {
+	return &DecodeError{Reason: reason, Plain: true}
 }
 
 // decodeUnicodeEscapes walks s and expands the standard Python
@@ -237,6 +248,14 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, off
 			name := string(s[i+1 : j])
 			if name == "" {
 				return "", nil, nil, newDecodeError("malformed \\N character escape", escStart, j+1)
+			}
+			// CPython loads the unicodedata module lazily here; if the
+			// import is blocked (sys.modules['unicodedata'] = None) it
+			// raises a UnicodeError before any name lookup.
+			//
+			// CPython: Objects/unicodeobject.c:6791 load_ucnhash
+			if err := CheckUnicodeDataLoadable(); err != nil {
+				return "", nil, nil, newPlainDecodeError("\\N escapes not supported (can't load unicodedata module)")
 			}
 			expanded, ok := NameLookup(name)
 			if !ok {

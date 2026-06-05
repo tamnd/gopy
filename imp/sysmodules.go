@@ -30,6 +30,23 @@ func init() {
 // CPython: Python/sysmodule.c interp->modules
 func SysModules() *objects.Dict { return sysModules }
 
+// GetModuleRaw returns the raw sys.modules entry under name, including a
+// None sentinel (used by code that deliberately blocks an import by
+// assigning sys.modules[name] = None). present is false only when the
+// key is absent. Unlike GetModule it does not require the value to be a
+// module, so callers can detect the None-halt case.
+//
+// CPython: Lib/importlib/_bootstrap.py:1390 _find_and_load (None sentinel)
+func GetModuleRaw(name string) (objects.Object, bool) {
+	sysModulesMu.RLock()
+	v, err := sysModules.GetItem(objects.NewStr(name))
+	sysModulesMu.RUnlock()
+	if err != nil || v == nil {
+		return nil, false
+	}
+	return v, true
+}
+
 // GetModule returns the module registered under name in sys.modules,
 // or (nil, false) if absent or if the entry is not a module.
 //
