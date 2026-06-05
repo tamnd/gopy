@@ -71,6 +71,14 @@ func init() {
 	MemoryViewType.Hash = memoryViewHash
 	MemoryViewType.RichCmp = memoryViewRichCmp
 	MemoryViewType.Iter = memoryViewIter
+	// PyMemoryView_Type carries Py_TPFLAGS_HAVE_GC. Its tp_traverse visits the
+	// managed buffer, whose own traverse reaches the object the buffer was
+	// taken from, so a reference cycle running through a memoryview is
+	// collectable. gopy flattens the managed buffer into the obj/exporter
+	// fields, so the view traverse visits them directly.
+	//
+	// CPython: Objects/memoryobject.c:1164 memory_traverse / :131 mbuf_traverse
+	MemoryViewType.TpTraverse = memoryViewTraverse
 	MemoryViewType.Getattro = memoryViewGetattr
 	// CPython tags PyMemoryView_Type with Py_TPFLAGS_SEQUENCE so
 	// match-statement sequence patterns decompose memoryview through
@@ -131,6 +139,41 @@ func init() {
 	SetTypeDescr(MemoryViewType, "index", NewMethodDescr(MemoryViewType, "index", memoryViewIndexMethod))
 	SetTypeDescr(MemoryViewType, "__enter__", NewMethodDescr(MemoryViewType, "__enter__", memoryViewEnterMethod))
 	SetTypeDescr(MemoryViewType, "__exit__", NewMethodDescr(MemoryViewType, "__exit__", memoryViewExitMethod))
+}
+
+// initView finalizes a freshly built memoryview: it stamps the type and hands
+// the view to the cyclic collector. PyMemoryView_FromObject ends with
+// PyObject_GC_Track, so a view that participates in a reference cycle (for
+// example mv.obj is a list holding mv) can be reclaimed.
+//
+// CPython: Objects/memoryobject.c:1041 PyMemoryView_FromObject (PyObject_GC_Track)
+func (m *MemoryView) initView() {
+	m.init(MemoryViewType)
+	if h := GCTrackHook; h != nil {
+		h(m)
+	}
+}
+
+// memoryViewTraverse visits the object the view was opened on and its
+// bytearray exporter so a cycle through either is reachable by the collector.
+// CPython reaches these through the managed buffer (memory_traverse visits
+// self->mbuf, mbuf_traverse visits self->master.obj); gopy stores them on the
+// view directly.
+//
+// CPython: Objects/memoryobject.c:1164 memory_traverse / :131 mbuf_traverse
+func memoryViewTraverse(o Object, visit Visitor) error {
+	m := o.(*MemoryView)
+	if m.obj != nil {
+		if err := visit(m.obj); err != nil {
+			return err
+		}
+	}
+	if m.exporter != nil {
+		if err := visit(m.exporter); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // errReleased is the ValueError every accessor raises once the view has been
@@ -197,16 +240,16 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 	switch s := src.(type) {
 	case *Bytes:
 		mv := &MemoryView{buf: s.Bytes(), readonly: true, format: "B", itemsize: 1, contiguous: true, obj: s}
-		mv.init(MemoryViewType)
+		mv.initView()
 		return mv, nil
 	case *ByteArray:
 		mv := &MemoryView{buf: s.Bytes(), readonly: false, format: "B", itemsize: 1, contiguous: true, exporter: s, obj: s}
 		s.ExportInc()
-		mv.init(MemoryViewType)
+		mv.initView()
 		return mv, nil
 	case *MemoryView:
 		mv := &MemoryView{buf: s.buf, readonly: s.readonly, format: s.format, itemsize: s.itemsize, contiguous: s.contiguous, obj: s.obj}
-		mv.init(MemoryViewType)
+		mv.initView()
 		return mv, nil
 	}
 	if BufferHook != nil {
@@ -220,7 +263,7 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 				format = "B"
 			}
 			mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true, obj: src}
-			mv.init(MemoryViewType)
+			mv.initView()
 			return mv, nil
 		}
 	}
@@ -468,7 +511,7 @@ func memoryViewGetItemKey(o, key Object) (Object, error) {
 				copy(out[i*m.itemsize:], m.buf[src:src+m.itemsize])
 			}
 			view := &MemoryView{buf: out, readonly: m.readonly, format: m.format, itemsize: m.itemsize, contiguous: false}
-			view.init(MemoryViewType)
+			view.initView()
 			return view, nil
 		}
 		view := &MemoryView{
@@ -478,7 +521,7 @@ func memoryViewGetItemKey(o, key Object) (Object, error) {
 			format:     m.format,
 			itemsize:   m.itemsize,
 		}
-		view.init(MemoryViewType)
+		view.initView()
 		return view, nil
 	case *Tuple:
 		// A multi-index tuple addresses a single item; a multi-slice tuple
@@ -826,7 +869,7 @@ func memoryViewCastMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: memoryview: length is not a multiple of itemsize")
 	}
 	view := &MemoryView{buf: m.buf, readonly: m.readonly, format: format, itemsize: sz, contiguous: m.contiguous}
-	view.init(MemoryViewType)
+	view.initView()
 	return view, nil
 }
 
@@ -980,7 +1023,7 @@ func memoryViewToreadonlyMethod(args []Object, _ map[string]Object) (Object, err
 		return nil, err
 	}
 	view := &MemoryView{buf: m.buf, readonly: true, format: m.format, itemsize: m.itemsize, contiguous: m.contiguous, obj: m.obj}
-	view.init(MemoryViewType)
+	view.initView()
 	return view, nil
 }
 
