@@ -51,8 +51,31 @@ func (p *Property) AttrDict() *Dict { return p.attrs }
 func (p *Property) EnsureAttrDict() *Dict {
 	if p.attrs == nil {
 		p.attrs = NewDict()
+		trackAttrDictHolder(p)
 	}
 	return p.attrs
+}
+
+// propertyTraverse visits the getter/setter/deleter/doc/name members and
+// the managed __dict__ a subclass instance carries, so a cycle that runs
+// through a property (a getter closure capturing the owning object) is
+// reachable by the collector.
+//
+// CPython: Objects/descrobject.c:1500 property_traverse
+func propertyTraverse(o Object, visit Visitor) error {
+	p, ok := o.(*Property)
+	if !ok {
+		return nil
+	}
+	for _, m := range []Object{p.fget, p.fset, p.fdel, p.doc, p.name} {
+		if m == nil {
+			continue
+		}
+		if err := visit(m); err != nil {
+			return err
+		}
+	}
+	return visitAttrDict(o, visit)
 }
 
 // PropertyType is the type singleton for property.
@@ -74,6 +97,8 @@ func init() {
 	// CPython: Objects/descrobject.c:1855 PyProperty_Type (tp_getattro/tp_setattro)
 	PropertyType.Getattro = GenericGetAttr
 	PropertyType.Setattro = GenericSetAttr
+	// CPython: Objects/descrobject.c:1500 property_traverse
+	PropertyType.TpTraverse = propertyTraverse
 	addDescriptorSlotWrappers(PropertyType)
 
 	// property_methods: .getter / .setter / .deleter decorators plus

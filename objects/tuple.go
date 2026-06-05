@@ -210,7 +210,7 @@ func tupleTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 func tupleGetItem(o Object, i int) (Object, error) {

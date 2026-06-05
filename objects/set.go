@@ -281,7 +281,7 @@ func setTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 // NewSet creates an empty mutable set.

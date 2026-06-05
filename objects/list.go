@@ -98,7 +98,7 @@ func listTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 // NewList builds a list from items. The slice is copied so callers can

@@ -43,6 +43,7 @@ func (b *ByteArray) AttrDict() *Dict { return b.attrs }
 func (b *ByteArray) EnsureAttrDict() *Dict {
 	if b.attrs == nil {
 		b.attrs = NewDict()
+		trackAttrDictHolder(b)
 	}
 	return b.attrs
 }
@@ -82,6 +83,8 @@ var ByteArrayType = NewType("bytearray", []*Type{objectType})
 
 func init() {
 	ByteArrayType.Repr = byteArrayRepr
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (managed __dict__)
+	ByteArrayType.TpTraverse = attrDictHolderTraverse
 	ByteArrayType.Str = byteArrayRepr
 	ByteArrayType.Hash = byteArrayHash
 	ByteArrayType.RichCmp = byteArrayRichCmp

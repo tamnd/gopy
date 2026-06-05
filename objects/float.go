@@ -28,6 +28,7 @@ func (f *Float) AttrDict() *Dict { return f.attrs }
 func (f *Float) EnsureAttrDict() *Dict {
 	if f.attrs == nil {
 		f.attrs = NewDict()
+		trackAttrDictHolder(f)
 	}
 	return f.attrs
 }
@@ -41,6 +42,8 @@ var FloatType = NewType("float", []*Type{objectType})
 
 func init() {
 	FloatType.Repr = floatRepr
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (managed __dict__)
+	FloatType.TpTraverse = attrDictHolderTraverse
 	FloatType.Str = floatRepr
 	FloatType.Hash = floatHash
 	FloatType.RichCmp = floatRichCmp

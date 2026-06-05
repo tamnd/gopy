@@ -139,6 +139,37 @@ func init() {
 	SetTypeDescr(MemoryViewType, "index", NewMethodDescr(MemoryViewType, "index", memoryViewIndexMethod))
 	SetTypeDescr(MemoryViewType, "__enter__", NewMethodDescr(MemoryViewType, "__enter__", memoryViewEnterMethod))
 	SetTypeDescr(MemoryViewType, "__exit__", NewMethodDescr(MemoryViewType, "__exit__", memoryViewExitMethod))
+	// PEP 688: the bf_getbuffer slot is surfaced as __buffer__(flags), which
+	// returns a fresh memoryview over the exporter's buffer.
+	//
+	// CPython: Objects/typeobject.c:9737 wrap_buffer
+	SetTypeDescr(MemoryViewType, "__buffer__", NewMethodDescr(MemoryViewType, "__buffer__", memoryViewBufferMethod))
+}
+
+// memoryViewBufferMethod implements memoryview.__buffer__(flags). It mirrors
+// the bf_getbuffer slot wrapper, which validates the flags argument and hands
+// the exporter to _PyMemoryView_FromBufferProc to build a new view. gopy
+// aliases the same underlying buffer; the returned view keeps the source view
+// as its exporter so a reference cycle that runs through it stays reachable.
+//
+// CPython: Objects/typeobject.c:9737 wrap_buffer
+func memoryViewBufferMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __buffer__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	m, ok := args[0].(*MemoryView)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__buffer__' requires a 'memoryview' object")
+	}
+	if _, err := indexAsInt(args[1]); err != nil {
+		return nil, err
+	}
+	if err := m.checkReleased(); err != nil {
+		return nil, err
+	}
+	mv := &MemoryView{buf: m.buf, readonly: m.readonly, format: m.format, itemsize: m.itemsize, contiguous: m.contiguous, obj: m}
+	mv.initView()
+	return mv, nil
 }
 
 // initView finalizes a freshly built memoryview: it stamps the type and hands
@@ -252,20 +283,18 @@ func NewMemoryView(src Object) (*MemoryView, error) {
 		mv.initView()
 		return mv, nil
 	}
-	if BufferHook != nil {
-		if bi, ok := BufferHook(src); ok {
-			itemsize := bi.Itemsize
-			if itemsize == 0 {
-				itemsize = 1
-			}
-			format := bi.Format
-			if format == "" {
-				format = "B"
-			}
-			mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true, obj: src}
-			mv.initView()
-			return mv, nil
+	if bi, ok := lookupBuffer(src); ok {
+		itemsize := bi.Itemsize
+		if itemsize == 0 {
+			itemsize = 1
 		}
+		format := bi.Format
+		if format == "" {
+			format = "B"
+		}
+		mv := &MemoryView{buf: bi.Buf, readonly: bi.Readonly, format: format, itemsize: itemsize, contiguous: true, obj: src}
+		mv.initView()
+		return mv, nil
 	}
 	return nil, fmt.Errorf("TypeError: memoryview: a bytes-like object is required, not '%s'", src.Type().Name)
 }
@@ -706,7 +735,38 @@ type BufferInfo struct {
 
 // BufferHook resolves a buffer-protocol object outside the objects package
 // (array.array) into its live buffer info. Set at module init time.
+// Prefer RegisterBufferHook for new exporters: assigning BufferHook
+// directly clobbers any previously registered exporter.
 var BufferHook func(Object) (BufferInfo, bool)
+
+// bufferHooks is the registry of buffer-protocol resolvers contributed by
+// modules outside the objects package (array.array, pickle.PickleBuffer).
+// A single global BufferHook cannot hold more than one exporter, so each
+// module appends its own resolver and lookupBuffer tries them in turn.
+var bufferHooks []func(Object) (BufferInfo, bool)
+
+// RegisterBufferHook adds a buffer-protocol resolver. Modules that export a
+// buffer (array, pickle) call this from init so they coexist instead of
+// overwriting a shared slot.
+func RegisterBufferHook(fn func(Object) (BufferInfo, bool)) {
+	bufferHooks = append(bufferHooks, fn)
+}
+
+// lookupBuffer resolves o through the legacy BufferHook and every
+// registered resolver, returning the first match.
+func lookupBuffer(o Object) (BufferInfo, bool) {
+	if BufferHook != nil {
+		if bi, ok := BufferHook(o); ok {
+			return bi, true
+		}
+	}
+	for _, fn := range bufferHooks {
+		if bi, ok := fn(o); ok {
+			return bi, true
+		}
+	}
+	return BufferInfo{}, false
+}
 
 // AsWritableBuffer unwraps o to a live, writable, contiguous byte slice,
 // or reports false. It is the gopy equivalent of PyObject_GetBuffer with
@@ -726,10 +786,8 @@ func AsWritableBuffer(o Object) ([]byte, bool) {
 	case *Bytes:
 		return nil, false
 	}
-	if BufferHook != nil {
-		if bi, ok := BufferHook(o); ok && !bi.Readonly {
-			return bi.Buf, true
-		}
+	if bi, ok := lookupBuffer(o); ok && !bi.Readonly {
+		return bi.Buf, true
 	}
 	return nil, false
 }

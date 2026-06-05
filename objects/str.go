@@ -104,6 +104,7 @@ func (u *Unicode) AttrDict() *Dict { return u.attrs }
 func (u *Unicode) EnsureAttrDict() *Dict {
 	if u.attrs == nil {
 		u.attrs = NewDict()
+		trackAttrDictHolder(u)
 	}
 	return u.attrs
 }
@@ -250,6 +251,8 @@ func init() {
 	strType.RichCmp = unicodeRichCmp
 	strType.Getattro = GenericGetAttr
 	strType.TpFlags |= TpFlagMatchSelf
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	strType.TpTraverse = attrDictHolderTraverse
 	SetTypeDescr(strType, "__repr__", NewMethodDescr(strType, "__repr__", unicodeReprDescr))
 	SetTypeDescr(strType, "__str__", NewMethodDescr(strType, "__str__", unicodeStrDescr))
 	SetTypeDescr(strType, "__hash__", NewMethodDescr(strType, "__hash__", unicodeHashDescr))

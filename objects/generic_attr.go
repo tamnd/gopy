@@ -34,6 +34,53 @@ type AttrDictHolder interface {
 	EnsureAttrDict() *Dict
 }
 
+// visitAttrDict feeds an AttrDictHolder's managed __dict__ to a cycle
+// collector visitor. Every Dict is itself gc-tracked and traverses its
+// own entries, so visiting the dict object (rather than walking its
+// entries inline) keeps the refcount accounting consistent with the
+// dict's tp_traverse. Built-in tp_traverse slots call this in addition
+// to visiting their own payload (list items, set members) so a cycle
+// that runs through a subclass instance's attributes is reachable.
+//
+// CPython: Objects/typeobject.c:1356 subtype_traverse (Py_VISIT(*dictptr))
+func visitAttrDict(o Object, visit Visitor) error {
+	h, ok := o.(AttrDictHolder)
+	if !ok {
+		return nil
+	}
+	d := h.AttrDict()
+	if d == nil {
+		return nil
+	}
+	return visit(d)
+}
+
+// attrDictHolderTraverse is the tp_traverse for a built-in type whose
+// only collectable references live in the managed __dict__ a subclass
+// picks up (bytes, str, float, bytearray, property, weakref). Plain
+// (non-subclass) instances never allocate the dict, so the visit is a
+// no-op for them. Mirrors subtype_traverse for immutable bases that
+// contribute no payload of their own.
+//
+// CPython: Objects/typeobject.c:1356 subtype_traverse
+func attrDictHolderTraverse(o Object, visit Visitor) error {
+	return visitAttrDict(o, visit)
+}
+
+// trackAttrDictHolder registers a subclass instance with the cycle
+// collector the first time it materializes its managed __dict__. An
+// instance with no attributes references nothing mutable and cannot
+// anchor a cycle, so gopy defers the track to first attribute store
+// rather than to construction. GCTrackHook is idempotent, so callers may
+// invoke this unconditionally from EnsureAttrDict.
+//
+// CPython: Objects/typeobject.c:1748 type_call _PyObject_GC_TRACK
+func trackAttrDictHolder(o Object) {
+	if h := GCTrackHook; h != nil {
+		h(o)
+	}
+}
+
 // GenericGetAttr is the default Getattro slot. It looks up name in
 // the type's MRO and:
 //   - calls DescrGet if the descriptor is a data descriptor (has both

@@ -35,6 +35,7 @@ func (b *Bytes) AttrDict() *Dict { return b.attrs }
 func (b *Bytes) EnsureAttrDict() *Dict {
 	if b.attrs == nil {
 		b.attrs = NewDict()
+		trackAttrDictHolder(b)
 	}
 	return b.attrs
 }
@@ -63,6 +64,13 @@ func init() {
 	BytesType.Hash = bytesHash
 	BytesType.RichCmp = bytesRichCmp
 	BytesType.TpFlags |= TpFlagMatchSelf
+	// A bytes subclass can declare __dict__, so its instances participate
+	// in reference cycles through their attributes. Subtypes inherit this
+	// tp_traverse, and EnsureAttrDict gc-tracks the instance on first
+	// store, so the collector can reclaim such cycles.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	BytesType.TpTraverse = attrDictHolderTraverse
 	// CPython: Objects/bytesobject.c bytes_doc (tp_doc)
 	SetTypeDescr(BytesType, "__doc__", NewStr("bytes(iterable_of_ints) -> bytes\n"+
 		"bytes(string, encoding[, errors]) -> bytes\n"+
