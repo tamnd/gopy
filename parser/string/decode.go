@@ -261,6 +261,15 @@ func decodeUnicodeEscapesInternal(s []byte) (text string, warnings []string, off
 			if !ok {
 				return "", nil, nil, newDecodeError("unknown Unicode character name", escStart, j+1)
 			}
+			// \N{} rejects named sequences: CPython calls getcode with
+			// with_named_seq=0, so a name that resolves to a multi-codepoint
+			// named sequence is reported as an unknown name. Only
+			// unicodedata.lookup() (with_named_seq=1) returns the expansion.
+			//
+			// CPython: Modules/unicodedata.c:1399 _check_alias_and_seq
+			if utf8.RuneCountInString(expanded) != 1 {
+				return "", nil, nil, newDecodeError("unknown Unicode character name", escStart, j+1)
+			}
 			out = append(out, expanded...)
 			i = j + 1
 		default:
