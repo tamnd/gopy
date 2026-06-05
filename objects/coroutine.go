@@ -161,6 +161,13 @@ func init() {
 		func(o Object) (Object, error) {
 			c := o.(*Coroutine)
 			if !c.closed && c.GiFrame != nil {
+				// Frame object handed to user code: mark exposed so
+				// genFinalize takes ownership before the body unwinds.
+				//
+				// CPython: Objects/frameobject.c:1138 take_ownership
+				if fr, ok := c.GiFrame.(*Frame); ok {
+					fr.MarkExposed()
+				}
 				return c.GiFrame, nil
 			}
 			return None(), nil

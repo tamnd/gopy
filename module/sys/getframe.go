@@ -44,7 +44,16 @@ func getFrame(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	if f == nil {
 		return nil, fmt.Errorf("ValueError: call stack is not deep enough")
 	}
-	return objects.NewFrame(f), nil
+	// Returning a frame object to user code is CPython's
+	// _PyFrame_GetFrameObject materializing frame->frame_obj. Mark the
+	// activation record exposed so a generator that yields its own frame
+	// (sys._getframe() inside the body) snapshots its locals when later
+	// finalized instead of leaking them.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	wrapper := objects.NewFrame(f)
+	wrapper.MarkExposed()
+	return wrapper, nil
 }
 
 // getFrameModuleName ports sys._getframemodulename([depth]). Returns

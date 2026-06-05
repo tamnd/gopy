@@ -126,6 +126,20 @@ type InterpreterFrame interface {
 	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack (the
 	// PyFrameObject linkage that gopy emulates via wrapper registration)
 	FrameRegisterWrapper(w Object)
+	// FrameMarkExposed records that a Python-level frame object for this
+	// activation record has been handed to user code (gi_frame /
+	// sys._getframe / traceback). genFinalize keys take_ownership off
+	// this flag so a suspended generator only snapshots its locals when
+	// a frame object genuinely outlives it; gopy mints the wrapper
+	// eagerly, so the wrapper's existence cannot stand in for CPython's
+	// frame->frame_obj != NULL.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership
+	FrameMarkExposed()
+	// FrameExposed reports whether FrameMarkExposed has been called.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
+	FrameExposed() bool
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
@@ -630,6 +644,31 @@ func (f *Frame) TakeOwnership() {
 		return
 	}
 	f.interp.FrameTakeOwnership()
+}
+
+// MarkExposed flags the underlying activation record as having handed a
+// Python-level frame object to user code. Called from gi_frame /
+// cr_frame / ag_frame getters and sys._getframe so genFinalize knows a
+// frame object may outlive the generator.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj
+// is set as soon as _PyFrame_GetFrameObject hands one out).
+func (f *Frame) MarkExposed() {
+	if f == nil || f.interp == nil {
+		return
+	}
+	f.interp.FrameMarkExposed()
+}
+
+// Exposed reports whether a Python-level frame object for the underlying
+// activation record has been handed to user code.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
+func (f *Frame) Exposed() bool {
+	if f == nil || f.interp == nil {
+		return false
+	}
+	return f.interp.FrameExposed()
 }
 
 // Code returns f.f_code: the running Code object.

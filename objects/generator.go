@@ -241,6 +241,15 @@ func init() {
 		func(o Object) (Object, error) {
 			g := o.(*Generator)
 			if !g.closed && g.GiFrame != nil {
+				// Handing the frame object to user code is exactly
+				// CPython's _PyFrame_GetFrameObject materializing
+				// frame->frame_obj; take_ownership keys off that when the
+				// generator is later finalized.
+				//
+				// CPython: Objects/frameobject.c:1138 take_ownership
+				if fr, ok := g.GiFrame.(*Frame); ok {
+					fr.MarkExposed()
+				}
 				return g.GiFrame, nil
 			}
 			return None(), nil
@@ -566,11 +575,20 @@ func genFinalize(o Object) {
 	gRepr, _ := Repr(g)
 	// Take ownership of the iframe so external references to gi_frame
 	// (the test_frame_outlives_generator path) keep reading fast-local
-	// data after Close clears the underlying activation record.
+	// data after Close clears the underlying activation record. CPython
+	// only performs take_ownership when a PyFrameObject was materialized
+	// and outlives the activation record (frame->frame_obj != NULL); a
+	// frame object nobody requested is simply cleared by gen_close. gopy
+	// mints the gi_frame wrapper eagerly, so it tracks exposure with an
+	// explicit flag set by the gi_frame getter and sys._getframe instead.
+	// Snapshotting unconditionally would pin every suspended fast local
+	// (for example an iterator's owner whose __del__ the caller is waiting
+	// on) past the close, so the locals never reach the collector and
+	// free_after_iterating never fires.
 	//
-	// CPython: Objects/frameobject.c:1138 take_ownership
+	// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
 	if g.GiFrame != nil {
-		if fr, ok := g.GiFrame.(*Frame); ok {
+		if fr, ok := g.GiFrame.(*Frame); ok && fr.Exposed() {
 			fr.TakeOwnership()
 		}
 	}

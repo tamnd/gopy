@@ -140,6 +140,19 @@ type Frame struct {
 	// CPython: Include/cpython/frameobject.h PyFrameObject.f_lineno
 	Lineno int
 
+	// exposed records whether a Python-level frame object for this
+	// activation record has actually been handed to user code: returned
+	// by gi_frame / cr_frame / ag_frame, by sys._getframe(), or wrapped
+	// into a traceback. gopy mints the *Frame wrapper eagerly when a
+	// generator frame is created, so the wrapper's existence is not a
+	// reliable signal; this flag is the faithful stand-in for CPython's
+	// frame->frame_obj != NULL test, which take_ownership keys off when a
+	// suspended generator is finalized while a frame object outlives it.
+	//
+	// CPython: Objects/frameobject.c:1138 take_ownership (the
+	// frame->frame_obj != NULL guard before the iframe is copied out).
+	exposed bool
+
 	// Wrappers is the list of Python-visible frame objects that point
 	// at this activation record (sys._getframe, traceback walks, etc).
 	// FrameStack.Pop reads this list to rebind each wrapper to a
@@ -265,6 +278,7 @@ func (f *Frame) Init(co *objects.Code, globals, builtins objects.Object, fn obje
 	f.TraceLines = true
 	f.TraceOpcodes = false
 	f.Lineno = 0
+	f.exposed = false
 	f.Wrappers = nil
 	size := SizeFor(co)
 	if cap(f.LocalsPlus) >= size {
@@ -600,6 +614,21 @@ func (f *Frame) FrameRegisterWrapper(w objects.Object) {
 	}
 	f.Wrappers = append(f.Wrappers, w)
 }
+
+// FrameMarkExposed records that a Python-level frame object for this
+// activation record has been handed to user code. genFinalize keys
+// take_ownership off this so a suspended generator only pays the
+// snapshot cost when a frame object genuinely outlives it.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj
+// is set when _PyFrame_GetFrameObject materializes the PyFrameObject).
+func (f *Frame) FrameMarkExposed() { f.exposed = true }
+
+// FrameExposed reports whether FrameMarkExposed has been called for
+// this activation record.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
+func (f *Frame) FrameExposed() bool { return f.exposed }
 
 // FrameWrapper returns the previously-registered Python-level wrapper
 // for this activation record, or nil if no wrapper has been minted yet.
