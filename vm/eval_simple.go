@@ -278,15 +278,26 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		// DECREF_INPUTS: BINARY_OP owns both popped operands and releases
 		// them once the result is computed. CPython's nb_*/sq_* slots each
-		// return a new reference, but gopy's in-place arms hand back the
-		// borrowed left operand and NB_SUBSCR hands back a borrowed container
-		// element, so promote those to owned references before the drop. The
-		// combined guard increfs exactly once even when a subscript returns
-		// the container itself.
+		// return a new reference; gopy's containers do not incref on store,
+		// so its element/key subscript slots hand back a borrowed slot and
+		// the in-place arms hand back the borrowed left operand. Promote
+		// those to owned references before the drop.
+		//
+		// A slice subscript is the exception: every slice path builds a
+		// fresh container (sliceSequence, listGetSlice, the mp_subscript
+		// slice arms, memoryViewGetSlice), which is already a genuine new
+		// reference. Increffing it again strands a phantom count that, for a
+		// gc-tracked result (list/tuple/memoryview slice), pins the object
+		// as a Go root and keeps its weakref alive forever. So skip the
+		// promotion when the key is a slice.
 		//
 		// CPython: Python/bytecodes.c BINARY_OP (res = ...; DECREF_INPUTS())
-		if out == a || out == b || int(oparg) == nbBinarySubscr {
+		if out == a || out == b {
 			objects.Incref(out)
+		} else if int(oparg) == nbBinarySubscr {
+			if _, isSlice := b.(*objects.Slice); !isSlice {
+				objects.Incref(out)
+			}
 		}
 		objects.Decref(a)
 		objects.Decref(b)

@@ -273,6 +273,16 @@ func (e *evalState) opIS_OP(oparg uint32) (next int, ok bool, err error) {
 	if oparg == 1 {
 		eq = !eq
 	}
+	// DECREF_INPUTS: IS_OP compares identities and pushes a fresh bool,
+	// retaining neither operand, so both owned references are released the
+	// same way COMPARE_OP releases its operands. This relies on every
+	// producer that can feed IS_OP handing back an owned reference (the
+	// weakref dereference and container element reads were the borrowed
+	// holdouts; both now incref on the way out).
+	//
+	// CPython: Python/bytecodes.c IS_OP (b = ...; a = ...; DECREF_INPUTS())
+	objects.Decref(a)
+	objects.Decref(b)
 	e.pushObject(objects.NewBool(eq))
 	return e.advance(), true, nil
 }
@@ -289,6 +299,7 @@ func (e *evalState) opPOP_JUMP_IF(op compile.Opcode, oparg uint32) (next int, ok
 	default:
 		truthy, terr := objects.IsTruthy(v)
 		if terr != nil {
+			objects.Decref(v)
 			return 0, true, terr
 		}
 		if op == compile.POP_JUMP_IF_TRUE {
@@ -297,6 +308,15 @@ func (e *evalState) opPOP_JUMP_IF(op compile.Opcode, oparg uint32) (next int, ok
 			take = !truthy
 		}
 	}
+	// DECREF_INPUTS: the value-on-top is owned (LOAD_FAST_BORROW and every
+	// other producer push an owned reference), so it is released once the
+	// branch condition is read. The _NONE/_NOT_NONE forms close the object
+	// itself; the _TRUE/_FALSE forms close the bool TO_BOOL already produced,
+	// which is immortal and so a no-op. CPython mirrors this: _IS_NONE closes
+	// value and _POP_JUMP_IF_{TRUE,FALSE} close the condition.
+	//
+	// CPython: Python/bytecodes.c _IS_NONE / POP_JUMP_IF_{TRUE,FALSE,NONE,NOT_NONE}
+	objects.Decref(v)
 	if take {
 		return e.jumpBy(int(oparg) + 1), true, nil
 	}
