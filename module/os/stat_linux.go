@@ -54,8 +54,8 @@ func statBlockFields(info goos.FileInfo) (blksize, blocks, rdev int64) {
 	if !ok || sys == nil {
 		return
 	}
-	blksize = int64(sys.Blksize)
-	blocks = int64(sys.Blocks)
+	blksize = int64(sys.Blksize) //nolint:unconvert // Blksize is int32 on linux/arm64
+	blocks = int64(sys.Blocks)   //nolint:unconvert // Blocks is int32 on linux/arm64
 	rdev = int64(sys.Rdev)
 	return
 }

@@ -115,47 +115,10 @@ func synthesizeException(err error) *pyerrors.Exception {
 	if errors.Is(err, objects.ErrGeneratorExit) {
 		return pyerrors.New(pyerrors.PyExc_GeneratorExit, nil)
 	}
-	// Structured parser SyntaxError: lift filename/lineno/offset/text
-	// into the (msg, info) 2-arg form so the SyntaxError instance
-	// carries the full set of attributes Python user code expects.
-	// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
-	// (PyErr_SetObject builds the typed instance from these fields).
-	var se *parsererrors.SyntaxError
-	if errors.As(err, &se) {
-		return pyerrors.SyntaxFromParser(se)
-	}
-	// Structured symtable SyntaxError: same idea as the parser branch,
-	// but the location data lives in symtable.SyntaxError.Pos rather
-	// than the parser record.
-	var stse *symtable.SyntaxError
-	if errors.As(err, &stse) {
-		return pyerrors.SyntaxFromSymtable(stse)
-	}
-	// Structured compile-time SyntaxError: codegen visitor passes
-	// surface _PyCompile_Error through compile.SyntaxError with
-	// filename / ast.Pos already pinned to the offending node.
-	// CPython: Python/compile.c:1191 _PyCompile_Error
-	var cse *compile.SyntaxError
-	if errors.As(err, &cse) {
-		return pyerrors.SyntaxFromCompile(cse)
-	}
-	// Structured future-scanner SyntaxError: future_check_features raises
-	// for "braces" (easter egg) and unknown feature names.
-	// CPython: Python/future.c:L8 future_check_features
-	var fse *future.SyntaxError
-	if errors.As(err, &fse) {
-		return pyerrors.SyntaxFromFuture(fse)
-	}
-	// Structured codec UnicodeEncodeError: carries encoding, object, start,
-	// end, reason so Python code can access exc.object[exc.start:exc.end].
-	// CPython: Objects/exceptions.c:3040 UnicodeError_init
-	var uee *codecs.UnicodeEncodeErr
-	if errors.As(err, &uee) {
-		return pyerrors.NewUnicodeEncodeError(uee.Encoding, objects.NewStr(uee.Object), uee.Start, uee.End, uee.Reason)
-	}
-	var ude *codecs.UnicodeDecodeErr
-	if errors.As(err, &ude) {
-		return pyerrors.NewUnicodeDecodeError(ude.Encoding, ude.Object, ude.Start, ude.End, ude.Reason)
+	// Structured errors (SyntaxError variants, codec errors) carry their
+	// own location/codec fields and convert directly to a typed instance.
+	if exc, ok := synthesizeStructured(err); ok {
+		return exc
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
@@ -201,6 +164,56 @@ func synthesizeException(err error) *pyerrors.Exception {
 	return pyerrors.New(pyerrors.PyExc_Exception, objects.NewTuple([]objects.Object{
 		objects.NewStr(msg),
 	}))
+}
+
+// synthesizeStructured converts the Go error types that carry their own
+// structured fields (the SyntaxError family plus the codec errors) into a
+// typed Python exception. ok is false when err is not one of these shapes, so
+// the caller falls through to prefix-based message parsing.
+func synthesizeStructured(err error) (*pyerrors.Exception, bool) {
+	// Structured parser SyntaxError: lift filename/lineno/offset/text
+	// into the (msg, info) 2-arg form so the SyntaxError instance
+	// carries the full set of attributes Python user code expects.
+	// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
+	// (PyErr_SetObject builds the typed instance from these fields).
+	var se *parsererrors.SyntaxError
+	if errors.As(err, &se) {
+		return pyerrors.SyntaxFromParser(se), true
+	}
+	// Structured symtable SyntaxError: same idea as the parser branch,
+	// but the location data lives in symtable.SyntaxError.Pos rather
+	// than the parser record.
+	var stse *symtable.SyntaxError
+	if errors.As(err, &stse) {
+		return pyerrors.SyntaxFromSymtable(stse), true
+	}
+	// Structured compile-time SyntaxError: codegen visitor passes
+	// surface _PyCompile_Error through compile.SyntaxError with
+	// filename / ast.Pos already pinned to the offending node.
+	// CPython: Python/compile.c:1191 _PyCompile_Error
+	var cse *compile.SyntaxError
+	if errors.As(err, &cse) {
+		return pyerrors.SyntaxFromCompile(cse), true
+	}
+	// Structured future-scanner SyntaxError: future_check_features raises
+	// for "braces" (easter egg) and unknown feature names.
+	// CPython: Python/future.c:L8 future_check_features
+	var fse *future.SyntaxError
+	if errors.As(err, &fse) {
+		return pyerrors.SyntaxFromFuture(fse), true
+	}
+	// Structured codec UnicodeEncodeError: carries encoding, object, start,
+	// end, reason so Python code can access exc.object[exc.start:exc.end].
+	// CPython: Objects/exceptions.c:3040 UnicodeError_init
+	var uee *codecs.UnicodeEncodeErr
+	if errors.As(err, &uee) {
+		return pyerrors.NewUnicodeEncodeError(uee.Encoding, objects.NewStr(uee.Object), uee.Start, uee.End, uee.Reason), true
+	}
+	var ude *codecs.UnicodeDecodeErr
+	if errors.As(err, &ude) {
+		return pyerrors.NewUnicodeDecodeError(ude.Encoding, ude.Object, ude.Start, ude.End, ude.Reason), true
+	}
+	return nil, false
 }
 
 // buildExceptionForType is the single-arg constructor path used by the

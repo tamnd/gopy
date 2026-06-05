@@ -574,6 +574,19 @@ func memoryViewHash(o Object) (int64, error) {
 	return m.hashValue, nil
 }
 
+// asComparableBuffer wraps o in a temporary view so a richcompare can decode
+// its items. ok is false when o does not export a buffer (a str, for example),
+// which CPython surfaces as NotImplemented from memory_richcompare.
+//
+// CPython: Objects/memoryobject.c:3106 memory_richcompare (PyObject_GetBuffer)
+func asComparableBuffer(o Object) (*MemoryView, bool) {
+	mv, err := NewMemoryView(o)
+	if err != nil {
+		return nil, false
+	}
+	return mv, true
+}
+
 // memoryViewRichCmp compares two views (or a view and a bytes-like object)
 // for equality. A released view on either side compares equal only to itself,
 // and views differing in item count are unequal.
@@ -594,8 +607,8 @@ func memoryViewRichCmp(a, b Object, op CompareOp) (Object, error) {
 	// The right operand is compared through its own buffer: wrap it in a
 	// temporary view so its format decodes items the same way the left view
 	// does. A non-buffer object (str) yields NotImplemented.
-	mb, err := NewMemoryView(b)
-	if err != nil {
+	mb, ok := asComparableBuffer(b)
+	if !ok {
 		return NotImplemented(), nil
 	}
 	// equiv_shape: differing item counts compare unequal without decoding.
