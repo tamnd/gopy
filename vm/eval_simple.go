@@ -28,6 +28,16 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// nbBinarySubscr is the BINARY_OP suboperator that selects PyObject_GetItem
+// (NB_SUBSCR in CPython 3.14). The BINARY_OP handler uses it to recognize the
+// one arm whose result is a borrowed container element rather than a freshly
+// built object, so it can promote that element to an owned reference before
+// running DECREF_INPUTS. It mirrors the nbSubscr value in binaryOp's local
+// suboperator table.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h NB_SUBSCR
+const nbBinarySubscr = 26
+
 // init wires the const-wrap hook so objects.wrapConstAttr (the path
 // dis.py and friends take when they read co_consts) can convert
 // compile-pipeline value types into Objects without dragging the
@@ -262,8 +272,24 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		a := e.popObject()
 		out, berr := binaryOp(int32(oparg), a, b)
 		if berr != nil {
+			objects.Decref(a)
+			objects.Decref(b)
 			return 0, true, berr
 		}
+		// DECREF_INPUTS: BINARY_OP owns both popped operands and releases
+		// them once the result is computed. CPython's nb_*/sq_* slots each
+		// return a new reference, but gopy's in-place arms hand back the
+		// borrowed left operand and NB_SUBSCR hands back a borrowed container
+		// element, so promote those to owned references before the drop. The
+		// combined guard increfs exactly once even when a subscript returns
+		// the container itself.
+		//
+		// CPython: Python/bytecodes.c BINARY_OP (res = ...; DECREF_INPUTS())
+		if out == a || out == b || int(oparg) == nbBinarySubscr {
+			objects.Incref(out)
+		}
+		objects.Decref(a)
+		objects.Decref(b)
 		e.pushObject(out)
 		return e.cacheAdvance(compile.BINARY_OP), true, nil
 
@@ -275,6 +301,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		// reserved for adaptive specialization.
 		cmpOp := objects.CompareOp((oparg >> 5) & 0xf)
 		out, cerr := objects.RichCmp(a, b, cmpOp)
+		// DECREF_INPUTS: the comparison returns a fresh bool (or the rich
+		// result of a user __eq__/__lt__), never a borrowed operand, so the
+		// two operands are released unconditionally.
+		//
+		// CPython: Python/bytecodes.c COMPARE_OP (res = ...; DECREF_INPUTS())
+		objects.Decref(a)
+		objects.Decref(b)
 		if cerr != nil {
 			return 0, true, cerr
 		}
