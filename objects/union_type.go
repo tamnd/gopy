@@ -59,7 +59,10 @@ func (u *UnionType) Args() *Tuple { return u.args }
 //
 // CPython: Objects/unionobject.c:35 union_traverse
 func unionTraverse(o Object, visit Visitor) error {
-	u := o.(*UnionType)
+	u, ok := o.(*UnionType)
+	if !ok {
+		return nil
+	}
 	if u.args != nil {
 		if err := visit(u.args); err != nil {
 			return err
