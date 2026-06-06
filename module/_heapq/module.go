@@ -105,9 +105,16 @@ func siftup(heap *objects.List, pos int) error {
 			if err != nil {
 				return err
 			}
+			// CPython: Modules/_heapqmodule.c:54 size-change guard
+			if heap.Len() != endpos {
+				return fmt.Errorf("RuntimeError: list changed size during iteration")
+			}
 			if !lt {
 				childpos = rightpos
 			}
+		}
+		if childpos >= heap.Len() {
+			return fmt.Errorf("RuntimeError: list changed size during iteration")
 		}
 		if err := listSet(heap, pos, heap.Item(childpos)); err != nil {
 			return err

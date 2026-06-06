@@ -194,9 +194,19 @@ func sliceDealloc(o Object) {
 	if !ok {
 		return
 	}
-	Decref(s.Start)
-	Decref(s.Stop)
-	Decref(s.Step)
+	// Use nil-safe decrefs: CPython guarantees start/stop/step are never
+	// NULL (PySlice_New always fills them from Py_None), but gopy's freelist
+	// may leave fields zeroed if a slice is collected before NewSlice
+	// finishes initialization. Matches Py_XDECREF semantics.
+	if s.Start != nil {
+		Decref(s.Start)
+	}
+	if s.Stop != nil {
+		Decref(s.Stop)
+	}
+	if s.Step != nil {
+		Decref(s.Step)
+	}
 	s.Start = nil
 	s.Stop = nil
 	s.Step = nil
