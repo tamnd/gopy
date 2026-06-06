@@ -3,7 +3,7 @@ id: "1724"
 slug: 1724
 title: "1724: Builtins / types test panel — 28-file gap analysis and CPython parity port"
 sidebar_label: "1724 Builtins types panel"
-description: "Full audit and port of the 28 Builtins/types test files from spec 1700 against CPython 3.14. Sixteen files are green today. Two panic, two crash on missing os surface, and eight fail on subsystem gaps (range getset attributes, dict-view set methods, property descriptor surface, memoryview buffer protocol, float.hex mantissa, hashlib blake2, UserDict/UserList edges). Every gap is traced to the exact CPython file and line with a concrete port plan."
+description: "Full audit and port of the 28 Builtins/types test files from spec 1700 against CPython 3.14. All 28 vendored files now pass. test_buffer stays out of scope (C Py_buffer struct API)."
 ---
 
 ## Status
@@ -22,7 +22,7 @@ that tree before porting.
 
 ---
 
-## Current test status (audit date: 2026-06-04)
+## Current test status (audit date: 2026-06-06)
 
 Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 
@@ -49,42 +49,29 @@ Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 | test_range | OK | range getset + methods + pickle compat (P1, shipped) | done |
 | test_dictviews | OK | dict-view set ops + __contains__ + recursive repr (P2, shipped) | done |
 | test_property | OK | property descriptor surface (P3, shipped) | done |
-| test_memoryview | FAIL (9f, 2e) | weakref/gc reclaim parity (P4.b, VM-refcount-blocked) | blocked |
+| test_memoryview | OK (171, 20 skipped) | gc traverse chain fix (P4.b, shipped) | done |
 | test_strtod | OK | float.hex mantissa padding + long-mantissa parse (P5, shipped) | done |
 | test_unicodedata | OK | hashlib blake2 + data file (P6, shipped) | done |
 | test_ucn | OK | hashlib blake2 + named sequences (P6, shipped) | done |
 | test_unicode_file | OK | os.supports_unicode_filenames (P7, shipped) | done |
 | test_unicode_file_functions | OK | os unicode path surface (P7, shipped) | done |
 | test_userdict | OK | `|`/`|=` + test_fromkeys (P8.a, shipped) | done |
-| test_userlist | FAIL (1f) | free-after-iter reclaim (P8.b, VM-refcount-blocked) | blocked |
+| test_userlist | OK (54) | free-after-iter gc chain fix (P8.b, shipped) | done |
 | test_buffer | not vendored | C-level buffer protocol API | out-of-scope |
 
-Twenty-six green, two blocked on a shared root cause, one out of scope.
-`test_buffer` stays out of scope (it drives the C `Py_buffer` struct API
-directly, not Python-visible behaviour).
+Twenty-eight green (minus one out-of-scope), one out of scope. All 28 vendored
+files pass. `test_buffer` stays out of scope (it drives the C `Py_buffer`
+struct API directly, not Python-visible behaviour).
 
-The two remaining reds (`test_memoryview` weakref/gc cases, `test_userlist`
-free-after-iterating) both fail for the same reason: gopy's interpreter
-operand stack is managed by the Go garbage collector, not by reference
-counting, so `DECREF_INPUTS` is deliberately omitted across the arithmetic
-and comparison opcodes. The result is that an operand pushed by `LOAD_FAST`
-(which does incref) and consumed by `IS_OP`/`COMPARE_OP` (which does not
-decref) leaks one reference, while a borrowed call result (a weakref deref)
-carries none. `weakref.ref(m); m is wr()` therefore leaves the referent with
-one phantom reference, so `del m` never reaches zero and the weakref is never
-cleared. The same phantom keeps a caught exception's traceback frame, and the
-object bound only as that frame's `self`, alive past `gc.collect()`.
-
-A faithful fix is the consistent-ownership model CPython uses: every producer
-opcode increfs, every consumer decrefs, and every container slot store increfs
-the stored value. Doing that piecemeal is unsafe. An earlier attempt that
-added `DECREF_INPUTS` without also incref'ing on container store regressed
-`test_set` (items in a set were freed while still held), and an attempt to
-drop the traceback snapshot at `POP_EXCEPT` keyed on the exception's refcount
-regressed `test_frame` (a stored, returned exception is indistinguishable from
-a discarded one because `exc_info` holds no counted reference). The work is
-tracked as the VM refcount/container-incref audit and is out of scope for a
-single panel pass.
+The two previously blocked tests (`test_memoryview` weakref/gc cases,
+`test_userlist` free-after-iterating) are now green. The root cause was that
+inline tracebacks created in `attachFrameTraceback` were never added to the
+GC's tracked set, making the Exception→Traceback→Frame chain invisible to
+`subtractRefs`. Added `gc.TrackSilent` for inline tracebacks, split dicts, and
+exception objects, plus `TpTraverse` on Traceback and Exception types. Using
+the silent variant avoids bumping gen0.count during execution, which would
+otherwise trigger premature auto-collection that races with suspended
+generators (the regression in `test_clear_executing_generator`).
 
 ---
 
@@ -531,11 +518,11 @@ alone), CI green before moving on:
 - [x] P2 dict-view __contains__ + set ops + richcompare + isdisjoint + recursive repr (test_dictviews)
 - [x] P3 property __isabstractmethod__ + writable __doc__ + __name__/__set_name__ + subclass docstring rules (test_property)
 - [x] P4.a memoryview item/slice assignment + hash (gh-142664 use-after-free guard) + context manager/release + count/index + default-pickle rejection (test_memoryview 49f/36e -> 17f/2e)
-- [ ] P4.b memoryview weakref / GC-cycle reclaim parity: test_weakref, test_gc, test_buffer_reference_loop, test_picklebuffer_reference_loop (down to 9f/2e). Blocked on the VM refcount/container-incref audit. The leak is `self.assertIs(wr(), m)`: its inner `a is not b` loads `m` with `LOAD_FAST` (incref, owned) and `IS_OP` consumes it without `DECREF_INPUTS`, so `m` keeps one phantom reference and `del m` never reaches zero, which keeps the weakref live. Every localized patch only relocates the leak: (1) adding `DECREF_INPUTS` to `IS_OP` clears 6 memoryview cases (9f/2e -> 3f/2e) but over-decrefs the borrowed operand from `weakref()` and regresses test_generators (the `weakref` doctest premature-frees, `list(p)` raises ReferenceError); (2) making `weakref()` return an owned ref to reconcile that then leaks when `wr()` is passed as a `CALL` argument (gopy's `CALL` does not decref args) and regresses test_frame test_clear_locals_after_f_locals_access; (3) bare `DECREF_INPUTS` on `BINARY_OP`/`SUBSCR` regresses test_set (members freed while held, because container reads never incref). The only sound fix is the full CPython model (every producer owned, every consumer decrefs, every container read increfs); tracked outside this panel.
+- [x] P4.b memoryview weakref / GC-cycle reclaim parity: shipped via GC chain fix (gc.TrackSilent on inline tracebacks + TpTraverse on Traceback/Exception). test_memoryview now OK (171, 20 skipped).
 - [x] P5 float.hex full mantissa zero-padding + exact long-mantissa decimal parsing (test_strtod)
 - [x] P6.a hashlib blake2b / blake2s (test_unicodedata, test_ucn checksums)
 - [x] P6.b vendor NormalizationTest-3.2.0.txt (test_unicodedata normalization)
 - [x] P6.c named-sequence resolver table (test_ucn named sequences)
 - [x] P7 os.supports_unicode_filenames + unicode path surface (test_unicode_file, test_unicode_file_functions)
 - [x] P8.a dict / mappingproxy nb_or + nb_inplace_or: `dict |= mapping` keeps dict identity, `UserDict | mappingproxy` -> UserDict; test_fromkeys now green (test_userdict OK; test_mixed_or, test_mixed_ior)
-- [ ] P8.b free-after-iterating reclaim: test_userlist test_free_after_iterating. A caught IndexError's traceback frame snapshot keeps the iterated object's `self` alive past gc.collect(); same VM refcount root cause as P4.b. The localized POP_EXCEPT teardown attempt regressed test_frame (a stored, returned exception is indistinguishable from a discarded one when exc_info holds no counted reference). Deferred to the container-incref audit.
+- [x] P8.b free-after-iterating reclaim: shipped via GC chain fix (same batch as P4.b). test_userlist now OK (54).
