@@ -76,6 +76,25 @@ func init() {
 	Type.Setattro = objects.GenericSetAttr
 	Type.Repr = tracebackRepr
 	Type.Str = tracebackRepr
+	// TpTraverse visits TbFrame and Next so the cycle collector can walk
+	// Exception→Traceback→Frame chains and identify unreachable cycles.
+	// Mirrors CPython's tb_traverse which visits tb_frame and tb_next.
+	//
+	// CPython: Python/traceback.c:244 tb_traverse
+	Type.TpTraverse = func(o objects.Object, visit objects.Visitor) error {
+		tb := o.(*Traceback)
+		if tb.TbFrame != nil {
+			if err := visit(tb.TbFrame); err != nil {
+				return err
+			}
+		}
+		if tb.Next != nil {
+			if err := visit(tb.Next); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // tbDir backs the traceback __dir__ method. CPython returns the literal
@@ -98,6 +117,10 @@ func tbDir(_ []objects.Object, _ map[string]objects.Object) (objects.Object, err
 func New(entry Entry) *Traceback {
 	tb := &Traceback{Entry: entry}
 	tb.Init(Type)
+	// CPython: Python/traceback.c:154 PyTraceBack_Here PyObject_GC_Track
+	if h := objects.GCTrackHook; h != nil {
+		h(tb)
+	}
 	return tb
 }
 
@@ -107,6 +130,10 @@ func New(entry Entry) *Traceback {
 func Push(tb *Traceback, entry Entry) *Traceback {
 	out := &Traceback{Entry: entry, Next: tb}
 	out.Init(Type)
+	// CPython: Python/traceback.c:154 PyTraceBack_Here PyObject_GC_Track
+	if h := objects.GCTrackHook; h != nil {
+		h(out)
+	}
 	return out
 }
 

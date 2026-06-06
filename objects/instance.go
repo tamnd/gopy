@@ -34,6 +34,18 @@ var GCTrackHook func(Object)
 // CPython: Include/internal/pycore_object.h:248 _PyObject_GC_UNTRACK
 var GCUntrackHook func(Object)
 
+// GCTrackSilentHook tracks o for cycle detection without incrementing
+// gen0.count, so no auto-collection is triggered. Used for objects
+// whose allocation bursts would otherwise push gen0 over its threshold
+// at a time when the container under-incref issue (#223) would cause
+// false unreachability. Split instance dicts use this path: they hold
+// no cycle-relevant references when empty, but must be trackable once
+// values are written.
+//
+// CPython: _PyObject_GC_Link increments gcstate->young.count which then
+// drives the auto-trigger; this hook intentionally omits that step.
+var GCTrackSilentHook func(Object)
+
 // SaveCurrentExceptionHook returns the active thread's pending exception
 // (a typed *pyerrors.Exception, returned here as any to avoid an objects
 // to pyerrors import edge). RestoreCurrentExceptionHook puts it back.

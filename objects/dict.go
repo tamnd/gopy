@@ -277,11 +277,25 @@ func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewBool(v != nil), nil
 }
 
-// dictTraverse visits every key and every value.
+// dictTraverse visits every key and value for combined dicts, and only
+// per-instance values for split dicts. Split dicts share their key table
+// with SharedKeys (which the type object owns), so visiting the keys
+// would double-decrement them during subtractRefs. CPython's dict_traverse
+// skips the dk_kind==DICT_KEYS_SPLIT branch in the same way.
 //
 // CPython: Objects/dictobject.c:4022 dict_traverse
 func dictTraverse(o Object, visit Visitor) error {
 	d := o.(*Dict)
+	if d.sharedKeys != nil {
+		for _, slot := range d.sharedKeys.order {
+			if v := d.splitValues[slot]; v != nil {
+				if err := visit(v); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	for _, slot := range d.order {
 		k := d.slotKey(slot)
 		if k != nil {

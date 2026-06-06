@@ -196,6 +196,49 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	// = PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
 	t.Getattro = objects.GenericGetAttr
 	t.Setattro = objects.GenericSetAttr
+	// TpTraverse visits every GC-visible field so the cycle collector can
+	// walk the Exception→Traceback→Frame chain and identify unreachable
+	// exception cycles. This matches CPython's BaseException_traverse which
+	// visits tb, context, cause, notes, args, and dict.
+	//
+	// CPython: Objects/exceptions.c:121 BaseException_traverse
+	t.TpTraverse = func(o objects.Object, visit objects.Visitor) error {
+		exc, ok := o.(*Exception)
+		if !ok {
+			return nil
+		}
+		if exc.TB != nil {
+			if err := visit(exc.TB); err != nil {
+				return err
+			}
+		}
+		if exc.Context != nil {
+			if err := visit(exc.Context); err != nil {
+				return err
+			}
+		}
+		if exc.Cause != nil {
+			if err := visit(exc.Cause); err != nil {
+				return err
+			}
+		}
+		if exc.Notes != nil {
+			if err := visit(exc.Notes); err != nil {
+				return err
+			}
+		}
+		if exc.Args != nil {
+			if err := visit(exc.Args); err != nil {
+				return err
+			}
+		}
+		if exc.StopValue != nil {
+			if err := visit(exc.StopValue); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	// BaseException carries __repr__ / __str__ method descriptors that
 	// wrap BaseException_repr / BaseException_str. Without these, a
 	// user subclass like `class BozoError(Exception): pass` runs through

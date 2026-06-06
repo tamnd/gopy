@@ -119,6 +119,13 @@ func New(t *objects.Type, args *objects.Tuple) *Exception {
 			e.StopValue = objects.None()
 		}
 	}
+	// Track for cycle GC so the collector can walk Exception→TB→Frame chains
+	// and identify unreachable exception objects (e.g. from PUSH_EXC_INFO bugs).
+	//
+	// CPython: Objects/exceptions.c BaseException_new PyObject_GC_Track
+	if h := objects.GCTrackHook; h != nil {
+		h(e)
+	}
 	return e
 }
 

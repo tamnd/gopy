@@ -81,6 +81,30 @@ func Track(o objects.Object) {
 	maybeAutoCollect()
 }
 
+// TrackSilent adds o to the youngest generation without incrementing
+// gen0.count and without triggering maybeAutoCollect. Used for objects
+// whose allocation pattern would otherwise inflate gen0 and cause
+// premature auto-collections that expose the container under-incref
+// gap (#223). The object is fully visible to the next collection that
+// fires via any other trigger; only the auto-trigger suppression is
+// silent.
+//
+// CPython: _PyObject_GC_Link increments gcstate->young.count; this
+// function intentionally omits that step.
+func TrackSilent(o objects.Object) {
+	if o == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if _, ok := state.tracked[o]; ok {
+		return
+	}
+	g := &gcHead{obj: o}
+	listAppend(g, state.generations[0].head)
+	state.tracked[o] = g
+}
+
 // Untrack removes o from whichever generation list it currently sits
 // on. No-op if the object was never tracked. CPython internally
 // keeps the FINALIZED bit while clearing COLLECTING; gopy lets the

@@ -236,6 +236,14 @@ func NewSplitDict(sk *SharedKeys) *Dict {
 	}
 	d.init(DictType)
 	sk.refs++
+	// CPython: Objects/dictobject.c:897 new_dict_with_shared_keys PyObject_GC_Track
+	// Use the silent variant so split-dict creation does not inflate gen0.count
+	// and trigger premature auto-collections that expose the container under-incref
+	// gap (#223). The dict is still fully visible to any collection that fires via
+	// another trigger.
+	if h := GCTrackSilentHook; h != nil {
+		h(d)
+	}
 	return d
 }
 

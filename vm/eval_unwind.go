@@ -23,6 +23,7 @@ import (
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/future"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/module/gc"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/symtable"
@@ -566,6 +567,7 @@ func (e *evalState) attachFrameTraceback() {
 	// frames.
 	//
 	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
+	// CPython: Python/traceback.c:154 PyTraceBack_Here PyObject_GC_Track
 	tb := &traceback.Traceback{
 		Entry:   entry,
 		Next:    exc.TB,
@@ -573,6 +575,7 @@ func (e *evalState) attachFrameTraceback() {
 		TbLasti: off,
 	}
 	tb.Init(traceback.Type)
+	gc.TrackSilent(tb)
 	exc.TB = tb
 }
 
