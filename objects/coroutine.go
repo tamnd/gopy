@@ -103,7 +103,6 @@ var CoroutineType *Type
 // CPython: Objects/genobject.c:L1500 _PyCoroWrapper_Type
 var CoroAwaitType *Type
 
-//nolint:gocyclo // coroutine type-registration table: flat sequence of attribute/descriptor installs
 func init() {
 	CoroutineType = NewType("coroutine", []*Type{objectType})
 	CoroutineType.Repr = coroRepr
@@ -126,6 +125,11 @@ func init() {
 	//
 	// CPython: Objects/genobject.c:1486 coro_await (coro_as_async.am_await)
 	CoroutineType.Async = &AsyncMethods{Await: coroAmAwait}
+	initCoroutineDescriptors()
+}
+
+//nolint:gocognit,gocyclo // coroutine type-registration table: flat sequence of attribute/descriptor installs with getset closures
+func initCoroutineDescriptors() {
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
 		"send":          coroSendMethod,
 		"throw":         coroThrowMethod,

@@ -202,43 +202,7 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	// visits tb, context, cause, notes, args, and dict.
 	//
 	// CPython: Objects/exceptions.c:121 BaseException_traverse
-	t.TpTraverse = func(o objects.Object, visit objects.Visitor) error {
-		exc, ok := o.(*Exception)
-		if !ok {
-			return nil
-		}
-		if exc.TB != nil {
-			if err := visit(exc.TB); err != nil {
-				return err
-			}
-		}
-		if exc.Context != nil {
-			if err := visit(exc.Context); err != nil {
-				return err
-			}
-		}
-		if exc.Cause != nil {
-			if err := visit(exc.Cause); err != nil {
-				return err
-			}
-		}
-		if exc.Notes != nil {
-			if err := visit(exc.Notes); err != nil {
-				return err
-			}
-		}
-		if exc.Args != nil {
-			if err := visit(exc.Args); err != nil {
-				return err
-			}
-		}
-		if exc.StopValue != nil {
-			if err := visit(exc.StopValue); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+	t.TpTraverse = excTraverse
 	// BaseException carries __repr__ / __str__ method descriptors that
 	// wrap BaseException_repr / BaseException_str. Without these, a
 	// user subclass like `class BozoError(Exception): pass` runs through
@@ -369,4 +333,24 @@ func Match(exc *Exception, t *objects.Type) bool {
 		return false
 	}
 	return IsSubtype(exc.ExcType, t)
+}
+
+// excTraverse is the TpTraverse slot shared by all exception types. It visits
+// every GC-visible field so the cycle collector can walk Exception→Traceback→Frame
+// chains. Matches CPython's BaseException_traverse.
+//
+// CPython: Objects/exceptions.c:121 BaseException_traverse
+func excTraverse(o objects.Object, visit objects.Visitor) error {
+	exc, ok := o.(*Exception)
+	if !ok {
+		return nil
+	}
+	for _, ref := range []objects.Object{exc.TB, exc.Context, exc.Cause, exc.Notes, exc.Args, exc.StopValue} {
+		if ref != nil {
+			if err := visit(ref); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
