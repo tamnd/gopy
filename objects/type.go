@@ -3,6 +3,7 @@ package objects
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -507,7 +508,7 @@ var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype}
 
 func init() {
 	typeType.typ = typeType
-	typeType.refcnt = 1
+	atomic.StoreInt64(&typeType.refcnt, 1)
 	// type inherits from object. CPython: Objects/typeobject.c:6361
 	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
 	// in type's MRO so metatype lookup of __class__ / __dict__ finds

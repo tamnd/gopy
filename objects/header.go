@@ -5,15 +5,19 @@
 // arrive in later phases (see notes/Spec/1700/).
 package objects
 
+import "sync/atomic"
+
 // Header is the per-object header. Mirrors struct _object in
 // cpython/Include/object.h. The zero value is invalid; constructors
 // set refcount to 1 and install the type pointer.
 //
-// refcnt is a plain int64 to match CPython's GIL-build ob_refcnt,
-// where Py_INCREF / Py_DECREF expand to non-atomic ++/--. Atomic
-// access would cost a memory barrier per op on the hot path. The
-// free-threaded build (v0.14) will introduce a tagged biased
-// refcount instead of a global atomic.
+// refcnt is accessed via sync/atomic because Go runtime finalizers
+// (runtime.SetFinalizer on FrameSnapshot) call Decref from a goroutine
+// that is independent of the Python GC's updateRefs reads. All Incref,
+// Decref, and Refcnt operations use atomic loads/stores/adds to prevent
+// the data race the -race detector reports when tracebacks outlive their
+// activation records. This matches CPython's free-threaded build model
+// (_Py_INCREF_SPECIALIZED / _Py_DECREF_SPECIALIZED).
 //
 // CPython: Include/object.h:L107 _object
 type Header struct {
@@ -101,7 +105,7 @@ func (h *Header) Init(t *Type) {
 //
 // CPython: Include/object.h:L246 Py_REFCNT
 func (h *Header) Refcnt() int64 {
-	return h.refcnt
+	return atomic.LoadInt64(&h.refcnt)
 }
 
 // Size returns ob_size. Only meaningful for VarHeader-backed types.
@@ -130,14 +134,14 @@ const ImmortalRefcnt int64 = 1 << 30
 //
 // CPython: Include/internal/pycore_object.h _Py_SetImmortal
 func (h *Header) MakeImmortal() {
-	h.refcnt = ImmortalRefcnt
+	atomic.StoreInt64(&h.refcnt, ImmortalRefcnt)
 }
 
 // IsImmortal reports whether the header has been stamped immortal.
 //
 // CPython: Include/internal/pycore_object.h _Py_IsImmortal
 func (h *Header) IsImmortal() bool {
-	return h.refcnt >= ImmortalRefcnt
+	return atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt
 }
 
 // Finalized reports whether tp_finalize has already run on this object.

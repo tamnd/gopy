@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // setEntry is one slot in the set's open-addressed table.
@@ -255,10 +256,10 @@ func init() {
 func setDealloc(o Object) {
 	if fn := o.Type().Finalize; fn != nil {
 		h := o.Hdr()
-		h.refcnt = 1
+		atomic.StoreInt64(&h.refcnt, 1)
 		fn(o)
-		h.refcnt--
-		if h.refcnt != 0 {
+		atomic.AddInt64(&h.refcnt, -1)
+		if atomic.LoadInt64(&h.refcnt) != 0 {
 			return
 		}
 	}

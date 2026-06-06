@@ -17,6 +17,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 )
 
 // NewUserType builds a Python-defined class. bases default to
@@ -211,7 +212,7 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	//
 	// CPython: Objects/typeobject.c:4153 type_new (heap types start at
 	// refcount 1 from PyObject_GC_NewVar)
-	t.Hdr().refcnt = 1
+	atomic.StoreInt64(&t.Hdr().refcnt, 1)
 	stampMetaclass(t, meta)
 	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
