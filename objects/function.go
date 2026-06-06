@@ -651,7 +651,10 @@ func funcGetAttr(o Object, name Object) (Object, error) {
 		}
 		return descr, nil
 	}
-	fn := o.(*Function)
+	fn, ok := o.(*Function)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
 	if fn.Dict != nil {
 		v, err := fn.Dict.GetItem(name)
 		if err == nil && v != nil {

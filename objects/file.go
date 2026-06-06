@@ -368,7 +368,10 @@ func ioErr(err error) error {
 // CPython: Modules/_io/iobase.c (iobase + per-class slot tables) +
 // PyObject_GenericGetAttr resolution
 func fileGetattr(o Object, name Object) (Object, error) {
-	fi := o.(*File)
+	fi, ok := o.(*File)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
 	n, ok := name.(*Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
@@ -404,7 +407,10 @@ func fileGetattr(o Object, name Object) (Object, error) {
 // CPython: Modules/_io/textio.c (textiowrapper_setmode) + the implicit
 // __dict__-less fall-through.
 func fileSetattr(o Object, name Object, value Object) error {
-	fi := o.(*File)
+	fi, ok := o.(*File)
+	if !ok {
+		return GenericSetAttr(o, name, value)
+	}
 	n, ok := name.(*Unicode)
 	if !ok {
 		return fmt.Errorf("TypeError: attribute name must be string")

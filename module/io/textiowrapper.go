@@ -889,7 +889,10 @@ func (t *TextIOWrapper) Detach() (objects.Object, error) {
 //
 // CPython: Modules/_io/textio.c textiowrapper_getset + textiowrapper_methods
 func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	t := o.(*TextIOWrapper)
+	t, ok := o.(*TextIOWrapper)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
@@ -1309,7 +1312,10 @@ const (
 
 // incrementalNLDecoderGetattr handles attribute and method access.
 func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	d := o.(*IncrementalNewlineDecoder)
+	d, ok := o.(*IncrementalNewlineDecoder)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")

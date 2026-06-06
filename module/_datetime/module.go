@@ -387,7 +387,10 @@ func asInt(o objects.Object) (int64, error) {
 //
 // CPython: Modules/_datetimemodule.c:2700 timedelta_getattro
 func timedeltaGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	td := o.(*Timedelta)
+	td, ok := o.(*Timedelta)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -957,7 +960,10 @@ func dateReduce(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 //
 // CPython: Modules/_datetimemodule.c:3183 date_getattro
 func dateGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	d := o.(*Date)
+	d, ok := o.(*Date)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -1894,7 +1900,10 @@ func parseTimeArgs(args []objects.Object, kwargs map[string]objects.Object,
 }
 
 func timeGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	t := o.(*Time)
+	t, ok := o.(*Time)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -2558,7 +2567,10 @@ func datetimeNew(cls *objects.Type, args []objects.Object, kwargs map[string]obj
 }
 
 func datetimeGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	dt := o.(*Datetime)
+	dt, ok := o.(*Datetime)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err

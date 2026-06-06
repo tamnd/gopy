@@ -462,7 +462,10 @@ func partialRepr(o objects.Object) (string, error) {
 //
 // CPython: Modules/_functoolsmodule.c:588 partial_memberlist
 func partialGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	p := o.(*Partial)
+	p, ok := o.(*Partial)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -493,7 +496,10 @@ func partialGetattr(o objects.Object, name objects.Object) (objects.Object, erro
 //
 // CPython: Modules/_functoolsmodule.c:588 partial_memberlist (Py_READONLY)
 func partialSetattr(o objects.Object, name objects.Object, value objects.Object) error {
-	p := o.(*Partial)
+	p, ok := o.(*Partial)
+	if !ok {
+		return objects.GenericSetAttr(o, name, value)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return err
@@ -608,7 +614,10 @@ func keyObjectCall(o objects.Object, args []objects.Object, kwargs map[string]ob
 //
 // CPython: Modules/_functoolsmodule.c:845 keyobject_members
 func keyObjectGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	ko := o.(*KeyObject)
+	ko, ok := o.(*KeyObject)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -1096,7 +1105,10 @@ func lruCacheDescrGet(descr objects.Object, owner objects.Object, _ *objects.Typ
 //
 // CPython: Objects/object.c:1932 PyObject_GenericGetAttr
 func lruCacheGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	w := o.(*LruCacheWrapper)
+	w, ok := o.(*LruCacheWrapper)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err
@@ -1125,7 +1137,10 @@ func lruCacheGetattr(o objects.Object, name objects.Object) (objects.Object, err
 //
 // CPython: Objects/object.c:2024 PyObject_GenericSetAttr
 func lruCacheSetattr(o objects.Object, name objects.Object, value objects.Object) error {
-	w := o.(*LruCacheWrapper)
+	w, ok := o.(*LruCacheWrapper)
+	if !ok {
+		return objects.GenericSetAttr(o, name, value)
+	}
 	if w.Dict == nil {
 		w.Dict = objects.NewDict()
 	}

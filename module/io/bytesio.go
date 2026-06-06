@@ -432,7 +432,10 @@ func (b *BytesIO) setState(state objects.Object) error {
 //
 // CPython: Modules/_io/bytesio.c bytesio_getset + bytesio_methods
 func bytesIOGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	b := o.(*BytesIO)
+	b, ok := o.(*BytesIO)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")

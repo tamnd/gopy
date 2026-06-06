@@ -809,9 +809,9 @@ func exitStackPopAll(args []objects.Object, _ map[string]objects.Object) (object
 		return objects.None(), nil
 	}
 	newStack := objects.NewInstance(exitStackType)
-	cur, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
-	_ = newStack.Dict().SetItem(objects.NewStr("_exit_callbacks"), cur)
-	_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
+	cur, _ := self.EnsureDict().GetItem(objects.NewStr("_exit_callbacks"))
+	_ = newStack.EnsureDict().SetItem(objects.NewStr("_exit_callbacks"), cur)
+	_ = self.EnsureDict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
 	return newStack, nil
 }
 

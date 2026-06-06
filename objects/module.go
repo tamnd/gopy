@@ -184,7 +184,10 @@ func (m *Module) SetState(s any) { m.state = s }
 //
 // CPython: Objects/moduleobject.c:147 module_getattro
 func moduleGetattr(o Object, name Object) (Object, error) {
-	m := o.(*Module)
+	m, ok := o.(*Module)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
 	key := attrNameStr(name)
 	// __dict__ is the canonical module attribute that exposes the
 	// backing namespace. CPython sets it via module_init_dict and

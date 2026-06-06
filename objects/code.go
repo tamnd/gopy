@@ -403,7 +403,10 @@ func tupleToStrings(o Object, field string) ([]string, error) {
 //
 // CPython: Objects/codeobject.c:2960 code_memberlist
 func codeGetAttr(o Object, name Object) (Object, error) {
-	c := o.(*Code)
+	c, ok := o.(*Code)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
 	n, ok := name.(*Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
