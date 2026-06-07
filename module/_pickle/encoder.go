@@ -34,6 +34,7 @@ import (
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	sys "github.com/tamnd/gopy/module/sys"
 )
 
 // pickler holds the in-progress write buffer for a single dump cycle.
@@ -49,6 +50,12 @@ type pickler struct {
 	bin        bool
 	framing    bool
 	frameStart int
+	// depth counts nested save() calls. Bounded by sys.getrecursionlimit()
+	// so that a self-referential object raises RecursionError instead of
+	// overflowing the goroutine stack.
+	//
+	// CPython: Modules/_pickle.c:4390 Pickler_save (Py_EnterRecursiveCall)
+	depth int
 	// memo maps an object's identity to its memo index. The keys are
 	// interface values whose dynamic type is a pointer, so map equality
 	// degenerates into pointer identity. CPython's PyMemoTable uses raw
@@ -449,6 +456,17 @@ func (p *pickler) memoGet(obj objects.Object) error {
 //
 // CPython: Modules/_pickle.c:4401 save
 func (p *pickler) save(obj objects.Object) error {
+	// Mirror CPython's Pickler_save which calls Py_EnterRecursiveCall so that
+	// self-referential objects raise RecursionError instead of crashing.
+	//
+	// CPython: Modules/_pickle.c:4390 Pickler_save (Py_EnterRecursiveCall)
+	p.depth++
+	if p.depth > sys.RecursionLimit() {
+		p.depth--
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded while pickling an object")
+	}
+	defer func() { p.depth-- }()
+
 	if obj == nil {
 		return errors.New("PicklingError: nil object")
 	}

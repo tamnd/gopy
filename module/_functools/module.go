@@ -117,6 +117,8 @@ type Partial struct {
 
 func newPartialType() *objects.Type {
 	t := objects.NewType("partial", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_functoolsmodule.c:796 partial_type_spec — exposed as functools.partial.
+	t.Module = "functools"
 	t.HasDict = true
 	t.Getattro = partialGetattr
 	t.Setattro = partialSetattr
@@ -129,6 +131,75 @@ func newPartialType() *objects.Type {
 	t.TpTraverse = partialTraverse
 	// CPython: Modules/_functoolsmodule.c:350 partial_dealloc
 	t.Dealloc = partialDealloc
+	// Register __repr__ and __str__ as method descriptors so that user
+	// subclasses of partial inherit the correct repr via MRO lookup.
+	// Without this, callDunderNoArgObject falls through to object.__repr__.
+	//
+	// CPython: Modules/_functoolsmodule.c:610 partial_repr (tp_repr slot wrapper)
+	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'partial' argument")
+			}
+			p, ok := args[0].(*Partial)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'partial' object")
+			}
+			s, err := partialRepr(p)
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewStr(s), nil
+		},
+	))
+	objects.SetTypeDescr(t, "__str__", objects.NewMethodDescr(t, "__str__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: descriptor '__str__' requires a 'partial' argument")
+			}
+			p, ok := args[0].(*Partial)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__str__' requires a 'partial' object")
+			}
+			s, err := partialRepr(p)
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewStr(s), nil
+		},
+	))
+
+	// Register __reduce__ and __setstate__ as type descriptors so that
+	// objectReduceExDescr's LookupDescriptor check can detect them as
+	// overrides of object.__reduce__. The actual calls go through
+	// partialGetattr which returns closures capturing the instance.
+	//
+	// CPython: Modules/_functoolsmodule.c:697 partial_reduce
+	// CPython: Modules/_functoolsmodule.c:706 partial_setstate
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) < 1 {
+				return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'partial' argument")
+			}
+			p, ok := args[0].(*Partial)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'partial' object")
+			}
+			return partialReduce(p)
+		},
+	))
+	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescr(t, "__setstate__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			p, ok := args[0].(*Partial)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__setstate__' requires a 'partial' object")
+			}
+			return partialSetstate(p, args[1])
+		},
+	))
 	return t
 }
 
@@ -364,11 +435,14 @@ func partialCall(o objects.Object, callArgs []objects.Object, callKwargs map[str
 			if err != nil {
 				return nil, err
 			}
-			ks, err := objects.Str(k)
-			if err != nil {
-				return nil, err
+			// CPython: Modules/_functoolsmodule.c:497 partial_call — only string keys
+			// are valid as keyword arguments; non-string keys in the keywords dict
+			// raise TypeError, matching CPython's behavior for function calls.
+			kStr, ok := k.(*objects.Unicode)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: keywords must be strings")
 			}
-			totKw[ks] = v
+			totKw[kStr.Value()] = v
 		}
 		for k, v := range callKwargs {
 			totKw[k] = v
@@ -416,43 +490,99 @@ func partialCall(o objects.Object, callArgs []objects.Object, callKwargs map[str
 }
 
 // partialRepr renders partial(func, args..., kw=val, ...). Mirrors
-// partial_repr; recursion guard is omitted because gopy does not yet
-// expose Py_ReprEnter.
+// partial_repr including the Py_ReprEnter cycle guard so self-referential
+// partials yield "<mod>.<qualname>(...)" instead of a stack overflow.
 //
 // CPython: Modules/_functoolsmodule.c:610 partial_repr
 func partialRepr(o objects.Object) (string, error) {
 	p := o.(*Partial)
-	fnRepr, err := objects.Repr(p.Fn)
+	// Build the qualified name from the type's __module__ and __qualname__,
+	// exactly as CPython does via PyType_GetModuleName / PyType_GetQualName.
+	//
+	// CPython: Modules/_functoolsmodule.c:667 partial_repr (PyType_GetModuleName)
+	typeName := partialTypeName(p.Type())
+	if objects.ReprEnter(o) {
+		// Cycle detected: CPython returns bare "..." so the outer partial's
+		// repr becomes "<mod>.<qualname>(...)" naturally via the fn repr.
+		// CPython: Modules/_functoolsmodule.c:622 partial_repr (Py_ReprEnter branch)
+		return "...", nil
+	}
+	defer objects.ReprLeave(o)
+
+	// Snapshot fn, args, and keywords BEFORE any Repr call. A __repr__
+	// or __str__ on any argument value can call __setstate__ on this
+	// partial and replace these fields underneath us (test_repr_safety_against_reentrant_mutation).
+	// CPython: Modules/_functoolsmodule.c:628 partial_repr (Py_NewRef fn/args/kw)
+	fn := p.Fn
+	args := p.Args
+	kw := p.Keywords
+
+	// Snapshot keywords (key, value) pairs before iterating, because
+	// key.__str__ may mutate the dict.
+	// CPython: Modules/_functoolsmodule.c:645 partial_repr (Py_INCREF value guard)
+	type kv struct{ k, v objects.Object }
+	var kwPairs []kv
+	if kw != nil {
+		kwPairs = make([]kv, 0, kw.Len())
+		for _, k := range kw.Keys() {
+			v, err := kw.GetItem(k)
+			if err != nil {
+				return "", err
+			}
+			kwPairs = append(kwPairs, kv{k, v})
+		}
+	}
+
+	fnRepr, err := objects.Repr(fn)
 	if err != nil {
 		return "", err
 	}
-	out := "functools.partial(" + fnRepr
-	for i := 0; i < p.Args.Len(); i++ {
-		ar, err := objects.Repr(p.Args.Item(i))
+	out := typeName + "(" + fnRepr
+	for i := 0; i < args.Len(); i++ {
+		ar, err := objects.Repr(args.Item(i))
 		if err != nil {
 			return "", err
 		}
 		out += ", " + ar
 	}
-	if p.Keywords != nil {
-		for _, k := range p.Keywords.Keys() {
-			ks, err := objects.Str(k)
-			if err != nil {
-				return "", err
-			}
-			v, err := p.Keywords.GetItem(k)
-			if err != nil {
-				return "", err
-			}
-			vr, err := objects.Repr(v)
-			if err != nil {
-				return "", err
-			}
-			out += ", " + ks + "=" + vr
+	for _, pair := range kwPairs {
+		ks, err := objects.Str(pair.k)
+		if err != nil {
+			return "", err
 		}
+		vr, err := objects.Repr(pair.v)
+		if err != nil {
+			return "", err
+		}
+		out += ", " + ks + "=" + vr
 	}
 	out += ")"
 	return out, nil
+}
+
+// partialTypeName returns "<__module__>.<__qualname__>" for the given
+// type, mirroring the PyType_GetModuleName + PyType_GetQualName pair
+// that CPython's partial_repr uses to build the display prefix.
+//
+// CPython: Modules/_functoolsmodule.c:667 partial_repr (PyType_GetModuleName / PyType_GetQualName)
+func partialTypeName(tp *objects.Type) string {
+	modObj, err := objects.GetAttr(tp, objects.NewStr("__module__"))
+	if err != nil || modObj == nil || objects.IsNone(modObj) {
+		return tp.Name
+	}
+	mod, err := objects.Str(modObj)
+	if err != nil {
+		return tp.Name
+	}
+	qnObj, err := objects.GetAttr(tp, objects.NewStr("__qualname__"))
+	if err != nil || qnObj == nil || objects.IsNone(qnObj) {
+		return mod + "." + tp.Name
+	}
+	qn, err := objects.Str(qnObj)
+	if err != nil {
+		return mod + "." + tp.Name
+	}
+	return mod + "." + qn
 }
 
 // partialGetattr exposes the .func / .args / .keywords / .__dict__
@@ -482,6 +612,21 @@ func partialGetattr(o objects.Object, name objects.Object) (objects.Object, erro
 			p.Dict = objects.NewDict()
 		}
 		return p.Dict, nil
+	case "__reduce__":
+		// CPython: Modules/_functoolsmodule.c:697 partial_reduce
+		fn := objects.NewBuiltinFunction("__reduce__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return partialReduce(p)
+		})
+		return fn, nil
+	case "__setstate__":
+		// CPython: Modules/_functoolsmodule.c:706 partial_setstate
+		fn := objects.NewBuiltinFunction("__setstate__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
+			}
+			return partialSetstate(p, args[0])
+		})
+		return fn, nil
 	}
 	if p.Dict != nil {
 		if v, err := p.Dict.GetItem(name); err == nil {
@@ -515,6 +660,133 @@ func partialSetattr(o objects.Object, name objects.Object, value objects.Object)
 		return p.Dict.DelItem(name)
 	}
 	return p.Dict.SetItem(name, value)
+}
+
+// partialReduce implements partial.__reduce__: returns a 3-tuple
+// (type, (fn,), (fn, args, keywords, dict)) so pickle can reconstruct
+// the partial by calling type(fn) and then __setstate__.
+//
+// CPython: Modules/_functoolsmodule.c:697 partial_reduce
+func partialReduce(p *Partial) (objects.Object, error) {
+	if err := objects.EnterRecursiveCall("while pickling a partial object"); err != nil {
+		return nil, err
+	}
+	defer objects.LeaveRecursiveCall()
+	tp := objects.Object(p.Type())
+	dictObj := objects.Object(objects.None())
+	if p.Dict != nil {
+		dictObj = p.Dict
+	}
+	kw := objects.Object(p.Keywords)
+	if kw == nil {
+		kw = objects.NewDict()
+	}
+	state := objects.NewTuple([]objects.Object{p.Fn, p.Args, kw, dictObj})
+	return objects.NewTuple([]objects.Object{
+		tp,
+		objects.NewTuple([]objects.Object{p.Fn}),
+		state,
+	}), nil
+}
+
+// partialSetstate implements partial.__setstate__: accepts a 4-tuple
+// (func, args, keywords, dict) and installs the fields in place.
+// This is called by pickle during unpickling.
+//
+// CPython: Modules/_functoolsmodule.c:706 partial_setstate
+func partialSetstate(p *Partial, state objects.Object) (objects.Object, error) {
+	// state must be a tuple (not a list or other sequence).
+	// CPython: Modules/_functoolsmodule.c:712 partial_setstate (PyTuple_Check)
+	tup, ok := state.(*objects.Tuple)
+	if !ok || tup.Len() != 4 {
+		return nil, fmt.Errorf("TypeError: invalid partial state")
+	}
+	fn := tup.Item(0)
+	fnargs1 := tup.Item(1)
+	kwObj := tup.Item(2)
+	dictObj := tup.Item(3)
+
+	// fn must be callable, fnargs must be a tuple, kw/dict must be None or dict.
+	// CPython: Modules/_functoolsmodule.c:714 partial_setstate (validation)
+	if !objects.Callable(fn) {
+		return nil, fmt.Errorf("TypeError: invalid partial state")
+	}
+	if _, isTuple := fnargs1.(*objects.Tuple); !isTuple {
+		return nil, fmt.Errorf("TypeError: invalid partial state")
+	}
+	if !objects.IsNone(kwObj) {
+		if _, isDict := kwObj.(*objects.Dict); !isDict {
+			return nil, fmt.Errorf("TypeError: invalid partial state")
+		}
+	}
+	if !objects.IsNone(dictObj) {
+		if _, isDict := dictObj.(*objects.Dict); !isDict {
+			return nil, fmt.Errorf("TypeError: invalid partial state")
+		}
+	}
+
+	// Reject trailing Placeholder.
+	// CPython: Modules/_functoolsmodule.c:722 partial_setstate (trailing Placeholder check)
+	fnargs := fnargs1.(*objects.Tuple)
+	nargs := fnargs.Len()
+	if nargs > 0 && fnargs.Item(nargs-1) == Placeholder {
+		return nil, fmt.Errorf("TypeError: trailing Placeholders are not allowed")
+	}
+
+	// Count placeholders (all but the last element).
+	// CPython: Modules/_functoolsmodule.c:727 partial_setstate (phcount)
+	phcount := 0
+	for i := 0; i < nargs-1; i++ {
+		if fnargs.Item(i) == Placeholder {
+			phcount++
+		}
+	}
+
+	// If fnargs is not an exact tuple (e.g. MyTuple subclass), convert it.
+	// CPython: Modules/_functoolsmodule.c:733 partial_setstate (PySequence_Tuple)
+	if fnargs.Type() != objects.TupleType {
+		seq, err := objects.SequenceTuple(fnargs)
+		if err != nil {
+			return nil, fmt.Errorf("TypeError: invalid partial state")
+		}
+		fnargs = seq
+	}
+
+	// Normalize kw: None -> empty dict, non-exact dict -> copy.
+	// CPython: Modules/_functoolsmodule.c:740 partial_setstate (kw normalization)
+	var kw *objects.Dict
+	if objects.IsNone(kwObj) {
+		kw = objects.NewDict()
+	} else {
+		kw = kwObj.(*objects.Dict)
+		if kw.Type() != objects.DictType {
+			cp := objects.NewDict()
+			for _, k := range kw.Keys() {
+				v, err := kw.GetItem(k)
+				if err != nil {
+					return nil, err
+				}
+				if err := cp.SetItem(k, v); err != nil {
+					return nil, err
+				}
+			}
+			kw = cp
+		}
+	}
+
+	// None means clear the instance dict; a real dict replaces it.
+	// CPython: Modules/_functoolsmodule.c:751 partial_setstate (dict field)
+	if objects.IsNone(dictObj) {
+		p.Dict = nil
+	} else {
+		p.Dict = dictObj.(*objects.Dict)
+	}
+
+	p.Fn = fn
+	p.Args = fnargs
+	p.Keywords = kw
+	p.Phcount = phcount
+	return objects.None(), nil
 }
 
 // partialDescrGet wires partial as a descriptor: accessing it through
@@ -552,6 +824,19 @@ func init() {
 	KeyObjectType.Getattro = keyObjectGetattr
 	KeyObjectType.Call = keyObjectCall
 	KeyObjectType.RichCmp = keyObjectRichCmp
+	// KeyWrapper is not hashable; cmp_to_key objects use __lt__ etc. not __hash__.
+	// CPython sets tp_hash = PyObject_HashNotImplemented which surfaces as
+	// __hash__ = None at the Python level. Setting the tp_hash slot alone is not
+	// enough because collections.abc.Hashable checks for __hash__ being None.
+	// We set both the Hash slot (for direct hash() calls) and stamp __hash__ = None
+	// into the type dict (for the ABC check).
+	//
+	// CPython: Modules/_functoolsmodule.c:869 keyobject_type_slots (no Py_tp_hash entry,
+	// but the Python-level functools.py sets __hash__ = None on the pure-Python K class)
+	KeyObjectType.Hash = func(o objects.Object) (int64, error) {
+		return 0, errors.New("TypeError: unhashable type: 'functools.KeyWrapper'")
+	}
+	objects.SetTypeDescr(KeyObjectType, "__hash__", objects.None())
 }
 
 // isCallable returns true when o looks invokable: it has a Call slot,
@@ -579,13 +864,24 @@ func isCallable(o objects.Object) bool {
 // cmpToKey is the module-level cmp_to_key function. It freezes the
 // user's cmp into a fresh KeyObject "factory" (Obj==nil); calling
 // that factory with an obj returns a fully populated keyobject.
+// Accepts mycmp as a keyword argument to match CPython's clinic-generated
+// signature: cmp_to_key(mycmp, /).
 //
 // CPython: Modules/_functoolsmodule.c:953 _functools_cmp_to_key_impl
-func cmpToKey(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) != 1 {
+func cmpToKey(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	var mycmp objects.Object
+	if len(args) == 1 && len(kwargs) == 0 {
+		mycmp = args[0]
+	} else if len(args) == 0 && len(kwargs) == 1 {
+		var ok bool
+		mycmp, ok = kwargs["mycmp"]
+		if !ok {
+			return nil, fmt.Errorf("TypeError: cmp_to_key() got an unexpected keyword argument")
+		}
+	} else {
 		return nil, fmt.Errorf("TypeError: cmp_to_key() takes exactly one argument (%d given)", len(args))
 	}
-	k := &KeyObject{Cmp: args[0]}
+	k := &KeyObject{Cmp: mycmp}
 	k.Init(KeyObjectType)
 	return k, nil
 }
@@ -663,9 +959,25 @@ func keyObjectRichCmp(a, b objects.Object, op objects.CompareOp) (objects.Object
 // an iterable, optionally seeded by `initial`.
 //
 // CPython: Modules/_functoolsmodule.c:990 _functools_reduce_impl
-func reduceFunc(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func reduceFunc(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// CPython: Modules/_functoolsmodule.c:972 _functools.reduce clinic:
+	// function and iterable are positional-only (/); initial may be passed
+	// as a keyword argument.
+	//
+	// CPython: Modules/_functoolsmodule.c:991 _functools_reduce_impl
+	var initialKw objects.Object
+	for k, v := range kwargs {
+		if k == "initial" {
+			initialKw = v
+		} else {
+			return nil, fmt.Errorf("TypeError: reduce() got an unexpected keyword argument '%s'", k)
+		}
+	}
 	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: reduce() takes 2 or 3 arguments (%d given)", len(args))
+		return nil, fmt.Errorf("TypeError: reduce() takes 2 or 3 arguments (%d given)", len(args)+len(kwargs))
+	}
+	if len(args) == 3 && initialKw != nil {
+		return nil, fmt.Errorf("TypeError: reduce() got multiple values for argument 'initial'")
 	}
 	fn := args[0]
 	it, err := objects.Iter(args[1])
@@ -675,6 +987,8 @@ func reduceFunc(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	var acc objects.Object
 	if len(args) == 3 {
 		acc = args[2]
+	} else if initialKw != nil {
+		acc = initialKw
 	}
 	for {
 		v, ierr := objects.IterNext(it)

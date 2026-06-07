@@ -219,9 +219,22 @@ func typeGetModule(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__module__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if t.IsUser {
+		// Check the descriptor dict first (non-string __module__ stored there by typeSetModule).
+		if v := TypeOwnDescrs(t)["__module__"]; v != nil {
+			return v, nil
+		}
 		if t.Module == "" {
 			return nil, fmt.Errorf("AttributeError: __module__")
 		}
+		return NewStr(t.Module), nil
+	}
+	// Non-user (C/Go heap) types: honour an explicit t.Module when set,
+	// then fall back to the dotted-prefix convention, then "builtins".
+	// CPython heap types (Py_TPFLAGS_HEAPTYPE, e.g. functools.partial)
+	// store __module__ in tp_dict; our equivalent is t.Module.
+	//
+	// CPython: Objects/typeobject.c:1538 type_module
+	if t.Module != "" {
 		return NewStr(t.Module), nil
 	}
 	if i := strings.LastIndexByte(t.Name, '.'); i >= 0 {
@@ -244,11 +257,16 @@ func typeSetModule(o Object, v Object) error {
 	if v == nil {
 		return fmt.Errorf("TypeError: cannot delete '__module__' attribute")
 	}
-	s, ok := v.(*Unicode)
-	if !ok {
-		return fmt.Errorf("TypeError: can only assign string to %s.__module__, not '%s'", t.Name, typeNameOf(v))
+	// CPython stores any object (not just str) in tp_dict["__module__"].
+	// Update t.Module only when the value is a string so the Go field stays
+	// consistent; non-string values are stored only in the descriptor dict.
+	//
+	// CPython: Objects/typeobject.c:1581 type_set_module
+	if s, ok := v.(*Unicode); ok {
+		t.Module = s.v
+	} else {
+		SetTypeDescr(t, "__module__", v)
 	}
-	t.Module = s.v
 	// __firstlineno__ records the source line the class statement opened
 	// on; once __module__ is reassigned the recorded line no longer
 	// describes where the type lives, so CPython drops it from tp_dict.
