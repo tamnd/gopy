@@ -47,6 +47,8 @@ func init() {
 	FloatType.Str = floatRepr
 	FloatType.Hash = floatHash
 	FloatType.RichCmp = floatRichCmp
+	// CPython: Objects/floatobject.c:851 PyFloat_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(FloatType)
 	FloatType.TpFlags |= TpFlagMatchSelf
 	FloatType.Number = &NumberMethods{
 		Add:         floatAdd,

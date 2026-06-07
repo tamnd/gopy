@@ -35,6 +35,8 @@ func init() {
 	IntType.Str = intRepr
 	IntType.Hash = intHash
 	IntType.RichCmp = intRichCmp
+	// CPython: Objects/longobject.c:6542 PyLong_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(IntType)
 	IntType.TpFlags |= TpFlagMatchSelf
 	// PyLongObject layout sizes on a 64-bit build: tp_basicsize is the
 	// offset of long_value.ob_digit (PyObject_HEAD = 16 bytes plus

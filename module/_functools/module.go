@@ -200,6 +200,21 @@ func newPartialType() *objects.Type {
 			return partialSetstate(p, args[1])
 		},
 	))
+	// partial[int] returns types.GenericAlias(partial, (int,)).
+	//
+	// CPython: Modules/_functoolsmodule.c:796 partial_type_spec Py_GenericAlias
+	objects.SetTypeDescr(t, "__class_getitem__", objects.NewClassMethod(
+		objects.NewBuiltinFunction("__class_getitem__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __class_getitem__() takes exactly one argument")
+			}
+			cls, ok := args[0].(*objects.Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: __class_getitem__ requires a type")
+			}
+			return objects.NewGenericAlias(cls, args[1]), nil
+		}),
+	))
 	return t
 }
 
@@ -652,6 +667,10 @@ func partialSetattr(o objects.Object, name objects.Object, value objects.Object)
 	switch n {
 	case "func", "args", "keywords":
 		return fmt.Errorf("AttributeError: readonly attribute '%s'", n)
+	case "__dict__":
+		// CPython: Modules/_functoolsmodule.c partial_type_spec — __dict__
+		// is managed by the type; replacing or deleting it is not allowed.
+		return fmt.Errorf("TypeError: 'partial' object attribute '__dict__' is read-only")
 	}
 	if p.Dict == nil {
 		p.Dict = objects.NewDict()
@@ -1218,6 +1237,14 @@ func boundedLruCacheWrapper(w *LruCacheWrapper, args []objects.Object, kwargs ma
 	res, err := callFunc(w.Func, args, kwargs)
 	if err != nil {
 		return nil, err
+	}
+	// A recursive call inside w.Func may have already inserted this key.
+	// In that case skip eviction and insertion to keep the LRU list and
+	// dict consistent (bpo-35780).
+	//
+	// CPython: Modules/_functoolsmodule.c:1491 bounded_lru_cache_wrapper
+	if _, hitErr := w.Cache.GetItem(key); hitErr == nil {
+		return res, nil
 	}
 	// If we hit the bound, evict the LRU node (root.next).
 	cacheSize := int64(w.Cache.Len())

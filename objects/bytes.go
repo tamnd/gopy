@@ -63,6 +63,8 @@ func init() {
 	BytesType.Str = bytesRepr
 	BytesType.Hash = bytesHash
 	BytesType.RichCmp = bytesRichCmp
+	// CPython: Objects/bytesobject.c:3158 PyBytes_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(BytesType)
 	BytesType.TpFlags |= TpFlagMatchSelf
 	// A bytes subclass can declare __dict__, so its instances participate
 	// in reference cycles through their attributes. Subtypes inherit this

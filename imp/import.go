@@ -46,10 +46,20 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		return nil, err
 	}
 
-	// 1. sys.modules cache.
+	// 1. sys.modules cache. When the entry is None the import is intentionally
+	// blocked (e.g. import_helper.import_fresh_module sets sys.modules[name]=None
+	// to prevent built-in modules from loading). Raise ImportError immediately
+	// the same way CPython does.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1390 _find_and_load (None sentinel)
 	// CPython: Python/import.c:L1613 sys_modules_get_dict
-	if mod, ok := GetModule(absName); ok {
-		return mod, nil
+	if raw, present := GetModuleRaw(absName); present {
+		if objects.IsNone(raw) {
+			return nil, fmt.Errorf("ImportError: import of %q halted; None in sys.modules", absName)
+		}
+		if mod, ok := raw.(*objects.Module); ok {
+			return mod, nil
+		}
 	}
 
 	// 2. Frozen module.

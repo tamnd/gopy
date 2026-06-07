@@ -249,6 +249,8 @@ func init() {
 	strType.Str = unicodeStr
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
+	// CPython: Objects/unicodeobject.c:12358 PyUnicode_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(strType)
 	strType.Getattro = GenericGetAttr
 	strType.TpFlags |= TpFlagMatchSelf
 	// CPython: Objects/typeobject.c:1356 subtype_traverse

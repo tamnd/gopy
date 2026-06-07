@@ -330,18 +330,26 @@ func lockAcquire(lk *lockObject, args []objects.Object, kwargs map[string]object
 		}
 	}
 	if t, ok := kwargs["timeout"]; ok {
-		f, ok2 := t.(*objects.Float)
-		if !ok2 {
+		switch tv := t.(type) {
+		case *objects.Float:
+			timeoutSecs = tv.Float64()
+		case *objects.Int:
+			n, _ := tv.Int64()
+			timeoutSecs = float64(n)
+		default:
 			return nil, fmt.Errorf("TypeError: acquire() timeout must be float")
 		}
-		timeoutSecs = f.Float64()
 	}
 	if len(args) >= 2 {
-		f, ok := args[1].(*objects.Float)
-		if !ok {
+		switch tv := args[1].(type) {
+		case *objects.Float:
+			timeoutSecs = tv.Float64()
+		case *objects.Int:
+			n, _ := tv.Int64()
+			timeoutSecs = float64(n)
+		default:
 			return nil, fmt.Errorf("TypeError: acquire() timeout must be float")
 		}
-		timeoutSecs = f.Float64()
 	}
 
 	if !blocking {

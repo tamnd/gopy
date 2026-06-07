@@ -413,6 +413,42 @@ func richCompareDescr(op CompareOp) func(args []Object, kwargs map[string]Object
 	}
 }
 
+// BindRichCmpDescriptors installs type-specific __lt__/__le__/__gt__/__ge__
+// slot wrappers on t. CPython does this via slot_tp_richcompare for every
+// type whose tp_richcompare overrides object's; the wrappers are different
+// objects from object.__lt__ etc. so that functools.total_ordering (which
+// uses `getattr(cls, op) is not getattr(object, op)`) can detect
+// inheritance-through-subclassing correctly.
+//
+// CPython: Objects/typeobject.c:7094 slot_tp_richcompare wrapper installation
+func BindRichCmpDescriptors(t *Type) {
+	for _, pair := range []struct {
+		name string
+		op   CompareOp
+	}{
+		{"__lt__", CompareLT},
+		{"__le__", CompareLE},
+		{"__gt__", CompareGT},
+		{"__ge__", CompareGE},
+		{"__eq__", CompareEQ},
+		{"__ne__", CompareNE},
+	} {
+		op := pair.op
+		SetTypeDescr(t, pair.name, NewMethodDescr(t, pair.name,
+			func(args []Object, _ map[string]Object) (Object, error) {
+				if len(args) != 2 {
+					return nil, fmt.Errorf("TypeError: expected 2 arguments, got %d", len(args))
+				}
+				rcmp := args[0].Type().RichCmp
+				if rcmp == nil {
+					return notImplemented(), nil
+				}
+				return rcmp(args[0], args[1], op)
+			},
+		))
+	}
+}
+
 // objectFormatDescr is object.__format__(self, format_spec). Empty
 // format_spec returns str(self); a non-empty spec raises TypeError
 // (the default formatter does not understand format codes).

@@ -46,6 +46,8 @@ func init() {
 	TupleType.Str = tupleRepr
 	TupleType.Hash = tupleHash
 	TupleType.RichCmp = tupleRichCmp
+	// CPython: Objects/tupleobject.c:1055 PyTuple_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(TupleType)
 	TupleType.Iter = tupleIter
 	TupleType.Sequence = &SequenceMethods{
 		Length:   tupleLen,

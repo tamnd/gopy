@@ -46,6 +46,8 @@ func init() {
 	ListType.Repr = listRepr
 	ListType.Str = listRepr
 	ListType.RichCmp = listRichCmp
+	// CPython: Objects/listobject.c:3307 PyList_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(ListType)
 	ListType.Iter = listIter
 	ListType.Sequence = &SequenceMethods{
 		Length:        listLen,

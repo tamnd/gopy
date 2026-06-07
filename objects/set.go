@@ -78,6 +78,8 @@ func init() {
 	// explicitly unhashable so subclasses inherit that property.
 	SetTypeDescr(SetType, "__hash__", None())
 	SetType.RichCmp = setRichCmp
+	// CPython: Objects/setobject.c:2220 PySet_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(SetType)
 	SetType.TpFlags |= TpFlagMatchSelf
 	FrozensetType.TpFlags |= TpFlagMatchSelf
 	SetType.Iter = setIter
