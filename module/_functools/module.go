@@ -1105,6 +1105,15 @@ func newLruCacheWrapperType() *objects.Type {
 	objects.SetTypeDescr(t, "cache_clear", objects.NewMethodDescr(t, "cache_clear", lruCacheClear))
 	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", lruCacheCopy))
 	objects.SetTypeDescr(t, "__deepcopy__", objects.NewMethodDescr(t, "__deepcopy__", lruCacheCopy))
+	// CPython: Modules/_functoolsmodule.c:1718 lru_cache_reduce
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__",
+		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			if len(args) == 0 {
+				return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a '_lru_cache_wrapper' argument")
+			}
+			return objects.GetAttr(args[0], objects.NewStr("__qualname__"))
+		},
+	))
 	return t
 }
 

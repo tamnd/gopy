@@ -111,6 +111,14 @@ func Repr(o Object) (string, error) {
 	if r := o.Type().Repr; r != nil {
 		return r(o)
 	}
+	// When o is a type whose metaclass is a Python-defined subclass of
+	// type (e.g. ABCMeta), the metaclass has no Go Repr slot. Fall back
+	// to typeRepr if o is itself a *Type so we still emit <class '...'>.
+	//
+	// CPython: Objects/typeobject.c:1268 type_repr (inherited by metaclasses)
+	if _, ok := o.(*Type); ok {
+		return typeRepr(o)
+	}
 	return fmt.Sprintf("<%s object at %p>", o.Type().Name, o), nil
 }
 

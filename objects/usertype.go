@@ -61,8 +61,18 @@ func installSubclassAttrSlots(t *Type) {
 	case IsSubtype(t, DictType):
 		t.Getattro = dictSubclassGetAttr
 		t.Setattro = dictSubclassSetAttr
+		// Inherit TpNew from the most-derived non-user base (e.g.
+		// defaultdict overrides DictType.TpNew with its own allocator).
+		//
 		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
 		t.TpNew = DictType.TpNew
+		for _, base := range t.MRO {
+			if base == t || base.IsUser || base.TpNew == nil {
+				continue
+			}
+			t.TpNew = base.TpNew
+			break
+		}
 	case IsSubtype(t, strType):
 		t.Getattro = strSubclassGetAttr
 		t.Setattro = strSubclassSetAttr

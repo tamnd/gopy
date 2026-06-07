@@ -645,11 +645,16 @@ func objReachableAsGlobal(obj objects.Object, module, name string) bool {
 	if err != nil || modObj == nil {
 		return false
 	}
-	attr, err := objects.GetAttr(modObj, objects.NewStr(name))
-	if err != nil || attr == nil {
-		return false
+	// name may be a dotted qualname (e.g. "Class.method"); walk each segment
+	// the same way pickle._getattribute does.
+	cur := modObj
+	for _, part := range strings.Split(name, ".") {
+		cur, err = objects.GetAttr(cur, objects.NewStr(part))
+		if err != nil || cur == nil {
+			return false
+		}
 	}
-	return attr == obj
+	return cur == obj
 }
 
 // saveFunctionGlobal pickles a function as a GLOBAL / STACK_GLOBAL
