@@ -275,6 +275,7 @@ func contextSet(owner objects.Object, value objects.Object) error {
 	}
 	if objects.IsNone(value) {
 		e.Context = nil
+		e.ContextSet = true // user explicitly set to None; block implicit chaining
 		return nil
 	}
 	exc, ok := value.(*Exception)
@@ -282,6 +283,7 @@ func contextSet(owner objects.Object, value objects.Object) error {
 		return errors.New("TypeError: exception context must be None or derive from BaseException")
 	}
 	e.Context = exc
+	e.ContextSet = true
 	return nil
 }
 

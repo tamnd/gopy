@@ -45,7 +45,8 @@ func Decref(o Object) {
 	if atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt {
 		return
 	}
-	if atomic.AddInt64(&h.refcnt, -1) != 0 {
+	newrc := atomic.AddInt64(&h.refcnt, -1)
+	if newrc != 0 {
 		return
 	}
 	t := o.Type()

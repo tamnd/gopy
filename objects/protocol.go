@@ -79,6 +79,18 @@ func leaveRecursiveCall() {
 	cRecursionRemaining++
 }
 
+// EnterRecursiveCall is the exported form of enterRecursiveCall for
+// packages outside objects/ that need the same recursion budget guard
+// (e.g. partial.__repr__ in _functools).
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+func EnterRecursiveCall(where string) error { return enterRecursiveCall(where) }
+
+// LeaveRecursiveCall is the exported form of leaveRecursiveCall.
+//
+// CPython: Include/internal/pycore_ceval.h:233 _Py_LeaveRecursiveCallTstate
+func LeaveRecursiveCall() { leaveRecursiveCall() }
+
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.
 //

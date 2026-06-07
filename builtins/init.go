@@ -112,7 +112,19 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		}
 	}
 	for _, fn := range aggregationPanel() {
-		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+		bf := objects.NewBuiltinFunction(fn.name, fn.impl)
+		// Stamp docstrings for the aggregate builtins so update_wrapper
+		// can copy __doc__ to a wrapper function.
+		// CPython: Python/bltinmodule.c builtin_min_methoddef / builtin_max_methoddef
+		switch fn.name {
+		case "max":
+			bf.Doc = "max(iterable, *[, default=obj, key=func]) -> value\nmax(arg1, arg2, *args, *[, key=func]) -> value\n\nWith a single iterable argument, return its biggest item.\nWith two or more arguments, return the largest argument."
+		case "min":
+			bf.Doc = "min(iterable, *[, default=obj, key=func]) -> value\nmin(arg1, arg2, *args, *[, key=func]) -> value\n\nWith a single iterable argument, return its smallest item.\nWith two or more arguments, return the smallest argument."
+		case "sum":
+			bf.Doc = "sum(iterable, /, start=0)\n\nReturn the sum of a 'start' value (default: 0) plus an iterable of numbers."
+		}
+		if err := setBuiltin(dict, fn.name, bf); err != nil {
 			return nil, err
 		}
 	}

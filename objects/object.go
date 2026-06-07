@@ -564,10 +564,9 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 	if !fits {
 		return nil, fmt.Errorf("OverflowError: __reduce_ex__() protocol out of range")
 	}
-	// Detect __reduce__ override: when the type's __reduce__
-	// descriptor is the one we installed on objectType, the
-	// subclass inherits the default and CPython falls through to
-	// _common_reduce. Otherwise call the override.
+	// Detect __reduce__ override: compare the __reduce__ descriptor on
+	// type(self) against the one on objectType.
+	// CPython: Objects/typeobject.c:8062 object_reduce_ex_impl
 	clsReduce, _ := LookupDescriptor(self.Type(), "__reduce__")
 	baseReduce, _ := LookupDescriptor(objectType, "__reduce__")
 	if clsReduce != nil && clsReduce != baseReduce {
@@ -575,7 +574,12 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 		if err != nil {
 			return nil, err
 		}
-		return Call(fn, NewTuple(nil), nil)
+		if err := EnterRecursiveCall("while reducing an object"); err != nil {
+			return nil, err
+		}
+		result, callErr := Call(fn, NewTuple(nil), nil)
+		LeaveRecursiveCall()
+		return result, callErr
 	}
 	return commonReduce(self, int(protoVal))
 }

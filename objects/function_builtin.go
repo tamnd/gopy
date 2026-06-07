@@ -25,6 +25,12 @@ type BuiltinFunction struct {
 	Name   string
 	Module string
 	Conv   MethFlag
+	// Doc is the optional docstring (ml_doc in PyMethodDef). When non-empty,
+	// __doc__ returns this string; when empty __doc__ returns None, matching
+	// CPython's meth_get__doc__ falling back to NULL ml_doc -> Py_None.
+	//
+	// CPython: Objects/methodobject.c:286 meth_getsets (__doc__ getset)
+	Doc string
 	// Self mirrors PyCFunctionObject.m_self. For a static method bound
 	// to a type, type_add_method stores the owning type here via
 	// PyCFunction_NewEx(meth, (PyObject*)type, NULL); meth_get__qualname__
@@ -57,7 +63,12 @@ func init() {
 	// meth_getsets: __doc__, __name__, __qualname__, __self__, __module__
 	// CPython: Objects/methodobject.c:286 meth_getsets
 	SetTypeDescr(BuiltinFunctionType, "__doc__", NewGetSetDescr("__doc__",
-		func(o Object) (Object, error) { return None(), nil },
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok && bf.Doc != "" {
+				return NewStr(bf.Doc), nil
+			}
+			return None(), nil
+		},
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__name__", NewGetSetDescr("__name__",

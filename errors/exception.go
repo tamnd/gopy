@@ -17,9 +17,10 @@ type Exception struct {
 	objects.Header
 	ExcType  *objects.Type
 	Args     *objects.Tuple
-	Cause    *Exception
-	Context  *Exception
-	Suppress bool
+	Cause      *Exception
+	Context    *Exception
+	ContextSet bool // true once __context__ has been assigned by user code or Raise
+	Suppress   bool
 	Notes    *objects.List
 	TB       *traceback.Traceback
 	attrs    *objects.Dict

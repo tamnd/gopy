@@ -112,6 +112,13 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	}
 	v, err := t.IterNext(it)
 	if err == nil {
+		// tp_iternext returns a new reference in CPython (PyIter_Next convention).
+		// gopy's slot implementations return borrowed refs from their backing
+		// containers, so promote to owned here before handing the value to the
+		// Python VM.
+		//
+		// CPython: Objects/abstract.c:2840 PyIter_Next (returns new ref)
+		objects.Incref(v)
 		return v, nil
 	}
 	// next(it, default) swaps in the default for any StopIteration,

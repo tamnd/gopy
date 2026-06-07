@@ -173,6 +173,22 @@ func init() {
 			return bytesModulo(args[1], args[0])
 		},
 	))
+	// PEP 688: bf_getbuffer surfaced as __buffer__(flags) -> memoryview.
+	// CPython: Objects/typeobject.c:9737 wrap_buffer (PyBytes_Type.tp_as_buffer)
+	SetTypeDescr(BytesType, "__buffer__", NewMethodDescr(BytesType, "__buffer__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __buffer__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			if _, ok := args[0].(*Bytes); !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__buffer__' requires a 'bytes' object")
+			}
+			if _, err := indexAsInt(args[1]); err != nil {
+				return nil, err
+			}
+			return NewMemoryView(args[0])
+		},
+	))
 }
 
 func bytesMulMethod(args []Object, _ map[string]Object) (Object, error) {

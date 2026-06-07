@@ -179,6 +179,8 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_iter
 	AddIterSlotWrappers(DictType)
+	// CPython: Objects/dictobject.c:2498 dict.__hash__ = None
+	SetTypeDescr(DictType, "__hash__", None())
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a
@@ -544,6 +546,20 @@ func dictMappingDel(o, key Object) error {
 	return d.DelItem(key)
 }
 
+// AttrDict implements AttrDictHolder so dict subclasses can carry
+// instance attributes and expose them to objectGetStateDefault.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (dict-subclass path)
+func (d *Dict) AttrDict() *Dict { return d.attrs }
+
+// EnsureAttrDict allocates the instance attrs dict on first use.
+func (d *Dict) EnsureAttrDict() *Dict {
+	if d.attrs == nil {
+		d.attrs = NewDict()
+	}
+	return d.attrs
+}
+
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in
 // d.attrs for per-instance attributes before walking the type MRO.
@@ -693,9 +709,16 @@ func asDictBacking(o Object) (*Dict, bool) {
 //
 // CPython: Objects/dictobject.c:3494 dict_equal
 func dictEqual(a, b *Dict) (bool, error) {
+	if a == b {
+		return true, nil
+	}
 	if a.Len() != b.Len() {
 		return false, nil
 	}
+	if err := enterRecursiveCall(" in comparison"); err != nil {
+		return false, err
+	}
+	defer leaveRecursiveCall()
 	for _, k := range a.Keys() {
 		av, err := a.GetItem(k)
 		if err != nil {
@@ -707,6 +730,9 @@ func dictEqual(a, b *Dict) (bool, error) {
 				return false, nil
 			}
 			return false, err
+		}
+		if av == bv {
+			continue
 		}
 		eq, err := RichCmpBool(av, bv, CompareEQ)
 		if err != nil {

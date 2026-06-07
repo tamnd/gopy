@@ -160,7 +160,14 @@ func makeWrapIterNext(t *Type) func(args []Object, kwargs map[string]Object) (Ob
 		if len(args) != 1 {
 			return nil, fmt.Errorf("TypeError: expected 0 arguments, got %d", len(args)-1)
 		}
-		return t.IterNext(args[0])
+		v, err := t.IterNext(args[0])
+		if err != nil {
+			return nil, err
+		}
+		// Mirror PyIter_Next: return an owned reference.
+		// CPython: Objects/abstract.c:2840 PyIter_Next (returns new ref)
+		Incref(v)
+		return v, nil
 	}
 }
 

@@ -745,6 +745,13 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 				return genResult{ok: true}, fmt.Errorf("TypeError: %s is not an iterator", t.Name)
 			}
 			val, nerr = t.IterNext(recv)
+			if nerr == nil {
+				// tp_iternext returns borrowed; promote to owned before the VM
+				// stack takes it, matching CPython's PyIter_Next convention.
+				//
+				// CPython: Objects/abstract.c:2840 PyIter_Next (returns new ref)
+				objects.Incref(val)
+			}
 		} else {
 			sendAttr, agerr := objects.GetAttr(recv, objects.NewStr("send"))
 			if agerr != nil {

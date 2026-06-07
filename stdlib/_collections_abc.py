@@ -1165,3 +1165,10 @@ class MutableSequence(Sequence):
 
 MutableSequence.register(list)
 MutableSequence.register(bytearray)
+# CPython: Modules/arraymodule.c array_exec (PyObject_CallMethodOneArg MutableSequence.register)
+try:
+    import array as _array
+    MutableSequence.register(_array.array)
+    del _array
+except ImportError:
+    pass

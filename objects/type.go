@@ -517,6 +517,24 @@ func init() {
 	typeType.MRO = []*Type{typeType, objectType}
 	typeType.Hash = identityHash
 
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __call__)
+	// Install type.__call__ so Callable ABC detection finds it in type.__dict__
+	// via _check_methods. Routes through typeCallViaTpNew (TpNew + __init__) to
+	// avoid the infinite-recursion that would arise from calling Call(self, ...)
+	// when self is a type (Call would re-enter type.__call__ as the metacall).
+	//
+	// CPython: Objects/typeobject.c:6753 type_call
+	SetTypeDescr(typeType, "__call__", NewMethodDescr(typeType, "__call__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __call__() missing self argument")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: type.__call__() requires a type argument")
+		}
+		rest := args[1:]
+		return typeCallViaTpNew(cls, rest, kwargs)
+	}))
 	// CPython: Objects/typeobject.c type_type_params getset
 	SetTypeDescr(typeType, "__type_params__", NewGetSetDescr("__type_params__",
 		func(o Object) (Object, error) {

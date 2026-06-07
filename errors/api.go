@@ -156,8 +156,16 @@ func Raise(ts *state.Thread, exc *Exception) {
 	if prev == nil {
 		prev = Handled(ts)
 	}
-	if prev != nil && prev != exc && exc.Context == nil {
+	// Only chain context when it has not been explicitly set by user code
+	// (exc.__context__ = None or exc.__context__ = other_exc). CPython's
+	// _PyErr_SetObject always calls PyException_SetContext unconditionally,
+	// but gopy uses ContextSet to distinguish "never touched" from
+	// "user explicitly wrote exc.__context__ = None".
+	//
+	// CPython: Python/errors.c:204 _PyErr_SetObject (implicit chaining)
+	if prev != nil && prev != exc && !exc.ContextSet {
 		exc.Context = prev
+		exc.ContextSet = true
 	}
 	ts.SetException(exc)
 }

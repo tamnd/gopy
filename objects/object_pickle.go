@@ -231,6 +231,26 @@ func objectGetStateDefault(self Object, required bool) (Object, error) {
 	if required && self.Type().OpaqueCState {
 		return nil, fmt.Errorf("TypeError: cannot pickle '%s' object", self.Type().Name)
 	}
+	// Collect slot values from __slots__ declared across the MRO.
+	// CPython: Objects/typeobject.c:7389 object_getstate_default (slot loop)
+	slots := NewDict()
+	for _, t := range self.Type().MRO {
+		for _, name := range t.Slots {
+			v, err := GetAttr(self, NewStr(name))
+			if err != nil {
+				if isAttributeError(err) {
+					continue // slot not set on this instance
+				}
+				return nil, err
+			}
+			if setErr := slots.SetItem(NewStr(name), v); setErr != nil {
+				return nil, setErr
+			}
+		}
+	}
+	if slots.Len() > 0 {
+		return NewTuple([]Object{state, slots}), nil
+	}
 	return state, nil
 }
 

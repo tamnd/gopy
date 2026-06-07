@@ -83,6 +83,8 @@ func init() {
 	}
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(ListType)
+	// CPython: Objects/listobject.c:3373 list.__hash__ = None
+	SetTypeDescr(ListType, "__hash__", None())
 }
 
 // listTraverse visits every item. Mirrors list_traverse.

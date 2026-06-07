@@ -87,6 +87,17 @@ func init() {
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
 	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
 	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescr(TupleType, "__getnewargs__", tupleGetNewArgsMethod))
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	SetTypeDescr(TupleType, "__hash__", NewMethodDescr(TupleType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: __hash__() takes exactly 1 argument (%d given)", len(args))
+		}
+		h, err := tupleHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.

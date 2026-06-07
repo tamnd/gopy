@@ -365,7 +365,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			}
 			return 0, true, nerr
 		}
-		e.pushObject(v)
+		// tp_iternext returns a new reference in CPython; mirror that
+		// by creating an owned stack slot so STORE_FAST's Close() on the
+		// previous loop variable is balanced.
+		//
+		// CPython: Python/bytecodes.c:1395 FOR_ITER (tp_iternext new ref)
+		e.push(stackref.FromObjectNew(v))
 		return e.cacheAdvance(compile.FOR_ITER), true, nil
 
 	case compile.END_FOR:
@@ -454,6 +459,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		haystack := e.popObject()
 		needle := e.popObject()
 		hit, cerr := containsItem(haystack, needle)
+		// CPython: Python/bytecodes.c:2769 _CONTAINS_OP (DECREF_INPUTS before ERROR_IF)
+		objects.Decref(haystack)
+		objects.Decref(needle)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -475,8 +483,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		case 0:
 			// Bare `raise` re-raises the currently-handled exception
 			// (PUSH_EXC_INFO stashed it on entry to the except block).
-			// CPython: Python/bytecodes.c:1648 RAISE_VARARGS oparg==0
-			// reads tstate->exc_info->exc_value via _PyErr_GetRaisedException.
+			// CPython's do_raise with exc==NULL returns 1 and the caller
+			// jumps directly to exception_unwind (NOT through the error
+			// label), so PyTraceBack_Here is NOT called. Mirror this by
+			// returning a reraiseError so attachFrameTraceback is skipped.
+			//
+			// CPython: Python/bytecodes.c:1165 RAISE_VARARGS (oparg==0 path)
+			// CPython: Python/ceval.c:2197 do_raise (exc == NULL branch)
 			handled := e.ts.HandledException()
 			if handled == nil {
 				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
@@ -486,7 +499,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
 			}
 			pyerrors.Raise(e.ts, exc)
-			return 0, true, excSentinel(exc)
+			return 0, true, &reraiseError{exc: exc}
 		case 1:
 			val := e.popObject()
 			exc := raiseValue(e.ts, val, nil)

@@ -17,6 +17,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 )
 
@@ -1871,6 +1872,22 @@ func slotSqContains(o Object, key Object) (bool, error) {
 	return IsTruthy(r)
 }
 
+// mangleSlotName applies PEP 8 private name mangling to a slot name.
+// Slot names starting with "__" (but not ending with "__") are rewritten to
+// "_<stripped-class-name><name>", mirroring _Py_Mangle.
+//
+// CPython: Python/symtable.c:3207 _Py_Mangle
+func mangleSlotName(className, name string) string {
+	if len(name) < 2 || name[0] != '_' || name[1] != '_' || strings.HasSuffix(name, "__") {
+		return name
+	}
+	stripped := strings.TrimLeft(className, "_")
+	if stripped == "" {
+		return name
+	}
+	return "_" + stripped + name
+}
+
 // installSlots reads __slots__ from ns, validates it, and registers a
 // MemberDescr per slot on t. Mirrors the slice of CPython's type_new
 // pipeline that runs type_new_slots + type_new_descriptors:
@@ -1942,6 +1959,11 @@ func installSlots(t *Type, ns *Dict) error {
 		if !StrIsIdentifier(n) {
 			return fmt.Errorf("TypeError: __slots__ must be identifiers")
 		}
+		// Apply PEP 8 private name mangling: "__x" in class "Foo" → "_Foo__x".
+		// Mirrors _Py_Mangle which type_new_copy_slots calls on every slot name.
+		//
+		// CPython: Objects/typeobject.c:4037 type_new_copy_slots (_Py_Mangle call)
+		n = mangleSlotName(t.Name, n)
 		if seen[n] {
 			continue
 		}

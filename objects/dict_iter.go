@@ -521,6 +521,8 @@ func init() {
 		// must be traversable. CPython: Objects/dictobject.c:6087
 		// dictview_traverse.
 		vt.TpTraverse = dictViewTraverse
+		// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __iter__)
+		AddIterSlotWrappers(vt)
 	}
 	// isdisjoint is only defined on the set-like views (keys, items).
 	//

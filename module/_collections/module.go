@@ -1825,6 +1825,12 @@ func tupleGetterGetattr(o objects.Object, name objects.Object) (objects.Object, 
 // countElements counts elements in the iterable, updating the mapping.
 // Mirrors _collections__count_elements_impl.
 //
+// Fast path: when neither get() nor __setitem__() is overridden on the
+// mapping type (i.e. it is a plain dict), go through Go slots directly.
+// Slow path: call mapping.get(key, 0) and mapping[key] = val through the
+// Python protocol so Counter subclasses that override those methods are
+// respected.
+//
 // CPython: Modules/_collectionsmodule.c:2534 _collections__count_elements_impl
 func countElements(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 2 {
@@ -1838,34 +1844,83 @@ func countElements(args []objects.Object, _ map[string]objects.Object) (objects.
 		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", iterable.Type().Name)
 	}
 	one := objects.NewInt(1)
+	zero := objects.NewInt(0)
 	mappingTP := mapping.Type()
 
-	for {
-		key, ierr := objects.IterNext(it)
-		if ierr != nil {
-			if errors.Is(ierr, objects.ErrStopIteration) {
+	// Check if get() or __setitem__() is overridden relative to dict.
+	// CPython: Modules/_collectionsmodule.c:2563 override detection
+	mappingGet, _ := objects.LookupDescriptor(mappingTP, "get")
+	dictGet, _ := objects.LookupDescriptor(objects.DictType, "get")
+	mappingSetitem, _ := objects.LookupDescriptor(mappingTP, "__setitem__")
+	dictSetitem, _ := objects.LookupDescriptor(objects.DictType, "__setitem__")
+	fastPath := mappingGet == dictGet && mappingSetitem == dictSetitem
+
+	if fastPath {
+		// Fast path: use Go-level slots directly.
+		// CPython: Modules/_collectionsmodule.c:2575 fast path
+		for {
+			key, ierr := objects.IterNext(it)
+			if ierr != nil {
+				if errors.Is(ierr, objects.ErrStopIteration) {
+					break
+				}
+				return nil, ierr
+			}
+			if key == nil {
 				break
 			}
-			return nil, ierr
+			var oldval objects.Object
+			if mappingTP.Mapping != nil && mappingTP.Mapping.GetItem != nil {
+				oldval, _ = mappingTP.Mapping.GetItem(mapping, key)
+			}
+			var newval objects.Object
+			if oldval == nil {
+				newval = one
+			} else {
+				newval, err = objects.NumberAdd(oldval, one)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if mappingTP.Mapping != nil && mappingTP.Mapping.SetItem != nil {
+				if err := mappingTP.Mapping.SetItem(mapping, key, newval); err != nil {
+					return nil, err
+				}
+			}
 		}
-		if key == nil {
-			break
+	} else {
+		// Slow path: call mapping.get(key, 0) and mapping[key] = val through
+		// Python protocol so subclass overrides are respected.
+		// CPython: Modules/_collectionsmodule.c:2612 slow path
+		boundGet, err := objects.GetAttr(mapping, objects.NewStr("get"))
+		if err != nil {
+			return nil, err
 		}
-		var oldval objects.Object
-		if mappingTP.Mapping != nil && mappingTP.Mapping.GetItem != nil {
-			oldval, _ = mappingTP.Mapping.GetItem(mapping, key)
-		}
-		var newval objects.Object
-		if oldval == nil {
-			newval = one
-		} else {
-			newval, err = objects.NumberAdd(oldval, one)
+		for {
+			key, ierr := objects.IterNext(it)
+			if ierr != nil {
+				if errors.Is(ierr, objects.ErrStopIteration) {
+					break
+				}
+				return nil, ierr
+			}
+			if key == nil {
+				break
+			}
+			oldval, err := objects.Call(boundGet, objects.NewTuple([]objects.Object{key, zero}), nil)
 			if err != nil {
 				return nil, err
 			}
-		}
-		if mappingTP.Mapping != nil && mappingTP.Mapping.SetItem != nil {
-			if err := mappingTP.Mapping.SetItem(mapping, key, newval); err != nil {
+			var newval objects.Object
+			if objects.Is(oldval, zero) {
+				newval = one
+			} else {
+				newval, err = objects.NumberAdd(oldval, one)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if err := objects.SetItem(mapping, key, newval); err != nil {
 				return nil, err
 			}
 		}

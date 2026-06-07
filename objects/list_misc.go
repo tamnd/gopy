@@ -178,6 +178,12 @@ func listRichCmp(a, b Object, op CompareOp) (Object, error) {
 	if (op == CompareEQ || op == CompareNE) && len(al.items) != len(bl.items) {
 		return NewBool(op == CompareNE), nil
 	}
+	// Guard against self-referential lists (e.g. x = []; x.append(x)).
+	// CPython: Objects/listobject.c:3396 list_richcompare_impl (Py_ENTER_RECURSIVE_CALL)
+	if err := enterRecursiveCall(" in comparison"); err != nil {
+		return nil, err
+	}
+	defer leaveRecursiveCall()
 	var i int
 	for i = 0; i < len(al.items) && i < len(bl.items); i++ {
 		vitem := al.items[i]
