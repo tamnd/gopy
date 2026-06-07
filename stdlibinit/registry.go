@@ -257,6 +257,7 @@ import (
 	// Each registers itself via an init() that calls imp.AppendInittab.
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/atexit"
+
 	// contextlib is now vendored as stdlib/contextlib.py (CPython 3.14).
 	// _ "github.com/tamnd/gopy/module/contextlib"
 	_ "github.com/tamnd/gopy/module/dataclasses"

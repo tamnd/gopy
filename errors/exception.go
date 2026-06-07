@@ -15,15 +15,15 @@ import (
 // CPython: Objects/exceptions.c:L34 BaseExceptionObject
 type Exception struct {
 	objects.Header
-	ExcType  *objects.Type
-	Args     *objects.Tuple
+	ExcType    *objects.Type
+	Args       *objects.Tuple
 	Cause      *Exception
 	Context    *Exception
 	ContextSet bool // true once __context__ has been assigned by user code or Raise
 	Suppress   bool
-	Notes    *objects.List
-	TB       *traceback.Traceback
-	attrs    *objects.Dict
+	Notes      *objects.List
+	TB         *traceback.Traceback
+	attrs      *objects.Dict
 
 	// StopValue stores StopIteration's separate value slot per
 	// PyStopIterationObject. CPython keeps args and value independent:

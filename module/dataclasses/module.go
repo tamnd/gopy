@@ -539,9 +539,7 @@ func processClass(cls *objects.Type, flags dataclassFlags) (*objects.Type, error
 
 	// Install __replace__ so copy.replace(obj, **changes) works on this class.
 	// CPython: Lib/dataclasses.py:1150 _set_new_attribute(cls, '__replace__', _replace)
-	objects.SetTypeDescr(cls, "__replace__", objects.NewMethodDescr(cls, "__replace__", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		return replaceBuiltin(args, kwargs)
-	}))
+	objects.SetTypeDescr(cls, "__replace__", objects.NewMethodDescr(cls, "__replace__", replaceBuiltin))
 
 	return cls, nil
 }

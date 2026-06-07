@@ -228,7 +228,7 @@ func typeGetModule(o Object) (Object, error) {
 		}
 		return NewStr(t.Module), nil
 	}
-	// Non-user (C/Go heap) types: honour an explicit t.Module when set,
+	// Non-user (C/Go heap) types: honor an explicit t.Module when set,
 	// then fall back to the dotted-prefix convention, then "builtins".
 	// CPython heap types (Py_TPFLAGS_HEAPTYPE, e.g. functools.partial)
 	// store __module__ in tp_dict; our equivalent is t.Module.
