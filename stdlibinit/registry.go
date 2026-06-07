@@ -258,8 +258,7 @@ import (
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/atexit"
 
-	// contextlib is now vendored as stdlib/contextlib.py (CPython 3.14).
-	// _ "github.com/tamnd/gopy/module/contextlib"
+	_ "github.com/tamnd/gopy/module/contextlib" // built-in so traceback tests find it without a PathFinder
 	_ "github.com/tamnd/gopy/module/dataclasses"
 	_ "github.com/tamnd/gopy/module/fnmatch"
 	_ "github.com/tamnd/gopy/module/functools"
