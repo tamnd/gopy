@@ -105,4 +105,3 @@ func Decref(o Object) {
 func Is(a, b Object) bool {
 	return a == b
 }
-
