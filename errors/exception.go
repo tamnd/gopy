@@ -52,6 +52,23 @@ type Exception struct {
 	//
 	// CPython: Objects/exceptions.c:1940 PyOSErrorObject
 	OSErr *OSErrorState
+
+	// EG carries the BaseExceptionGroup-specific payload (msg, excs,
+	// excs_str). Non-nil only for exceptions built through the
+	// BaseExceptionGroup constructor (egTpNew). Groups created directly
+	// through New (the VM's CHECK_EG_MATCH / except* paths) leave it nil;
+	// egStateOf synthesizes the equivalent view from args on demand.
+	//
+	// CPython: Objects/exceptions.c:867 PyBaseExceptionGroupObject
+	EG *ExceptionGroupState
+
+	// NotesObj holds a __notes__ value that is not a plain list. CPython
+	// stores __notes__ as an ordinary instance attribute that may hold any
+	// object; add_note only requires a list when it appends. The common
+	// list case lives in Notes; NotesObj covers `exc.__notes__ = 123`.
+	//
+	// CPython: Objects/exceptions.c:296 BaseException_add_note (read/write)
+	NotesObj objects.Object
 }
 
 // AttrDict implements objects.AttrDictHolder so a Python subclass of a

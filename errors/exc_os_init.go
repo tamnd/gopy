@@ -51,14 +51,6 @@ func osErrorTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects
 	return osErrorConstruct(cls, args)
 }
 
-// osErrorCall is the tp_call dispatch for every OSError subclass.
-//
-// CPython: Objects/exceptions.c:2132 OSError_new (called via tp_call)
-func osErrorCall(callable objects.Object, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	cls, _ := callable.(*objects.Type)
-	return osErrorConstruct(cls, args)
-}
-
 // osErrorConstruct runs the OSError_new body: it parses the (errno,
 // strerror, filename, winerror, filename2) argument shape, promotes a
 // bare OSError to the errnomap subclass when the first argument is an
@@ -241,7 +233,6 @@ func init() {
 	//
 	// CPython: Objects/exceptions.c:2410 OSError tp_new / tp_init / tp_str
 	for _, ft := range osErrFamily() {
-		ft.Call = osErrorCall
 		ft.TpNew = osErrorTpNew
 		ft.Str = osErrorStr
 	}

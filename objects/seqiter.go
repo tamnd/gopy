@@ -70,6 +70,22 @@ var IsStopIterationHook func(error) bool
 // CPython: Python/errors.c:488 _PyErr_Clear
 var ClearCurrentExceptionHook func()
 
+// ClearCurrentExceptionIfIterStopHook drops the thread-state's current
+// exception only when it is an IndexError or StopIteration, the two
+// exception types iteration legitimately swallows: iter_iternext clears
+// after PyErr_ExceptionMatches(PyExc_IndexError) and PyIter_Next clears
+// after PyErr_ExceptionMatches(PyExc_StopIteration). The gopy iterators
+// signal exhaustion with a Go-level ErrStopIteration / errIndexOutOfRange
+// and never install that exception on the thread state, so an
+// unconditional clear would wipe an unrelated exception that happens to
+// be pending (for example one being raised while its repr walks a
+// contained sequence). Guarding on the exception type mirrors CPython's
+// ExceptionMatches gate.
+//
+// CPython: Objects/iterobject.c:78 iter_iternext (PyErr_ExceptionMatches + PyErr_Clear)
+// CPython: Objects/abstract.c:2852 PyIter_Next (PyErr_ExceptionMatches + PyErr_Clear)
+var ClearCurrentExceptionIfIterStopHook func()
+
 // seqIterNext mirrors iter_iternext: it_seq[it_index++], stopping on
 // IndexError or StopIteration. Other errors propagate.
 //
@@ -86,8 +102,8 @@ func seqIterNext(o Object) (Object, error) {
 			if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) ||
 				(IsIndexErrorHook != nil && IsIndexErrorHook(err)) {
 				it.seq = nil
-				if ClearCurrentExceptionHook != nil {
-					ClearCurrentExceptionHook()
+				if ClearCurrentExceptionIfIterStopHook != nil {
+					ClearCurrentExceptionIfIterStopHook()
 				}
 				return nil, ErrStopIteration
 			}
@@ -116,8 +132,8 @@ func seqIterNext(o Object) (Object, error) {
 		if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) ||
 			(IsIndexErrorHook != nil && IsIndexErrorHook(err)) {
 			it.seq = nil
-			if ClearCurrentExceptionHook != nil {
-				ClearCurrentExceptionHook()
+			if ClearCurrentExceptionIfIterStopHook != nil {
+				ClearCurrentExceptionIfIterStopHook()
 			}
 			return nil, ErrStopIteration
 		}

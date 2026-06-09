@@ -44,7 +44,7 @@ func SyntaxFromSymtable(se *symtable.SyntaxError) *Exception {
 		filename, lineno, offset, objects.None(), endLineno, endOffset,
 	})
 	args := []objects.Object{objects.NewStr(se.Msg), info}
-	out, err := PyExc_SyntaxError.Call(PyExc_SyntaxError, args, nil)
+	out, err := objects.Call(PyExc_SyntaxError, objects.NewTuple(args), nil)
 	if err != nil {
 		return New(PyExc_SyntaxError, objects.NewTuple([]objects.Object{
 			objects.NewStr(se.Msg),

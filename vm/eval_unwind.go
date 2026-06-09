@@ -226,12 +226,12 @@ func synthesizeStructured(err error) (*pyerrors.Exception, bool) {
 // "<no detail available>" string.
 //
 // CPython: Objects/exceptions.c:2713 SyntaxError_init runs through the
-// type's tp_init / tp_call, so a bare PyObject_New does not populate
+// type's tp_new / tp_init, so a bare PyObject_New does not populate
 // the members.
 func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
 	args := []objects.Object{objects.NewStr(msg)}
 	if isSyntaxErrorType(typ) {
-		out, err := typ.Call(typ, args, nil)
+		out, err := objects.Call(typ, objects.NewTuple(args), nil)
 		if err == nil {
 			if exc, ok := out.(*pyerrors.Exception); ok {
 				return exc

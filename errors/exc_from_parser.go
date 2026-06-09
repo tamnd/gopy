@@ -73,7 +73,7 @@ func SyntaxFromParser(se *parsererrors.SyntaxError) *Exception {
 		filename, lineno, offset, text, endLineno, endOffset,
 	})
 	args := []objects.Object{objects.NewStr(se.Message), info}
-	out, err := typ.Call(typ, args, nil)
+	out, err := objects.Call(typ, objects.NewTuple(args), nil)
 	if err != nil {
 		return New(typ, objects.NewTuple([]objects.Object{
 			objects.NewStr(se.Message),
