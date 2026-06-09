@@ -13,10 +13,17 @@ package vm
 
 import (
 	thread "github.com/tamnd/gopy/module/_thread"
+	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
 
 func init() {
+	// Share the fast getg-based goid with leaf packages that need cheap
+	// goroutine identity (functools._lru_cache_wrapper's reentrant lock).
+	// Routing through objects keeps the dependency arrow pointing the
+	// right way: objects is a leaf both vm and module/_functools import.
+	objects.GoidHook = goid
+
 	// Resolve the active Python thread's identity for the running
 	// goroutine. Returns 0 when no thread is active so _thread falls back
 	// to the goroutine id.
