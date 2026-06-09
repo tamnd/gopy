@@ -172,12 +172,12 @@ func egTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects.Obje
 	}
 
 	actualCls := cls
-	switch {
-	case cls == PyExc_ExceptionGroup:
+	switch cls {
+	case PyExc_ExceptionGroup:
 		if nestedBaseExceptions {
 			return nil, fmt.Errorf("TypeError: Cannot nest BaseExceptions in an ExceptionGroup")
 		}
-	case cls == PyExc_BaseExceptionGroup:
+	case PyExc_BaseExceptionGroup:
 		if !nestedBaseExceptions {
 			// All nested exceptions are Exception subclasses: promote.
 			actualCls = PyExc_ExceptionGroup

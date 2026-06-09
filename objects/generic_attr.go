@@ -156,61 +156,78 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 		}
 	}
 	if inst, ok := o.(*Instance); ok {
-		if inst.dict == nil {
-			if !tp.HasDict {
-				if value == nil {
-					return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-				}
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			if value == nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			// LAZY_DICT: first store materializes the managed dict.
-			//
-			// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
-			inst.dict = NewDict()
-		}
-		if value == nil {
-			if _, err := inst.dict.GetItem(name); err != nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			inst.inlineValid = false
-			return inst.dict.DelItem(name)
-		}
-		// Mirror instanceSetAttr: any name first stored on an instance
-		// must enter the type's shared-keys set so the LOAD_ATTR
-		// specializer refuses NONDESCRIPTOR_WITH_VALUES for it. Frozen
-		// dataclass __init__ writes through object.__setattr__, which
-		// lands here instead of instanceSetAttr, so the AddCachedKey
-		// hook has to live in both places.
-		//
-		// CPython: Objects/dictobject.c:5132 insert_split_key
-		if u, ok := name.(*Unicode); ok {
-			tp.AddCachedKey(u.v)
-		}
-		return inst.dict.SetItem(name, value)
+		return setAttrOnInstance(inst, tp, name, value)
 	}
 	if h, ok := o.(AttrDictHolder); ok && tp.HasDict {
-		if value == nil {
-			d := h.AttrDict()
-			if d == nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			if _, err := d.GetItem(name); err != nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			return d.DelItem(name)
-		}
-		if u, ok := name.(*Unicode); ok {
-			tp.AddCachedKey(u.v)
-		}
-		return h.EnsureAttrDict().SetItem(name, value)
+		return setAttrOnHolder(h, tp, name, value)
 	}
 	if value == nil {
 		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 	}
 	return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+}
+
+// setAttrOnInstance stores or deletes name on an *Instance's managed dict,
+// materializing it lazily on first store. Split out of GenericSetAttr to keep
+// the slot dispatcher's cognitive complexity in check.
+//
+// CPython: Objects/object.c:1693 _PyObject_GenericSetAttrWithDict (instance dict path)
+func setAttrOnInstance(inst *Instance, tp *Type, name, value Object) error {
+	if inst.dict == nil {
+		if !tp.HasDict {
+			if value == nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			}
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		if value == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		// LAZY_DICT: first store materializes the managed dict.
+		//
+		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+		inst.dict = NewDict()
+	}
+	if value == nil {
+		if _, err := inst.dict.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		inst.inlineValid = false
+		return inst.dict.DelItem(name)
+	}
+	// Mirror instanceSetAttr: any name first stored on an instance
+	// must enter the type's shared-keys set so the LOAD_ATTR
+	// specializer refuses NONDESCRIPTOR_WITH_VALUES for it. Frozen
+	// dataclass __init__ writes through object.__setattr__, which
+	// lands here instead of instanceSetAttr, so the AddCachedKey
+	// hook has to live in both places.
+	//
+	// CPython: Objects/dictobject.c:5132 insert_split_key
+	if u, ok := name.(*Unicode); ok {
+		tp.AddCachedKey(u.v)
+	}
+	return inst.dict.SetItem(name, value)
+}
+
+// setAttrOnHolder stores or deletes name on an AttrDictHolder's attribute
+// dict. Split out of GenericSetAttr for the same reason as setAttrOnInstance.
+//
+// CPython: Objects/object.c:1693 _PyObject_GenericSetAttrWithDict (tp_dictoffset path)
+func setAttrOnHolder(h AttrDictHolder, tp *Type, name, value Object) error {
+	if value == nil {
+		d := h.AttrDict()
+		if d == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		if _, err := d.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		return d.DelItem(name)
+	}
+	if u, ok := name.(*Unicode); ok {
+		tp.AddCachedKey(u.v)
+	}
+	return h.EnsureAttrDict().SetItem(name, value)
 }
 
 // instanceAttrDict returns the per-instance attribute dict for o (an
