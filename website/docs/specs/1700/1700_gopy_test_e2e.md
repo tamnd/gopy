@@ -13,7 +13,7 @@ description: "Port CPython 3.14's Lib/test/ behaviour suite into gopy. v0.0-v0.1
 
 Infrastructure (gates the panel work below):
 - [x] MANIFEST: `test/cpython/MANIFEST.txt` lists 447 entries
-      (191 ready, 119 deferred, 67 out-of-scope, 69 done, 1 pending).
+      (285 ready, 92 done, 70 out-of-scope).
 - [x] Harness: `test/regrtest/` walks the manifest and shells out to
       the gopy binary per entry. Outcome buckets: pass / fail / skip
       / missing / timeout / error.
@@ -248,23 +248,23 @@ Last retested at `2c01f361` (v0.12.7, 2026-05-29).
 | test_compare | v0.12.7 | done | 16/16 green |
 | test_contains | v0.12.7 | done | 4/4 green |
 | test_dynamic | v0.12.7 | done | 11/11 green |
-| test_eval | v0.10.1 | ready | not yet vendored (1723 P9) |
-| test_extcall | v0.9 | ready | 1 failure — error message module prefix (1723 P10) |
-| test_frame | v0.9 | ready | 17 fail, 9 errors — FrameLocalsProxy, frame.clear, f_generator (1723 P4) |
-| test_index | v0.4 | ready | 1 fail, 20 errors — __index__ on seq types, sequence repeat overflow (1723 P6) |
+| test_eval | v0.10.1 | out-of-scope | no standalone module in 3.14 (moved to test_capi/, needs _testcapi) (1723 P9) |
+| test_extcall | v0.13 | done | 1/1 green (1723 P10: module naming, star-unpack, iter-drain) |
+| test_frame | v0.13 | done | 59 pass, 12 skip (1723 P4 + P12.4 + P14 executing-frame GC roots) |
+| test_index | v0.13 | done | 55/55 green (1723 P6) |
 | test_isinstance | v0.12.7 | done | 23/23 green |
-| test_iter | v0.2 | ready | 1 failure — str.join (spec 1722 P5) |
-| test_iterlen | v0.2 | ready | 18 fail — __length_hint__ on iterators (1723 P7) |
+| test_iter | v0.13 | done | 57 pass, 2 skip |
+| test_iterlen | v0.13 | done | 22/22 green (1723 P7) |
 | test_pow | v0.12.7 | done | 7/7 green |
 | test_richcmp | v0.12.7 | done | 11/11 green |
 | test_typechecks | v0.12.7 | done | 6/6 green |
 | test_unary | v0.12.7 | done | 6/6 green |
 | test_with | v0.12.7 | done | 54/54 green |
-| test_asyncgen | v0.12.8 | ready | 3 fail, 80 errors — asyncgen hooks (1723 P3) |
-| test_coroutines | v0.12.8 | ready | 25 fail, 29 errors — asyncio.run and coroutine hooks (1723 P3) |
+| test_asyncgen | v0.13 | done | 85/85 green (1723 P3 + P13 + P14, asyncio event loop) |
+| test_coroutines | v0.13 | done | 99 pass, 3 skip (1723 P3 + P12.3 + P14, asyncio event loop) |
 | test_generator_stop | v0.12.8 | done | 2/2 green |
 | test_generators | v0.12.8 | done | 59/60 green, 1 skip |
-| test_yield_from | v0.12.8 | ready | 12 fail, 8 errors — gen.close/throw, yield-from delegation (1723 P8) |
+| test_yield_from | v0.13 | done | 43/43 green (1723 P8) |
 
 ### Exceptions / traceback (8 files)
 
