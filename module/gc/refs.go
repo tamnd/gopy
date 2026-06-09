@@ -90,10 +90,29 @@ func subtractRefs(containers *gcHead, tracked map[objects.Object]*gcHead) error 
 // tstate->current_frame.
 //
 // CPython: Python/gc.c:1208 gc_collect_main (tstate roots stay reachable)
-func pinRoots(containers *gcHead) {
+func pinRoots(containers *gcHead, tracked map[objects.Object]*gcHead) {
 	for g := containers.next; g != containers; g = g.next {
 		if r, ok := g.obj.(objects.GCRoot); ok && r.GCRoot() && g.refs == 0 {
 			g.refs = 1
 		}
+	}
+	// Re-float every candidate an executing interpreter frame holds.
+	// CPython roots these through tstate->current_frame; gopy's frame
+	// arena is invisible to the collector, so the vm enumerates the
+	// held objects and we pin the ones that landed on the candidate
+	// list. move_unreachable's visit_reachable then pulls in whatever
+	// the rooted object itself references (a suspended generator's
+	// frame, its sub-generators, and so on).
+	//
+	// CPython: Python/gc.c:1430 gc_collect_main (tstate->current_frame roots)
+	if h := objects.GCExecutingRootsHook; h != nil {
+		h(func(o objects.Object) {
+			if o == nil {
+				return
+			}
+			if g, ok := tracked[o]; ok && g.flags&gcCollecting != 0 && g.refs == 0 {
+				g.refs = 1
+			}
+		})
 	}
 }

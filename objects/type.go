@@ -351,6 +351,24 @@ type GCRoot interface {
 	GCRoot() bool
 }
 
+// GCExecutingRootsHook is wired by the vm so the cycle collector can
+// see the objects an executing interpreter frame holds in its fast
+// locals, cell/free vars, and operand stack. CPython gets this for
+// free: every value an active frame holds is reachable from
+// tstate->current_frame, which gc_collect_main never collects. gopy's
+// interpreter frames live in a per-thread arena that is a plain Go
+// allocation, invisible to the refcount-based collector, so a value
+// referenced only by a live frame local (for example a suspended
+// generator a test still holds in a local) collapses to gc_refs == 0
+// under subtract_refs and move_unreachable would reclaim it out from
+// under the running program. The vm walks every active thread's frame
+// stack and reports each held object through pin; the collector
+// re-floats any matching candidate to a positive ref count. nil until
+// the vm initializes.
+//
+// CPython: Python/gc.c:1430 gc_collect_main (tstate->current_frame roots)
+var GCExecutingRootsHook func(pin func(Object))
+
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //
 // CPython: Include/object.h:L284 Py_TPFLAGS_MAPPING / Py_TPFLAGS_SEQUENCE
