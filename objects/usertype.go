@@ -300,6 +300,35 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	return t, nil
 }
 
+// typeUserDealloc releases the descriptor-table entries for a user-defined
+// heap type. CPython's tp_dict is a regular dict whose dealloc Decrefs all
+// values; in gopy the equivalent is typeDescrTable plus the optional
+// ClassAttrDict.
+//
+// CPython: Objects/typeobject.c:6434 type_dealloc (Py_XDECREF(type->tp_dict))
+func typeUserDealloc(o Object) {
+	t, ok := o.(*Type)
+	if !ok {
+		return
+	}
+	if m, ok := typeDescrTable[t]; ok {
+		for _, v := range m {
+			Decref(v)
+		}
+		delete(typeDescrTable, t)
+		delete(typeDescrOrder, t)
+	}
+	if t.ClassAttrDict != nil {
+		// ClassAttrDict.SetItem Incref'd every value it holds. Dict.Dealloc is
+		// nil so those refs would leak unless we release them here explicitly.
+		// CPython: Objects/typeobject.c:6434 type_dealloc (tp_dict Py_DECREF
+		// calls through to dict_dealloc which calls PyDict_Clear).
+		t.ClassAttrDict.clearContents()
+		Decref(t.ClassAttrDict)
+		t.ClassAttrDict = nil
+	}
+}
+
 // stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
 // meta. Skips a nil or typeType meta because NewType already wired the
 // default.
@@ -712,7 +741,8 @@ func typeSetNames(t *Type, ns *Dict) error {
 		}
 		dt := setName.Type()
 		var callable Object
-		if dt.DescrGet != nil {
+		setNameIsNew := dt.DescrGet != nil
+		if setNameIsNew {
 			bound, err := dt.DescrGet(setName, v, v.Type())
 			if err != nil {
 				return err
@@ -721,7 +751,12 @@ func typeSetNames(t *Type, ns *Dict) error {
 		} else {
 			callable = setName
 		}
-		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+		_, callErr := Call(callable, NewTuple([]Object{t, s}), nil)
+		// CPython: Objects/typeobject.c:6046 type_set_names Py_DECREF(set_name) after call
+		if setNameIsNew {
+			Decref(callable)
+		}
+		if callErr != nil {
 			if FormatNoteHook != nil {
 				keyRepr, rerr := Repr(s)
 				keyText := s.Value()
@@ -731,7 +766,7 @@ func typeSetNames(t *Type, ns *Dict) error {
 				FormatNoteHook(fmt.Sprintf("Error calling __set_name__ on '%s' instance %s in '%s'",
 					typeNameOf(v), keyText, t.Name))
 			}
-			return err
+			return callErr
 		}
 	}
 	return nil
@@ -755,7 +790,8 @@ func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 		}
 		dt := descr.Type()
 		var callable Object
-		if dt.DescrGet != nil {
+		callableIsNew := dt.DescrGet != nil
+		if callableIsNew {
 			bound, err := dt.DescrGet(descr, t, t)
 			if err != nil {
 				return err
@@ -773,9 +809,14 @@ func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 				}
 			}
 		}
-		_, err := Call(callable, NewTuple(nil), kwd)
-		if err != nil {
-			return err
+		// CPython: Objects/typeobject.c:4584 type_new_init_subclass
+		_, callErr := Call(callable, NewTuple(nil), kwd)
+		// CPython: Objects/typeobject.c:4584 Py_DECREF(func) after call
+		if callableIsNew {
+			Decref(callable)
+		}
+		if callErr != nil {
+			return callErr
 		}
 		return nil
 	}
@@ -957,6 +998,56 @@ func slotTpGetattroHook(o Object, name Object) (Object, error) {
 		return nil, err2
 	}
 	return Call(fb, NewTuple([]Object{name}), nil)
+}
+
+// fixupSetattroSlot wires tp_setattro to a slot dispatcher that calls
+// the user's __setattr__ (or __delattr__ for deletions) when the class
+// body, or any user-defined base, overrides them. Without this, attribute
+// assignment on an instance of such a class bypasses the Python-level
+// override and writes directly to the instance dict.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot tp_setattro path
+// CPython: Objects/typeobject.c:10406 slot_tp_setattro
+func fixupSetattroSlot(t *Type) {
+	_, saOwner := LookupDescriptor(t, "__setattr__")
+	_, daOwner := LookupDescriptor(t, "__delattr__")
+	hasSetattr := saOwner != nil && saOwner != objectType
+	hasDelattr := daOwner != nil && daOwner != objectType
+	if !hasSetattr && !hasDelattr {
+		return
+	}
+	t.Setattro = slotTpSetattroHook
+}
+
+// slotTpSetattroHook dispatches attribute set (value != nil) through the
+// type's __setattr__ and attribute delete (value == nil) through
+// __delattr__. This is the gopy port of CPython's slot_tp_setattro.
+//
+// CPython: Objects/typeobject.c:10406 slot_tp_setattro
+func slotTpSetattroHook(o Object, name Object, value Object) error {
+	tp := o.Type()
+	if value != nil {
+		sa, _ := LookupDescriptor(tp, "__setattr__")
+		if sa != nil {
+			bound, err := bindAttrCallable(sa, o, tp)
+			if err != nil {
+				return err
+			}
+			_, err = Call(bound, NewTuple([]Object{name, value}), nil)
+			return err
+		}
+		return GenericSetAttr(o, name, value)
+	}
+	da, _ := LookupDescriptor(tp, "__delattr__")
+	if da != nil {
+		bound, err := bindAttrCallable(da, o, tp)
+		if err != nil {
+			return err
+		}
+		_, err = Call(bound, NewTuple([]Object{name}), nil)
+		return err
+	}
+	return GenericSetAttr(o, name, nil)
 }
 
 // bindAttrCallable applies tp_descr_get to attr with (o, tp) so the

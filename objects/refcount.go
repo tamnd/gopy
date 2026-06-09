@@ -1,6 +1,8 @@
 package objects
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+)
 
 // Incref bumps the refcount. Immortal objects (refcount >= ImmortalRefcnt)
 // skip the bump so their refcount cannot overflow into the mortal range.
@@ -103,3 +105,4 @@ func Decref(o Object) {
 func Is(a, b Object) bool {
 	return a == b
 }
+

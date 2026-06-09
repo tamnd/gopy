@@ -228,7 +228,12 @@ func (e *evalState) fastCallType1(oparg uint32) (int, bool, error) {
 		return 0, false, nil
 	}
 	arg := e.peek(0).AsObject()
-	return e.finishCall(oparg, arg.Type()), true, nil
+	// CPython: Python/bytecodes.c:4061 _CALL_TYPE_1 uses Py_NewRef so the
+	// result is an owned reference. Incref before handing to finishCall /
+	// pushObject which steal (FromObject, no Incref).
+	t := arg.Type()
+	objects.Incref(t)
+	return e.finishCall(oparg, t), true, nil
 }
 
 // fastCallStr1 runs CALL_STR_1: str(x). Guards: callable is
