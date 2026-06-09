@@ -93,6 +93,15 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
 	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+
+	// All static built-in types are immortal: CPython stamps them with
+	// _Py_IMMORTAL_REFCNT in _PyStaticType_InitBuiltin so tp_dealloc
+	// never fires. objectType is the only *Type whose initializer does
+	// not go through NewType (which calls MakeImmortal), so we stamp it
+	// here once all descriptors are registered.
+	//
+	// CPython: Objects/typeobject.c:352 _PyStaticType_InitBuiltin
+	objectType.MakeImmortal()
 }
 
 // objectSetDict implements object.__dict__ set for HasDict-bearing
@@ -649,7 +658,9 @@ func objectInitSubclass(args []Object, kwargs map[string]Object) (Object, error)
 //
 // CPython: Objects/typeobject.c:7000 object_get_class
 func objectGetClass(o Object) (Object, error) {
-	return o.Type(), nil
+	t := o.Type()
+	Incref(t)
+	return t, nil
 }
 
 // objectSetClass implements object.__class__ set. CPython checks that

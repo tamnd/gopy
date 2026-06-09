@@ -21,6 +21,8 @@ var CellType = NewType("cell", []*Type{objectType})
 func init() {
 	CellType.TpTraverse = cellTraverse
 	CellType.TpNew = cellTpNew
+	// CPython: Objects/cellobject.c cell_dealloc (GC variant)
+	CellType.Dealloc = cellDealloc
 	CellType.Getattro = GenericGetAttr
 	// cell uses the default object tp_setattro (PyObject_GenericSetAttr) so
 	// cell_contents assignment reaches the getset setter below; without it,
@@ -36,12 +38,17 @@ func init() {
 			}
 			return c.Contents, nil
 		},
-		// cell_set_contents stores the value verbatim; only deletion
-		// (value == nil) empties the cell. None is a real value here.
-		//
 		// CPython: Objects/cellobject.c:159 cell_set_contents
 		func(o Object, v Object) error {
-			o.(*Cell).Contents = v
+			c := o.(*Cell)
+			old := c.Contents
+			if v != nil {
+				Incref(v)
+			}
+			c.Contents = v
+			if old != nil {
+				Decref(old)
+			}
 			return nil
 		},
 	))
@@ -114,6 +121,17 @@ func cellTpNew(_ *Type, args []Object, _ map[string]Object) (Object, error) {
 	}
 }
 
+// cellDealloc releases the cell's contents reference when the cell's
+// refcount drops to zero.
+//
+// CPython: Objects/cellobject.c cell_dealloc
+func cellDealloc(o Object) {
+	c := o.(*Cell)
+	if c.Contents != nil {
+		Decref(c.Contents)
+	}
+}
+
 // cellTraverse visits the contents reference. Mirrors cell_traverse.
 //
 // CPython: Objects/cellobject.c:282 cell_traverse
@@ -127,8 +145,13 @@ func cellTraverse(o Object, visit Visitor) error {
 
 // NewCell builds a cell holding contents. Pass nil for an unbound cell.
 //
-// CPython: Objects/cellobject.c PyCell_New
+// CPython: Objects/cellobject.c:16 PyCell_New
 func NewCell(contents Object) *Cell {
+	// CPython: Objects/cellobject.c:16 Py_XNewRef — bumps refcount so the
+	// cell owns a strong reference to its initial contents.
+	if contents != nil {
+		Incref(contents)
+	}
 	c := &Cell{Contents: contents}
 	c.init(CellType)
 	return c

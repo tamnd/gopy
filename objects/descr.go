@@ -298,10 +298,24 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		m = map[string]Object{}
 		typeDescrTable[t] = m
 	}
-	if _, exists := m[name]; !exists {
+	if old, exists := m[name]; exists {
+		// Replace: install new value then release old owned reference.
+		// CPython: type_setattro -> PyDict_SetItem sets the value before
+		// the dict releases the old entry (Objects/dictobject.c:1875).
+		m[name] = d
+		Incref(d)
+		Decref(old)
+	} else {
 		typeDescrOrder[t] = append(typeDescrOrder[t], name)
+		// typeDescrTable takes ownership: Incref so the value survives
+		// independent of the class-body ns dict's lifetime. Mirrors
+		// CPython's tp_dict (a real dict) holding a counted ref to every
+		// stored value.
+		//
+		// CPython: Objects/typeobject.c:6088 type_setattro -> PyDict_SetItem
+		m[name] = d
+		Incref(d)
 	}
-	m[name] = d
 	if t.ClassAttrDict != nil {
 		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
 	}

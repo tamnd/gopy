@@ -313,7 +313,11 @@ func (e *evalState) importStar(from objects.Object) error {
 		if verr != nil {
 			return verr
 		}
-		if serr := dst.SetItem(objects.NewStr(name), val); serr != nil {
+		serr := dst.SetItem(objects.NewStr(name), val)
+		// CPython: Python/ceval.c import_star_from — always releases the
+		// GetAttr new-ref after SetItem takes its own.
+		objects.Decref(val)
+		if serr != nil {
 			return serr
 		}
 	}

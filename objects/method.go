@@ -12,7 +12,9 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // BoundMethod is the value attribute access produces when a function
 // is fetched off an instance: it pairs the function with the instance
@@ -741,6 +743,13 @@ func init() {
 	StaticMethodType.DescrGet = staticMethodDescrGet
 	StaticMethodType.TpTraverse = staticMethodTraverse
 	StaticMethodType.Getattro = staticMethodGetattro
+	// sm_dealloc releases the owned reference to sm_callable that sm_init acquired.
+	//
+	// CPython: Objects/funcobject.c:1676 sm_dealloc Py_XDECREF(im->sm_callable)
+	StaticMethodType.Dealloc = func(o Object) {
+		sm := o.(*StaticMethod)
+		Decref(sm.smCallable)
+	}
 	// sm_call: calling a staticmethod directly forwards to the
 	// wrapped callable. CPython 3.10 added this so the @staticmethod
 	// descriptor itself is callable, not just the bound result.
@@ -803,6 +812,10 @@ func staticMethodTraverse(o Object, visit Visitor) error {
 //
 // CPython: Objects/funcobject.c:1731 sm_init
 func NewStaticMethod(fn Object) *StaticMethod {
+	// sm_init stores a new reference to callable.
+	//
+	// CPython: Objects/funcobject.c:1731 sm_init Py_INCREF(callable)
+	Incref(fn)
 	sm := &StaticMethod{smCallable: fn}
 	sm.init(StaticMethodType)
 	functoolsWraps(sm, fn)
@@ -828,7 +841,12 @@ func staticMethodRepr(o Object) (string, error) {
 //
 // CPython: Objects/funcobject.c:1705 sm_descr_get
 func staticMethodDescrGet(descr Object, _ Object, _ *Type) (Object, error) {
-	return descr.(*StaticMethod).smCallable, nil
+	sm := descr.(*StaticMethod)
+	// sm_descr_get returns a new reference to the wrapped callable.
+	//
+	// CPython: Objects/funcobject.c:1705 sm_descr_get Py_INCREF(sm->sm_callable)
+	Incref(sm.smCallable)
+	return sm.smCallable, nil
 }
 
 // staticMethodCall forwards a direct call on a staticmethod object to

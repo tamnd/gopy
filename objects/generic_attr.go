@@ -9,7 +9,9 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // AttributeErrorFactory is wired by the errors package after init so that
 // GenericGetAttr can produce a rich AttributeError with .name and .obj set.
@@ -99,7 +101,8 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
-	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
 	if descr != nil {
 		dt := descr.Type()
 		if dt.DescrGet != nil && dt.DescrSet != nil {
@@ -117,6 +120,9 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 		if dt.DescrGet != nil {
 			return dt.DescrGet(descr, o, tp)
 		}
+		// CPython: Objects/object.c:995 _PyObject_GenericGetAttrWithDict
+		// Py_INCREF(res) before returning a plain type-level attribute.
+		Incref(descr)
 		return descr, nil
 	}
 	// CPython: Objects/typeobject.c:7254 object_getsets — every object
@@ -149,7 +155,22 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 			return dset(descr, o, value)
 		}
 	}
-	if inst, ok := o.(*Instance); ok && inst.dict != nil {
+	if inst, ok := o.(*Instance); ok {
+		if inst.dict == nil {
+			if !tp.HasDict {
+				if value == nil {
+					return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+				}
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+			}
+			if value == nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			}
+			// LAZY_DICT: first store materializes the managed dict.
+			//
+			// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+			inst.dict = NewDict()
+		}
 		if value == nil {
 			if _, err := inst.dict.GetItem(name); err != nil {
 				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))

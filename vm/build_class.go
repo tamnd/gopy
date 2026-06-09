@@ -131,6 +131,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		prepArgsTuple := objects.NewTuple([]objects.Object{nameObj, basesTuple})
 		kwargsDict := kwargsToDict(kwargs)
 		ns, err = objects.Call(prep, prepArgsTuple, kwargsDict)
+		// CPython: Python/bltinmodule.c:183 Py_XDECREF(prep)
+		objects.Decref(prep)
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +177,27 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	}
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}
-	return objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
+	result, err := objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
+	// Release the initial NewDict ref. NewTuple copies raw pointers without
+	// Incref-ing ns, so the only owner remaining after the metaclass call is
+	// this reference. The metaclass copied every namespace entry into the
+	// type's descriptor table with its own Incref, so this is the last owner
+	// of ns. gopy dicts carry no synchronous tp_dealloc, so dropping the
+	// refcount alone leaves the method functions ns holds pinned by a count
+	// no live container backs: the class dies, the methods never reclaim, and
+	// weakref(A.method) never clears. Mirror dict_dealloc and clear the
+	// namespace contents once ns reaches refcount zero (the precise signal
+	// that nothing else, e.g. a __prepare__ mapping the caller kept, still
+	// holds it).
+	//
+	// CPython: Python/bltinmodule.c:246 builtin___build_class__ Py_DECREF(ns)
+	// CPython: Objects/dictobject.c:2768 dict_dealloc (PyDict_Clear on last decref)
+	if d, ok := ns.(*objects.Dict); ok {
+		objects.DecrefThrowawayKwargs(d)
+	} else {
+		objects.Decref(ns)
+	}
+	return result, err
 }
 
 // runClassBody invokes the body function with ns as its f_locals, so
@@ -208,7 +230,9 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 		// Free vars sit at co_nlocalsplus - co_nfreevars.
 		base := frame.NLocalsPlusOf(co) - fn.Closure.Len()
 		for i := 0; i < fn.Closure.Len(); i++ {
-			f.LocalsPlus[base+i] = stackref.FromObject(fn.Closure.Item(i))
+			// CPython: Python/bytecodes.c:1925 COPY_FREE_VARS uses
+			// PyStackRef_FromPyObjectNew; frame slot owns the reference.
+			f.LocalsPlus[base+i] = stackref.FromObjectNew(fn.Closure.Item(i))
 		}
 	}
 

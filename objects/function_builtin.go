@@ -31,6 +31,13 @@ type BuiltinFunction struct {
 	//
 	// CPython: Objects/methodobject.c:286 meth_getsets (__doc__ getset)
 	Doc string
+	// TextSignature is the Argument Clinic '__text_signature__' string.
+	// When non-empty, inspect.Signature.from_callable reads it to construct
+	// a Signature object. The '$' prefix on a parameter marks the implicit
+	// self/module argument that inspect strips when skip_bound_arg=True.
+	//
+	// CPython: Objects/methodobject.c ml_doc first-line protocol
+	TextSignature string
 	// Self mirrors PyCFunctionObject.m_self. For a static method bound
 	// to a type, type_add_method stores the owning type here via
 	// PyCFunction_NewEx(meth, (PyObject*)type, NULL); meth_get__qualname__
@@ -98,6 +105,22 @@ func init() {
 		func(o Object) (Object, error) {
 			if bf, ok := o.(*BuiltinFunction); ok && bf.Module != "" {
 				return NewStr(bf.Module), nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
+	// __text_signature__ is the Argument Clinic signature string.
+	// inspect._signature_from_builtin reads this to construct a Signature
+	// object for builtins that don't have an introspectable code object.
+	//
+	// CPython: Objects/methodobject.c:286 meth_getsets (__text_signature__
+	// is accessed via the generic ml_doc first-line protocol; gopy
+	// exposes it explicitly as a getset instead)
+	SetTypeDescr(BuiltinFunctionType, "__text_signature__", NewGetSetDescr("__text_signature__",
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok && bf.TextSignature != "" {
+				return NewStr(bf.TextSignature), nil
 			}
 			return None(), nil
 		},

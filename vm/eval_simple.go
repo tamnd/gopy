@@ -669,7 +669,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		dst := frame.NLocalsPlusOf(e.f.Code) - n
 		for i := 0; i < n; i++ {
 			cell := fn.Closure.Item(i)
-			e.f.LocalsPlus[dst+i] = stackref.FromObject(cell)
+			// CPython: Python/bytecodes.c:1925 COPY_FREE_VARS uses
+			// PyStackRef_FromPyObjectNew which Increfs the cell. The frame
+			// slot owns the reference; frame.Clear() drops it via Close().
+			e.f.LocalsPlus[dst+i] = stackref.FromObjectNew(cell)
 		}
 		return e.advance(), true, nil
 

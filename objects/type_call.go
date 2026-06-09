@@ -306,7 +306,10 @@ func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 // CPython: Objects/typeobject.c:1817 type_call (the type==&PyType_Type branch)
 func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	if len(args) == 1 && len(kwargs) == 0 {
-		return args[0].Type(), nil
+		// CPython: Objects/abstract.c:2526 PyObject_Type — Py_INCREF before return.
+		t := args[0].Type()
+		Incref(t)
+		return t, nil
 	}
 	if len(args) != 3 {
 		return nil, fmt.Errorf("TypeError: type() takes 1 or 3 arguments")
@@ -483,17 +486,30 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 //
 // CPython: Objects/typeobject.c:2331 type_call (tp_new + tp_init path)
 func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
-	var kwmap map[string]Object
-	if kwargs != nil && kwargs.Len() > 0 {
-		var merr error
-		kwmap, merr = dictToMap(kwargs)
-		if merr != nil {
-			return nil, merr
+	var inst Object
+	if cls.TpNewWithDict != nil {
+		var err error
+		inst, err = cls.TpNewWithDict(cls, args, kwargs)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var kwmap map[string]Object
+		if kwargs != nil && kwargs.Len() > 0 {
+			var merr error
+			kwmap, merr = dictToMap(kwargs)
+			if merr != nil {
+				return nil, merr
+			}
+		}
+		var err error
+		inst, err = cls.TpNew(cls, args, kwmap)
+		if err != nil {
+			return nil, err
 		}
 	}
-	inst, err := cls.TpNew(cls, args, kwmap)
-	if err != nil {
-		return nil, err
+	if inst == nil {
+		return nil, nil
 	}
 	if !IsSubtype(inst.Type(), cls) {
 		return inst, nil

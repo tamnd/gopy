@@ -285,6 +285,19 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if t.TpTraverse == nil {
 		t.TpTraverse = instanceTraverse
 	}
+	// Pure user classes (object-only storage base) have no inherited
+	// tp_dealloc, so wire instanceDealloc to release the type reference
+	// each instance takes in NewInstance. Subclasses of built-ins keep the
+	// dealloc they inherited from their storage base (set, etc.); their
+	// instances never route through NewInstance and so never took the
+	// reference instanceDealloc would release. This mirrors CPython giving
+	// every heap type subtype_dealloc, whose _Py_DECREF_TYPE balances the
+	// _Py_INCREF_TYPE in _PyObject_Init.
+	//
+	// CPython: Objects/typeobject.c:4213 type_new (tp_dealloc = subtype_dealloc)
+	if t.Dealloc == nil {
+		t.Dealloc = instanceDealloc
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member
@@ -326,6 +339,22 @@ func typeUserDealloc(o Object) {
 		t.ClassAttrDict.clearContents()
 		Decref(t.ClassAttrDict)
 		t.ClassAttrDict = nil
+	}
+	// Release the references this type took on its bases in newTypeE,
+	// mirroring type_dealloc decref'ing tp_base / tp_bases / tp_mro. The
+	// basesReleased latch keeps this one-to-one with the per-base Incref
+	// even if gopy re-enters dealloc on a type whose refcount oscillated
+	// through zero.
+	//
+	// CPython: Objects/typeobject.c:6434 type_dealloc
+	//          (Py_XDECREF(type->tp_bases / tp_base / tp_mro))
+	if !t.basesReleased {
+		t.basesReleased = true
+		for _, b := range t.Bases {
+			if b != nil {
+				Decref(b)
+			}
+		}
 	}
 }
 
@@ -862,6 +891,7 @@ func fixupSlotDispatchers(t *Type) {
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
+	fixupSetattroSlot(t)
 	fixupAsyncSlots(t)
 	fixupNumberSlots(t)
 	fixupTpNew(t)
@@ -1077,6 +1107,32 @@ func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
 func fixupTpNew(t *Type) {
 	if lookupTypeMember(t, "__new__") != nil {
 		t.TpNew = slotTpNew
+		t.TpNewWithDict = slotTpNewWithDict
+		return
+	}
+	// inheritDirectBaseScalars only copies TpNew from the primary base
+	// (Bases[0]). When a Python-level __new__ lives on a secondary base
+	// of a multiple-inheritance class (e.g. class Mock(CallableMixin,
+	// NonCallableMock) where NonCallableMock defines __new__), the slot
+	// is missed and construction falls through to the built-in tp_new,
+	// skipping the user __new__. CPython's update_one_slot walks the
+	// full MRO and installs slot_tp_new whenever the resolved __new__ is
+	// a Python object rather than the C tp_new_wrapper. Mirror that: walk
+	// the MRO and route through slotTpNew when __new__ resolves to a
+	// Python function (built-in __new__ stays a BuiltinFunction and keeps
+	// the inherited C tp_new).
+	//
+	// CPython: Objects/typeobject.c:10336 update_one_slot (tp_new entry)
+	if fnPtr(t.TpNew) == fnPtr(slotTpNew) {
+		return
+	}
+	newFn, _ := LookupDescriptor(t, "__new__")
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	if _, ok := newFn.(*Function); ok {
+		t.TpNew = slotTpNew
+		t.TpNewWithDict = slotTpNewWithDict
 	}
 }
 
@@ -1926,6 +1982,30 @@ func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 		}
 	}
 	return Call(newFn, NewTuple(posArgs), kwDict)
+}
+
+// slotTpNewWithDict is slotTpNew with the keyword arguments preserved as an
+// insertion-ordered *Dict rather than a Go map. typeCallViaTpNewWithDict calls
+// this in preference to slotTpNew so the __new__ implementation observes the
+// keyword order supplied at the call site. This matters for types like
+// functools.partial / partialmethod whose __new__ stores **keywords verbatim:
+// rebuilding the dict from a Go map (slotTpNew) shuffles the keys, so
+// partialmethod(capture, self=1, func=2) reprs in random order. CPython's
+// slot_tp_new receives the original ordered kwds dict, so mirror that.
+//
+// CPython: Objects/typeobject.c:9395 slot_tp_new
+func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
+	newFn, _ := LookupDescriptor(cls, "__new__")
+	if newFn == nil {
+		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
+	}
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	posArgs := make([]Object, 0, len(args)+1)
+	posArgs = append(posArgs, cls)
+	posArgs = append(posArgs, args...)
+	return Call(newFn, NewTuple(posArgs), kwargs)
 }
 
 // slotTpDescrGet dispatches __get__(self, obj, type). obj is None when

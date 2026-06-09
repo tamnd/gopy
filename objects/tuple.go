@@ -10,8 +10,10 @@ import (
 // CPython: Include/cpython/tupleobject.h:L8 PyTupleObject
 type Tuple struct {
 	VarHeader
-	items    []Object
-	attrDict *Dict
+	items     []Object
+	attrDict  *Dict
+	hashValid bool
+	hashValue int64
 }
 
 // AttrDict returns the per-instance attribute dict, or nil if no
@@ -403,9 +405,16 @@ func tupleRepr(o Object) (string, error) {
 // constants are taken straight from cpython/Objects/tupleobject.c so
 // the output matches CPython byte for byte.
 //
-// CPython: Objects/tupleobject.c:L329 tuplehash
+// The result is cached in t.hashValue after the first computation,
+// matching CPython's ob_hash caching in PyTupleObject so that repeated
+// hash(some_tuple) calls do not re-invoke element __hash__ methods.
+//
+// CPython: Objects/tupleobject.c:329 tuplehash (ob_hash cache)
 func tupleHash(o Object) (int64, error) {
 	t := o.(*Tuple)
+	if t.hashValid {
+		return t.hashValue, nil
+	}
 	const (
 		p1 uint64 = 11400714785074694791
 		p2 uint64 = 14029467366897019727
@@ -423,10 +432,13 @@ func tupleHash(o Object) (int64, error) {
 		acc *= p1
 	}
 	acc += uint64(len(t.items)) ^ (p5 ^ 3527539)
-	if int64(acc) == -1 {
-		return 1546275796, nil
+	result := int64(acc)
+	if result == -1 {
+		result = 1546275796
 	}
-	return int64(acc), nil
+	t.hashValid = true
+	t.hashValue = result
+	return result, nil
 }
 
 // tupleRichCmp ports tuplerichcompare: EQ/NE compare length+element-wise,

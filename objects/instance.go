@@ -113,6 +113,16 @@ type Instance struct {
 	//
 	// CPython: Include/internal/pycore_dict.h PyDictValues.valid
 	inlineValid bool
+
+	// typeReleased guards the single _Py_DECREF_TYPE that instanceDealloc
+	// performs. CPython's refcounting is exact, so subtype_dealloc runs
+	// exactly once per object; gopy's VM still under-counts some borrowed
+	// references, so an *Instance can reach refcount 0 more than once and
+	// re-enter Decref's dealloc path. Without this latch the second pass
+	// would decref the type again and free a class that still has live
+	// instances. The latch keeps the type release one-to-one with the
+	// NewInstance incref regardless of how many times dealloc re-fires.
+	typeReleased bool
 }
 
 // NewInstance allocates a fresh Instance bound to t. The instance
@@ -163,6 +173,20 @@ func NewInstance(t *Type) *Instance {
 	// CPython: Objects/object.c _PyObject_InitInlineValues
 	inst.inlineValid = true
 	inst.init(t)
+	// Every object holds a counted reference to its type. _PyObject_Init
+	// calls _Py_INCREF_TYPE, which bumps the refcount for heap (user)
+	// types and is a no-op for the immortal static built-ins. gopy mirrors
+	// the HEAPTYPE branch with the IsUser gate: a class defined inside a
+	// local scope must stay alive as long as any instance references it,
+	// otherwise typeUserDealloc clears its descriptor table out from under
+	// a live instance. The matching release happens in instanceDealloc
+	// (subtype_dealloc's _Py_DECREF_TYPE).
+	//
+	// CPython: Include/internal/pycore_object.h:507 _PyObject_Init
+	//          (_Py_INCREF_TYPE(typeobj))
+	if t.IsUser {
+		Incref(t)
+	}
 	// Register with the cycle collector for any type that has tp_traverse
 	// (not only types with tp_finalize). CPython calls _PyObject_GC_TRACK
 	// for all heap types, which always have tp_traverse; restricting to
@@ -212,6 +236,36 @@ func (i *Instance) EnsureDict() *Dict {
 		i.dict = NewDict()
 	}
 	return i.dict
+}
+
+// instanceDealloc is the tp_dealloc slot for pure user-class instances
+// (the *Instance layout, classes whose only storage base is object).
+// It releases the counted reference the instance took on its type in
+// NewInstance, mirroring the _Py_DECREF_TYPE(type) that subtype_dealloc
+// performs once a heap-type instance is reclaimed. The IsUser/type-assert
+// guards keep it a no-op for any object that did not take the matching
+// reference (built-in subclass instances never route through NewInstance,
+// so they never incref their type and must not decref it here).
+//
+// gopy leaves the per-instance __dict__ and slot array to the cycle
+// collector and Go's GC, which already walk them via instanceTraverse;
+// the type reference is the one piece refcounting alone owns, so it is
+// the only release this slot performs.
+//
+// CPython: Objects/typeobject.c:2782 subtype_dealloc (_Py_DECREF_TYPE)
+func instanceDealloc(o Object) {
+	inst, ok := o.(*Instance)
+	if !ok {
+		return
+	}
+	if inst.typeReleased {
+		return
+	}
+	t := inst.Type()
+	if t != nil && t.IsUser {
+		inst.typeReleased = true
+		Decref(t)
+	}
 }
 
 // instanceTraverse visits every Object reachable from a user-class
@@ -317,6 +371,9 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 		if dt.DescrGet != nil {
 			return dt.DescrGet(descr, o, tp)
 		}
+		// CPython: Objects/object.c:995 _PyObject_GenericGetAttrWithDict
+		// Py_INCREF(res) before returning a plain type-level attribute.
+		Incref(descr)
 		return descr, nil
 	}
 	// Fall back to __getattr__ if the class defines it. The hook

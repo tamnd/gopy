@@ -695,12 +695,13 @@ func funcSetAttr(o Object, name Object, value Object) error {
 
 // functionDescrGet implements the function descriptor protocol:
 // `instance.method` returns a BoundMethod, `Class.method` returns the
-// raw function. owner==nil signals access through the class itself
-// (e.g. `Class.method`).
+// raw function with a new strong reference.
 //
-// CPython: Objects/funcobject.c:1057 func_descr_get
+// CPython: Objects/funcobject.c:1192 func_descr_get
 func functionDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if owner == nil {
+		// CPython: Objects/funcobject.c:1194 Py_NewRef(func) — caller owns the ref.
+		Incref(descr)
 		return descr, nil
 	}
 	return NewBoundMethod(descr, owner), nil

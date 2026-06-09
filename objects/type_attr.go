@@ -7,11 +7,16 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func init() {
 	typeType.Getattro = typeGetAttr
 	typeType.Setattro = typeSetAttr
+	// CPython: Objects/typeobject.c:6434 type_dealloc (set on typeType so
+	// heap type objects are cleaned up when their refcount reaches zero).
+	typeType.Dealloc = typeUserDealloc
 
 	// Register __annotations__ and __annotate__ as GetSetDescr entries on
 	// typeType so they appear in type.__dict__. CPython exposes these as
@@ -118,6 +123,31 @@ func init() {
 		},
 		nil,
 	))
+	// type.__setattr__ / type.__delattr__ wrap typeSetAttr so that
+	// super().__setattr__(...) / super().__delattr__(...) in user
+	// metaclass bodies (e.g. EnumType) correctly route through
+	// typeSetAttr rather than falling through to object's GenericSetAttr
+	// which does not understand *Type receivers.
+	//
+	// CPython: Objects/typeobject.c:5165 type_setattro (both branches)
+	SetTypeDescr(typeType, "__setattr__", NewMethodDescr(typeType, "__setattr__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("TypeError: type.__setattr__() takes exactly 3 arguments (%d given)", len(args))
+		}
+		if err := typeSetAttr(args[0], args[1], args[2]); err != nil {
+			return nil, err
+		}
+		return None(), nil
+	}))
+	SetTypeDescr(typeType, "__delattr__", NewMethodDescr(typeType, "__delattr__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: type.__delattr__() takes exactly 2 arguments (%d given)", len(args))
+		}
+		if err := typeSetAttr(args[0], args[1], nil); err != nil {
+			return nil, err
+		}
+		return None(), nil
+	}))
 	SetTypeDescr(typeType, "__annotate__", NewGetSetDescr("__annotate__",
 		func(o Object) (Object, error) {
 			tp, ok := o.(*Type)
@@ -132,6 +162,101 @@ func init() {
 				return fmt.Errorf("TypeError: descriptor '__annotate__' requires 'type' object")
 			}
 			return typeSetAnnotate(tp, v)
+		},
+	))
+	// type.__qualname__ exposes the heap-type qualname; static types fall
+	// back to tp_name (the tail component for dotted names). The setter
+	// is permitted only for heap types (IsUser==true), matching CPython's
+	// check_set_special_type_attr gate.
+	//
+	// CPython: Objects/typeobject.c:1469 type_qualname
+	// CPython: Objects/typeobject.c:1484 type_qualname_set
+	SetTypeDescr(typeType, "__qualname__", NewGetSetDescr("__qualname__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__qualname__' requires 'type' object")
+			}
+			return TypeGetQualName(tp), nil
+		},
+		func(o Object, v Object) error {
+			tp, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: descriptor '__qualname__' requires 'type' object")
+			}
+			if !tp.IsUser {
+				return fmt.Errorf("TypeError: cannot set '__qualname__' attribute of immutable type '%s'", tp.Name)
+			}
+			u, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: type __qualname__ must be a str, not %s", typeNameOf(v))
+			}
+			tp.Qualname = u.v
+			return nil
+		},
+	))
+	// type.__name__ exposes tp_name (just the tail for built-ins, or the
+	// heap-type ht_name for user types). CPython's setter rejects
+	// non-heap types with the same immutable-type guard as __qualname__.
+	//
+	// CPython: Objects/typeobject.c:1415 type_name
+	// CPython: Objects/typeobject.c:1430 type_set_name
+	SetTypeDescr(typeType, "__name__", NewGetSetDescr("__name__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__name__' requires 'type' object")
+			}
+			return TypeGetName(tp), nil
+		},
+		func(o Object, v Object) error {
+			tp, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: descriptor '__name__' requires 'type' object")
+			}
+			if !tp.IsUser {
+				return fmt.Errorf("TypeError: cannot set '__name__' attribute of immutable type '%s'", tp.Name)
+			}
+			u, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: type __name__ must be a str, not %s", typeNameOf(v))
+			}
+			tp.Name = u.v
+			return nil
+		},
+	))
+	// type.__module__ exposes the heap-type module name. Built-ins report
+	// the leading component of the dotted tp_name (or "builtins" when
+	// undotted). The setter permits modification only on heap types.
+	//
+	// CPython: Objects/typeobject.c:1537 type_module
+	// CPython: Objects/typeobject.c:1557 type_set_module
+	SetTypeDescr(typeType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) {
+			tp, ok := o.(*Type)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__module__' requires 'type' object")
+			}
+			v, err := TypeGetModuleName(tp)
+			if err != nil {
+				return nil, err
+			}
+			return v, nil
+		},
+		func(o Object, v Object) error {
+			tp, ok := o.(*Type)
+			if !ok {
+				return fmt.Errorf("TypeError: descriptor '__module__' requires 'type' object")
+			}
+			if !tp.IsUser {
+				return fmt.Errorf("TypeError: cannot set '__module__' attribute of immutable type '%s'", tp.Name)
+			}
+			u, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: type __module__ must be a str, not %s", typeNameOf(v))
+			}
+			tp.Module = u.v
+			return nil
 		},
 	))
 }
@@ -168,6 +293,12 @@ func typeItemSize(t *Type) int {
 // *Type; lookup walks the metatype MRO for data descriptors, then the
 // type's own MRO, then non-data descriptors from the metatype.
 //
+// LookupDescriptor returns a borrowed reference from typeDescrTable.
+// Every return path that hands the value to the caller must either
+// Incref it directly or replace it with a new ref produced by DescrGet.
+// This mirrors CPython's type_getattro which Py_INCREF's after every
+// _PyType_Lookup call.
+//
 // CPython: Objects/typeobject.c:5063 type_getattro
 func typeGetAttr(o Object, name Object) (Object, error) {
 	if name == nil || name.Type() != strType {
@@ -201,19 +332,34 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 		return NewMappingProxy(d)
 	}
 
+	// CPython: Objects/typeobject.c:5091 Py_INCREF(meta_attribute) after lookup
 	metaAttr, _ := LookupDescriptor(metatype, nameStr)
 	if metaAttr != nil {
+		Incref(metaAttr)
 		mt := metaAttr.Type()
 		if mt.DescrGet != nil && mt.DescrSet != nil {
-			return mt.DescrGet(metaAttr, o, metatype)
+			// Data descriptor on metatype wins. DescrGet returns a new ref;
+			// release our borrowed-to-owned incref.
+			res, err := mt.DescrGet(metaAttr, o, metatype)
+			Decref(metaAttr)
+			return res, err
 		}
 	}
 
+	// CPython: Objects/typeobject.c:5110 Py_INCREF(attribute) after lookup
 	attr, _ := LookupDescriptor(tp, nameStr)
 	if attr != nil {
+		Incref(attr)
 		at := attr.Type()
 		if at.DescrGet != nil {
-			return at.DescrGet(attr, nil, tp)
+			res, err := at.DescrGet(attr, nil, tp)
+			Decref(attr)
+			return res, err
+		}
+		// Non-descriptor class attribute: return with our Incref as the
+		// caller's new reference.
+		if metaAttr != nil {
+			Decref(metaAttr)
 		}
 		return attr, nil
 	}
@@ -228,17 +374,26 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 	// CPython: Objects/typeobject.c:2069 type_get_annotations
 	// CPython: Objects/typeobject.c:1990 type_get_annotate
 	if nameStr == "__annotations__" {
+		if metaAttr != nil {
+			Decref(metaAttr)
+		}
 		return typeGetAnnotations(tp)
 	}
 	if nameStr == "__annotate__" {
+		if metaAttr != nil {
+			Decref(metaAttr)
+		}
 		return typeGetAnnotate(tp)
 	}
 
 	if metaAttr != nil {
 		mt := metaAttr.Type()
 		if mt.DescrGet != nil {
-			return mt.DescrGet(metaAttr, o, metatype)
+			res, err := mt.DescrGet(metaAttr, o, metatype)
+			Decref(metaAttr)
+			return res, err
 		}
+		// Non-data descriptor on metatype: return with our Incref.
 		return metaAttr, nil
 	}
 
@@ -294,7 +449,13 @@ func typeSetAttr(o Object, name Object, value Object) error {
 		if _, ok := m[nameStr]; !ok {
 			return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
 		}
+		old := m[nameStr]
 		delete(m, nameStr)
+		// Release the typeDescrTable's owned reference.
+		//
+		// CPython: Objects/typeobject.c:5165 type_setattro
+		// (PyObject_GenericSetAttr -> PyDict_DelItemString drops the ref)
+		Decref(old)
 		if tp.ClassAttrDict != nil {
 			_ = tp.ClassAttrDict.DelItem(NewStr(nameStr))
 		}
