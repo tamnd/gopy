@@ -15,18 +15,23 @@ import (
 )
 
 func init() {
+	// METH_NOARGS rows route the arity TypeError through _PyObject_FunctionStr
+	// via methodDescrCheckArity, yielding "float.hex() takes no arguments
+	// (N given)" etc.
+	//
+	// CPython: Objects/clinic/floatobject.c.h float_methods flags
 	// CPython: Objects/floatobject.c:1492 float_as_integer_ratio_impl
-	SetTypeDescr(FloatType, "as_integer_ratio", NewMethodDescr(FloatType, "as_integer_ratio", floatAsIntegerRatio))
+	SetTypeDescr(FloatType, "as_integer_ratio", NewMethodDescrConv(FloatType, "as_integer_ratio", MethNoArgs, floatAsIntegerRatio))
 	// CPython: Objects/floatobject.c:845 float_is_integer_impl
-	SetTypeDescr(FloatType, "is_integer", NewMethodDescr(FloatType, "is_integer", floatIsInteger))
+	SetTypeDescr(FloatType, "is_integer", NewMethodDescrConv(FloatType, "is_integer", MethNoArgs, floatIsInteger))
 	// CPython: Objects/floatobject.c:884 float___floor___impl
-	SetTypeDescr(FloatType, "__floor__", NewMethodDescr(FloatType, "__floor__", floatFloor))
+	SetTypeDescr(FloatType, "__floor__", NewMethodDescrConv(FloatType, "__floor__", MethNoArgs, floatFloor))
 	// CPython: Objects/floatobject.c:895 float___ceil___impl
-	SetTypeDescr(FloatType, "__ceil__", NewMethodDescr(FloatType, "__ceil__", floatCeil))
+	SetTypeDescr(FloatType, "__ceil__", NewMethodDescrConv(FloatType, "__ceil__", MethNoArgs, floatCeil))
 	// CPython: Objects/floatobject.c:868 float___trunc___impl
-	SetTypeDescr(FloatType, "__trunc__", NewMethodDescr(FloatType, "__trunc__", floatTrunc))
+	SetTypeDescr(FloatType, "__trunc__", NewMethodDescrConv(FloatType, "__trunc__", MethNoArgs, floatTrunc))
 	// CPython: Objects/floatobject.c:1164 float_hex_impl
-	SetTypeDescr(FloatType, "hex", NewMethodDescr(FloatType, "hex", floatHex))
+	SetTypeDescr(FloatType, "hex", NewMethodDescrConv(FloatType, "hex", MethNoArgs, floatHex))
 	// CPython: Objects/floatobject.c:1235 float_fromhex_impl — classmethod
 	SetTypeDescr(FloatType, "fromhex", NewClassMethod(NewBuiltinFunction("float.fromhex", floatFromHex)))
 	// CPython: Objects/floatobject.c:1649 float_from_number_impl — classmethod
@@ -42,7 +47,7 @@ func init() {
 			return floatTrueDiv(args[0], args[1])
 		}))
 	// CPython: Objects/floatobject.c:1561 float___getnewargs___impl
-	SetTypeDescr(FloatType, "__getnewargs__", NewMethodDescr(FloatType, "__getnewargs__", floatGetNewArgs))
+	SetTypeDescr(FloatType, "__getnewargs__", NewMethodDescrConv(FloatType, "__getnewargs__", MethNoArgs, floatGetNewArgs))
 }
 
 // floatGetNewArgs implements float.__getnewargs__. It returns a 1-tuple

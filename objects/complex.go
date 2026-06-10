@@ -54,15 +54,15 @@ func init() {
 	// lookup, so install GetSetDescr here for consistency with int/float.
 	SetTypeDescr(ComplexType, "real", NewGetSetDescr("real", complexRealGetter, nil))
 	SetTypeDescr(ComplexType, "imag", NewGetSetDescr("imag", complexImagGetter, nil))
-	SetTypeDescr(ComplexType, "conjugate", NewMethodDescr(ComplexType, "conjugate", complexConjugateMethod))
-	SetTypeDescr(ComplexType, "__complex__", NewMethodDescr(ComplexType, "__complex__", complexComplexMethod))
-	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescr(ComplexType, "__getnewargs__", complexGetNewArgsMethod))
+	SetTypeDescr(ComplexType, "conjugate", NewMethodDescrConv(ComplexType, "conjugate", MethNoArgs, complexConjugateMethod))
+	SetTypeDescr(ComplexType, "__complex__", NewMethodDescrConv(ComplexType, "__complex__", MethNoArgs, complexComplexMethod))
+	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescrConv(ComplexType, "__getnewargs__", MethNoArgs, complexGetNewArgsMethod))
 	// CPython: Python/formatter_unicode.c:1693 _PyComplex_FormatAdvancedWriter
 	// is reachable both via PyObject_Format (the Format slot above) and
 	// via instance.__format__(spec). Install a method descriptor so the
 	// attribute-access path hits the same renderer; without this, MRO
 	// inherits objectFormatDescr which rejects every non-empty spec.
-	SetTypeDescr(ComplexType, "__format__", NewMethodDescr(ComplexType, "__format__", complexFormatMethod))
+	SetTypeDescr(ComplexType, "__format__", NewMethodDescrConv(ComplexType, "__format__", MethO, complexFormatMethod))
 	// CPython: Objects/complexobject.c:1301 complex_from_number_impl, METH_O | METH_CLASS
 	SetTypeDescr(ComplexType, "from_number", NewClassMethod(
 		NewBuiltinFunction("complex.from_number", complexFromNumber)))

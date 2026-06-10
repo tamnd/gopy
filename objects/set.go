@@ -111,12 +111,17 @@ func init() {
 		InPlaceXor: setIXor,
 	}
 	SetTypeDescr(SetType, "__init__", NewMethodDescr(SetType, "__init__", setInitMethod))
-	SetTypeDescr(SetType, "__contains__", NewMethodDescr(SetType, "__contains__", setContainsMethod))
-	SetTypeDescr(SetType, "add", NewMethodDescr(SetType, "add", setAddMethod))
-	SetTypeDescr(SetType, "discard", NewMethodDescr(SetType, "discard", setDiscardMethod))
-	SetTypeDescr(SetType, "remove", NewMethodDescr(SetType, "remove", setRemoveMethod))
-	SetTypeDescr(SetType, "pop", NewMethodDescr(SetType, "pop", setPopMethod))
-	SetTypeDescr(SetType, "clear", NewMethodDescr(SetType, "clear", setClearMethod))
+	// METH_O / METH_NOARGS rows carry their clinic flag so methodDescrCheckArity
+	// formats the arity TypeError through _PyObject_FunctionStr, yielding
+	// "set.add() takes exactly one argument (N given)" etc.
+	//
+	// CPython: Objects/clinic/setobject.c.h set_methods flags
+	SetTypeDescr(SetType, "__contains__", NewMethodDescrConv(SetType, "__contains__", MethO, setContainsMethod))
+	SetTypeDescr(SetType, "add", NewMethodDescrConv(SetType, "add", MethO, setAddMethod))
+	SetTypeDescr(SetType, "discard", NewMethodDescrConv(SetType, "discard", MethO, setDiscardMethod))
+	SetTypeDescr(SetType, "remove", NewMethodDescrConv(SetType, "remove", MethO, setRemoveMethod))
+	SetTypeDescr(SetType, "pop", NewMethodDescrConv(SetType, "pop", MethNoArgs, setPopMethod))
+	SetTypeDescr(SetType, "clear", NewMethodDescrConv(SetType, "clear", MethNoArgs, setClearMethod))
 	SetTypeDescr(SetType, "update", NewMethodDescr(SetType, "update", setUpdateMethod))
 	SetTypeDescr(SetType, "intersection", NewMethodDescr(SetType, "intersection", setIntersectionMethod))
 	SetTypeDescr(SetType, "union", NewMethodDescr(SetType, "union", setUnionMethod))
@@ -149,14 +154,14 @@ func init() {
 		}
 		return setXor(args[0], args[1])
 	}))
-	SetTypeDescr(SetType, "issubset", NewMethodDescr(SetType, "issubset", setIsSubsetMethod))
-	SetTypeDescr(SetType, "issuperset", NewMethodDescr(SetType, "issuperset", setIsSupersetMethod))
-	SetTypeDescr(SetType, "isdisjoint", NewMethodDescr(SetType, "isdisjoint", setIsDisjointMethod))
+	SetTypeDescr(SetType, "issubset", NewMethodDescrConv(SetType, "issubset", MethO, setIsSubsetMethod))
+	SetTypeDescr(SetType, "issuperset", NewMethodDescrConv(SetType, "issuperset", MethO, setIsSupersetMethod))
+	SetTypeDescr(SetType, "isdisjoint", NewMethodDescrConv(SetType, "isdisjoint", MethO, setIsDisjointMethod))
 	SetTypeDescr(SetType, "intersection_update", NewMethodDescr(SetType, "intersection_update", setIntersectionUpdateMethod))
 	SetTypeDescr(SetType, "difference_update", NewMethodDescr(SetType, "difference_update", setDifferenceUpdateMethod))
-	SetTypeDescr(SetType, "symmetric_difference", NewMethodDescr(SetType, "symmetric_difference", setSymmetricDifferenceMethod))
-	SetTypeDescr(SetType, "symmetric_difference_update", NewMethodDescr(SetType, "symmetric_difference_update", setSymmetricDifferenceUpdateMethod))
-	SetTypeDescr(SetType, "copy", NewMethodDescr(SetType, "copy", setCopyMethod))
+	SetTypeDescr(SetType, "symmetric_difference", NewMethodDescrConv(SetType, "symmetric_difference", MethO, setSymmetricDifferenceMethod))
+	SetTypeDescr(SetType, "symmetric_difference_update", NewMethodDescrConv(SetType, "symmetric_difference_update", MethO, setSymmetricDifferenceUpdateMethod))
+	SetTypeDescr(SetType, "copy", NewMethodDescrConv(SetType, "copy", MethNoArgs, setCopyMethod))
 	SetTypeDescr(SetType, "__len__", NewMethodDescr(SetType, "__len__", setLenMethod))
 	// __repr__ and __str__ descriptors so set subclasses inherit them via MRO
 	// and fixupCallReprStr installs slotTpRepr (not generic object repr).
@@ -229,7 +234,7 @@ func init() {
 	// __init__) don't have their kwargs rejected by an inherited
 	// frozenset __init__. Keyword-arg rejection for exact frozenset()
 	// calls is handled in frozensetCtorWithType (TpNew).
-	SetTypeDescr(FrozensetType, "__contains__", NewMethodDescr(FrozensetType, "__contains__", setContainsMethod))
+	SetTypeDescr(FrozensetType, "__contains__", NewMethodDescrConv(FrozensetType, "__contains__", MethO, setContainsMethod))
 	SetTypeDescr(FrozensetType, "__len__", NewMethodDescr(FrozensetType, "__len__", setLenMethod))
 	// __repr__ and __str__ descriptors so frozenset subclasses inherit them via MRO.
 	//
@@ -256,18 +261,18 @@ func init() {
 	}))
 	SetTypeDescr(FrozensetType, "intersection", NewMethodDescr(FrozensetType, "intersection", setIntersectionMethod))
 	SetTypeDescr(FrozensetType, "union", NewMethodDescr(FrozensetType, "union", setUnionMethod))
-	SetTypeDescr(FrozensetType, "issubset", NewMethodDescr(FrozensetType, "issubset", setIsSubsetMethod))
-	SetTypeDescr(FrozensetType, "issuperset", NewMethodDescr(FrozensetType, "issuperset", setIsSupersetMethod))
+	SetTypeDescr(FrozensetType, "issubset", NewMethodDescrConv(FrozensetType, "issubset", MethO, setIsSubsetMethod))
+	SetTypeDescr(FrozensetType, "issuperset", NewMethodDescrConv(FrozensetType, "issuperset", MethO, setIsSupersetMethod))
 	SetTypeDescr(FrozensetType, "difference", NewMethodDescr(FrozensetType, "difference", setDifferenceMethod))
-	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescr(FrozensetType, "symmetric_difference", setSymmetricDifferenceMethod))
-	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescr(FrozensetType, "isdisjoint", setIsDisjointMethod))
-	SetTypeDescr(FrozensetType, "copy", NewMethodDescr(FrozensetType, "copy", setCopyMethod))
+	SetTypeDescr(FrozensetType, "symmetric_difference", NewMethodDescrConv(FrozensetType, "symmetric_difference", MethO, setSymmetricDifferenceMethod))
+	SetTypeDescr(FrozensetType, "isdisjoint", NewMethodDescrConv(FrozensetType, "isdisjoint", MethO, setIsDisjointMethod))
+	SetTypeDescr(FrozensetType, "copy", NewMethodDescrConv(FrozensetType, "copy", MethNoArgs, setCopyMethod))
 	// __reduce__ returns (type, ([list_of_elements],), state) so pickle
 	// and copy.deepcopy can reconstruct the set.
 	//
 	// CPython: Objects/setobject.c:2397 set___reduce___impl
-	SetTypeDescr(SetType, "__reduce__", NewMethodDescr(SetType, "__reduce__", setReduceMethod))
-	SetTypeDescr(FrozensetType, "__reduce__", NewMethodDescr(FrozensetType, "__reduce__", setReduceMethod))
+	SetTypeDescr(SetType, "__reduce__", NewMethodDescrConv(SetType, "__reduce__", MethNoArgs, setReduceMethod))
+	SetTypeDescr(FrozensetType, "__reduce__", NewMethodDescrConv(FrozensetType, "__reduce__", MethNoArgs, setReduceMethod))
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(SetType)
 	AddIterSlotWrappers(FrozensetType)

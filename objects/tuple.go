@@ -89,8 +89,8 @@ func init() {
 	SetTypeDescr(TupleType, "__mul__", NewMethodDescr(TupleType, "__mul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "__rmul__", NewMethodDescr(TupleType, "__rmul__", tupleMulMethod))
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
-	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
-	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescr(TupleType, "__getnewargs__", tupleGetNewArgsMethod))
+	SetTypeDescr(TupleType, "count", NewMethodDescrConv(TupleType, "count", MethO, tupleCountMethod))
+	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescrConv(TupleType, "__getnewargs__", MethNoArgs, tupleGetNewArgsMethod))
 	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
 	SetTypeDescr(TupleType, "__hash__", NewMethodDescr(TupleType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 1 {
