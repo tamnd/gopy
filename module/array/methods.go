@@ -21,34 +21,46 @@ import (
 //
 // CPython: Modules/arraymodule.c:3231 array_modexec (PyType_FromModuleAndSpec)
 func registerArrayMethods(t *objects.Type) {
+	// conv carries the clinic METH flag so methodDescrCheckArity formats
+	// the arity TypeError through _PyObject_FunctionStr, yielding
+	// "array.byteswap() takes no arguments (N given)" / "array.append()
+	// takes exactly one argument (N given)". METH_VARARGS rows (extend,
+	// index, insert, pop, __reduce_ex__) keep their hand-rolled messages.
+	//
+	// CPython: Modules/clinic/arraymodule.c.h array_methods flags
 	methods := []struct {
 		name string
+		conv objects.MethFlag
 		fn   func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
 	}{
-		{"append", arrayMethodAppend},
-		{"buffer_info", arrayMethodBufferInfo},
-		{"byteswap", arrayMethodByteswap},
-		{"clear", arrayMethodClear},
-		{"__copy__", arrayMethodCopy},
-		{"__deepcopy__", arrayMethodDeepcopy},
-		{"count", arrayMethodCount},
-		{"extend", arrayMethodExtend},
-		{"frombytes", arrayMethodFrombytes},
-		{"fromlist", arrayMethodFromlist},
-		{"fromunicode", arrayMethodFromunicode},
-		{"index", arrayMethodIndex},
-		{"insert", arrayMethodInsert},
-		{"pop", arrayMethodPop},
-		{"__reduce_ex__", arrayMethodReduceEx},
-		{"remove", arrayMethodRemove},
-		{"reverse", arrayMethodReverse},
-		{"tobytes", arrayMethodTobytes},
-		{"tolist", arrayMethodTolist},
-		{"tounicode", arrayMethodTounicode},
-		{"__sizeof__", arrayMethodSizeof},
+		{"append", objects.MethO, arrayMethodAppend},
+		{"buffer_info", objects.MethNoArgs, arrayMethodBufferInfo},
+		{"byteswap", objects.MethNoArgs, arrayMethodByteswap},
+		{"clear", objects.MethNoArgs, arrayMethodClear},
+		{"__copy__", objects.MethNoArgs, arrayMethodCopy},
+		{"__deepcopy__", objects.MethO, arrayMethodDeepcopy},
+		{"count", objects.MethO, arrayMethodCount},
+		{"extend", 0, arrayMethodExtend},
+		{"frombytes", objects.MethO, arrayMethodFrombytes},
+		{"fromlist", objects.MethO, arrayMethodFromlist},
+		{"fromunicode", objects.MethO, arrayMethodFromunicode},
+		{"index", 0, arrayMethodIndex},
+		{"insert", 0, arrayMethodInsert},
+		{"pop", 0, arrayMethodPop},
+		{"__reduce_ex__", 0, arrayMethodReduceEx},
+		{"remove", objects.MethO, arrayMethodRemove},
+		{"reverse", objects.MethNoArgs, arrayMethodReverse},
+		{"tobytes", objects.MethNoArgs, arrayMethodTobytes},
+		{"tolist", objects.MethNoArgs, arrayMethodTolist},
+		{"tounicode", objects.MethNoArgs, arrayMethodTounicode},
+		{"__sizeof__", objects.MethNoArgs, arrayMethodSizeof},
 	}
 	for _, m := range methods {
-		objects.SetTypeDescr(t, m.name, objects.NewMethodDescr(t, m.name, m.fn))
+		if m.conv == 0 {
+			objects.SetTypeDescr(t, m.name, objects.NewMethodDescr(t, m.name, m.fn))
+			continue
+		}
+		objects.SetTypeDescr(t, m.name, objects.NewMethodDescrConv(t, m.name, m.conv, m.fn))
 	}
 	objects.SetTypeDescr(t, "typecode", objects.NewGetSetDescr("typecode", arrayGetTypecode, nil))
 	objects.SetTypeDescr(t, "itemsize", objects.NewGetSetDescr("itemsize", arrayGetItemsize, nil))
