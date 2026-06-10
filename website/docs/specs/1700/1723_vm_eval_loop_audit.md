@@ -648,6 +648,38 @@ the model.
 five-test cycle suite AND the conjoin/email/fun/coroutine/test_modify_f_locals
 panel pass. The order is: land P11.1, then enable tracking in P11.2.
 
+**Finding (2026-06-10): a container-only refcount port is unsafe here.**
+Implementing the full list refcount in isolation (`NewList` increfs each stored
+item under a borrow convention, `listDealloc` decrefs the contents, every
+mutation path in `objects/list.go` balanced) compiles cleanly and passes every
+simple repro, but corrupts real workloads: `import textwrap` dies with
+`IndexError: index out of range` inside `re._parser` because a live list reaches
+refcount 0 and `listDealloc` frees its backing slice while the interpreter still
+holds it (the list reports `len == 1` but `list[0]` is out of range, a
+length/contents desync). Disabling only `ListType.Dealloc = listDealloc` makes
+the import pass again, which pins the cause precisely.
+
+The root cause is the eval loop, not the container. `decrefInputs`
+(`vm/eval_helpers.go`, CPython `Python/ceval_macros.h DECREF_INPUTS`) is a
+deliberate no-op, and the load opcodes (`LOAD_FAST`, `LOAD_ATTR`, returns,
+iterator results) do not consistently `Incref` the value they push. So the
+Python refcount is not a coherent liveness signal: any container `Dealloc` that
+frees contents at refcount 0 will free still-live objects. The container-level
+port therefore CANNOT ship on its own. The gate tests
+(`test_iter.test_ref_counting_behavior`, `test_frame.test_clear_refcycles`)
+require the full eval-loop stack-ref discipline below as a prerequisite.
+
+**Prerequisite P11.0 — eval-loop stack-ref discipline.** Before any container
+`Dealloc` can fire at refcount 0, the stack must own its references the way
+CPython's stackref machinery does: each load pushes an owned reference (increfs
+its source), every consumed input is closed (`decrefInputs` becomes a real
+`Decref` over the popped slots), and stores into locals/cells/containers/attrs
+incref. CPython model: `Python/ceval_macros.h DECREF_INPUTS`,
+`Include/internal/pycore_stackref.h PyStackRef_DUP`/`PyStackRef_CLOSE`,
+`Python/bytecodes.c` (every `LOAD_*`/`STORE_*` uop). Only once the refcount is a
+true liveness signal do P11.1 (container deallocs) and P11.2 (generator
+tracking) become safe to land.
+
 ### P11.2 — Wire `GCTrackHook` in `NewGenerator`
 
 After P11.1 lands, restore the `GCTrackHook` call in

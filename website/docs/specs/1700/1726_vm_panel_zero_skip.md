@@ -73,6 +73,6 @@ Per panel file, `gopy skip count` vs `CPython skip count` on the same file:
 - [ ] Port `_testcapi.raise_SIGINT_then_send_None` for `test_generators`
 - [ ] Port `_testinternalcapi` sizeof hook for `test_frame.test_sizeof`
 - [ ] `ctypes` for `test_frame.TestFrameCApi.test_basic` (or confirm CPython-skip parity)
-- [ ] P11: failed-unpack decref so `test_iter.test_ref_counting_behavior` is green
+- [ ] P11: failed-unpack decref so `test_iter.test_ref_counting_behavior` is green (blocked on P11.0 eval-loop stack-ref discipline; a container-only refcount port corrupts real imports because `DECREF_INPUTS` is a no-op and loads do not incref, so the refcount is not yet a liveness signal: see spec 1723 P11.1 finding)
 - [ ] Panel re-run: gopy skip set == CPython skip set (only the 8 proxy skips remain)
 - [ ] spec 1700 panel rows updated; spec 1723 closed against this
