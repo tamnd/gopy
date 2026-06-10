@@ -20,6 +20,13 @@ func init() {
 	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
 		SetTypeDescr(strType, name, NewMethodDescr(strType, name, fn))
 	}
+	// bindNoArgs wires a METH_NOARGS row so methodDescrCheckArity emits
+	// the CPython arg-count TypeError ("str.<name>() takes no arguments
+	// (N given)") through _PyObject_FunctionStr, instead of the bare
+	// message the hand-rolled bodies used to raise.
+	bindNoArgs := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		SetTypeDescr(strType, name, NewMethodDescrConv(strType, name, MethNoArgs, fn))
+	}
 
 	bind("startswith", strStartsWithMethod)
 	bind("endswith", strEndsWithMethod)
@@ -28,12 +35,12 @@ func init() {
 	bind("index", strIndexMethod)
 	bind("rindex", strRIndexMethod)
 	bind("count", strCountMethod)
-	bind("lower", strSimple1(StrLower))
-	bind("upper", strSimple1(StrUpper))
-	bind("casefold", strSimple1(StrCaseFold))
-	bind("swapcase", strSimple1(StrSwapCase))
-	bind("capitalize", strSimple1(StrCapitalize))
-	bind("title", strSimple1(StrTitle))
+	bindNoArgs("lower", strSimple1(StrLower))
+	bindNoArgs("upper", strSimple1(StrUpper))
+	bindNoArgs("casefold", strSimple1(StrCaseFold))
+	bindNoArgs("swapcase", strSimple1(StrSwapCase))
+	bindNoArgs("capitalize", strSimple1(StrCapitalize))
+	bindNoArgs("title", strSimple1(StrTitle))
 	bind("strip", strStripMethod(StrStrip))
 	bind("lstrip", strStripMethod(StrLStrip))
 	bind("rstrip", strStripMethod(StrRStrip))
@@ -44,18 +51,18 @@ func init() {
 	bind("join", strJoinMethod)
 	bind("partition", strPartitionMethod)
 	bind("rpartition", strRPartitionMethod)
-	bind("isdigit", strBoolMethod(StrIsDigit))
-	bind("isalpha", strBoolMethod(StrIsAlpha))
-	bind("isalnum", strBoolMethod(StrIsAlnum))
-	bind("isspace", strBoolMethod(func(s string) bool { return s != "" && allSpace(s) }))
-	bind("isascii", strBoolMethod(StrIsASCII))
-	bind("islower", strBoolMethod(StrIsLower))
-	bind("isupper", strBoolMethod(StrIsUpper))
-	bind("istitle", strBoolMethod(StrIsTitle))
-	bind("isidentifier", strBoolMethod(StrIsIdentifier))
-	bind("isdecimal", strBoolMethod(StrIsDecimal))
-	bind("isnumeric", strBoolMethod(StrIsNumeric))
-	bind("isprintable", strBoolMethod(StrIsPrintable))
+	bindNoArgs("isdigit", strBoolMethod(StrIsDigit))
+	bindNoArgs("isalpha", strBoolMethod(StrIsAlpha))
+	bindNoArgs("isalnum", strBoolMethod(StrIsAlnum))
+	bindNoArgs("isspace", strBoolMethod(func(s string) bool { return s != "" && allSpace(s) }))
+	bindNoArgs("isascii", strBoolMethod(StrIsASCII))
+	bindNoArgs("islower", strBoolMethod(StrIsLower))
+	bindNoArgs("isupper", strBoolMethod(StrIsUpper))
+	bindNoArgs("istitle", strBoolMethod(StrIsTitle))
+	bindNoArgs("isidentifier", strBoolMethod(StrIsIdentifier))
+	bindNoArgs("isdecimal", strBoolMethod(StrIsDecimal))
+	bindNoArgs("isnumeric", strBoolMethod(StrIsNumeric))
+	bindNoArgs("isprintable", strBoolMethod(StrIsPrintable))
 	bind("encode", strEncodeMethod)
 	bind("format", strFormatMethod)
 	bind("format_map", strFormatMapMethod)

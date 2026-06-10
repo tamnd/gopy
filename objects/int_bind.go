@@ -18,22 +18,30 @@ func init() {
 	bind := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
 		SetTypeDescr(IntType, name, NewMethodDescr(IntType, name, fn))
 	}
+	// bindNoArgs wires a METH_NOARGS row so the arg-count TypeError
+	// ("int.<name>() takes no arguments (N given)") flows through
+	// methodDescrCheckArity / _PyObject_FunctionStr. Slot wrappers
+	// (__index__, __int__, __repr__, __str__) keep their own
+	// "expected 0 arguments, got N" template and stay on plain bind.
+	bindNoArgs := func(name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		SetTypeDescr(IntType, name, NewMethodDescrConv(IntType, name, MethNoArgs, fn))
+	}
 
-	bind("bit_length", intBitLengthMethod)
-	bind("bit_count", intBitCountMethod)
+	bindNoArgs("bit_length", intBitLengthMethod)
+	bindNoArgs("bit_count", intBitCountMethod)
 	bind("__index__", intIndexMethod)
 	bind("__int__", intIndexMethod)
-	bind("__trunc__", intIndexMethod)
-	bind("__floor__", intIndexMethod)
-	bind("__ceil__", intIndexMethod)
-	bind("conjugate", intIndexMethod)
+	bindNoArgs("__trunc__", intIndexMethod)
+	bindNoArgs("__floor__", intIndexMethod)
+	bindNoArgs("__ceil__", intIndexMethod)
+	bindNoArgs("conjugate", intIndexMethod)
 	bind("to_bytes", intToBytesMethod)
-	bind("as_integer_ratio", intAsIntegerRatioMethod)
-	bind("is_integer", intIsIntegerMethod)
+	bindNoArgs("as_integer_ratio", intAsIntegerRatioMethod)
+	bindNoArgs("is_integer", intIsIntegerMethod)
 	bind("__repr__", intReprDescr)
 	bind("__str__", intReprDescr)
-	bind("__sizeof__", intSizeofMethod)
-	bind("__getnewargs__", intGetNewArgsMethod)
+	bindNoArgs("__sizeof__", intSizeofMethod)
+	bindNoArgs("__getnewargs__", intGetNewArgsMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
