@@ -97,4 +97,4 @@ patched inline:
 - [x] errors: BaseException `__reduce__` NoArgs, `__setstate__` O
 - [x] builtins iterators: seqIter / callIter / reversedIter / zip `__reduce__`/`__setstate__`/`__length_hint__`
 - [x] drift: remove divergent `slice.__getnewargs__` (#229)
-- [ ] spec doc + PR opened, CI green
+- [x] spec doc + PR #90 opened, CI green (lint, vet, cfg-phase-parity, macOS/ubuntu/windows test)
