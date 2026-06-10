@@ -587,7 +587,7 @@ func init() {
 	tupleIterType.Iter = SelfIter
 	AddIterSlotWrappers(tupleIterType)
 	// CPython: Objects/tupleobject.c:1132 tupleiter_reduce
-	SetTypeDescr(tupleIterType, "__reduce__", NewMethodDescr(tupleIterType, "__reduce__",
+	SetTypeDescr(tupleIterType, "__reduce__", NewMethodDescrConv(tupleIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -607,7 +607,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/tupleobject.c:1148 tupleiter_setstate
-	SetTypeDescr(tupleIterType, "__setstate__", NewMethodDescr(tupleIterType, "__setstate__",
+	SetTypeDescr(tupleIterType, "__setstate__", NewMethodDescrConv(tupleIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
@@ -632,7 +632,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/tupleobject.c:1115 tupleiter_len
-	SetTypeDescr(tupleIterType, "__length_hint__", NewMethodDescr(tupleIterType, "__length_hint__",
+	SetTypeDescr(tupleIterType, "__length_hint__", NewMethodDescrConv(tupleIterType, "__length_hint__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")

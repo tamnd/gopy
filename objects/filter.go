@@ -29,7 +29,7 @@ func init() {
 	FilterType.Iter = SelfIter
 	FilterType.IterNext = filterNext
 	AddIterSlotWrappers(FilterType)
-	SetTypeDescr(FilterType, "__reduce__", NewMethodDescr(FilterType, "__reduce__", filterReduce))
+	SetTypeDescr(FilterType, "__reduce__", NewMethodDescrConv(FilterType, "__reduce__", MethNoArgs, filterReduce))
 }
 
 // NewFilter mirrors filter_new: turn iterable into an iterator and

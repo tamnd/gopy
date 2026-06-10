@@ -34,8 +34,8 @@ func init() {
 	MapType.Iter = SelfIter
 	MapType.IterNext = mapNext
 	AddIterSlotWrappers(MapType)
-	SetTypeDescr(MapType, "__reduce__", NewMethodDescr(MapType, "__reduce__", mapReduce))
-	SetTypeDescr(MapType, "__setstate__", NewMethodDescr(MapType, "__setstate__", mapSetstate))
+	SetTypeDescr(MapType, "__reduce__", NewMethodDescrConv(MapType, "__reduce__", MethNoArgs, mapReduce))
+	SetTypeDescr(MapType, "__setstate__", NewMethodDescrConv(MapType, "__setstate__", MethO, mapSetstate))
 }
 
 // NewMap mirrors map_new: convert each iterable to its iterator up

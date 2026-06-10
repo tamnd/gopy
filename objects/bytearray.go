@@ -248,14 +248,14 @@ func init() {
 	// (cls, args, state) where args reconstruct the buffer.
 	//
 	// CPython: Objects/bytearrayobject.c:1880 _common_reduce
-	SetTypeDescr(ByteArrayType, "__reduce__", NewMethodDescr(ByteArrayType, "__reduce__",
+	SetTypeDescr(ByteArrayType, "__reduce__", NewMethodDescrConv(ByteArrayType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments (%d given)", len(args)-1)
 			}
 			return byteArrayCommonReduce(args[0], 2)
 		}))
-	SetTypeDescr(ByteArrayType, "__reduce_ex__", NewMethodDescr(ByteArrayType, "__reduce_ex__",
+	SetTypeDescr(ByteArrayType, "__reduce_ex__", NewMethodDescrConv(ByteArrayType, "__reduce_ex__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			proto := 2
 			if len(args) >= 2 {

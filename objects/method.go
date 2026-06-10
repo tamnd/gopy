@@ -95,7 +95,7 @@ func init() {
 	//
 	// CPython: Objects/classobject.c:103 method_methods
 	SetTypeDescr(BoundMethodType, "__reduce__",
-		NewMethodDescr(BoundMethodType, "__reduce__", boundMethodReduceMethod))
+		NewMethodDescrConv(BoundMethodType, "__reduce__", MethNoArgs, boundMethodReduceMethod))
 	AddCallSlotWrapper(BoundMethodType)
 }
 

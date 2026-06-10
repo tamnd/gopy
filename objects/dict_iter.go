@@ -180,12 +180,12 @@ func init() {
 		return NewTuple([]Object{iterFn, NewTuple([]Object{NewList(items)})}), nil
 	}
 	// CPython: Objects/dictobject.c:5310 dictiter_reduce
-	SetTypeDescr(dictKeyIterType, "__reduce__", NewMethodDescr(dictKeyIterType, "__reduce__", dictReduceFn))
-	SetTypeDescr(dictValueIterType, "__reduce__", NewMethodDescr(dictValueIterType, "__reduce__", dictReduceFn))
-	SetTypeDescr(dictItemIterType, "__reduce__", NewMethodDescr(dictItemIterType, "__reduce__", dictReduceFn))
-	SetTypeDescr(dictReverseKeyIterType, "__reduce__", NewMethodDescr(dictReverseKeyIterType, "__reduce__", dictReduceFn))
-	SetTypeDescr(dictReverseValueIterType, "__reduce__", NewMethodDescr(dictReverseValueIterType, "__reduce__", dictReduceFn))
-	SetTypeDescr(dictReverseItemIterType, "__reduce__", NewMethodDescr(dictReverseItemIterType, "__reduce__", dictReduceFn))
+	SetTypeDescr(dictKeyIterType, "__reduce__", NewMethodDescrConv(dictKeyIterType, "__reduce__", MethNoArgs, dictReduceFn))
+	SetTypeDescr(dictValueIterType, "__reduce__", NewMethodDescrConv(dictValueIterType, "__reduce__", MethNoArgs, dictReduceFn))
+	SetTypeDescr(dictItemIterType, "__reduce__", NewMethodDescrConv(dictItemIterType, "__reduce__", MethNoArgs, dictReduceFn))
+	SetTypeDescr(dictReverseKeyIterType, "__reduce__", NewMethodDescrConv(dictReverseKeyIterType, "__reduce__", MethNoArgs, dictReduceFn))
+	SetTypeDescr(dictReverseValueIterType, "__reduce__", NewMethodDescrConv(dictReverseValueIterType, "__reduce__", MethNoArgs, dictReduceFn))
+	SetTypeDescr(dictReverseItemIterType, "__reduce__", NewMethodDescrConv(dictReverseItemIterType, "__reduce__", MethNoArgs, dictReduceFn))
 
 	// CPython: Objects/dictobject.c:5300 dictiter_len
 	// Returns 0 if the dict was mutated (size mismatch) so callers don't
@@ -217,12 +217,12 @@ func init() {
 		}
 		return NewInt(int64(remaining)), nil
 	}
-	SetTypeDescr(dictKeyIterType, "__length_hint__", NewMethodDescr(dictKeyIterType, "__length_hint__", dictLenHintFn))
-	SetTypeDescr(dictValueIterType, "__length_hint__", NewMethodDescr(dictValueIterType, "__length_hint__", dictLenHintFn))
-	SetTypeDescr(dictItemIterType, "__length_hint__", NewMethodDescr(dictItemIterType, "__length_hint__", dictLenHintFn))
-	SetTypeDescr(dictReverseKeyIterType, "__length_hint__", NewMethodDescr(dictReverseKeyIterType, "__length_hint__", dictLenHintFn))
-	SetTypeDescr(dictReverseValueIterType, "__length_hint__", NewMethodDescr(dictReverseValueIterType, "__length_hint__", dictLenHintFn))
-	SetTypeDescr(dictReverseItemIterType, "__length_hint__", NewMethodDescr(dictReverseItemIterType, "__length_hint__", dictLenHintFn))
+	SetTypeDescr(dictKeyIterType, "__length_hint__", NewMethodDescrConv(dictKeyIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
+	SetTypeDescr(dictValueIterType, "__length_hint__", NewMethodDescrConv(dictValueIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
+	SetTypeDescr(dictItemIterType, "__length_hint__", NewMethodDescrConv(dictItemIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
+	SetTypeDescr(dictReverseKeyIterType, "__length_hint__", NewMethodDescrConv(dictReverseKeyIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
+	SetTypeDescr(dictReverseValueIterType, "__length_hint__", NewMethodDescrConv(dictReverseValueIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
+	SetTypeDescr(dictReverseItemIterType, "__length_hint__", NewMethodDescrConv(dictReverseItemIterType, "__length_hint__", MethNoArgs, dictLenHintFn))
 }
 
 // dictIter is the type-level Iter slot that DictType registers in

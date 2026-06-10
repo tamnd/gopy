@@ -134,7 +134,7 @@ func init() {
 	// can't pickle a BIF.
 	//
 	// CPython: Objects/methodobject.c:192 meth_reduce
-	SetTypeDescr(BuiltinFunctionType, "__reduce__", NewMethodDescr(BuiltinFunctionType, "__reduce__", builtinFunctionReduce))
+	SetTypeDescr(BuiltinFunctionType, "__reduce__", NewMethodDescrConv(BuiltinFunctionType, "__reduce__", MethNoArgs, builtinFunctionReduce))
 }
 
 // builtinFunctionQualname mirrors meth_get__qualname__. If m_self is

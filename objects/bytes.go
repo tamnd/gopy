@@ -278,7 +278,7 @@ func init() {
 	bytesIterType.IterNext = bytesIterNext
 	AddIterSlotWrappers(bytesIterType)
 	// CPython: Objects/bytesobject.c:2858 bytes_iter_reduce
-	SetTypeDescr(bytesIterType, "__reduce__", NewMethodDescr(bytesIterType, "__reduce__",
+	SetTypeDescr(bytesIterType, "__reduce__", NewMethodDescrConv(bytesIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -298,7 +298,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/bytesobject.c:2875 bytes_iter_setstate
-	SetTypeDescr(bytesIterType, "__setstate__", NewMethodDescr(bytesIterType, "__setstate__",
+	SetTypeDescr(bytesIterType, "__setstate__", NewMethodDescrConv(bytesIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")

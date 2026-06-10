@@ -396,7 +396,7 @@ func init() {
 	}
 	AddIterSlotWrappers(strIterType)
 	// CPython: Objects/unicodeobject.c:15178 unicodeiter_reduce
-	SetTypeDescr(strIterType, "__reduce__", NewMethodDescr(strIterType, "__reduce__",
+	SetTypeDescr(strIterType, "__reduce__", NewMethodDescrConv(strIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -416,7 +416,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/unicodeobject.c:15195 unicodeiter_setstate
-	SetTypeDescr(strIterType, "__setstate__", NewMethodDescr(strIterType, "__setstate__",
+	SetTypeDescr(strIterType, "__setstate__", NewMethodDescrConv(strIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")

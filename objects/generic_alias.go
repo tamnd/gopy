@@ -431,7 +431,7 @@ func init() {
 		return starred, nil
 	}
 	// CPython: Objects/genericaliasobject.c:965 ga_iter_reduce
-	SetTypeDescr(gaIterType, "__reduce__", NewMethodDescr(gaIterType, "__reduce__",
+	SetTypeDescr(gaIterType, "__reduce__", NewMethodDescrConv(gaIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -641,7 +641,7 @@ func init() {
 	SetTypeDescr(GenericAliasType, "__subclasscheck__", NewMethodDescr(GenericAliasType, "__subclasscheck__", func(_ []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: issubclass() argument 2 cannot be a parameterized generic")
 	}))
-	SetTypeDescr(GenericAliasType, "__reduce__", NewMethodDescr(GenericAliasType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+	SetTypeDescr(GenericAliasType, "__reduce__", NewMethodDescrConv(GenericAliasType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() missing self argument")
 		}

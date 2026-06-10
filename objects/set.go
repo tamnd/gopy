@@ -940,7 +940,7 @@ func init() {
 	// the iterator as a list iterator (undefined order, so list is used).
 	//
 	// CPython: Objects/setobject.c:876 setiter_reduce
-	SetTypeDescr(setIterType, "__reduce__", NewMethodDescr(setIterType, "__reduce__",
+	SetTypeDescr(setIterType, "__reduce__", NewMethodDescrConv(setIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -968,7 +968,7 @@ func init() {
 	))
 	// __length_hint__ returns the number of items remaining.
 	// CPython: Objects/setobject.c:L966 setiter_len
-	SetTypeDescr(setIterType, "__length_hint__", NewMethodDescr(setIterType, "__length_hint__",
+	SetTypeDescr(setIterType, "__length_hint__", NewMethodDescrConv(setIterType, "__length_hint__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
