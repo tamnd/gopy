@@ -8,10 +8,38 @@ description: "Full audit of the 22 VM/eval-loop test files from spec 1700 agains
 
 ## Status
 
-Complete. All 22 panel files audited; the 21 in-scope files are green and
-test_eval is out-of-scope (no standalone module in 3.14). Re-audited
-2026-06-09 against `$HOME/cpython-314/`: every gate re-run from a clean build,
-no skips beyond the documented `_testcapi`/platform skips, no deferred fixes.
+Reopened 2026-06-10 under the zero-skip conformance standard (spec 1726).
+The 2026-06-09 "complete" sign-off counted the `@cpython_only` and
+`requires _testcapi` skips as acceptable. They are not: gopy must reproduce
+CPython's own run/skip decisions exactly, and CPython does not skip those.
+Running the panel under CPython 3.14 itself (same vendored files) skips only
+the FrameLocalsProxy design tests in `test_frame` (8 unconditional
+`@unittest.skip`s like "Unlike a mapping: no proxy.update"). Everything else
+CPython runs. So every other gopy skip is a real gap.
+
+The earlier source-level audit still holds for the eval loop itself: a fresh
+sweep found no behavioural defers (the residual "not implemented" strings are
+defensive switch defaults that no real bytecode reaches, e.g. the `BINARY_OP`
+suboperator default in `vm/eval_simple.go` which already covers all 27 NB_
+codes, plus the `FOR_ITER_GEN` specialization that intentionally falls through
+to the correct generic `FOR_ITER` body). The gaps are object-layer and harness
+gaps the skips were hiding, now tracked in spec 1726:
+
+- `@cpython_only` tests now run (gopy is treated as cpython for impl-detail
+  gating, since gopy commits to CPython implementation-detail parity). This
+  exposed real arg-count message drift the funcstr sweep (spec 1725) had not
+  reached: `test_call` alone has ~29 such failures.
+- `requires _testcapi` / `_testinternalcapi` tests need those test C-extension
+  modules ported (vectorcall.c heap types, etc.).
+- `test_frame` needs `ctypes` for one C-API test.
+- P11 (container refcount discipline) is no longer a free pass: it is exactly
+  what `test_iter.test_ref_counting_behavior` and the `_testcapi` getrefcount
+  tests measure.
+
+Fixed so far on this pass: `dict.__contains__` rebind to METH_O (kwargs are
+rejected before arity, matching `Objects/clinic/dictobject.c.h:66`), and the
+`PySeqIter` index overflow guard (`Objects/iterobject.c:64`), which clears
+`test_iter.test_iter_overflow`.
 
 ## Goal
 

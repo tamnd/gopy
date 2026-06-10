@@ -156,7 +156,8 @@ func init() {
 	SetTypeDescr(DictType, "values", NewMethodDescrConv(DictType, "values", MethNoArgs, dictValuesMethod))
 	SetTypeDescr(DictType, "items", NewMethodDescrConv(DictType, "items", MethNoArgs, dictItemsMethod))
 	SetTypeDescr(DictType, "get", NewMethodDescr(DictType, "get", dictGetMethod))
-	SetTypeDescr(DictType, "__contains__", NewMethodDescr(DictType, "__contains__", dictContainsMethod))
+	// CPython: Objects/clinic/dictobject.c.h:66 METH_O|METH_COEXIST
+	SetTypeDescr(DictType, "__contains__", NewMethodDescrConv(DictType, "__contains__", MethO, dictContainsMethod))
 	SetTypeDescr(DictType, "__getitem__", NewMethodDescr(DictType, "__getitem__", dictGetItemMethod))
 	SetTypeDescr(DictType, "__setitem__", NewMethodDescr(DictType, "__setitem__", dictSetItemMethod))
 	SetTypeDescr(DictType, "__delitem__", NewMethodDescr(DictType, "__delitem__", dictDelItemMethod))
