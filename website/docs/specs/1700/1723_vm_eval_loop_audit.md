@@ -37,9 +37,40 @@ gaps the skips were hiding, now tracked in spec 1726:
   tests measure.
 
 Fixed so far on this pass: `dict.__contains__` rebind to METH_O (kwargs are
-rejected before arity, matching `Objects/clinic/dictobject.c.h:66`), and the
-`PySeqIter` index overflow guard (`Objects/iterobject.c:64`), which clears
-`test_iter.test_iter_overflow`.
+rejected before arity, matching `Objects/clinic/dictobject.c.h:66`), the
+`PySeqIter` index overflow guard (`Objects/iterobject.c:64`, clears
+`test_iter.test_iter_overflow`), and the `test_call` `@cpython_only` arg-count
+message drift (getattr/hasattr/setattr/delattr rebound to METH_FASTCALL,
+dict.get/pop/setdefault/fromkeys + classmethod/staticmethod routed through
+`CheckPositional`, ImportError keyword `__init__`, module-not-callable
+suggestion, and a faithful `Python/suggestions.c` port for the "Did you mean"
+tails).
+
+## Full-panel re-run (2026-06-10)
+
+Reran all 21 in-scope files (test_eval stays out-of-scope, no standalone 3.14
+module). 18 are fully green. Three carry a combined five failures, and every
+one traces to a subsystem the spec already tracks as a whole-port, not a
+partial slice:
+
+| File | Result | Remaining failures | Root cause |
+|------|--------|--------------------|------------|
+| test_call | 2 fail, 1 error | test_margin_is_sufficient (error) | needs `_testinternalcapi.get_stack_margin` (spec 1726 #245) |
+| | | test_varargs18_kw | clinic `_PyArg_UnpackKeywords` with real BadStr key objects + ordered kwargs (spec 1726 #243) |
+| | | test_unexpected_keyword_suggestion_via_getargs | same clinic path: `str.split` suggestion text + ordered ImportError kwargs (#243) |
+| test_frame | 1 fail | test_clear_refcycles | `frame.clear()` must decref locals so a pure-refcount (gc disabled) cycle breaks: P11 container refcount discipline |
+| test_iter | 1 fail | test_ref_counting_behavior | failed unpack `a, b = iter(l)` plus `del l` must deterministically run `__del__` at refcount 0: P11 (spec 1726 #246) |
+
+These are not skips: gopy runs every one of these tests (the `@cpython_only`
+bridge is live). They fail because gopy does not yet reproduce CPython's exact
+deterministic destruction (P11) or carry the test C-extension modules. P11 is
+deliberately a whole-subsystem port (`objects/dict.go`, `list.go`, `tuple.go`,
+`set.go`, `instance.go`, `frame/frame.go`, `vm/eval.go` all need faithful
+Incref/Decref on every store) because enabling generator tracking or
+half-wiring the refcounts regresses the conjoin/email/fun/coroutine doctests,
+as recorded under P11.1 below. So the panel does not yet meet the zero-skip
+"every gate green" bar; the gap is fully enumerated, cited, and tracked rather
+than papered over.
 
 ## Goal
 
