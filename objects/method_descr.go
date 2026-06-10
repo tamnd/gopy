@@ -205,24 +205,39 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 // CPython: Objects/descrobject.c:330 method_vectorcall_NOARGS
 // CPython: Objects/descrobject.c:360 method_vectorcall_O
 func methodDescrCheckArity(d *MethodDescr, nargs, nkw int) error {
+	noKeyword := func() error {
+		funcstr, err := FunctionStr(d)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
+	}
 	switch d.conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod) {
 	case MethNoArgs:
 		if nkw > 0 {
-			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+			return noKeyword()
 		}
 		if nargs != 0 {
-			return fmt.Errorf("TypeError: %s() takes no arguments (%d given)", d.name, nargs)
+			funcstr, err := FunctionStr(d)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("TypeError: %s takes no arguments (%d given)", funcstr, nargs)
 		}
 	case MethO:
 		if nkw > 0 {
-			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+			return noKeyword()
 		}
 		if nargs != 1 {
-			return fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", d.name, nargs)
+			funcstr, err := FunctionStr(d)
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("TypeError: %s takes exactly one argument (%d given)", funcstr, nargs)
 		}
 	case MethFastcall:
 		if nkw > 0 {
-			return fmt.Errorf("TypeError: %s() takes no keyword arguments", d.name)
+			return noKeyword()
 		}
 	}
 	return nil

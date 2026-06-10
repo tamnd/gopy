@@ -181,25 +181,33 @@ func cfunctionVectorcall(callable Object, args []Object, nargsf uint, kwnames *T
 
 	switch calling {
 	case MethNoArgs:
-		if err := cfunctionCheckKwargs(def, kwnames); err != nil {
+		if err := cfunctionCheckKwargs(cf, kwnames); err != nil {
 			return nil, err
 		}
 		if nargs != 0 {
-			return nil, fmt.Errorf("TypeError: %s() takes no arguments (%d given)", def.Name, nargs)
+			funcstr, err := FunctionStr(cf)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("TypeError: %s takes no arguments (%d given)", funcstr, nargs)
 		}
 		return def.NoArgs(cf.Self)
 
 	case MethO:
-		if err := cfunctionCheckKwargs(def, kwnames); err != nil {
+		if err := cfunctionCheckKwargs(cf, kwnames); err != nil {
 			return nil, err
 		}
 		if nargs != 1 {
-			return nil, fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", def.Name, nargs)
+			funcstr, err := FunctionStr(cf)
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("TypeError: %s takes exactly one argument (%d given)", funcstr, nargs)
 		}
 		return def.O(cf.Self, args[0])
 
 	case MethFastcall:
-		if err := cfunctionCheckKwargs(def, kwnames); err != nil {
+		if err := cfunctionCheckKwargs(cf, kwnames); err != nil {
 			return nil, err
 		}
 		return def.Fastcall(cf.Self, args[:nargs])
@@ -297,9 +305,13 @@ func cfunctionCall(o Object, posArgs []Object, kwmap map[string]Object) (Object,
 // the same name in methodobject.c.
 //
 // CPython: Objects/methodobject.c:399 cfunction_check_kwargs
-func cfunctionCheckKwargs(def *MethodDef, kwnames *Tuple) error {
+func cfunctionCheckKwargs(callable Object, kwnames *Tuple) error {
 	if kwnames != nil && kwnames.Len() > 0 {
-		return fmt.Errorf("TypeError: %s() takes no keyword arguments", def.Name)
+		funcstr, err := FunctionStr(callable)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
 	}
 	return nil
 }
