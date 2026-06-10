@@ -591,6 +591,11 @@ func (e *evalState) handleEvalBreaker() error {
 	}
 	if b.IsSet(gil.BreakerCallsPending) {
 		b.Clear(gil.BreakerCallsPending)
+		// Run finalizer teardown the Go runtime finalizer goroutine
+		// handed off (snapshot Decref, weakref callbacks) here on the
+		// interpreter goroutine, the way CPython runs tp_finalize under
+		// the GIL.
+		objects.DrainDeferredFinalizers()
 		if p := PendingFor(e.ts); p != nil {
 			if err := p.Drain(); err != nil {
 				return err
