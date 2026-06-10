@@ -46,6 +46,8 @@ func init() {
 	ListType.Repr = listRepr
 	ListType.Str = listRepr
 	ListType.RichCmp = listRichCmp
+	// CPython: Objects/listobject.c:3307 PyList_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(ListType)
 	ListType.Iter = listIter
 	ListType.Sequence = &SequenceMethods{
 		Length:        listLen,
@@ -83,6 +85,8 @@ func init() {
 	}
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(ListType)
+	// CPython: Objects/listobject.c:3373 list.__hash__ = None
+	SetTypeDescr(ListType, "__hash__", None())
 }
 
 // listTraverse visits every item. Mirrors list_traverse.
@@ -98,7 +102,7 @@ func listTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 // NewList builds a list from items. The slice is copied so callers can

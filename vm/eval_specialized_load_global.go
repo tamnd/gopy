@@ -32,8 +32,9 @@ import (
 //	( -- res, null if oparg & 1 )
 //
 // value is pushed first (deeper slot), the NULL marker on top.
+// CPython: Python/bytecodes.c:1797 op(_LOAD_GLOBAL_MODULE) uses PyStackRef_FromPyObjectNew
 func (e *evalState) pushGlobalResult(value objects.Object, oparg uint32) {
-	e.pushObject(value)
+	e.push(stackref.FromObjectNew(value))
 	if oparg&1 != 0 {
 		e.push(stackref.Null)
 	}

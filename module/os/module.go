@@ -22,25 +22,116 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
-// statResultType is the struct-sequence type for os.stat_result.
-// CPython: Modules/posixmodule.c:3238 os_stat_impl
-var statResultType = objects.NewStructSeqType("os.stat_result", []objects.StructSeqField{
-	{Name: "st_mode"},
-	{Name: "st_ino"},
-	{Name: "st_dev"},
-	{Name: "st_nlink"},
-	{Name: "st_uid"},
-	{Name: "st_gid"},
-	{Name: "st_size"},
-	{Name: "st_atime"},
-	{Name: "st_mtime"},
-	{Name: "st_ctime"},
+// statResultType is the struct-sequence type for os.stat_result. The
+// first ten fields are visible (n_in_sequence=10): seven named fields,
+// then three unnamed integer-time slots (indices 7,8,9) that hold the
+// truncated st_atime/st_mtime/st_ctime. The named float timestamps,
+// nanosecond timestamps, and block fields trail as hidden fields reached
+// only by attribute.
+//
+// CPython: Modules/posixmodule.c:2337 stat_result_fields
+var statResultType = objects.NewStructSeqTypeDesc(objects.StructSeqDesc{
+	Name:        "os.stat_result",
+	NInSequence: 10,
+	Fields: []objects.StructSeqField{
+		{Name: "st_mode", Doc: "protection bits"},
+		{Name: "st_ino", Doc: "inode"},
+		{Name: "st_dev", Doc: "device"},
+		{Name: "st_nlink", Doc: "number of hard links"},
+		{Name: "st_uid", Doc: "user ID of owner"},
+		{Name: "st_gid", Doc: "group ID of owner"},
+		{Name: "st_size", Doc: "total size, in bytes"},
+		{Name: objects.UnnamedField, Doc: "integer time of last access"},
+		{Name: objects.UnnamedField, Doc: "integer time of last modification"},
+		{Name: objects.UnnamedField, Doc: "integer time of last change"},
+		{Name: "st_atime", Doc: "time of last access"},
+		{Name: "st_mtime", Doc: "time of last modification"},
+		{Name: "st_ctime", Doc: "time of last change"},
+		{Name: "st_atime_ns", Doc: "time of last access in nanoseconds"},
+		{Name: "st_mtime_ns", Doc: "time of last modification in nanoseconds"},
+		{Name: "st_ctime_ns", Doc: "time of last change in nanoseconds"},
+		{Name: "st_blksize", Doc: "blocksize for filesystem I/O"},
+		{Name: "st_blocks", Doc: "number of blocks allocated"},
+		{Name: "st_rdev", Doc: "device type (if inode device)"},
+	},
 })
+
+// goFileModeToStMode rebuilds a POSIX st_mode from Go's os.FileMode.
+// Go abstracts the inode mode into its own bit layout (type bits in the
+// high word, permission in the low nine), but stat.S_ISREG / S_ISDIR /
+// S_ISLNK and friends expect the raw POSIX encoding: the S_IF* file-type
+// nibble in 0o170000 ORed with the permission and setuid/setgid/sticky
+// bits. The POSIX stat helpers prefer the real syscall st_mode; this is
+// the fallback used on Windows (which synthesizes a mode) and on
+// platforms without a syscall.Stat_t.
+//
+// CPython: Modules/posixmodule.c:1862 attributes_to_mode (Windows synthesis)
+func goFileModeToStMode(m goos.FileMode) int64 {
+	mode := int64(m.Perm())
+	if m&goos.ModeSetuid != 0 {
+		mode |= 0o4000
+	}
+	if m&goos.ModeSetgid != 0 {
+		mode |= 0o2000
+	}
+	if m&goos.ModeSticky != 0 {
+		mode |= 0o1000
+	}
+	switch {
+	case m&goos.ModeDir != 0:
+		mode |= 0o040000 // S_IFDIR
+	case m&goos.ModeSymlink != 0:
+		mode |= 0o120000 // S_IFLNK
+	case m&goos.ModeNamedPipe != 0:
+		mode |= 0o010000 // S_IFIFO
+	case m&goos.ModeSocket != 0:
+		mode |= 0o140000 // S_IFSOCK
+	case m&goos.ModeCharDevice != 0:
+		mode |= 0o020000 // S_IFCHR
+	case m&goos.ModeDevice != 0:
+		mode |= 0o060000 // S_IFBLK
+	default:
+		mode |= 0o100000 // S_IFREG
+	}
+	return mode
+}
+
+// newStatResult assembles an os.stat_result from the second-resolution
+// components gathered by the platform stat helpers. The visible integer
+// time slots truncate the float seconds; the hidden float and nanosecond
+// timestamps and block fields follow the CPython layout.
+//
+// CPython: Modules/posixmodule.c:2456 _pystat_fromstructstat
+func newStatResult(mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime, blksize, blocks, rdev int64) *objects.StructSeq {
+	ns := func(sec int64) objects.Object { return objects.NewInt(sec * 1_000_000_000) }
+	return objects.NewStructSeq(statResultType, []objects.Object{
+		objects.NewInt(mode),
+		objects.NewInt(ino),
+		objects.NewInt(dev),
+		objects.NewInt(nlink),
+		objects.NewInt(uid),
+		objects.NewInt(gid),
+		objects.NewInt(size),
+		objects.NewInt(atime), // unnamed: integer st_atime
+		objects.NewInt(mtime), // unnamed: integer st_mtime
+		objects.NewInt(ctime), // unnamed: integer st_ctime
+		objects.NewFloat(float64(atime)),
+		objects.NewFloat(float64(mtime)),
+		objects.NewFloat(float64(ctime)),
+		ns(atime),
+		ns(mtime),
+		ns(ctime),
+		objects.NewInt(blksize),
+		objects.NewInt(blocks),
+		objects.NewInt(rdev),
+	})
+}
 
 // terminalSizeType is the struct-sequence type for os.terminal_size.
 // CPython: Modules/posixmodule.c:15329 os.terminal_size
@@ -87,6 +178,33 @@ var terminalSizeType = func() *objects.Type {
 	return tp
 }()
 
+// timesResultType is the struct-sequence type for os.times(). All five
+// fields are visible (no unnamed, no hidden), so n_sequence_fields equals
+// n_fields.
+//
+// CPython: Modules/posixmodule.c:10687 times_result_fields
+var timesResultType = objects.NewStructSeqType("os.times_result", []objects.StructSeqField{
+	{Name: "user", Doc: "user time"},
+	{Name: "system", Doc: "system time"},
+	{Name: "children_user", Doc: "user time of children"},
+	{Name: "children_system", Doc: "system time of children"},
+	{Name: "elapsed", Doc: "elapsed time since an arbitrary point in the past"},
+})
+
+// osTimes returns process timing information as an os.times_result.
+//
+// CPython: Modules/posixmodule.c:10755 os_times_impl
+func osTimes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	user, system, childUser, childSystem, elapsed := processTimes()
+	return objects.NewStructSeq(timesResultType, []objects.Object{
+		objects.NewFloat(user),
+		objects.NewFloat(system),
+		objects.NewFloat(childUser),
+		objects.NewFloat(childSystem),
+		objects.NewFloat(elapsed),
+	}), nil
+}
+
 func init() {
 	_ = imp.AppendInittab("os", buildOS)
 	_ = imp.AppendInittab("posix", buildPosixModule)
@@ -96,7 +214,7 @@ func init() {
 	if runtime.GOOS == "windows" {
 		_ = imp.AppendInittab("nt", buildPosixModule)
 	}
-	_ = imp.AppendInittab("os.path", buildPath)
+	_ = imp.AppendInittab("os.path", buildOSPath)
 	// posixpath and ntpath now load from stdlib/ via PathFinder.
 }
 
@@ -126,7 +244,21 @@ func buildPosixModule() (*objects.Module, error) {
 	return posix, nil
 }
 
-// buildPath populates the os.path / posixpath module.
+// buildOSPath backs `import os.path` (the os.path inittab entry). It
+// returns the same module os.path resolves to: the vendored posixpath /
+// ntpath, with the Go shim as a fallback. This keeps `import os.path`
+// and the os.path attribute referring to one object.
+//
+// CPython: Lib/os.py:140 sys.modules['os.path'] = path
+func buildOSPath() (*objects.Module, error) {
+	if pm, ok := osPathModule().(*objects.Module); ok {
+		return pm, nil
+	}
+	return buildPath()
+}
+
+// buildPath populates the os.path / posixpath Go-shim module used as a
+// bootstrap fallback when the vendored posixpath cannot be imported.
 func buildPath() (*objects.Module, error) {
 	m := objects.NewModule("posixpath")
 	d := m.Dict()
@@ -138,24 +270,22 @@ func buildPath() (*objects.Module, error) {
 	return m, nil
 }
 
-// buildOS populates the os module. The path attribute holds a
-// reference to the same posixpath module that buildPath returns,
-// keeping `os.path.X` and `from os.path import X` consistent.
+// buildOS populates the os module. The path attribute is the vendored
+// posixpath (or ntpath) module, the same object `import posixpath`
+// returns, matching CPython's `import posixpath as path` in os.py. The
+// Go shim is kept only as a bootstrap fallback for the rare case the
+// import machinery is not yet wired (see osPathModule).
+//
+// CPython: Lib/os.py:140 import posixpath as path
 func buildOS() (*objects.Module, error) {
-	pathMod, err := buildPath()
-	if err != nil {
-		return nil, err
-	}
-
 	// environ: populate from the real process environment.
 	// CPython: Modules/posixmodule.c:1768 convertenviron
 	environDict := objects.NewDict()
 	for _, kv := range goos.Environ() {
-		idx := strings.IndexByte(kv, '=')
-		if idx < 0 {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
 			continue
 		}
-		k, v := kv[:idx], kv[idx+1:]
 		if err := environDict.SetItem(objects.NewStr(k), objects.NewStr(v)); err != nil {
 			return nil, err
 		}
@@ -163,9 +293,6 @@ func buildOS() (*objects.Module, error) {
 
 	m := objects.NewModule("os")
 	d := m.Dict()
-	if err := d.SetItem(objects.NewStr("path"), pathMod); err != nil {
-		return nil, err
-	}
 
 	// Platform constants.
 	sep := string(filepath.Separator)
@@ -205,12 +332,14 @@ func buildOS() (*objects.Module, error) {
 		{"unlink", objects.NewBuiltinFunction("unlink", remove)},
 		{"rename", objects.NewBuiltinFunction("rename", rename)},
 		{"rmdir", objects.NewBuiltinFunction("rmdir", rmdir)},
+		{"utime", objects.NewBuiltinFunction("utime", osUtime)},
 		{"walk", objects.NewBuiltinFunction("walk", walk)},
 		{"fspath", objects.NewBuiltinFunction("fspath", fspath)},
 		{"fsdecode", objects.NewBuiltinFunction("fsdecode", osFsdecode)},
 		{"fsencode", objects.NewBuiltinFunction("fsencode", osFsencode)},
 		{"open", objects.NewBuiltinFunction("open", osOpen)},
 		{"scandir", objects.NewBuiltinFunction("scandir", osScandir)},
+		{"DirEntry", DirEntryType},
 		{"strerror", objects.NewBuiltinFunction("strerror", osStrerror)},
 		// Open flags. CPython: Modules/posixmodule.c posixmodule_exec
 		{"O_RDONLY", objects.NewInt(int64(syscall.O_RDONLY))},
@@ -273,6 +402,8 @@ func buildOS() (*objects.Module, error) {
 		{"supports_effective_ids", emptyFrozenset},
 		{"terminal_size", terminalSizeType},
 		{"get_terminal_size", objects.NewBuiltinFunction("get_terminal_size", osGetTerminalSize)},
+		{"times_result", timesResultType},
+		{"times", objects.NewBuiltinFunction("times", osTimes)},
 		// Cross-platform additions to round out the posixmodule.c surface.
 		{"chmod", objects.NewBuiltinFunction("chmod", osChmod)},
 		{"symlink", objects.NewBuiltinFunction("symlink", osSymlink)},
@@ -310,7 +441,71 @@ func buildOS() (*objects.Module, error) {
 			}
 		}
 	}
+
+	// Bind os.path lazily. CPython's os.py does `import posixpath as path`
+	// at module scope and aliases sys.modules['os.path'] to that module,
+	// so os.path is the very object `import posixpath` returns. Importing
+	// the vendored posixpath eagerly here is unsafe: os is first imported
+	// while importlib's path-based finder is still being installed, and
+	// driving a .py import through the half-built finder corrupts it. The
+	// PEP 562 __getattr__ hook defers the import to first access of
+	// os.path, by which point the finder is ready.
+	//
+	// CPython: Lib/os.py:140 import posixpath as path; sys.modules['os.path'] = path
+	if err := d.SetItem(objects.NewStr("__getattr__"),
+		objects.NewBuiltinFunction("__getattr__", osModuleGetattr(m))); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// osModuleGetattr returns the PEP 562 module __getattr__ for the os
+// module. It resolves the single computed attribute os.py supplies, the
+// `path` submodule, lazily on first access: the vendored posixpath (or
+// ntpath) module. The result is cached into the module dict and aliased
+// into sys.modules as os.path so every later access and `import os.path`
+// share one object. Any other missing name raises AttributeError, the
+// same outcome a module with no __getattr__ produces.
+//
+// CPython: Lib/os.py:140 import posixpath as path
+func osModuleGetattr(m *objects.Module) func([]objects.Object, map[string]objects.Object) (objects.Object, error) {
+	return func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		name, _ := objects.Str(args[0])
+		if name != "path" {
+			return nil, fmt.Errorf("AttributeError: module 'os' has no attribute %q", name)
+		}
+		pathMod := osPathModule()
+		if err := m.Dict().SetItem(objects.NewStr("path"), pathMod); err != nil {
+			return nil, err
+		}
+		if pm, ok := pathMod.(*objects.Module); ok {
+			imp.AddModule("os.path", pm)
+		}
+		return pathMod, nil
+	}
+}
+
+// osPathModule returns the module bound to os.path: the vendored
+// posixpath (POSIX) or ntpath (Windows) module imported through the
+// normal machinery. When the import hook is unavailable or the vendored
+// module cannot be loaded, it falls back to the Go shim so os.path still
+// resolves.
+//
+// CPython: Lib/os.py:140 import posixpath as path
+func osPathModule() objects.Object {
+	name := "posixpath"
+	if runtime.GOOS == "windows" {
+		name = "ntpath"
+	}
+	if objects.ImportModuleHook != nil {
+		if mod, err := objects.ImportModuleHook(name); err == nil && mod != nil {
+			return mod
+		}
+	}
+	if shim, err := buildPath(); err == nil {
+		return shim
+	}
+	return objects.None()
 }
 
 func pathEntries() []struct {
@@ -574,10 +769,7 @@ func commonprefix(args []objects.Object, _ map[string]objects.Object) (objects.O
 	}
 	prefix := strs[0]
 	for _, s := range strs[1:] {
-		limit := len(prefix)
-		if len(s) < limit {
-			limit = len(s)
-		}
+		limit := min(len(prefix), len(s))
 		i := 0
 		for i < limit && prefix[i] == s[i] {
 			i++
@@ -661,19 +853,10 @@ func stat(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 		return nil, fmt.Errorf("OSError: %w", serr)
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
-	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink),
+		int64(uid), int64(gid), info.Size(), atime, info.ModTime().Unix(), ctime,
+		blksize, blocks, rdev), nil
 }
 
 // getenv mirrors Lib/os.py:818 getenv: returns environ[key] or default.
@@ -790,6 +973,104 @@ func rmdir(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 		return nil, fmt.Errorf("OSError: %w", rerr)
 	}
 	return objects.None(), nil
+}
+
+// osUtime sets the access and modification times of path. With both
+// times and ns omitted (or times=None), the current time is used. times
+// is a 2-tuple (atime, mtime) in seconds (int or float); ns is a 2-tuple
+// in nanoseconds. Passing both raises ValueError, matching CPython.
+//
+// CPython: Modules/posixmodule.c:6621 os_utime_impl
+func osUtime(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: utime() missing required argument 'path' (pos 1)")
+	}
+	path, err := objects.Str(args[0])
+	if err != nil {
+		return nil, err
+	}
+	times := objects.None()
+	if len(args) >= 2 {
+		times = args[1]
+	}
+	if t, ok := kwargs["times"]; ok {
+		times = t
+	}
+	nsObj, hasNS := kwargs["ns"]
+	hasNS = hasNS && !objects.IsNone(nsObj)
+	// CPython: Modules/posixmodule.c:6635 reject specifying both.
+	if times != nil && !objects.IsNone(times) && hasNS {
+		return nil, fmt.Errorf("ValueError: utime: you may specify either 'times' or 'ns' but not both")
+	}
+	var atime, mtime time.Time
+	switch {
+	case times != nil && !objects.IsNone(times):
+		atime, mtime, err = utimeFromTuple(times, "utime: 'times' must be either a tuple of two ints or None", utimeSecondsToTime)
+	case hasNS:
+		atime, mtime, err = utimeFromTuple(nsObj, "utime: 'ns' must be a tuple of two ints", utimeNanosToTime)
+	default:
+		// times and ns both unspecified: use "now".
+		// CPython: Modules/posixmodule.c:6680 utime.now = 1
+		atime = time.Now()
+		mtime = atime
+	}
+	if err != nil {
+		return nil, err
+	}
+	if cerr := goos.Chtimes(path, atime, mtime); cerr != nil {
+		return nil, fmt.Errorf("OSError: %w", cerr)
+	}
+	return objects.None(), nil
+}
+
+// utimeFromTuple unpacks a strict 2-tuple of time components and runs
+// conv on each to build the (atime, mtime) pair. errMsg is the TypeError
+// text raised when the value is not a 2-tuple, matching CPython's
+// PyTuple_CheckExact / size check.
+//
+// CPython: Modules/posixmodule.c:6644 PyTuple_CheckExact(times)
+func utimeFromTuple(v objects.Object, errMsg string, conv func(objects.Object) (time.Time, error)) (atime, mtime time.Time, err error) {
+	tup, ok := v.(*objects.Tuple)
+	if !ok || tup.Len() != 2 {
+		return atime, mtime, fmt.Errorf("TypeError: %s", errMsg)
+	}
+	atime, err = conv(tup.Item(0))
+	if err != nil {
+		return atime, mtime, err
+	}
+	mtime, err = conv(tup.Item(1))
+	return atime, mtime, err
+}
+
+// utimeSecondsToTime converts a seconds value (int or float) to a
+// time.Time, flooring the sub-second part into nanoseconds.
+//
+// CPython: Modules/posixmodule.c:6653 _PyTime_ObjectToTimespec (ROUND_FLOOR)
+func utimeSecondsToTime(o objects.Object) (time.Time, error) {
+	switch n := o.(type) {
+	case *objects.Int:
+		sec, _ := n.Int64()
+		return time.Unix(sec, 0), nil
+	case *objects.Float:
+		f := n.Float64()
+		sec := int64(f)
+		nsec := int64((f - float64(sec)) * 1e9)
+		return time.Unix(sec, nsec), nil
+	default:
+		return time.Time{}, fmt.Errorf("TypeError: an integer is required (got type %s)", o.Type().Name)
+	}
+}
+
+// utimeNanosToTime converts an integer nanosecond count to a time.Time.
+//
+// CPython: Modules/posixmodule.c:6669 split_py_long_to_s_and_ns
+func utimeNanosToTime(o objects.Object) (time.Time, error) {
+	n, ok := o.(*objects.Int)
+	if !ok {
+		return time.Time{}, fmt.Errorf("TypeError: an integer is required (got type %s)", o.Type().Name)
+	}
+	ns, _ := n.Int64()
+	return time.Unix(0, ns), nil
 }
 
 // walk yields (dirpath, dirnames, filenames) for each directory in the
@@ -1003,18 +1284,8 @@ func osLstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
 
 // osFstat returns the stat of an open file descriptor.
@@ -1039,18 +1310,8 @@ func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 	mtime := info.ModTime().Unix()
-	return objects.NewStructSeq(statResultType, []objects.Object{
-		objects.NewInt(int64(info.Mode())),
-		objects.NewInt(int64(ino)),
-		objects.NewInt(int64(dev)),
-		objects.NewInt(int64(nlink)),
-		objects.NewInt(int64(uid)),
-		objects.NewInt(int64(gid)),
-		objects.NewInt(info.Size()),
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-	}), nil
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
 
 // osReplace atomically renames src to dst, replacing dst if it exists.

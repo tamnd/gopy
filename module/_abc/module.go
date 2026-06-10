@@ -91,12 +91,25 @@ func inWeakSet(d *abcData, set *objects.Set, obj objects.Object) (bool, error) {
 	if set == nil || set.Len() == 0 {
 		return false, nil
 	}
-	ref, err := objects.PyWeakref_NewRef(obj, nil)
-	if err != nil {
-		// CPython swallows TypeError (unweakreferenceable types).
-		return false, nil //nolint:nilerr // matches CPython's PyErr_ExceptionMatches(TypeError) path
+	// Iterate referents by pointer identity instead of using set.Contains,
+	// which would hash the weakref (and thus the referent). Objects with
+	// __hash__ = None would raise TypeError, silently returning false even
+	// when obj is registered. CPython avoids this by holding the GIL and
+	// walking the set; we mirror that by comparing referent pointers directly.
+	for _, entry := range set.Items() {
+		w, ok := entry.(*objects.Weakref)
+		if !ok {
+			continue
+		}
+		ref, alive := objects.PyWeakref_GetRef(w)
+		if !alive {
+			continue
+		}
+		if ref == obj {
+			return true, nil
+		}
 	}
-	return set.Contains(ref)
+	return false, nil
 }
 
 // addToWeakSet inserts obj into *pset, lazily creating the set. The
@@ -320,6 +333,10 @@ func abcRegister(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 	if collFlag := selfCls.TpFlags & collectionFlags; collFlag != 0 {
 		objects.SetFlagsRecursive(subCls, collectionFlags, collFlag)
 	}
+	// CPython: Modules/_abc.c:596 Py_NewRef(subclass) — return a new
+	// reference so the caller's post-call Decref of the argument slot
+	// does not over-release the class object.
+	objects.Incref(subclass)
 	return subclass, nil
 }
 

@@ -1,19 +1,24 @@
 package objects
 
-// Incref bumps the refcount. gopy runs under a global mutator lock
-// (Python's GIL), so the increment is a plain ++ matching CPython's
-// GIL-build expansion of Py_INCREF. Immortal objects (refcount >=
-// ImmortalRefcnt) skip the bump entirely so their refcount cannot
-// overflow into the mortal range.
+import (
+	"sync/atomic"
+)
+
+// Incref bumps the refcount. Immortal objects (refcount >= ImmortalRefcnt)
+// skip the bump so their refcount cannot overflow into the mortal range.
+// Uses atomic operations because Go runtime finalizers (runtime.SetFinalizer)
+// call Decref from a separate goroutine concurrently with the Python GC
+// reading refcounts in updateRefs. Matches CPython's free-threaded build
+// (_Py_INCREF_SPECIALIZED) rather than the GIL-build plain ++.
 //
 // CPython: Include/object.h:L605 Py_INCREF,
 // Include/internal/pycore_object.h _Py_INCREF_IMMORTAL_STAT_INC
 func Incref(o Object) {
 	h := o.Hdr()
-	if h.refcnt >= ImmortalRefcnt {
+	if atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt {
 		return
 	}
-	h.refcnt++
+	atomic.AddInt64(&h.refcnt, 1)
 }
 
 // Decref drops the refcount. Immortal objects short-circuit before
@@ -28,6 +33,10 @@ func Incref(o Object) {
 // memory is reclaimed; gopy mirrors that here so __del__ fires
 // synchronously on the last drop.
 //
+// Uses atomic operations for the same reason as Incref: Go runtime
+// finalizers call Decref from a goroutine that is independent of the
+// Python GC's updateRefs reads.
+//
 // CPython: Include/object.h:L631 Py_DECREF,
 // Include/internal/pycore_object.h _Py_DECREF_IMMORTAL_STAT_INC
 // CPython: Objects/typeobject.c:1450 subtype_dealloc
@@ -35,11 +44,11 @@ func Incref(o Object) {
 //	(PyObject_CallFinalizerFromDealloc call before deallocation)
 func Decref(o Object) {
 	h := o.Hdr()
-	if h.refcnt >= ImmortalRefcnt {
+	if atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt {
 		return
 	}
-	h.refcnt--
-	if h.refcnt != 0 {
+	newrc := atomic.AddInt64(&h.refcnt, -1)
+	if newrc != 0 {
 		return
 	}
 	t := o.Type()
@@ -48,10 +57,10 @@ func Decref(o Object) {
 	}
 	if t.Finalize != nil && !h.finalized {
 		h.finalized = true
-		h.refcnt = 1
+		atomic.StoreInt64(&h.refcnt, 1)
 		t.Finalize(o)
-		h.refcnt--
-		if h.refcnt > 0 {
+		atomic.AddInt64(&h.refcnt, -1)
+		if atomic.LoadInt64(&h.refcnt) > 0 {
 			return
 		}
 	}

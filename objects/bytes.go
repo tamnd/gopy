@@ -35,6 +35,7 @@ func (b *Bytes) AttrDict() *Dict { return b.attrs }
 func (b *Bytes) EnsureAttrDict() *Dict {
 	if b.attrs == nil {
 		b.attrs = NewDict()
+		trackAttrDictHolder(b)
 	}
 	return b.attrs
 }
@@ -62,7 +63,16 @@ func init() {
 	BytesType.Str = bytesRepr
 	BytesType.Hash = bytesHash
 	BytesType.RichCmp = bytesRichCmp
+	// CPython: Objects/bytesobject.c:3158 PyBytes_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(BytesType)
 	BytesType.TpFlags |= TpFlagMatchSelf
+	// A bytes subclass can declare __dict__, so its instances participate
+	// in reference cycles through their attributes. Subtypes inherit this
+	// tp_traverse, and EnsureAttrDict gc-tracks the instance on first
+	// store, so the collector can reclaim such cycles.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	BytesType.TpTraverse = attrDictHolderTraverse
 	// CPython: Objects/bytesobject.c bytes_doc (tp_doc)
 	SetTypeDescr(BytesType, "__doc__", NewStr("bytes(iterable_of_ints) -> bytes\n"+
 		"bytes(string, encoding[, errors]) -> bytes\n"+
@@ -163,6 +173,22 @@ func init() {
 			// a.__rmod__(b) computes b % a; bytes_mod requires the left
 			// operand to be bytes, so a non-bytes lhs yields NotImplemented.
 			return bytesModulo(args[1], args[0])
+		},
+	))
+	// PEP 688: bf_getbuffer surfaced as __buffer__(flags) -> memoryview.
+	// CPython: Objects/typeobject.c:9737 wrap_buffer (PyBytes_Type.tp_as_buffer)
+	SetTypeDescr(BytesType, "__buffer__", NewMethodDescr(BytesType, "__buffer__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __buffer__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			if _, ok := args[0].(*Bytes); !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__buffer__' requires a 'bytes' object")
+			}
+			if _, err := indexAsInt(args[1]); err != nil {
+				return nil, err
+			}
+			return NewMemoryView(args[0])
 		},
 	))
 }

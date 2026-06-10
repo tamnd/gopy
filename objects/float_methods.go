@@ -200,36 +200,61 @@ func floatHex(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'hex' for 'float' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
 	}
-	v := f.Float64()
-	if math.IsNaN(v) {
+	x := f.Float64()
+	// float_repr renders nan / inf / -inf for the non-finite cases.
+	if math.IsNaN(x) {
 		return NewStr("nan"), nil
 	}
-	if math.IsInf(v, 1) {
+	if math.IsInf(x, 1) {
 		return NewStr("inf"), nil
 	}
-	if math.IsInf(v, -1) {
+	if math.IsInf(x, -1) {
 		return NewStr("-inf"), nil
 	}
-	// Go's strconv.FormatFloat with 'x' produces the hex-float form.
-	// e.g. 0.1 → "0x1.999999999999ap-04" but CPython gives "0x1.999999999999ap-4"
-	s := strconv.FormatFloat(v, 'x', -1, 64)
-	// Normalise exponent: strip leading zeros in p+04 → p+4
-	if idx := strings.IndexByte(s, 'p'); idx >= 0 {
-		prefix := s[:idx+1]
-		expStr := s[idx+1:]
-		sign := ""
-		if expStr[0] == '+' || expStr[0] == '-' {
-			sign = string(expStr[0])
-			expStr = expStr[1:]
+	if x == 0.0 {
+		if math.Signbit(x) {
+			return NewStr("-0x0.0p+0"), nil
 		}
-		// strip leading zeros
-		expStr = strings.TrimLeft(expStr, "0")
-		if expStr == "" {
-			expStr = "0"
-		}
-		s = prefix + sign + expStr
+		return NewStr("0x0.0p+0"), nil
 	}
-	return NewStr(s), nil
+
+	// TOHEX_NBITS is DBL_MANT_DIG (53) rounded up to 4k+1, giving 53, so
+	// the mantissa always carries 1 leading plus (53-1)/4 = 13 fractional
+	// hex digits with trailing zeros retained. DBL_MIN_EXP is -1021.
+	const dblMinExp = -1021
+	const nfrac = (53 - 1) / 4
+
+	m, e := math.Frexp(math.Abs(x))
+	shift := 1
+	if dblMinExp-e > 0 {
+		shift = 1 - (dblMinExp - e)
+	}
+	m = math.Ldexp(m, shift)
+	e -= shift
+
+	const hexdigits = "0123456789abcdef"
+	var sb strings.Builder
+	lead := int(m)
+	sb.WriteByte(hexdigits[lead])
+	m -= float64(lead)
+	sb.WriteByte('.')
+	for range nfrac {
+		m *= 16.0
+		d := int(m)
+		sb.WriteByte(hexdigits[d])
+		m -= float64(d)
+	}
+
+	esign := byte('+')
+	if e < 0 {
+		esign = '-'
+		e = -e
+	}
+	sign := ""
+	if x < 0.0 {
+		sign = "-"
+	}
+	return NewStr(fmt.Sprintf("%s0x%sp%c%d", sign, sb.String(), esign, e)), nil
 }
 
 // floatFromNumber converts a real number to float. Unlike float(), it rejects

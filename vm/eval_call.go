@@ -158,15 +158,41 @@ func init() {
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
 	sys.CurrentInterpreterFrameHook = currentInterpreterFrame
-	// Let seqIterNext clear the thread-state exception when it catches
-	// PyExc_IndexError, matching the PyErr_Clear in
-	// Objects/iterobject.c:78 iter_iternext.
+	// Unconditional clear of the thread-state exception, used by the
+	// iterator helpers that genuinely own the pending error (e.g.
+	// seqIterNext's IndexError signal in contexts where the access path
+	// did set one). Prefer ClearCurrentExceptionIfIterStopHook for the
+	// PyIter_Next / iter_iternext exhaustion paths.
+	//
+	// CPython: Python/errors.c:488 _PyErr_Clear
 	objects.ClearCurrentExceptionHook = func() {
 		ts := currentThread()
 		if ts == nil {
 			return
 		}
 		ts.SetException(nil)
+	}
+	// seqIterNext's fast path returns a Go errIndexOutOfRange without ever
+	// installing an IndexError on the thread state, so it must not blindly
+	// clear: an exception being raised while its repr walks a contained
+	// sequence would be wiped. Clear only when the live exception is the
+	// IndexError / StopIteration that iter_iternext is meant to swallow,
+	// matching CPython's PyErr_ExceptionMatches(PyExc_IndexError) gate.
+	//
+	// CPython: Objects/iterobject.c:78 iter_iternext
+	objects.ClearCurrentExceptionIfIterStopHook = func() {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		exc := pyerrors.Occurred(ts)
+		if exc == nil {
+			return
+		}
+		if pyerrors.IsSubtype(exc.ExcType, pyerrors.PyExc_IndexError) ||
+			pyerrors.IsSubtype(exc.ExcType, pyerrors.PyExc_StopIteration) {
+			ts.SetException(nil)
+		}
 	}
 	// Let genFinalize save and restore the active thread's pending
 	// exception across Close(). Mirrors CPython's PyErr_GetRaisedException

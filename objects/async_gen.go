@@ -226,6 +226,13 @@ func init() {
 		func(o Object) (Object, error) {
 			g := o.(*AsyncGenerator)
 			if !g.closed && g.GiFrame != nil {
+				// Frame object handed to user code: mark exposed so
+				// genFinalize takes ownership before the body unwinds.
+				//
+				// CPython: Objects/frameobject.c:1138 take_ownership
+				if fr, ok := g.GiFrame.(*Frame); ok {
+					fr.MarkExposed()
+				}
 				return g.GiFrame, nil
 			}
 			return None(), nil

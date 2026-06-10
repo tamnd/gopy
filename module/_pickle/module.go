@@ -239,5 +239,11 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 
+	// PickleBuffer: the out-of-band buffer wrapper pickle.py re-exports.
+	// CPython: Modules/_pickle.c:8093 PyModule_AddType (PyPickleBuffer_Type)
+	if err := d.SetItem(objects.NewStr("PickleBuffer"), PickleBufferType); err != nil {
+		return nil, err
+	}
+
 	return m, nil
 }

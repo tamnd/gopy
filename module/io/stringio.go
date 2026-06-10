@@ -835,7 +835,10 @@ func (s *StringIO) setState(state objects.Object) error {
 //
 // CPython: Modules/_io/stringio.c:1035 stringio_methods + :1054 stringio_getset
 func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	s := o.(*StringIO)
+	s, ok := o.(*StringIO)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")

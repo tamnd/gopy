@@ -377,7 +377,7 @@ func isNormalizedImpl(self *UCD, args []objects.Object, _ map[string]objects.Obj
 		} else {
 			cmp = nfdNFKD(self, input, k)
 		}
-		if string(cmp) == string(input) {
+		if objects.RunesToStr(cmp) == objects.RunesToStr(input) {
 			return objects.True(), nil
 		}
 		return objects.False(), nil
@@ -402,7 +402,7 @@ func normalizeImpl(self *UCD, args []objects.Object, _ map[string]objects.Object
 		return nil, err
 	}
 	if isNormalizedQuickcheck(self, input, nfc, k, true) == quickcheckYes {
-		return objects.NewStr(string(input)), nil
+		return objects.NewStr(objects.RunesToStr(input)), nil
 	}
 	var out []rune
 	if nfc {
@@ -410,7 +410,7 @@ func normalizeImpl(self *UCD, args []objects.Object, _ map[string]objects.Object
 	} else {
 		out = nfdNFKD(self, input, k)
 	}
-	return objects.NewStr(string(out)), nil
+	return objects.NewStr(objects.RunesToStr(out)), nil
 }
 
 func isNormalizedBuiltin(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -436,5 +436,8 @@ func normalizeArgs(fname string, args []objects.Object) (string, []rune, error) 
 	if !ok {
 		return "", nil, fmt.Errorf("TypeError: %s() argument 2 must be str, not %s", fname, args[1].Type().Name)
 	}
-	return formObj.Value(), []rune(inputObj.Value()), nil
+	// Decode through Runes so lone surrogates survive as single code
+	// points instead of fracturing into U+FFFD; normalization treats
+	// them as already-normalized stable characters.
+	return formObj.Value(), inputObj.Runes(), nil
 }

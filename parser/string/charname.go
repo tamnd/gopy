@@ -38,3 +38,23 @@ func CharByName(name string) (rune, error) {
 func NameLookup(name string) (string, bool) {
 	return unicodedata.Lookup(name)
 }
+
+// UnicodeDataLoadCheck, when non-nil, mirrors CPython's lazy
+// PyCapsule_Import of the unicodedata module before a \N{NAME} lookup:
+// it returns an error when the module can't be loaded (for example after
+// `sys.modules['unicodedata'] = None`), so the decoder can raise
+// "\N escapes not supported (can't load unicodedata module)" instead of
+// silently consulting the built-in table. The VM installs this hook; at
+// bootstrap parse time it is nil and the table is used directly.
+//
+// CPython: Objects/unicodeobject.c:6791 load_ucnhash / ucnhash_capi
+var UnicodeDataLoadCheck func() error
+
+// CheckUnicodeDataLoadable runs the installed UnicodeDataLoadCheck hook,
+// returning its error (nil when the hook is unset or the module loads).
+func CheckUnicodeDataLoadable() error {
+	if UnicodeDataLoadCheck == nil {
+		return nil
+	}
+	return UnicodeDataLoadCheck()
+}

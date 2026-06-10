@@ -260,6 +260,19 @@ func (s *FrameSnapshot) FrameDropSnapshot() {
 // snapshot is already the post-take_ownership backing store).
 func (s *FrameSnapshot) FrameRegisterWrapper(_ Object) {}
 
+// FrameMarkExposed is a no-op on a snapshot. A snapshot only exists
+// because a frame object already outlived its activation record, so
+// exposure is implicit; there is no live generator left to finalize.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership
+func (s *FrameSnapshot) FrameMarkExposed() {}
+
+// FrameExposed reports true: a snapshot is created precisely because a
+// frame object outlived the original activation record.
+//
+// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
+func (s *FrameSnapshot) FrameExposed() bool { return true }
+
 // FrameGenOwner returns the generator that owned the original
 // activation record at snapshot time, or nil.
 //

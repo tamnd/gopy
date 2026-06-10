@@ -281,16 +281,41 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		if x.owner == nil {
 			x.owner = t
 		}
+	case *StaticMethod:
+		// type_add_method binds a METH_STATIC builtin to its owning type
+		// via PyCFunction_NewEx(meth, (PyObject*)type, NULL); m_self then
+		// feeds meth_get__qualname__ so str.maketrans.__qualname__ reads
+		// 'str.maketrans'. The METH_STATIC flag keeps __self__ at None.
+		//
+		// CPython: Objects/typeobject.c:8026 type_add_method (METH_STATIC)
+		if bf, ok := x.smCallable.(*BuiltinFunction); ok && bf.Self == nil {
+			bf.Self = t
+			bf.Conv |= MethStatic
+		}
 	}
 	m, ok := typeDescrTable[t]
 	if !ok {
 		m = map[string]Object{}
 		typeDescrTable[t] = m
 	}
-	if _, exists := m[name]; !exists {
+	if old, exists := m[name]; exists {
+		// Replace: install new value then release old owned reference.
+		// CPython: type_setattro -> PyDict_SetItem sets the value before
+		// the dict releases the old entry (Objects/dictobject.c:1875).
+		m[name] = d
+		Incref(d)
+		Decref(old)
+	} else {
 		typeDescrOrder[t] = append(typeDescrOrder[t], name)
+		// typeDescrTable takes ownership: Incref so the value survives
+		// independent of the class-body ns dict's lifetime. Mirrors
+		// CPython's tp_dict (a real dict) holding a counted ref to every
+		// stored value.
+		//
+		// CPython: Objects/typeobject.c:6088 type_setattro -> PyDict_SetItem
+		m[name] = d
+		Incref(d)
 	}
-	m[name] = d
 	if t.ClassAttrDict != nil {
 		_ = t.ClassAttrDict.SetItem(NewStr(name), d)
 	}

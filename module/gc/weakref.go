@@ -99,13 +99,24 @@ func handleWeakrefs(unreachable *gcHead, weakrefs map[objects.Object][]*objects.
 	return pending
 }
 
-// invokeWeakrefCallbacks fires each pending callback with its weakref
-// as the sole argument. Errors are swallowed: CPython prints them
-// through PyErr_WriteUnraisable and continues; gopy has no equivalent
-// surface yet, so we drop them on the floor for v0.10 and revisit
-// once a sys.unraisablehook port lands.
+// invokeWeakrefCallbacks fires each pending callback with its weakref as
+// the sole argument, the way CPython's second handle_weakrefs pass calls
+// PyObject_CallOneArg(callback, wr). Routing through objects.Call (rather
+// than reaching for callback.Type().Call directly) reaches the vectorcall
+// fast path that plain Python functions and bound methods advertise; those
+// callables leave tp_call nil, so the old direct slot call dereferenced a
+// nil func pointer and crashed the collector. A callback that raises is
+// reported through sys.unraisablehook and the walk continues, matching
+// PyErr_FormatUnraisable.
+//
+// CPython: Python/gc.c:915 handle_weakrefs (PyObject_CallOneArg + PyErr_FormatUnraisable)
 func invokeWeakrefCallbacks(pending []pendingCallback) {
 	for _, p := range pending {
-		_, _ = p.callback.Type().Call(p.callback, []objects.Object{p.weakref}, nil)
+		args := objects.NewTuple([]objects.Object{p.weakref})
+		if _, err := objects.Call(p.callback, args, nil); err != nil {
+			if h := objects.WriteUnraisableHook; h != nil {
+				h(p.callback, "Exception ignored on calling weakref callback", err)
+			}
+		}
 	}
 }

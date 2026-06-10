@@ -33,6 +33,33 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	return
 }
 
+// statMode returns the raw POSIX st_mode (file-type nibble plus
+// permission and special bits) from the FileInfo's syscall.Stat_t, the
+// exact value CPython copies into stat_result. When the syscall struct
+// is unavailable it reconstructs the mode from Go's os.FileMode.
+// CPython: Modules/posixmodule.c:2521 _pystat_fromstructstat (st_mode)
+func statMode(info goos.FileInfo) int64 {
+	if sys, ok := info.Sys().(*syscall.Stat_t); ok && sys != nil {
+		return int64(sys.Mode)
+	}
+	return goFileModeToStMode(info.Mode())
+}
+
+// statBlockFields extracts st_blksize, st_blocks and st_rdev from a
+// FileInfo's syscall.Stat_t. These trail the named struct-sequence
+// slots in stat_result.
+// CPython: Modules/posixmodule.c:2521 _pystat_fromstructstat
+func statBlockFields(info goos.FileInfo) (blksize, blocks, rdev int64) {
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || sys == nil {
+		return
+	}
+	blksize = int64(sys.Blksize)
+	blocks = sys.Blocks
+	rdev = int64(sys.Rdev)
+	return
+}
+
 // getuid returns the real user ID of the calling process.
 // CPython: Modules/posixmodule.c:9635 os_getuid_impl
 func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

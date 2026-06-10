@@ -1586,7 +1586,10 @@ func structRepr(o objects.Object) (string, error) {
 //
 // CPython: Modules/_struct.c:1226 s_sizeof
 func structGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	s := o.(*Struct)
+	s, ok := o.(*Struct)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	n, err := objects.Str(name)
 	if err != nil {
 		return nil, err

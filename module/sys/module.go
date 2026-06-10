@@ -429,6 +429,18 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "is_finalizing", objects.NewBuiltinFunction("is_finalizing", isFinalizing)); err != nil {
 		return nil, err
 	}
+	// sys.getswitchinterval / sys.setswitchinterval expose the GIL switch
+	// interval in seconds. gopy runs the GIL-free model so the value is a
+	// no-op sentinel but must exist so threading code can read/write it.
+	//
+	// CPython: Python/sysmodule.c:1261 sys_setswitchinterval_impl,
+	// Python/sysmodule.c:1278 sys_getswitchinterval_impl
+	if err := setItem(md, "getswitchinterval", objects.NewBuiltinFunction("getswitchinterval", getSwitchInterval)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "setswitchinterval", objects.NewBuiltinFunction("setswitchinterval", setSwitchInterval)); err != nil {
+		return nil, err
+	}
 	// sys.get_int_max_str_digits / sys.set_int_max_str_digits guard
 	// integer-to-string conversion length. Added in CPython 3.11 to
 	// mitigate quadratic-time attacks via enormous int repr.
@@ -569,6 +581,42 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 	return m, nil
+}
+
+// switchInterval is the current GIL switch interval in seconds.
+// gopy uses a GIL-free goroutine model, so reads and writes are
+// no-ops that keep the value coherent for Python code that inspects it.
+var switchInterval = 0.005 // CPython default: 5 ms
+
+// getSwitchInterval implements sys.getswitchinterval().
+//
+// CPython: Python/sysmodule.c:1278 sys_getswitchinterval_impl
+func getSwitchInterval(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewFloat(switchInterval), nil
+}
+
+// setSwitchInterval implements sys.setswitchinterval(interval).
+//
+// CPython: Python/sysmodule.c:1261 sys_setswitchinterval_impl
+func setSwitchInterval(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: setswitchinterval() takes exactly one argument (%d given)", len(args))
+	}
+	var v float64
+	switch a := args[0].(type) {
+	case *objects.Float:
+		v = a.Float64()
+	case *objects.Int:
+		n, _ := a.Int64()
+		v = float64(n)
+	default:
+		return nil, fmt.Errorf("TypeError: a float is required")
+	}
+	if v <= 0 {
+		return nil, fmt.Errorf("ValueError: switch interval must be strictly positive")
+	}
+	switchInterval = v
+	return objects.None(), nil
 }
 
 // displayHook implements sys.displayhook: skip None, then print repr(o)

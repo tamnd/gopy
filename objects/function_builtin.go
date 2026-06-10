@@ -25,7 +25,28 @@ type BuiltinFunction struct {
 	Name   string
 	Module string
 	Conv   MethFlag
-	Fn     func(args []Object, kwargs map[string]Object) (Object, error)
+	// Doc is the optional docstring (ml_doc in PyMethodDef). When non-empty,
+	// __doc__ returns this string; when empty __doc__ returns None, matching
+	// CPython's meth_get__doc__ falling back to NULL ml_doc -> Py_None.
+	//
+	// CPython: Objects/methodobject.c:286 meth_getsets (__doc__ getset)
+	Doc string
+	// TextSignature is the Argument Clinic '__text_signature__' string.
+	// When non-empty, inspect.Signature.from_callable reads it to construct
+	// a Signature object. The '$' prefix on a parameter marks the implicit
+	// self/module argument that inspect strips when skip_bound_arg=True.
+	//
+	// CPython: Objects/methodobject.c ml_doc first-line protocol
+	TextSignature string
+	// Self mirrors PyCFunctionObject.m_self. For a static method bound
+	// to a type, type_add_method stores the owning type here via
+	// PyCFunction_NewEx(meth, (PyObject*)type, NULL); meth_get__qualname__
+	// reads it directly to yield e.g. 'str.maketrans'. The METH_STATIC
+	// flag still masks it from __self__, which stays None.
+	//
+	// CPython: Objects/typeobject.c:8026 type_add_method (METH_STATIC)
+	Self Object
+	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
 }
 
 // BuiltinFunctionType is the type singleton for built-in functions.
@@ -49,7 +70,12 @@ func init() {
 	// meth_getsets: __doc__, __name__, __qualname__, __self__, __module__
 	// CPython: Objects/methodobject.c:286 meth_getsets
 	SetTypeDescr(BuiltinFunctionType, "__doc__", NewGetSetDescr("__doc__",
-		func(o Object) (Object, error) { return None(), nil },
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok && bf.Doc != "" {
+				return NewStr(bf.Doc), nil
+			}
+			return None(), nil
+		},
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__name__", NewGetSetDescr("__name__",
@@ -62,12 +88,7 @@ func init() {
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__qualname__", NewGetSetDescr("__qualname__",
-		func(o Object) (Object, error) {
-			if bf, ok := o.(*BuiltinFunction); ok {
-				return NewStr(bf.Name), nil
-			}
-			return None(), nil
-		},
+		builtinFunctionQualname,
 		nil,
 	))
 	SetTypeDescr(BuiltinFunctionType, "__self__", NewGetSetDescr("__self__",
@@ -89,6 +110,22 @@ func init() {
 		},
 		nil,
 	))
+	// __text_signature__ is the Argument Clinic signature string.
+	// inspect._signature_from_builtin reads this to construct a Signature
+	// object for builtins that don't have an introspectable code object.
+	//
+	// CPython: Objects/methodobject.c:286 meth_getsets (__text_signature__
+	// is accessed via the generic ml_doc first-line protocol; gopy
+	// exposes it explicitly as a getset instead)
+	SetTypeDescr(BuiltinFunctionType, "__text_signature__", NewGetSetDescr("__text_signature__",
+		func(o Object) (Object, error) {
+			if bf, ok := o.(*BuiltinFunction); ok && bf.TextSignature != "" {
+				return NewStr(bf.TextSignature), nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
 	// meth_methods: __reduce__ returns the bare name string when the
 	// function is module-bound (m_self is the module or NULL). Pickle's
 	// save() inspects __reduce__ via __reduce_ex__ and treats a str
@@ -98,6 +135,39 @@ func init() {
 	//
 	// CPython: Objects/methodobject.c:192 meth_reduce
 	SetTypeDescr(BuiltinFunctionType, "__reduce__", NewMethodDescr(BuiltinFunctionType, "__reduce__", builtinFunctionReduce))
+}
+
+// builtinFunctionQualname mirrors meth_get__qualname__. If m_self is
+// NULL or a module the qualname is the bare name (e.g. len.__qualname__
+// == 'len'). If m_self is a type the result is type.__qualname__ + '.'
+// + name (e.g. str.maketrans.__qualname__ == 'str.maketrans'), and
+// otherwise type(m_self).__qualname__ + '.' + name.
+//
+// CPython: Objects/methodobject.c:231 meth_get__qualname__
+func builtinFunctionQualname(o Object) (Object, error) {
+	bf, ok := o.(*BuiltinFunction)
+	if !ok {
+		return None(), nil
+	}
+	if bf.Self == nil {
+		return NewStr(bf.Name), nil
+	}
+	if _, isMod := bf.Self.(*Module); isMod {
+		return NewStr(bf.Name), nil
+	}
+	owner := bf.Self
+	if _, isType := bf.Self.(*Type); !isType {
+		owner = bf.Self.Type()
+	}
+	tq, err := GetAttr(owner, NewStr("__qualname__"))
+	if err != nil {
+		return nil, err
+	}
+	tqStr, ok := tq.(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: <method>.__class__.__qualname__ is not a unicode object")
+	}
+	return NewStr(tqStr.Value() + "." + bf.Name), nil
 }
 
 // builtinFunctionReduce is meth_reduce. For module-level functions

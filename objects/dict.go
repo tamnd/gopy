@@ -108,6 +108,17 @@ func init() {
 		SetItem: dictMappingSet,
 		DelItem: dictMappingDel,
 	}
+	// nb_or / nb_inplace_or back PEP 584's | and |= on dict. Wiring them
+	// as number slots (not just method descriptors) is what makes
+	// `d |= mapping` update d in place: the |= dispatch consults the
+	// in-place number slot first, so it no longer falls through to a
+	// right-hand __ror__ that would rebuild the value as the other type.
+	//
+	// CPython: Objects/dictobject.c:3930 dict_as_number
+	DictType.Number = &NumberMethods{
+		Or:        dictNumberOr,
+		InPlaceOr: dictNumberIOr,
+	}
 	DictType.TpTraverse = dictTraverse
 	DictType.Getattro = GenericGetAttr
 	// TpNew creates a *Dict even for subclasses, so dict methods work
@@ -168,6 +179,8 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_iter
 	AddIterSlotWrappers(DictType)
+	// CPython: Objects/dictobject.c:2498 dict.__hash__ = None
+	SetTypeDescr(DictType, "__hash__", None())
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a
@@ -266,11 +279,25 @@ func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 	return NewBool(v != nil), nil
 }
 
-// dictTraverse visits every key and every value.
+// dictTraverse visits every key and value for combined dicts, and only
+// per-instance values for split dicts. Split dicts share their key table
+// with SharedKeys (which the type object owns), so visiting the keys
+// would double-decrement them during subtractRefs. CPython's dict_traverse
+// skips the dk_kind==DICT_KEYS_SPLIT branch in the same way.
 //
 // CPython: Objects/dictobject.c:4022 dict_traverse
 func dictTraverse(o Object, visit Visitor) error {
 	d := o.(*Dict)
+	if d.sharedKeys != nil {
+		for _, slot := range d.sharedKeys.order {
+			if v := d.splitValues[slot]; v != nil {
+				if err := visit(v); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	for _, slot := range d.order {
 		k := d.slotKey(slot)
 		if k != nil {
@@ -519,6 +546,20 @@ func dictMappingDel(o, key Object) error {
 	return d.DelItem(key)
 }
 
+// AttrDict implements AttrDictHolder so dict subclasses can carry
+// instance attributes and expose them to objectGetStateDefault.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (dict-subclass path)
+func (d *Dict) AttrDict() *Dict { return d.attrs }
+
+// EnsureAttrDict allocates the instance attrs dict on first use.
+func (d *Dict) EnsureAttrDict() *Dict {
+	if d.attrs == nil {
+		d.attrs = NewDict()
+	}
+	return d.attrs
+}
+
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in
 // d.attrs for per-instance attributes before walking the type MRO.
@@ -668,9 +709,16 @@ func asDictBacking(o Object) (*Dict, bool) {
 //
 // CPython: Objects/dictobject.c:3494 dict_equal
 func dictEqual(a, b *Dict) (bool, error) {
+	if a == b {
+		return true, nil
+	}
 	if a.Len() != b.Len() {
 		return false, nil
 	}
+	if err := enterRecursiveCall(" in comparison"); err != nil {
+		return false, err
+	}
+	defer leaveRecursiveCall()
 	for _, k := range a.Keys() {
 		av, err := a.GetItem(k)
 		if err != nil {
@@ -682,6 +730,9 @@ func dictEqual(a, b *Dict) (bool, error) {
 				return false, nil
 			}
 			return false, err
+		}
+		if av == bv {
+			continue
 		}
 		eq, err := RichCmpBool(av, bv, CompareEQ)
 		if err != nil {
@@ -1106,6 +1157,46 @@ func dictIOrMethod(args []Object, _ map[string]Object) (Object, error) {
 	//
 	// CPython: Objects/dictobject.c:3922 dict___ior___impl (dict_update_arg)
 	if err := dictMergeFromArg(self, args[1]); err != nil {
+		return nil, err
+	}
+	return self, nil
+}
+
+// dictNumberOr is the nb_or slot: a | b. Returns NotImplemented unless
+// both operands are dicts (or dict subclasses), then copies the left
+// and merges the right on top, so the right wins on duplicate keys.
+//
+// CPython: Objects/dictobject.c:3909 dict_or
+func dictNumberOr(a, b Object) (Object, error) {
+	self, ok := a.(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if _, ok := b.(*Dict); !ok {
+		return NotImplemented(), nil
+	}
+	dst := NewDict()
+	for _, k := range self.Keys() {
+		v, _ := self.GetItem(k)
+		_ = dst.SetItem(k, v)
+	}
+	if err := dictMergeFromArg(dst, b); err != nil {
+		return nil, err
+	}
+	return dst, nil
+}
+
+// dictNumberIOr is the nb_inplace_or slot: a |= b. Updates the left dict
+// in place from any mapping or iterable of pairs (dict_update_arg) and
+// returns it, so `d |= mapping` keeps d's identity and type.
+//
+// CPython: Objects/dictobject.c:3924 dict_ior
+func dictNumberIOr(a, b Object) (Object, error) {
+	self, ok := a.(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if err := dictMergeFromArg(self, b); err != nil {
 		return nil, err
 	}
 	return self, nil

@@ -84,6 +84,8 @@ func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
 				inst.Type().Name, d.name)
 		}
+		// CPython: Objects/descrobject.c:171 member_get Py_INCREF(v)
+		Incref(v)
 		return v, nil
 	}
 	// C-extension subclass: fall back to per-instance attrs dict.
@@ -92,6 +94,7 @@ func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 		if ad != nil {
 			key := NewStr(d.name)
 			if v, err := ad.GetItem(key); err == nil {
+				Incref(v)
 				return v, nil
 			}
 		}

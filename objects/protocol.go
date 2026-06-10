@@ -79,6 +79,18 @@ func leaveRecursiveCall() {
 	cRecursionRemaining++
 }
 
+// EnterRecursiveCall is the exported form of enterRecursiveCall for
+// packages outside objects/ that need the same recursion budget guard
+// (e.g. partial.__repr__ in _functools).
+//
+// CPython: Include/internal/pycore_ceval.h:222 _Py_EnterRecursiveCallTstate
+func EnterRecursiveCall(where string) error { return enterRecursiveCall(where) }
+
+// LeaveRecursiveCall is the exported form of leaveRecursiveCall.
+//
+// CPython: Include/internal/pycore_ceval.h:233 _Py_LeaveRecursiveCallTstate
+func LeaveRecursiveCall() { leaveRecursiveCall() }
+
 // Repr returns the Python repr of o. Falls back to a generic
 // `<type at addr>` when the type lacks a Repr slot.
 //
@@ -98,6 +110,14 @@ func Repr(o Object) (string, error) {
 	defer leaveRecursiveCall()
 	if r := o.Type().Repr; r != nil {
 		return r(o)
+	}
+	// When o is a type whose metaclass is a Python-defined subclass of
+	// type (e.g. ABCMeta), the metaclass has no Go Repr slot. Fall back
+	// to typeRepr if o is itself a *Type so we still emit <class '...'>.
+	//
+	// CPython: Objects/typeobject.c:1268 type_repr (inherited by metaclasses)
+	if _, ok := o.(*Type); ok {
+		return typeRepr(o)
 	}
 	return fmt.Sprintf("<%s object at %p>", o.Type().Name, o), nil
 }

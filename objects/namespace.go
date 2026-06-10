@@ -96,7 +96,10 @@ func namespaceRepr(o Object) (string, error) {
 
 // CPython: Objects/namespaceobject.c module_getattro fallback path
 func namespaceGetattr(o Object, name Object) (Object, error) {
-	n := o.(*Namespace)
+	n, ok := o.(*Namespace)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
 	v, err := n.dict.GetItem(name)
 	if err == nil {
 		return v, nil
@@ -105,7 +108,10 @@ func namespaceGetattr(o Object, name Object) (Object, error) {
 }
 
 func namespaceSetattr(o Object, name, value Object) error {
-	n := o.(*Namespace)
+	n, ok := o.(*Namespace)
+	if !ok {
+		return GenericSetAttr(o, name, value)
+	}
 	if value == nil {
 		return n.dict.DelItem(name)
 	}

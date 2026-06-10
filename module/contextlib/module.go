@@ -192,7 +192,15 @@ func contextManager(args []objects.Object, _ map[string]objects.Object) (objects
 		return nil, fmt.Errorf("TypeError: contextmanager() takes exactly one argument (%d given)", len(args))
 	}
 	fn := args[0]
-	helper := objects.NewMethodFunc("helper", func(hArgs []objects.Object, hKwargs map[string]objects.Object) (objects.Object, error) {
+	// Read the decorated function's name to propagate it to the helper.
+	// CPython: Lib/contextlib.py:280 @wraps(func)
+	helperName := "helper"
+	if nameObj, err := objects.GetAttr(fn, objects.NewStr("__name__")); err == nil {
+		if s, ok := nameObj.(*objects.Unicode); ok {
+			helperName = s.Value()
+		}
+	}
+	helper := objects.NewMethodFunc(helperName, func(hArgs []objects.Object, hKwargs map[string]objects.Object) (objects.Object, error) {
 		genObj, err := objects.Call(fn, objects.NewTuple(hArgs), kwargsToDict(hKwargs))
 		if err != nil {
 			return nil, err
@@ -229,6 +237,15 @@ func contextManager(args []objects.Object, _ map[string]objects.Object) (objects
 		}
 		return inst, nil
 	})
+	// Propagate wrapped-function attributes so functools.update_wrapper
+	// (called by @singledispatchmethod etc.) finds them already in place.
+	// CPython: Lib/contextlib.py:280 @wraps(func) → update_wrapper WRAPPER_ASSIGNMENTS
+	for _, attr := range []string{"__module__", "__name__", "__qualname__", "__annotations__", "__doc__"} {
+		if v, err := objects.GetAttr(fn, objects.NewStr(attr)); err == nil && v != nil {
+			_ = objects.SetAttr(helper, objects.NewStr(attr), v)
+		}
+	}
+	_ = objects.SetAttr(helper, objects.NewStr("__wrapped__"), fn)
 	return helper, nil
 }
 
@@ -290,7 +307,12 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if objects.IsNone(typArg) {
 		_, err := gen.Send(objects.None())
 		if err != nil {
-			if errors.Is(err, objects.ErrStopIteration) {
+			// A generator that returns normally (including `return value`)
+			// sends a *RaisedError wrapping StopIteration, not the bare
+			// ErrStopIteration sentinel. Use IsStopIteration to catch both.
+			//
+			// CPython: Lib/contextlib.py:148 __exit__ except StopIteration
+			if objects.IsStopIteration(err) {
 				return objects.NewBool(false), nil
 			}
 			return nil, err
@@ -809,9 +831,9 @@ func exitStackPopAll(args []objects.Object, _ map[string]objects.Object) (object
 		return objects.None(), nil
 	}
 	newStack := objects.NewInstance(exitStackType)
-	cur, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
-	_ = newStack.Dict().SetItem(objects.NewStr("_exit_callbacks"), cur)
-	_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
+	cur, _ := self.EnsureDict().GetItem(objects.NewStr("_exit_callbacks"))
+	_ = newStack.EnsureDict().SetItem(objects.NewStr("_exit_callbacks"), cur)
+	_ = self.EnsureDict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
 	return newStack, nil
 }
 

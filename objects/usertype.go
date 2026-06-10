@@ -17,6 +17,8 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 )
 
 // NewUserType builds a Python-defined class. bases default to
@@ -59,8 +61,18 @@ func installSubclassAttrSlots(t *Type) {
 	case IsSubtype(t, DictType):
 		t.Getattro = dictSubclassGetAttr
 		t.Setattro = dictSubclassSetAttr
+		// Inherit TpNew from the most-derived non-user base (e.g.
+		// defaultdict overrides DictType.TpNew with its own allocator).
+		//
 		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
 		t.TpNew = DictType.TpNew
+		for _, base := range t.MRO {
+			if base == t || base.IsUser || base.TpNew == nil {
+				continue
+			}
+			t.TpNew = base.TpNew
+			break
+		}
 	case IsSubtype(t, strType):
 		t.Getattro = strSubclassGetAttr
 		t.Setattro = strSubclassSetAttr
@@ -211,7 +223,7 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	//
 	// CPython: Objects/typeobject.c:4153 type_new (heap types start at
 	// refcount 1 from PyObject_GC_NewVar)
-	t.Hdr().refcnt = 1
+	atomic.StoreInt64(&t.Hdr().refcnt, 1)
 	stampMetaclass(t, meta)
 	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
@@ -273,6 +285,19 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if t.TpTraverse == nil {
 		t.TpTraverse = instanceTraverse
 	}
+	// Pure user classes (object-only storage base) have no inherited
+	// tp_dealloc, so wire instanceDealloc to release the type reference
+	// each instance takes in NewInstance. Subclasses of built-ins keep the
+	// dealloc they inherited from their storage base (set, etc.); their
+	// instances never route through NewInstance and so never took the
+	// reference instanceDealloc would release. This mirrors CPython giving
+	// every heap type subtype_dealloc, whose _Py_DECREF_TYPE balances the
+	// _Py_INCREF_TYPE in _PyObject_Init.
+	//
+	// CPython: Objects/typeobject.c:4213 type_new (tp_dealloc = subtype_dealloc)
+	if t.Dealloc == nil {
+		t.Dealloc = instanceDealloc
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member
@@ -286,6 +311,51 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 		return nil, err
 	}
 	return t, nil
+}
+
+// typeUserDealloc releases the descriptor-table entries for a user-defined
+// heap type. CPython's tp_dict is a regular dict whose dealloc Decrefs all
+// values; in gopy the equivalent is typeDescrTable plus the optional
+// ClassAttrDict.
+//
+// CPython: Objects/typeobject.c:6434 type_dealloc (Py_XDECREF(type->tp_dict))
+func typeUserDealloc(o Object) {
+	t, ok := o.(*Type)
+	if !ok {
+		return
+	}
+	if m, ok := typeDescrTable[t]; ok {
+		for _, v := range m {
+			Decref(v)
+		}
+		delete(typeDescrTable, t)
+		delete(typeDescrOrder, t)
+	}
+	if t.ClassAttrDict != nil {
+		// ClassAttrDict.SetItem Incref'd every value it holds. Dict.Dealloc is
+		// nil so those refs would leak unless we release them here explicitly.
+		// CPython: Objects/typeobject.c:6434 type_dealloc (tp_dict Py_DECREF
+		// calls through to dict_dealloc which calls PyDict_Clear).
+		t.ClassAttrDict.clearContents()
+		Decref(t.ClassAttrDict)
+		t.ClassAttrDict = nil
+	}
+	// Release the references this type took on its bases in newTypeE,
+	// mirroring type_dealloc decref'ing tp_base / tp_bases / tp_mro. The
+	// basesReleased latch keeps this one-to-one with the per-base Incref
+	// even if gopy re-enters dealloc on a type whose refcount oscillated
+	// through zero.
+	//
+	// CPython: Objects/typeobject.c:6434 type_dealloc
+	//          (Py_XDECREF(type->tp_bases / tp_base / tp_mro))
+	if !t.basesReleased {
+		t.basesReleased = true
+		for _, b := range t.Bases {
+			if b != nil {
+				Decref(b)
+			}
+		}
+	}
 }
 
 // stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
@@ -555,10 +625,14 @@ func namespaceKeyOrder(ns *Dict) []Object {
 }
 
 func copyNamespaceToType(t *Type, ns *Dict) error {
+	sawDoc := false
 	for _, k := range namespaceKeyOrder(ns) {
 		s, ok := k.(*Unicode)
 		if !ok || s.v == "__slots__" {
 			continue
+		}
+		if s.v == "__doc__" {
+			sawDoc = true
 		}
 		v, err := ns.GetItem(k)
 		if err != nil {
@@ -642,6 +716,21 @@ func copyNamespaceToType(t *Type, ns *Dict) error {
 		}
 		SetTypeDescr(t, s.v, v)
 	}
+	// type_dict_set_doc: when the type dictionary lacks a __doc__ entry, set it
+	// from tp_doc when present and to None otherwise. A user class has no
+	// tp_doc, so it defaults to None. This is why every class (docstring or
+	// not) has __doc__ in __dict__, and it lets instance __doc__ lookups
+	// resolve to the class value instead of falling through to __getattr__.
+	//
+	// The check is against the type's own dict, not just the namespace: a
+	// __slots__ entry named "__doc__" installs a member descriptor under
+	// "__doc__" (handled by installSlots above), and that entry must not be
+	// clobbered with None.
+	//
+	// CPython: Objects/typeobject.c:8551 type_dict_set_doc
+	if !sawDoc && lookupTypeMember(t, "__doc__") == nil {
+		SetTypeDescr(t, "__doc__", None())
+	}
 	return nil
 }
 
@@ -681,7 +770,8 @@ func typeSetNames(t *Type, ns *Dict) error {
 		}
 		dt := setName.Type()
 		var callable Object
-		if dt.DescrGet != nil {
+		setNameIsNew := dt.DescrGet != nil
+		if setNameIsNew {
 			bound, err := dt.DescrGet(setName, v, v.Type())
 			if err != nil {
 				return err
@@ -690,7 +780,12 @@ func typeSetNames(t *Type, ns *Dict) error {
 		} else {
 			callable = setName
 		}
-		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+		_, callErr := Call(callable, NewTuple([]Object{t, s}), nil)
+		// CPython: Objects/typeobject.c:6046 type_set_names Py_DECREF(set_name) after call
+		if setNameIsNew {
+			Decref(callable)
+		}
+		if callErr != nil {
 			if FormatNoteHook != nil {
 				keyRepr, rerr := Repr(s)
 				keyText := s.Value()
@@ -700,7 +795,7 @@ func typeSetNames(t *Type, ns *Dict) error {
 				FormatNoteHook(fmt.Sprintf("Error calling __set_name__ on '%s' instance %s in '%s'",
 					typeNameOf(v), keyText, t.Name))
 			}
-			return err
+			return callErr
 		}
 	}
 	return nil
@@ -724,7 +819,8 @@ func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 		}
 		dt := descr.Type()
 		var callable Object
-		if dt.DescrGet != nil {
+		callableIsNew := dt.DescrGet != nil
+		if callableIsNew {
 			bound, err := dt.DescrGet(descr, t, t)
 			if err != nil {
 				return err
@@ -742,9 +838,14 @@ func typeInitSubclass(t *Type, kwargs map[string]Object) error {
 				}
 			}
 		}
-		_, err := Call(callable, NewTuple(nil), kwd)
-		if err != nil {
-			return err
+		// CPython: Objects/typeobject.c:4584 type_new_init_subclass
+		_, callErr := Call(callable, NewTuple(nil), kwd)
+		// CPython: Objects/typeobject.c:4584 Py_DECREF(func) after call
+		if callableIsNew {
+			Decref(callable)
+		}
+		if callErr != nil {
+			return callErr
 		}
 		return nil
 	}
@@ -790,6 +891,7 @@ func fixupSlotDispatchers(t *Type) {
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
 	fixupGetattroSlot(t)
+	fixupSetattroSlot(t)
 	fixupAsyncSlots(t)
 	fixupNumberSlots(t)
 	fixupTpNew(t)
@@ -928,6 +1030,56 @@ func slotTpGetattroHook(o Object, name Object) (Object, error) {
 	return Call(fb, NewTuple([]Object{name}), nil)
 }
 
+// fixupSetattroSlot wires tp_setattro to a slot dispatcher that calls
+// the user's __setattr__ (or __delattr__ for deletions) when the class
+// body, or any user-defined base, overrides them. Without this, attribute
+// assignment on an instance of such a class bypasses the Python-level
+// override and writes directly to the instance dict.
+//
+// CPython: Objects/typeobject.c:10336 update_one_slot tp_setattro path
+// CPython: Objects/typeobject.c:10406 slot_tp_setattro
+func fixupSetattroSlot(t *Type) {
+	_, saOwner := LookupDescriptor(t, "__setattr__")
+	_, daOwner := LookupDescriptor(t, "__delattr__")
+	hasSetattr := saOwner != nil && saOwner != objectType
+	hasDelattr := daOwner != nil && daOwner != objectType
+	if !hasSetattr && !hasDelattr {
+		return
+	}
+	t.Setattro = slotTpSetattroHook
+}
+
+// slotTpSetattroHook dispatches attribute set (value != nil) through the
+// type's __setattr__ and attribute delete (value == nil) through
+// __delattr__. This is the gopy port of CPython's slot_tp_setattro.
+//
+// CPython: Objects/typeobject.c:10406 slot_tp_setattro
+func slotTpSetattroHook(o Object, name Object, value Object) error {
+	tp := o.Type()
+	if value != nil {
+		sa, _ := LookupDescriptor(tp, "__setattr__")
+		if sa != nil {
+			bound, err := bindAttrCallable(sa, o, tp)
+			if err != nil {
+				return err
+			}
+			_, err = Call(bound, NewTuple([]Object{name, value}), nil)
+			return err
+		}
+		return GenericSetAttr(o, name, value)
+	}
+	da, _ := LookupDescriptor(tp, "__delattr__")
+	if da != nil {
+		bound, err := bindAttrCallable(da, o, tp)
+		if err != nil {
+			return err
+		}
+		_, err = Call(bound, NewTuple([]Object{name}), nil)
+		return err
+	}
+	return GenericSetAttr(o, name, nil)
+}
+
 // bindAttrCallable applies tp_descr_get to attr with (o, tp) so the
 // resulting callable already has self bound, mirroring CPython's
 // call_attribute helper. Unbound objects (plain functions found on a
@@ -955,6 +1107,32 @@ func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
 func fixupTpNew(t *Type) {
 	if lookupTypeMember(t, "__new__") != nil {
 		t.TpNew = slotTpNew
+		t.TpNewWithDict = slotTpNewWithDict
+		return
+	}
+	// inheritDirectBaseScalars only copies TpNew from the primary base
+	// (Bases[0]). When a Python-level __new__ lives on a secondary base
+	// of a multiple-inheritance class (e.g. class Mock(CallableMixin,
+	// NonCallableMock) where NonCallableMock defines __new__), the slot
+	// is missed and construction falls through to the built-in tp_new,
+	// skipping the user __new__. CPython's update_one_slot walks the
+	// full MRO and installs slot_tp_new whenever the resolved __new__ is
+	// a Python object rather than the C tp_new_wrapper. Mirror that: walk
+	// the MRO and route through slotTpNew when __new__ resolves to a
+	// Python function (built-in __new__ stays a BuiltinFunction and keeps
+	// the inherited C tp_new).
+	//
+	// CPython: Objects/typeobject.c:10336 update_one_slot (tp_new entry)
+	if fnPtr(t.TpNew) == fnPtr(slotTpNew) {
+		return
+	}
+	newFn, _ := LookupDescriptor(t, "__new__")
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	if _, ok := newFn.(*Function); ok {
+		t.TpNew = slotTpNew
+		t.TpNewWithDict = slotTpNewWithDict
 	}
 }
 
@@ -1326,11 +1504,7 @@ func callBinaryDunder(self, other Object, dunder string) (Object, error) {
 // CPython: Objects/typeobject.c SLOT0 macro
 func makeSlotNbUnary(dunder string) func(Object) (Object, error) {
 	return func(self Object) (Object, error) {
-		fn, err := lookupMethodOnSelf(self, dunder)
-		if err != nil {
-			return nil, err
-		}
-		return Call(fn, NewTuple(nil), nil)
+		return vectorcallMethod(self, dunder)
 	}
 }
 
@@ -1381,27 +1555,6 @@ func lookupDunderCallable(t *Type, name string) bool {
 		return false
 	}
 	return true
-}
-
-// lookupMethodOnSelf finds name on type(o)'s MRO and applies descr_get
-// with o as the bound instance. Mirrors CPython's lookup_maybe_method:
-// slot dispatchers must look up via the *type* of self (not via self's
-// own attribute path) so that, for example, hash(C) on a class C finds
-// the metaclass's __hash__ entry rather than treating C as if it were
-// an instance of itself. GetAttr returns the descriptor unbound when
-// the receiver is a class, which breaks the no-arg call shape every
-// slot dispatcher relies on.
-//
-// CPython: Objects/typeobject.c:2255 lookup_maybe_method
-func lookupMethodOnSelf(o Object, name string) (Object, error) {
-	descr, _ := LookupDescriptor(o.Type(), name)
-	if descr == nil {
-		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", o.Type().Name, name)
-	}
-	if dg := descr.Type().DescrGet; dg != nil {
-		return dg(descr, o, o.Type())
-	}
-	return descr, nil
 }
 
 // lookupMaybeMethod is the CPython-faithful port of lookup_maybe_method.
@@ -1457,6 +1610,41 @@ func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
 		h(args)
 	}
 	return result, err
+}
+
+// vectorcallMethod ports CPython's vectorcall_method: look name up through
+// lookup_maybe_method, invoke it with self prepended when the lookup handed
+// back an unbound method-like descriptor (the no-temporary-PyMethodObject
+// path) or with the already-bound object otherwise, then release the
+// looked-up callable. The trailing Decref is the discipline that keeps a
+// __getitem__/__len__/__contains__ dispatch from leaking one reference to
+// self on every invocation: without it the temporary bound method pins self
+// forever, so the cycle collector never sees the instance go unreachable and
+// __del__ never fires. extra carries the positional arguments after self.
+//
+// CPython: Objects/typeobject.c:2334 vectorcall_method
+func vectorcallMethod(o Object, name string, extra ...Object) (Object, error) {
+	fn, unbound, err := lookupMaybeMethod(o, name)
+	if err != nil {
+		return nil, err
+	}
+	var callArgs []Object
+	if unbound {
+		callArgs = make([]Object, 0, len(extra)+1)
+		callArgs = append(callArgs, o)
+		callArgs = append(callArgs, extra...)
+	} else {
+		callArgs = extra
+	}
+	args := NewTuple(callArgs)
+	res, callErr := Call(fn, args, nil)
+	if h := GCUntrackHook; h != nil {
+		h(args)
+	}
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
@@ -1643,11 +1831,7 @@ func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	if IsNone(d) {
 		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
 	}
-	fn, err := lookupMethodOnSelf(a, name)
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple([]Object{b}), nil)
+	return vectorcallMethod(a, name, b)
 }
 
 // richCompareDunderName maps CompareOp to the dunder method name.
@@ -1673,11 +1857,7 @@ func richCompareDunderName(op CompareOp) string {
 //
 // CPython: Objects/typeobject.c:7869 slot_nb_bool
 func slotNbBool(o Object) (bool, error) {
-	fn, err := lookupMethodOnSelf(o, "__bool__")
-	if err != nil {
-		return false, err
-	}
-	r, err := Call(fn, NewTuple(nil), nil)
+	r, err := vectorcallMethod(o, "__bool__")
 	if err != nil {
 		return false, err
 	}
@@ -1705,11 +1885,7 @@ func slotNbBoolFromLen(o Object) (bool, error) {
 //
 // CPython: Objects/typeobject.c:7948 slot_mp_length / slot_sq_length
 func slotMpLength(o Object) (int, error) {
-	fn, err := lookupMethodOnSelf(o, "__len__")
-	if err != nil {
-		return 0, err
-	}
-	r, err := Call(fn, NewTuple(nil), nil)
+	r, err := vectorcallMethod(o, "__len__")
 	if err != nil {
 		return 0, err
 	}
@@ -1740,11 +1916,7 @@ func slotMpLength(o Object) (int, error) {
 //
 // CPython: Objects/typeobject.c:7989 slot_mp_subscript
 func slotMpSubscript(o Object, key Object) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__getitem__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple([]Object{key}), nil)
+	return vectorcallMethod(o, "__getitem__", key)
 }
 
 // slotSqGetItem dispatches __getitem__ for sequence-style int indexing.
@@ -1753,22 +1925,14 @@ func slotMpSubscript(o Object, key Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7964 slot_sq_item
 func slotSqGetItem(o Object, idx int) (Object, error) {
-	fn, err := lookupMethodOnSelf(o, "__getitem__")
-	if err != nil {
-		return nil, err
-	}
-	return Call(fn, NewTuple([]Object{NewInt(int64(idx))}), nil)
+	return vectorcallMethod(o, "__getitem__", NewInt(int64(idx)))
 }
 
 // slotMpSubscriptSet dispatches __setitem__.
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (set branch)
 func slotMpSubscriptSet(o, key, value Object) error {
-	fn, err := lookupMethodOnSelf(o, "__setitem__")
-	if err != nil {
-		return err
-	}
-	_, err = Call(fn, NewTuple([]Object{key, value}), nil)
+	_, err := vectorcallMethod(o, "__setitem__", key, value)
 	return err
 }
 
@@ -1776,11 +1940,7 @@ func slotMpSubscriptSet(o, key, value Object) error {
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (del branch)
 func slotMpSubscriptDel(o, key Object) error {
-	fn, err := lookupMethodOnSelf(o, "__delitem__")
-	if err != nil {
-		return err
-	}
-	_, err = Call(fn, NewTuple([]Object{key}), nil)
+	_, err := vectorcallMethod(o, "__delitem__", key)
 	return err
 }
 
@@ -1824,15 +1984,35 @@ func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 	return Call(newFn, NewTuple(posArgs), kwDict)
 }
 
+// slotTpNewWithDict is slotTpNew with the keyword arguments preserved as an
+// insertion-ordered *Dict rather than a Go map. typeCallViaTpNewWithDict calls
+// this in preference to slotTpNew so the __new__ implementation observes the
+// keyword order supplied at the call site. This matters for types like
+// functools.partial / partialmethod whose __new__ stores **keywords verbatim:
+// rebuilding the dict from a Go map (slotTpNew) shuffles the keys, so
+// partialmethod(capture, self=1, func=2) reprs in random order. CPython's
+// slot_tp_new receives the original ordered kwds dict, so mirror that.
+//
+// CPython: Objects/typeobject.c:9395 slot_tp_new
+func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
+	newFn, _ := LookupDescriptor(cls, "__new__")
+	if newFn == nil {
+		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
+	}
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	posArgs := make([]Object, 0, len(args)+1)
+	posArgs = append(posArgs, cls)
+	posArgs = append(posArgs, args...)
+	return Call(newFn, NewTuple(posArgs), kwargs)
+}
+
 // slotTpDescrGet dispatches __get__(self, obj, type). obj is None when
 // the descriptor is accessed through the class rather than an instance.
 //
 // CPython: Objects/typeobject.c:8444 slot_tp_descr_get
 func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
-	fn, err := lookupMethodOnSelf(descr, "__get__")
-	if err != nil {
-		return nil, err
-	}
 	var objArg Object
 	if obj == nil {
 		objArg = None()
@@ -1845,7 +2025,7 @@ func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
 	} else {
 		typeArg = tp
 	}
-	return Call(fn, NewTuple([]Object{objArg, typeArg}), nil)
+	return vectorcallMethod(descr, "__get__", objArg, typeArg)
 }
 
 // slotTpDescrSet dispatches __set__(self, obj, value) or
@@ -1853,23 +2033,12 @@ func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8456 slot_tp_descr_set
 func slotTpDescrSet(descr Object, obj Object, value Object) error {
-	var fn Object
-	var args []Object
 	var err error
 	if value == nil {
-		fn, err = lookupMethodOnSelf(descr, "__delete__")
-		if err != nil {
-			return err
-		}
-		args = []Object{obj}
+		_, err = vectorcallMethod(descr, "__delete__", obj)
 	} else {
-		fn, err = lookupMethodOnSelf(descr, "__set__")
-		if err != nil {
-			return err
-		}
-		args = []Object{obj, value}
+		_, err = vectorcallMethod(descr, "__set__", obj, value)
 	}
-	_, err = Call(fn, NewTuple(args), nil)
 	return err
 }
 
@@ -1877,15 +2046,27 @@ func slotTpDescrSet(descr Object, obj Object, value Object) error {
 //
 // CPython: Objects/typeobject.c:8064 slot_sq_contains
 func slotSqContains(o Object, key Object) (bool, error) {
-	fn, err := lookupMethodOnSelf(o, "__contains__")
-	if err != nil {
-		return false, err
-	}
-	r, err := Call(fn, NewTuple([]Object{key}), nil)
+	r, err := vectorcallMethod(o, "__contains__", key)
 	if err != nil {
 		return false, err
 	}
 	return IsTruthy(r)
+}
+
+// mangleSlotName applies PEP 8 private name mangling to a slot name.
+// Slot names starting with "__" (but not ending with "__") are rewritten to
+// "_<stripped-class-name><name>", mirroring _Py_Mangle.
+//
+// CPython: Python/symtable.c:3207 _Py_Mangle
+func mangleSlotName(className, name string) string {
+	if len(name) < 2 || name[0] != '_' || name[1] != '_' || strings.HasSuffix(name, "__") {
+		return name
+	}
+	stripped := strings.TrimLeft(className, "_")
+	if stripped == "" {
+		return name
+	}
+	return "_" + stripped + name
 }
 
 // installSlots reads __slots__ from ns, validates it, and registers a
@@ -1959,6 +2140,11 @@ func installSlots(t *Type, ns *Dict) error {
 		if !StrIsIdentifier(n) {
 			return fmt.Errorf("TypeError: __slots__ must be identifiers")
 		}
+		// Apply PEP 8 private name mangling: "__x" in class "Foo" → "_Foo__x".
+		// Mirrors _Py_Mangle which type_new_copy_slots calls on every slot name.
+		//
+		// CPython: Objects/typeobject.c:4037 type_new_copy_slots (_Py_Mangle call)
+		n = mangleSlotName(t.Name, n)
 		if seen[n] {
 			continue
 		}

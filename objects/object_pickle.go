@@ -208,7 +208,7 @@ func objectGetState(self Object, required bool) (Object, error) {
 // that declare __slots__.
 //
 // CPython: Objects/typeobject.c:7336 object_getstate_default
-func objectGetStateDefault(self Object, _ bool) (Object, error) {
+func objectGetStateDefault(self Object, required bool) (Object, error) {
 	state := None()
 	switch v := self.(type) {
 	case AttrDictHolder:
@@ -219,6 +219,37 @@ func objectGetStateDefault(self Object, _ bool) (Object, error) {
 		if d := v.Dict(); d != nil && d.Len() > 0 {
 			state = d
 		}
+	}
+	// CPython compares tp_basicsize against the base size plus the dict,
+	// weakref and slot pointers it can account for; a built-in type that
+	// carries extra C-level state (gopy's OpaqueCState) trips the guard
+	// and cannot be pickled by the default reducer. The instance __dict__
+	// (when present) is exposed in slot/dict state above, so the guard
+	// only fires for the opaque tail.
+	//
+	// CPython: Objects/typeobject.c:7363 object_getstate_default
+	if required && self.Type().OpaqueCState {
+		return nil, fmt.Errorf("TypeError: cannot pickle '%s' object", self.Type().Name)
+	}
+	// Collect slot values from __slots__ declared across the MRO.
+	// CPython: Objects/typeobject.c:7389 object_getstate_default (slot loop)
+	slots := NewDict()
+	for _, t := range self.Type().MRO {
+		for _, name := range t.Slots {
+			v, err := GetAttr(self, NewStr(name))
+			if err != nil {
+				if isAttributeError(err) {
+					continue // slot not set on this instance
+				}
+				return nil, err
+			}
+			if setErr := slots.SetItem(NewStr(name), v); setErr != nil {
+				return nil, setErr
+			}
+		}
+	}
+	if slots.Len() > 0 {
+		return NewTuple([]Object{state, slots}), nil
 	}
 	return state, nil
 }

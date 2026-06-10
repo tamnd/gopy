@@ -159,7 +159,7 @@ func stopIterValueSet(owner objects.Object, value objects.Object) error {
 }
 
 // NewExcType creates a named exception type that inherits from the
-// given bases. It wires the same Call/TpNew/Str/Repr/HasDict slots
+// given bases. It wires the same TpNew/Str/Repr/HasDict slots
 // that all CPython exception types carry. Exported for use by C-extension
 // ports (e.g. _pickle, _struct) that need proper exception classes.
 //
@@ -170,7 +170,13 @@ func NewExcType(name string, bases []*objects.Type) *objects.Type {
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
-	t.Call = excCall
+	// Construction routes through tp_new (type_call invokes it), exactly as
+	// CPython's exception types carry tp_new but leave tp_call at 0. Wiring a
+	// tp_call here would make instances look callable: PyCallable_Check(exc)
+	// must be false so exceptiongroup get_matcher_type rejects an exception
+	// instance as a predicate.
+	//
+	// CPython: Objects/exceptions.c:648 BaseException_Type (tp_call == 0)
 	t.TpNew = excTpNew
 	t.Str = excStr
 	t.Repr = excRepr
@@ -196,6 +202,25 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 	// = PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
 	t.Getattro = objects.GenericGetAttr
 	t.Setattro = objects.GenericSetAttr
+	// BaseException leaves tp_hash unset and so inherits object's
+	// _Py_HashPointer (identity hash); BaseException_richcompare is also
+	// 0, so exceptions hash and compare by identity. gopy's scalar-slot
+	// inheritance does not run for these NewType-built singletons (the
+	// same reason getattro/setattro are stamped above), so set the
+	// identity hash explicitly. Without it every exception type reports
+	// Hash == nil and instances raise "unhashable type", which breaks
+	// e.g. building a set of exceptions: {ValueError(42)}.
+	//
+	// CPython: Objects/exceptions.c:648 BaseException_Type (tp_hash == 0,
+	// tp_richcompare == 0 → inherits object identity hash/compare)
+	t.Hash = objects.IdentityHash
+	// TpTraverse visits every GC-visible field so the cycle collector can
+	// walk the Exception→Traceback→Frame chain and identify unreachable
+	// exception cycles. This matches CPython's BaseException_traverse which
+	// visits tb, context, cause, notes, args, and dict.
+	//
+	// CPython: Objects/exceptions.c:121 BaseException_traverse
+	t.TpTraverse = excTraverse
 	// BaseException carries __repr__ / __str__ method descriptors that
 	// wrap BaseException_repr / BaseException_str. Without these, a
 	// user subclass like `class BozoError(Exception): pass` runs through
@@ -296,20 +321,6 @@ func excRepr(o objects.Object) (string, error) {
 	return name + s, nil
 }
 
-// excCall is the tp_call slot for every built-in exception type. It
-// mirrors BaseException_new + BaseException_init: store positional args
-// on .args, ignore keyword arguments (CPython's BaseException_init also
-// rejects them, but tolerating them here keeps stdlib call sites that
-// pass `name=` / `path=` from blowing up before the proper ImportError
-// init lands).
-//
-// CPython: Objects/exceptions.c:L42 BaseException_new
-// CPython: Objects/exceptions.c:L84 BaseException_init
-func excCall(callable objects.Object, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	cls, _ := callable.(*objects.Type)
-	return New(cls, objects.NewTuple(args)), nil
-}
-
 // IsSubtype reports whether sub inherits from super, walking the MRO.
 //
 // CPython: Objects/typeobject.c:L2556 PyType_IsSubtype
@@ -326,4 +337,28 @@ func Match(exc *Exception, t *objects.Type) bool {
 		return false
 	}
 	return IsSubtype(exc.ExcType, t)
+}
+
+// excTraverse is the TpTraverse slot shared by all exception types. It visits
+// every GC-visible field so the cycle collector can walk Exception→Traceback→Frame
+// chains. Matches CPython's BaseException_traverse.
+//
+// CPython: Objects/exceptions.c:121 BaseException_traverse
+func excTraverse(o objects.Object, visit objects.Visitor) error {
+	exc, ok := o.(*Exception)
+	if !ok {
+		return nil
+	}
+	refs := []objects.Object{exc.TB, exc.Context, exc.Cause, exc.Notes, exc.NotesObj, exc.Args, exc.StopValue}
+	if exc.EG != nil {
+		refs = append(refs, exc.EG.Msg, exc.EG.Excs, exc.EG.ExcsStr)
+	}
+	for _, ref := range refs {
+		if ref != nil {
+			if err := visit(ref); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

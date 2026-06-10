@@ -43,6 +43,7 @@ func (b *ByteArray) AttrDict() *Dict { return b.attrs }
 func (b *ByteArray) EnsureAttrDict() *Dict {
 	if b.attrs == nil {
 		b.attrs = NewDict()
+		trackAttrDictHolder(b)
 	}
 	return b.attrs
 }
@@ -82,6 +83,8 @@ var ByteArrayType = NewType("bytearray", []*Type{objectType})
 
 func init() {
 	ByteArrayType.Repr = byteArrayRepr
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (managed __dict__)
+	ByteArrayType.TpTraverse = attrDictHolderTraverse
 	ByteArrayType.Str = byteArrayRepr
 	ByteArrayType.Hash = byteArrayHash
 	ByteArrayType.RichCmp = byteArrayRichCmp
@@ -236,6 +239,8 @@ func init() {
 	}
 	SetTypeDescr(ByteArrayType, "__repr__", NewMethodDescr(ByteArrayType, "__repr__", byteArrayReprDescr))
 	SetTypeDescr(ByteArrayType, "__str__", NewMethodDescr(ByteArrayType, "__str__", byteArrayReprDescr))
+	// CPython: Objects/bytearrayobject.c:2754 bytearray.__hash__ = None
+	SetTypeDescr(ByteArrayType, "__hash__", None())
 	// __reduce__ / __reduce_ex__ carry the byte content (and instance
 	// state) through pickle and copy. Without these, object's default
 	// reducer rebuilds the subclass via object.__new__ (losing the bytes
@@ -263,6 +268,22 @@ func init() {
 			}
 			return byteArrayCommonReduce(args[0], proto)
 		}))
+	// PEP 688: bf_getbuffer surfaced as __buffer__(flags) -> memoryview.
+	// CPython: Objects/typeobject.c:9737 wrap_buffer (PyByteArray_Type.tp_as_buffer)
+	SetTypeDescr(ByteArrayType, "__buffer__", NewMethodDescr(ByteArrayType, "__buffer__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("TypeError: __buffer__() takes exactly one argument (%d given)", len(args)-1)
+			}
+			if _, ok := args[0].(*ByteArray); !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__buffer__' requires a 'bytearray' object")
+			}
+			if _, err := indexAsInt(args[1]); err != nil {
+				return nil, err
+			}
+			return NewMemoryView(args[0])
+		},
+	))
 	// TpNew allocates a bare *ByteArray bound to the requested class so
 	// `class S(bytearray): pass; S(b'..')` returns an S instance that can
 	// also hold instance attributes. Population happens in __init__

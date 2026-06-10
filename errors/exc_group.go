@@ -47,27 +47,16 @@ func IsExceptionGroup(t *objects.Type) bool {
 //
 // CPython: Objects/exceptions.c:886 BaseExceptionGroup_new (excs slot)
 func ExceptionGroupLeaves(exc *Exception) []*Exception {
-	if exc == nil || exc.Args == nil || exc.Args.Len() < 2 {
+	if exc == nil {
 		return nil
 	}
-	raw := exc.Args.Item(1)
-	tup, ok := raw.(*objects.Tuple)
-	if ok {
-		out := make([]*Exception, 0, tup.Len())
-		for i := 0; i < tup.Len(); i++ {
-			if e, eok := tup.Item(i).(*Exception); eok {
-				out = append(out, e)
-			}
-		}
-		return out
-	}
-	lst, ok := raw.(*objects.List)
-	if !ok {
+	tup := egStateOf(exc).Excs
+	if tup == nil || tup.Len() == 0 {
 		return nil
 	}
-	out := make([]*Exception, 0, lst.Len())
-	for i := 0; i < lst.Len(); i++ {
-		if e, eok := lst.Item(i).(*Exception); eok {
+	out := make([]*Exception, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		if e, eok := tup.Item(i).(*Exception); eok {
 			out = append(out, e)
 		}
 	}
@@ -129,10 +118,7 @@ func deriveGroup(src *Exception, subset []*Exception) *Exception {
 	if src == nil || len(subset) == 0 {
 		return nil
 	}
-	message := objects.NewStr("")
-	if src.Args != nil && src.Args.Len() >= 1 {
-		message = src.Args.Item(0)
-	}
+	message := egStateOf(src).Msg
 	items := make([]objects.Object, len(subset))
 	for i, e := range subset {
 		items[i] = e

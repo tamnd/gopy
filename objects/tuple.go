@@ -10,8 +10,10 @@ import (
 // CPython: Include/cpython/tupleobject.h:L8 PyTupleObject
 type Tuple struct {
 	VarHeader
-	items    []Object
-	attrDict *Dict
+	items     []Object
+	attrDict  *Dict
+	hashValid bool
+	hashValue int64
 }
 
 // AttrDict returns the per-instance attribute dict, or nil if no
@@ -46,6 +48,8 @@ func init() {
 	TupleType.Str = tupleRepr
 	TupleType.Hash = tupleHash
 	TupleType.RichCmp = tupleRichCmp
+	// CPython: Objects/tupleobject.c:1055 PyTuple_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(TupleType)
 	TupleType.Iter = tupleIter
 	TupleType.Sequence = &SequenceMethods{
 		Length:   tupleLen,
@@ -87,6 +91,17 @@ func init() {
 	SetTypeDescr(TupleType, "index", NewMethodDescr(TupleType, "index", tupleIndexMethod))
 	SetTypeDescr(TupleType, "count", NewMethodDescr(TupleType, "count", tupleCountMethod))
 	SetTypeDescr(TupleType, "__getnewargs__", NewMethodDescr(TupleType, "__getnewargs__", tupleGetNewArgsMethod))
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	SetTypeDescr(TupleType, "__hash__", NewMethodDescr(TupleType, "__hash__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: __hash__() takes exactly 1 argument (%d given)", len(args))
+		}
+		h, err := tupleHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	// TpNew honors cls so `class T(tuple): pass; T((1,2))` returns a T
 	// instance instead of a plain tuple. tuple is immutable, so unlike
 	// list we populate items here rather than deferring to __init__.
@@ -167,8 +182,34 @@ func (t *Tuple) Len() int { return len(t.items) }
 // CPython: Objects/tupleobject.c:L319 PyTuple_GetItem
 func (t *Tuple) Item(i int) Object { return t.items[i] }
 
+// tupleItemsOf returns the element slice backing a tuple or any tuple
+// subclass instance. CPython stores PyStructSequence data in the inherited
+// PyTupleObject ob_item, so every tuple sequence slot reads a subclass
+// through the same field. gopy models structseq as a separate Go struct, so
+// the tuple slots extract the slice through this helper rather than an
+// unchecked *Tuple cast, which would panic on a *StructSeq.
+//
+// CPython: Objects/tupleobject.c PyTuple_Check + ob_item access
+func tupleItemsOf(o Object) ([]Object, bool) {
+	switch t := o.(type) {
+	case *Tuple:
+		return t.items, true
+	case *StructSeq:
+		return t.visible(), true
+	}
+	return nil, false
+}
+
+// isTupleOrSubclass mirrors PyTuple_Check: true for an exact tuple or any
+// tuple subclass instance (structseq).
+func isTupleOrSubclass(o Object) bool {
+	_, ok := tupleItemsOf(o)
+	return ok
+}
+
 func tupleLen(o Object) (int, error) {
-	return o.(*Tuple).Len(), nil
+	items, _ := tupleItemsOf(o)
+	return len(items), nil
 }
 
 // tupleTraverse visits every element. Mirrors tupletraverse.
@@ -184,18 +225,18 @@ func tupleTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 func tupleGetItem(o Object, i int) (Object, error) {
-	t := o.(*Tuple)
+	items, _ := tupleItemsOf(o)
 	if i < 0 {
-		i += len(t.items)
+		i += len(items)
 	}
-	if i < 0 || i >= len(t.items) {
+	if i < 0 || i >= len(items) {
 		return nil, errIndexOutOfRange
 	}
-	return t.items[i], nil
+	return items[i], nil
 }
 
 // tupleSubscript ports tuple_subscript (mp_subscript): an index-like key
@@ -205,9 +246,9 @@ func tupleGetItem(o Object, i int) (Object, error) {
 //
 // CPython: Objects/tupleobject.c:811 tuple_subscript
 func tupleSubscript(o, key Object) (Object, error) {
-	t := o.(*Tuple)
+	items, _ := tupleItemsOf(o)
 	if s, ok := key.(*Slice); ok {
-		start, _, step, slicelen, err := s.GetIndices(len(t.items))
+		start, _, step, slicelen, err := s.GetIndices(len(items))
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +257,7 @@ func tupleSubscript(o, key Object) (Object, error) {
 		}
 		out := make([]Object, slicelen)
 		for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
-			out[i] = t.items[idx]
+			out[i] = items[idx]
 		}
 		return NewTuple(out), nil
 	}
@@ -232,8 +273,8 @@ func tupleSubscript(o, key Object) (Object, error) {
 //
 // CPython: Objects/tupleobject.c:692 tuple_contains
 func tupleContains(o, v Object) (bool, error) {
-	t := o.(*Tuple)
-	for _, item := range t.items {
+	items, _ := tupleItemsOf(o)
+	for _, item := range items {
 		// tuple_contains compares the element on the left and the needle
 		// on the right: PyObject_RichCompareBool(item, el, Py_EQ).
 		eq, err := RichCmpBool(item, v, CompareEQ)
@@ -252,7 +293,7 @@ func tupleContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
 	}
-	if _, ok := args[0].(*Tuple); !ok {
+	if !isTupleOrSubclass(args[0]) {
 		return nil, fmt.Errorf("TypeError: descriptor '__contains__' requires a 'tuple' object")
 	}
 	found, err := tupleContains(args[0], args[1])
@@ -266,11 +307,10 @@ func tupleGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
 	}
-	t, ok := args[0].(*Tuple)
-	if !ok {
+	if !isTupleOrSubclass(args[0]) {
 		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'tuple' object")
 	}
-	return GetItem(t, args[1])
+	return tupleSubscript(args[0], args[1])
 }
 
 // tupleAddMethod backs tuple.__add__. Returns NotImplemented when other
@@ -281,7 +321,7 @@ func tupleAddMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __add__() takes exactly one argument (%d given)", len(args)-1)
 	}
-	if _, ok := args[1].(*Tuple); !ok {
+	if !isTupleOrSubclass(args[1]) {
 		return NotImplemented(), nil
 	}
 	return tupleConcat(args[0], args[1])
@@ -314,11 +354,11 @@ func tupleLenMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
 	}
-	t, ok := args[0].(*Tuple)
+	items, ok := tupleItemsOf(args[0])
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__len__' requires a 'tuple' object")
 	}
-	return NewInt(int64(t.Len())), nil
+	return NewInt(int64(len(items))), nil
 }
 
 func tupleReprMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -365,9 +405,16 @@ func tupleRepr(o Object) (string, error) {
 // constants are taken straight from cpython/Objects/tupleobject.c so
 // the output matches CPython byte for byte.
 //
-// CPython: Objects/tupleobject.c:L329 tuplehash
+// The result is cached in t.hashValue after the first computation,
+// matching CPython's ob_hash caching in PyTupleObject so that repeated
+// hash(some_tuple) calls do not re-invoke element __hash__ methods.
+//
+// CPython: Objects/tupleobject.c:329 tuplehash (ob_hash cache)
 func tupleHash(o Object) (int64, error) {
 	t := o.(*Tuple)
+	if t.hashValid {
+		return t.hashValue, nil
+	}
 	const (
 		p1 uint64 = 11400714785074694791
 		p2 uint64 = 14029467366897019727
@@ -385,10 +432,13 @@ func tupleHash(o Object) (int64, error) {
 		acc *= p1
 	}
 	acc += uint64(len(t.items)) ^ (p5 ^ 3527539)
-	if int64(acc) == -1 {
-		return 1546275796, nil
+	result := int64(acc)
+	if result == -1 {
+		result = 1546275796
 	}
-	return int64(acc), nil
+	t.hashValid = true
+	t.hashValue = result
+	return result, nil
 }
 
 // tupleRichCmp ports tuplerichcompare: EQ/NE compare length+element-wise,
@@ -467,14 +517,14 @@ func tupleEq(a, b *Tuple) (bool, error) {
 //
 // CPython: Objects/tupleobject.c:L625 tupleconcat
 func tupleConcat(a, b Object) (Object, error) {
-	at := a.(*Tuple)
-	bt, ok := b.(*Tuple)
+	aitems, _ := tupleItemsOf(a)
+	bitems, ok := tupleItemsOf(b)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: can only concatenate tuple (not %q) to tuple", typeNameOf(b))
 	}
-	out := make([]Object, 0, len(at.items)+len(bt.items))
-	out = append(out, at.items...)
-	out = append(out, bt.items...)
+	out := make([]Object, 0, len(aitems)+len(bitems))
+	out = append(out, aitems...)
+	out = append(out, bitems...)
 	return NewTuple(out), nil
 }
 
@@ -486,11 +536,11 @@ func tupleConcat(a, b Object) (Object, error) {
 //
 // CPython: Objects/tupleobject.c:533 tuple_repeat
 func tupleRepeat(o Object, n int) (rv Object, rerr error) {
-	t := o.(*Tuple)
-	input := len(t.items)
+	items, _ := tupleItemsOf(o)
+	input := len(items)
 	if input == 0 || n == 1 {
-		if t.Type() == TupleType {
-			return t, nil
+		if o.Type() == TupleType {
+			return o, nil
 		}
 	}
 	if input == 0 || n <= 0 {
@@ -507,7 +557,7 @@ func tupleRepeat(o Object, n int) (rv Object, rerr error) {
 	}()
 	out := make([]Object, 0, input*n)
 	for i := 0; i < n; i++ {
-		out = append(out, t.items...)
+		out = append(out, items...)
 	}
 	return NewTuple(out), nil
 }
@@ -601,7 +651,18 @@ func init() {
 }
 
 func tupleIter(o Object) (Object, error) {
-	it := &tupleIterator{src: o.(*Tuple)}
+	t, ok := o.(*Tuple)
+	if !ok {
+		// A tuple subclass (structseq) reaching the inherited tp_iter:
+		// snapshot its items into a plain tuple to drive the iterator,
+		// matching CPython where the iterator holds the tuple storage.
+		items, isTuple := tupleItemsOf(o)
+		if !isTuple {
+			return nil, fmt.Errorf("TypeError: 'iter()' requires a tuple, not '%s'", typeNameOf(o))
+		}
+		t = NewTuple(items)
+	}
+	it := &tupleIterator{src: t}
 	it.init(tupleIterType)
 	return it, nil
 }
@@ -614,12 +675,12 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: index() takes at least 1 argument")
 	}
-	t, ok := args[0].(*Tuple)
+	items, ok := tupleItemsOf(args[0])
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'index' requires a 'tuple' object")
 	}
 	target := args[1]
-	n := len(t.items)
+	n := len(items)
 	start := 0
 	stop := n
 	// start / stop go through the slice_index clinic converter, which
@@ -658,7 +719,7 @@ func tupleIndexMethod(args []Object, _ map[string]Object) (Object, error) {
 		stop = n
 	}
 	for i := start; i < stop; i++ {
-		eq, err := RichCmpBool(t.items[i], target, CompareEQ)
+		eq, err := RichCmpBool(items[i], target, CompareEQ)
 		if err != nil {
 			return nil, err
 		}
@@ -676,13 +737,13 @@ func tupleCountMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: count() takes exactly one argument (%d given)", len(args)-1)
 	}
-	t, ok := args[0].(*Tuple)
+	items, ok := tupleItemsOf(args[0])
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'count' requires a 'tuple' object")
 	}
 	target := args[1]
 	count := 0
-	for _, item := range t.items {
+	for _, item := range items {
 		eq, err := RichCmpBool(item, target, CompareEQ)
 		if err != nil {
 			return nil, err
@@ -705,12 +766,12 @@ func tupleGetNewArgsMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
 	}
-	t, ok := args[0].(*Tuple)
+	items, ok := tupleItemsOf(args[0])
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' requires a 'tuple' object")
 	}
-	cp := make([]Object, len(t.items))
-	copy(cp, t.items)
+	cp := make([]Object, len(items))
+	copy(cp, items)
 	return NewTuple([]Object{NewTuple(cp)}), nil
 }
 

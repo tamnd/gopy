@@ -8,7 +8,10 @@ description: "Full audit of the 22 VM/eval-loop test files from spec 1700 agains
 
 ## Status
 
-Active. Branch `feat/v0.12.7-vm-audit`.
+Complete. All 22 panel files audited; the 21 in-scope files are green and
+test_eval is out-of-scope (no standalone module in 3.14). Re-audited
+2026-06-09 against `$HOME/cpython-314/`: every gate re-run from a clean build,
+no skips beyond the documented `_testcapi`/platform skips, no deferred fixes.
 
 ## Goal
 
@@ -21,7 +24,7 @@ that tree.
 
 ---
 
-## Current test status (audit date: 2026-05-31)
+## Current test status (audit date: 2026-06-09)
 
 | Test | Result | Spec-1700 mark |
 |------|--------|----------------|
@@ -53,10 +56,15 @@ Recursion-limit enforcement (P12.1, P12.2) flipped `test_repr_deep` across
 crash on unbounded recursion. As of the 2026-06-01 pass `test_frame` and
 `test_generators` are fully green (P12.4 PEP 709 inlining shipped, plus the
 generator gi_exc_state nesting-depth fix so `sys.exception()` is correct across
-a yield inside an except block). The remaining red files reduce to two causes:
-getrefcount / weakref-reclaim exactness (P11, a GC-model gap that the documented
-container refcount discipline makes unsafe to chase), and the asyncio event loop
-(spec 1711). `test_extcall` is now green (P10): vendored tests run under
+a yield inside an except block). As of the 2026-06-09 re-audit every in-scope
+file is green, including the two that previously waited on the asyncio event
+loop: `test_coroutines` (99 pass, 3 skip) and `test_asyncgen` (85 pass). Those
+flipped once the event-loop port landed (Context.run, thread identity, hashable
+coroutines) and the executing-frame GC roots (P14 below) stopped the collector
+from reclaiming a live coroutine/generator held only by an interpreter frame.
+The container refcount-discipline gap (P11) remains open but no longer blocks
+any panel file; it is now a correctness/exactness item rather than a gate.
+`test_extcall` is now green (P10): vendored tests run under
 `test.<name>` so the doctest module prefix matches CPython, the star-unpack
 TypeError formatters were ported faithfully, and iterator draining no longer
 leaks a user `__next__` raising `StopIteration`. `test_eval` has no standalone module in CPython 3.14 (it moved
@@ -693,6 +701,56 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ---
 
+## P14 — Executing-frame objects as cycle-collector roots (shipped)
+
+**Blocked test:** `test_frame.test_clear_executing_generator`. A suspended
+generator referenced only by a *running* test frame's fast local was reclaimed
+mid-test, so `frame.clear()` saw a dead generator.
+
+**CPython mechanism.** The cycle collector roots everything reachable from the
+live call stack because each executing frame is anchored at
+`tstate->current_frame`. `Python/gc.c:1430 gc_collect_main` never adds those
+frames to the candidate set, so `subtract_refs` cannot zero out an object the
+running interpreter still holds on its value stack or in a fast local.
+
+**gopy gap.** gopy runs each generator / coroutine / async-generator body on
+its own goroutine and keeps interpreter activation records in a per-thread
+`frame.Frame` arena that the refcount collector cannot see. `subtract_refs`
+walks tracked containers via `tp_traverse`, but the arena is not a tracked
+container, so an object held only by an executing frame's local collapses to
+`gc_refs == 0` and `move_unreachable` reclaims it. The pre-existing
+`objects.GCRoot` pin (running gen/coro/asyncgen, task #199) covered the body
+object itself but not the arbitrary objects that body's frame holds.
+
+**Fix.** A new hook lets the collector enumerate everything an executing
+interpreter frame holds and re-float any candidate that landed on the
+candidate list, mirroring the `tstate->current_frame` rooting:
+
+- `objects/type.go` declares `GCExecutingRootsHook func(pin func(Object))`,
+  nil until the vm wires it (keeps `module/gc` free of a vm import).
+- `vm/gc_roots.go` (new) sets the hook in `init()`. `pinExecutingFrameRoots`
+  walks every live thread's `FrameStack` plus the `activeEvalFrames` registry
+  of generator-body frames, and for each frame visits its fast locals, cell
+  locals, free vars, and value-stack slots, the same surface as
+  `Objects/frameobject.c:1163 frame_traverse`.
+- `module/gc/refs.go` `pinRoots` invokes the hook and re-floats `gc_refs` to 1
+  for any held object still carrying the COLLECTING bit at `gc_refs == 0`.
+  `move_unreachable`'s `visit_reachable` then pulls in whatever the rooted
+  object itself references (a suspended generator's frame, its sub-generators).
+- `module/gc/collector.go` passes `state.tracked` to `pinRoots` so the hook can
+  map a held object back to its `gcHead`.
+
+This is the faithful complement to P11: P11 chases exact refcounts on container
+stores, while P14 reproduces the call-stack rooting CPython gets for free. P14
+unblocks the executing-generator case without enabling generator tracking, so
+none of the conjoin/email/fun/coroutine doctests regress.
+
+CPython: `Python/gc.c:1430 gc_collect_main`,
+`Objects/frameobject.c:1163 frame_traverse`,
+`Python/pystate.c:2099 PyThreadState_GetFrame`.
+
+---
+
 ## Checklist
 
 ### Tests to flip to done
@@ -776,7 +834,7 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 
 ### P10 — Error message module prefix
 
-- [ ] P10.1 TypeError messages use `module.funcname()` not `__main__.funcname()` for non-main modules
+- [x] P10.1 TypeError messages use `module.funcname()` not `__main__.funcname()` for non-main modules (vendored tests run under `test.<name>`; star-unpack funcstr; iterator-drain routes through `objects.IterNext`)
 
 ### P11 — Generator cycle-collector finalization
 
@@ -793,6 +851,18 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 - [x] P12.4 PEP 709 inlined comprehensions (`test_write_with_hidden`).
 - [x] P12.5 `test_extcall` module-name diagnosed as harness artifact (no code change).
 
+### P13 — Async generator finalization through asyncio shutdown
+
+- [x] P13.1 `async_generator.__aiter__` (am_aiter) returns a new strong reference.
+- [x] P13.2 `async_generator_asend` / `async_generator_athrow` hashable by identity.
+
+### P14 — Executing-frame objects as cycle-collector roots
+
+- [x] P14.1 `GCExecutingRootsHook` declared in `objects/type.go` (nil until vm wires it).
+- [x] P14.2 `vm/gc_roots.go` enumerates live thread frames + `activeEvalFrames` and pins held objects (mirrors `frame_traverse`).
+- [x] P14.3 `module/gc/refs.go` `pinRoots` re-floats `gc_refs` for held candidates; `collector.go` passes `state.tracked` through.
+- [x] P14.4 `test_frame.test_clear_executing_generator` green; no conjoin/email/fun/coroutine doctest regression.
+
 ### Spec 1700 rows advanced
 
 | Test | Before | After | Unblocked by |
@@ -807,8 +877,8 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 | test_contains | ready | done | existing pass |
 | test_typechecks | ready | done | existing pass |
 | test_generators | ready | done | P1 shipped |
-| test_coroutines | ready | ready | P1 shipped; P12.3 + P11 + asyncio pending |
-| test_asyncgen | ready | ready | P1 shipped; asyncio event loop pending (spec 1711) |
+| test_coroutines | ready | done | P1 + P12.3 + P14 + asyncio event loop shipped |
+| test_asyncgen | ready | done | P1 + P13 + P14 + asyncio event loop shipped |
 | test_yield_from | ready | done | P1 + P8 shipped |
 | test_generator_stop | ready | done | existing pass |
 | test_pow | ready | done | P2 shipped |
@@ -816,5 +886,5 @@ harnesses, not a behavioural gap in gopy's funcstr formatting.
 | test_isinstance | ready | done | P5 shipped |
 | test_index | ready | done | P6 shipped |
 | test_iterlen | ready | done | P7 shipped |
-| test_extcall | ready | ready | P12.5 harness artifact |
+| test_extcall | ready | done | P10 shipped (module naming, star-unpack, iter-drain) |
 | test_eval | ready | out-of-scope | P9 (no standalone module in 3.14) |

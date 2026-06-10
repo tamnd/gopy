@@ -78,9 +78,15 @@ const (
 //
 // CPython: Python/compile.c compiler_unit
 type Unit struct {
-	Name                string
-	Qualname            string
-	ScopeType           symtable.Block
+	Name      string
+	Qualname  string
+	ScopeType symtable.Block
+	// Ste is the symtable Entry this unit was entered from. Kept so
+	// compiler_set_qualname's force_global lookup can resolve the new
+	// scope's name against the parent entry's symbol scopes.
+	//
+	// CPython: Python/compile.c compiler_unit.u_ste
+	Ste                 *symtable.Entry
 	Argcount            int
 	PosOnlyArgCount     int
 	KwOnlyArgCount      int
@@ -289,6 +295,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 		Name:        name,
 		Qualname:    buildQualname(c.units, name, sc.Type),
 		ScopeType:   sc.Type,
+		Ste:         sc,
 		FirstLineno: firstLine,
 		Seq:         &Sequence{},
 		FastHidden:  map[string]bool{},
@@ -454,6 +461,21 @@ func buildQualname(stack []*Unit, name string, scopeType symtable.Block) string 
 			return name
 		}
 		parent = stack[len(stack)-1]
+	}
+	// force_global: when the new scope is a function or class whose name
+	// resolves to GLOBAL_EXPLICIT in the parent symtable entry (a `global`
+	// declaration of that name in the parent), the qualname is just the
+	// bare name with no parent prefix. CPython asserts the scope is never
+	// GLOBAL_IMPLICIT here.
+	//
+	// CPython: Python/compile.c:259 compiler_set_qualname (force_global)
+	if scopeType == symtable.FunctionBlock || scopeType == symtable.ClassBlock {
+		if parent.Ste != nil {
+			mangled := symtable.Mangle(parent.Private, name)
+			if parent.Ste.GetScope(mangled) == symtable.GlobalExplicit {
+				return name
+			}
+		}
 	}
 	if parent.ScopeType == symtable.ModuleBlock {
 		return name

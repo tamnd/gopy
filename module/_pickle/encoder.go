@@ -34,6 +34,7 @@ import (
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	sys "github.com/tamnd/gopy/module/sys"
 )
 
 // pickler holds the in-progress write buffer for a single dump cycle.
@@ -49,6 +50,12 @@ type pickler struct {
 	bin        bool
 	framing    bool
 	frameStart int
+	// depth counts nested save() calls. Bounded by sys.getrecursionlimit()
+	// so that a self-referential object raises RecursionError instead of
+	// overflowing the goroutine stack.
+	//
+	// CPython: Modules/_pickle.c:4390 Pickler_save (Py_EnterRecursiveCall)
+	depth int
 	// memo maps an object's identity to its memo index. The keys are
 	// interface values whose dynamic type is a pointer, so map equality
 	// degenerates into pointer identity. CPython's PyMemoTable uses raw
@@ -449,6 +456,17 @@ func (p *pickler) memoGet(obj objects.Object) error {
 //
 // CPython: Modules/_pickle.c:4401 save
 func (p *pickler) save(obj objects.Object) error {
+	// Mirror CPython's Pickler_save which calls Py_EnterRecursiveCall so that
+	// self-referential objects raise RecursionError instead of crashing.
+	//
+	// CPython: Modules/_pickle.c:4390 Pickler_save (Py_EnterRecursiveCall)
+	p.depth++
+	if p.depth > sys.RecursionLimit() {
+		p.depth--
+		return fmt.Errorf("RecursionError: maximum recursion depth exceeded while pickling an object")
+	}
+	defer func() { p.depth-- }()
+
 	if obj == nil {
 		return errors.New("PicklingError: nil object")
 	}
@@ -627,11 +645,16 @@ func objReachableAsGlobal(obj objects.Object, module, name string) bool {
 	if err != nil || modObj == nil {
 		return false
 	}
-	attr, err := objects.GetAttr(modObj, objects.NewStr(name))
-	if err != nil || attr == nil {
-		return false
+	// name may be a dotted qualname (e.g. "Class.method"); walk each segment
+	// the same way pickle._getattribute does.
+	cur := modObj
+	for _, part := range strings.Split(name, ".") {
+		cur, err = objects.GetAttr(cur, objects.NewStr(part))
+		if err != nil || cur == nil {
+			return false
+		}
 	}
-	return attr == obj
+	return cur == obj
 }
 
 // saveFunctionGlobal pickles a function as a GLOBAL / STACK_GLOBAL
@@ -703,7 +726,12 @@ func (p *pickler) saveViaReduce(obj objects.Object) error {
 	if err == nil && reduceAttr != nil {
 		result, err = objects.Call(reduceAttr, objects.NewTuple([]objects.Object{objects.NewInt(int64(p.proto))}), nil)
 		if err != nil {
-			return fmt.Errorf("PicklingError: __reduce_ex__ failed: %w", err)
+			// CPython's save() lets the exception raised by __reduce_ex__
+			// propagate unchanged (reduce_value == NULL -> goto error); it
+			// does not repaint it as a PicklingError.
+			//
+			// CPython: Modules/_pickle.c:4567 save
+			return err
 		}
 	} else {
 		reduceAttr, err = objects.GetAttr(obj, objects.NewStr("__reduce__"))
@@ -712,7 +740,7 @@ func (p *pickler) saveViaReduce(obj objects.Object) error {
 		}
 		result, err = objects.CallNoArgs(reduceAttr)
 		if err != nil {
-			return fmt.Errorf("PicklingError: __reduce__ failed: %w", err)
+			return err
 		}
 	}
 	switch rv := result.(type) {

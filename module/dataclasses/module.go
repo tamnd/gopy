@@ -537,6 +537,14 @@ func processClass(cls *objects.Type, flags dataclassFlags) (*objects.Type, error
 		objects.SetTypeDescr(cls, matchArgsAttr, objects.NewTuple(items))
 	}
 
+	// Install __replace__ so copy.replace(obj, **changes) works on this class.
+	// CPython: Lib/dataclasses.py:1150 _set_new_attribute(cls, '__replace__', _replace)
+	objects.SetTypeDescr(cls, "__replace__", objects.NewMethodDescr(cls, "__replace__", replaceBuiltin))
+
+	// CPython: Python/ceval.c — every callable returns a new reference.
+	// The CALL handler Decrefs selfOrNull after Vectorcall; if we return cls
+	// unchanged the caller's Decref fires Dealloc and clears typeDescrTable.
+	objects.Incref(cls)
 	return cls, nil
 }
 

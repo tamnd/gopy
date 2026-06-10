@@ -1216,6 +1216,13 @@ func bytesCoerceItem(item objects.Object, typeName string) (byte, error) {
 //
 // CPython: Objects/bytesobject.c:3005 PyBytes_FromObject
 func bytesFromObjectContents(x objects.Object, typeName string) ([]byte, error) {
+	// PyObject_GetBuffer is the first thing PyBytes_FromObject tries, so a
+	// released memoryview raises before any copy or iteration fallback.
+	//
+	// CPython: Objects/bytesobject.c:2818 PyBytes_FromObject
+	if err := objects.CheckBufferReleased(x); err != nil {
+		return nil, err
+	}
 	if buf, ok := objects.AsBytesLike(x); ok {
 		return append([]byte(nil), buf...), nil
 	}
@@ -1823,13 +1830,32 @@ func parseComplexString(s string) (complex128, error) {
 // "complex() arg is a malformed string" ValueError.
 var errMalformedComplex = errors.New("complex() arg is a malformed string")
 
-// memoryViewCtor ports memoryview(). Accepts a single bytes-like object
-// and returns a MemoryView wrapping it.
+// memoryViewCtor ports memoryview(object). The single argument is
+// positional-or-keyword ("object"); it is wrapped in a MemoryView through
+// the buffer protocol. Surplus positionals, an unknown keyword, or a missing
+// argument each raise TypeError, matching the Argument Clinic signature.
 //
-// CPython: Objects/memoryobject.c:930 memoryview_new_impl
-func memoryViewCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("TypeError: memoryview() takes exactly one argument (%d given)", len(args))
+// CPython: Objects/memoryobject.c:1006 memoryview.__new__
+func memoryViewCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	for k := range kwargs {
+		if k != "object" {
+			return nil, fmt.Errorf("TypeError: '%s' is an invalid keyword argument for memoryview()", k)
+		}
 	}
-	return objects.NewMemoryView(args[0])
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: memoryview() takes at most 1 argument (%d given)", len(args))
+	}
+	var obj objects.Object
+	switch {
+	case len(args) == 1:
+		if _, ok := kwargs["object"]; ok {
+			return nil, fmt.Errorf("TypeError: argument for memoryview() given by name ('object') and position (1)")
+		}
+		obj = args[0]
+	case kwargs["object"] != nil:
+		obj = kwargs["object"]
+	default:
+		return nil, fmt.Errorf("TypeError: memoryview() missing required argument 'object' (pos 1)")
+	}
+	return objects.NewMemoryView(obj)
 }

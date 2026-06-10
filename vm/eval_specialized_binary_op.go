@@ -97,11 +97,18 @@ func mulOverflow(left, right int64) (int64, bool) {
 }
 
 // pushBinaryResult finalizes a BINARY_OP fast-path hit: pop both
-// operands and push the result. CPython's _BINARY_OP_* macros end
-// with PUSH(res) after consuming left+right.
+// operands, run DECREF_INPUTS on them, and push the result. CPython's
+// _BINARY_OP_* macros end with DECREF_INPUTS()+PUSH(res) after computing
+// res from left+right. The caller owns res: arithmetic arms build a fresh
+// object while the container-element subscr arms incref the borrowed slot
+// before handing it here, so the steal in pushObject lands an owned value.
+//
+// CPython: Python/bytecodes.c BINARY_OP family (res = ...; DECREF_INPUTS())
 func (e *evalState) pushBinaryResult(res objects.Object) {
-	e.pop()
-	e.pop()
+	b := e.popObject()
+	a := e.popObject()
+	objects.Decref(a)
+	objects.Decref(b)
 	e.pushObject(res)
 }
 
@@ -230,7 +237,11 @@ func (e *evalState) fastBinaryOpSubscrListInt() (int, bool) {
 	if idx < 0 || idx >= int64(lst.Len()) {
 		return 0, false
 	}
-	e.pushBinaryResult(lst.Item(int(idx)))
+	// Item returns a borrowed slot; own it before DECREF_INPUTS drops the
+	// list so the value survives onto the stack.
+	res := lst.Item(int(idx))
+	objects.Incref(res)
+	e.pushBinaryResult(res)
 	return e.cacheAdvance(compile.BINARY_OP), true
 }
 
@@ -253,7 +264,10 @@ func (e *evalState) fastBinaryOpSubscrTupleInt() (int, bool) {
 	if idx < 0 || idx >= int64(tup.Len()) {
 		return 0, false
 	}
-	e.pushBinaryResult(tup.Item(int(idx)))
+	// Item returns a borrowed slot; own it before DECREF_INPUTS.
+	res := tup.Item(int(idx))
+	objects.Incref(res)
+	e.pushBinaryResult(res)
 	return e.cacheAdvance(compile.BINARY_OP), true
 }
 
@@ -301,6 +315,8 @@ func (e *evalState) fastBinaryOpSubscrDict() (next int, ok bool, err error) {
 		// slow handler can raise KeyError with the right shape.
 		return 0, false, nil //nolint:nilerr // intentional fast-path fallback
 	}
+	// GetItem returns a borrowed value slot; own it before DECREF_INPUTS.
+	objects.Incref(v)
 	e.pushBinaryResult(v)
 	return e.cacheAdvance(compile.BINARY_OP), true, nil
 }

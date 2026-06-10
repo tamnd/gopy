@@ -15,14 +15,15 @@ import (
 // CPython: Objects/exceptions.c:L34 BaseExceptionObject
 type Exception struct {
 	objects.Header
-	ExcType  *objects.Type
-	Args     *objects.Tuple
-	Cause    *Exception
-	Context  *Exception
-	Suppress bool
-	Notes    *objects.List
-	TB       *traceback.Traceback
-	attrs    *objects.Dict
+	ExcType    *objects.Type
+	Args       *objects.Tuple
+	Cause      *Exception
+	Context    *Exception
+	ContextSet bool // true once __context__ has been assigned by user code or Raise
+	Suppress   bool
+	Notes      *objects.List
+	TB         *traceback.Traceback
+	attrs      *objects.Dict
 
 	// StopValue stores StopIteration's separate value slot per
 	// PyStopIterationObject. CPython keeps args and value independent:
@@ -43,6 +44,31 @@ type Exception struct {
 	//
 	// CPython: Objects/exceptions.c:2670 PySyntaxErrorObject
 	SyntaxErr *SyntaxErrorState
+
+	// OSErr carries the OSError-specific PyMemberDef payload (myerrno,
+	// strerror, filename, filename2, characters_written). Non-nil only
+	// when ExcType is an OSError subclass. Populated by OSError_init
+	// through the type's tp_call / tp_new dispatch.
+	//
+	// CPython: Objects/exceptions.c:1940 PyOSErrorObject
+	OSErr *OSErrorState
+
+	// EG carries the BaseExceptionGroup-specific payload (msg, excs,
+	// excs_str). Non-nil only for exceptions built through the
+	// BaseExceptionGroup constructor (egTpNew). Groups created directly
+	// through New (the VM's CHECK_EG_MATCH / except* paths) leave it nil;
+	// egStateOf synthesizes the equivalent view from args on demand.
+	//
+	// CPython: Objects/exceptions.c:867 PyBaseExceptionGroupObject
+	EG *ExceptionGroupState
+
+	// NotesObj holds a __notes__ value that is not a plain list. CPython
+	// stores __notes__ as an ordinary instance attribute that may hold any
+	// object; add_note only requires a list when it appends. The common
+	// list case lives in Notes; NotesObj covers `exc.__notes__ = 123`.
+	//
+	// CPython: Objects/exceptions.c:296 BaseException_add_note (read/write)
+	NotesObj objects.Object
 }
 
 // AttrDict implements objects.AttrDictHolder so a Python subclass of a
@@ -110,6 +136,13 @@ func New(t *objects.Type, args *objects.Tuple) *Exception {
 		} else {
 			e.StopValue = objects.None()
 		}
+	}
+	// Track for cycle GC so the collector can walk Exception→TB→Frame chains
+	// and identify unreachable exception objects (e.g. from PUSH_EXC_INFO bugs).
+	//
+	// CPython: Objects/exceptions.c BaseException_new PyObject_GC_Track
+	if h := objects.GCTrackHook; h != nil {
+		h(e)
 	}
 	return e
 }

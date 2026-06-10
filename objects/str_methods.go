@@ -710,45 +710,46 @@ func lowerUcs4(rs []rune, i int, c rune, mapped []rune) int {
 }
 
 func StrLower(s string) string {
-	rs := []rune(s)
+	rs := strLenientRunes(s)
 	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
 	for i, c := range rs {
 		n := lowerUcs4(rs, i, c, mapped[:])
 		out = append(out, mapped[:n]...)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 func StrUpper(s string) string {
-	rs := []rune(s)
+	rs := strLenientRunes(s)
 	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
 	for _, c := range rs {
 		n := unicodetype.ToUpperFull(c, mapped[:])
 		out = append(out, mapped[:n]...)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 // StrCaseFold ports str.casefold via the full folding table.
 //
 // CPython: Objects/unicodeobject.c:10162 do_casefold
 func StrCaseFold(s string) string {
-	out := make([]rune, 0, len(s))
+	rs := strLenientRunes(s)
+	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
-	for _, c := range s {
+	for _, c := range rs {
 		n := unicodetype.ToFoldedFull(c, mapped[:])
 		out = append(out, mapped[:n]...)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 // StrSwapCase swaps each character's case.
 //
 // CPython: Objects/unicodeobject.c:10104 do_swapcase
 func StrSwapCase(s string) string {
-	rs := []rune(s)
+	rs := strLenientRunes(s)
 	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
 	for i, c := range rs {
@@ -764,7 +765,7 @@ func StrSwapCase(s string) string {
 		}
 		out = append(out, mapped[:n]...)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 // StrCapitalize ports str.capitalize: titlecase the first character,
@@ -775,7 +776,7 @@ func StrCapitalize(s string) string {
 	if s == "" {
 		return s
 	}
-	rs := []rune(s)
+	rs := strLenientRunes(s)
 	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
 	n := unicodetype.ToTitleFull(rs[0], mapped[:])
@@ -784,7 +785,7 @@ func StrCapitalize(s string) string {
 		n = lowerUcs4(rs, i, rs[i], mapped[:])
 		out = append(out, mapped[:n]...)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 // StrTitle ports str.title: the first cased character of each word is
@@ -793,7 +794,7 @@ func StrCapitalize(s string) string {
 //
 // CPython: Objects/unicodeobject.c:10179 do_title
 func StrTitle(s string) string {
-	rs := []rune(s)
+	rs := strLenientRunes(s)
 	out := make([]rune, 0, len(rs))
 	var mapped [3]rune
 	previousIsCased := false
@@ -807,7 +808,7 @@ func StrTitle(s string) string {
 		out = append(out, mapped[:n]...)
 		previousIsCased = IsCasedRune(c)
 	}
-	return string(out)
+	return RunesToStr(out)
 }
 
 // StrCenter / StrLJust / StrRJust pad to width with fillchar.

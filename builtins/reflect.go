@@ -95,9 +95,15 @@ func Hash(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: hash() takes exactly one argument (%d given)", len(args))
 	}
+	// PyObject_Hash already raises "unhashable type" when tp_hash is NULL;
+	// any other error (a writable memoryview's ValueError, a __hash__ that
+	// raised) must propagate unchanged rather than be repainted as a
+	// TypeError.
+	//
+	// CPython: Python/bltinmodule.c:1775 builtin_hash
 	h, err := objects.Hash(args[0])
 	if err != nil {
-		return nil, fmt.Errorf("TypeError: unhashable type: '%s'", args[0].Type().Name)
+		return nil, err
 	}
 	return objects.NewInt(h), nil
 }

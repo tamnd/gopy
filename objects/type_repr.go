@@ -13,6 +13,35 @@ import "fmt"
 func init() {
 	typeType.Repr = typeRepr
 	typeType.Str = typeRepr
+	// Register __repr__ and __str__ as descriptors so ABCMeta subclasses
+	// (whose metaclass is a user-level Python class) inherit them via
+	// callDunderNoArgObject MRO walk.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs TPSLOT __repr__
+	SetTypeDescr(typeType, "__repr__", NewMethodDescr(typeType, "__repr__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) == 0 {
+				return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'type' argument")
+			}
+			s, err := typeRepr(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewStr(s), nil
+		},
+	))
+	SetTypeDescr(typeType, "__str__", NewMethodDescr(typeType, "__str__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) == 0 {
+				return nil, fmt.Errorf("TypeError: descriptor '__str__' requires a 'type' argument")
+			}
+			s, err := typeRepr(args[0])
+			if err != nil {
+				return nil, err
+			}
+			return NewStr(s), nil
+		},
+	))
 }
 
 // typeRepr is the tp_repr slot for Type. Mirrors type_repr's two

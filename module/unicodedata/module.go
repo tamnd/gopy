@@ -77,8 +77,10 @@ func argChar(fname string, args []objects.Object) (rune, error) {
 	if !ok {
 		return 0, fmt.Errorf("TypeError: %s() argument 1 must be a unicode character, not %s", fname, args[0].Type().Name)
 	}
-	r := s.Value()
-	rs := []rune(r)
+	// Read through Runes so a lone surrogate (stored as 3-byte
+	// pseudo-UTF-8) counts as one code point instead of decoding to
+	// three U+FFFD runes.
+	rs := s.Runes()
 	if len(rs) != 1 {
 		return 0, fmt.Errorf("TypeError: %s() argument 1 must be a unicode character, not str of length %d", fname, len(rs))
 	}

@@ -339,12 +339,14 @@ func SequenceList(v Object) (*List, error) {
 }
 
 // SequenceTuple consumes v's iterator and returns a fresh tuple.
-// PyTuple_CheckExact returns the input unchanged in CPython; gopy
-// matches that since Tuple is immutable.
+// CPython fast-paths only PyTuple_CheckExact (exact tuple type, not
+// subclasses): a tuple subclass (namedtuple, structseq) must go
+// through the iterator path so a plain tuple copy is returned rather
+// than the subclass instance itself.
 //
 // CPython: Objects/abstract.c:1996 PySequence_Tuple
 func SequenceTuple(v Object) (*Tuple, error) {
-	if t, ok := v.(*Tuple); ok {
+	if t, ok := v.(*Tuple); ok && t.Type() == TupleType {
 		return t, nil
 	}
 	l, err := SequenceList(v)

@@ -121,6 +121,13 @@ func baseExceptionAddNote(args []objects.Object, _ map[string]objects.Object) (o
 	if args[1] == nil || args[1].Type() != objects.StrType() {
 		return nil, errors.New("TypeError: note must be a str")
 	}
+	// __notes__ must be a list (or absent). A non-list value assigned by
+	// user code lives in NotesObj; appending to it is an error.
+	//
+	// CPython: Objects/exceptions.c:296 BaseException_add_note
+	if e.NotesObj != nil {
+		return nil, errors.New("TypeError: Cannot add note: __notes__ is not a list")
+	}
 	if e.Notes == nil {
 		e.Notes = objects.NewList(nil)
 	}
@@ -135,6 +142,9 @@ func baseExceptionAddNote(args []objects.Object, _ map[string]objects.Object) (o
 // CPython: Objects/exceptions.c:298 BaseException_add_note_impl (read path)
 func notesGet(owner objects.Object) (objects.Object, error) {
 	e := owner.(*Exception)
+	if e.NotesObj != nil {
+		return e.NotesObj, nil
+	}
 	if e.Notes == nil {
 		return nil, errors.New("AttributeError: __notes__")
 	}
@@ -149,13 +159,18 @@ func notesSet(owner objects.Object, value objects.Object) error {
 	e := owner.(*Exception)
 	if value == nil {
 		e.Notes = nil
+		e.NotesObj = nil
 		return nil
 	}
-	lst, ok := value.(*objects.List)
-	if !ok {
-		return errors.New("TypeError: __notes__ must be a list")
+	if lst, ok := value.(*objects.List); ok {
+		e.Notes = lst
+		e.NotesObj = nil
+		return nil
 	}
-	e.Notes = lst
+	// CPython lets __notes__ hold any object; the list requirement is
+	// enforced only by add_note when it reads the value back.
+	e.NotesObj = value
+	e.Notes = nil
 	return nil
 }
 
@@ -275,6 +290,7 @@ func contextSet(owner objects.Object, value objects.Object) error {
 	}
 	if objects.IsNone(value) {
 		e.Context = nil
+		e.ContextSet = true // user explicitly set to None; block implicit chaining
 		return nil
 	}
 	exc, ok := value.(*Exception)
@@ -282,6 +298,7 @@ func contextSet(owner objects.Object, value objects.Object) error {
 		return errors.New("TypeError: exception context must be None or derive from BaseException")
 	}
 	e.Context = exc
+	e.ContextSet = true
 	return nil
 }
 

@@ -40,7 +40,7 @@ var (
 	PyExc_IncompleteInputError = newSyntaxExcType("_IncompleteInputError", []*objects.Type{PyExc_SyntaxError})
 )
 
-// newSyntaxExcType wires every SyntaxError subclass to syntaxExcCall so
+// newSyntaxExcType wires every SyntaxError subclass to syntaxExcTpNew so
 // the Python-level call `SyntaxError(msg, (filename, lineno, ...))`
 // flows through SyntaxError_init. excStr remains the default for
 // no-arg / single-arg paths; multi-arg renders via syntaxStr.
@@ -48,7 +48,6 @@ var (
 // CPython: Objects/exceptions.c:2898 ComplexExtendsException SyntaxError
 func newSyntaxExcType(name string, bases []*objects.Type) *objects.Type {
 	t := newExcType(name, bases)
-	t.Call = syntaxExcCall
 	t.TpNew = syntaxExcTpNew
 	t.Str = syntaxStr
 	return t
@@ -61,18 +60,6 @@ func newSyntaxExcType(name string, bases []*objects.Type) *objects.Type {
 // CPython: Objects/exceptions.c:42 BaseException_new
 // CPython: Objects/exceptions.c:2713 SyntaxError_init
 func syntaxExcTpNew(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	e := New(cls, objects.NewTuple(args))
-	if err := syntaxErrorInit(e, args); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
-// syntaxExcCall is the tp_call dispatch for every SyntaxError subclass.
-//
-// CPython: Objects/exceptions.c:2713 SyntaxError_init
-func syntaxExcCall(callable objects.Object, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	cls, _ := callable.(*objects.Type)
 	e := New(cls, objects.NewTuple(args))
 	if err := syntaxErrorInit(e, args); err != nil {
 		return nil, err

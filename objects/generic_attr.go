@@ -9,7 +9,9 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // AttributeErrorFactory is wired by the errors package after init so that
 // GenericGetAttr can produce a rich AttributeError with .name and .obj set.
@@ -34,6 +36,53 @@ type AttrDictHolder interface {
 	EnsureAttrDict() *Dict
 }
 
+// visitAttrDict feeds an AttrDictHolder's managed __dict__ to a cycle
+// collector visitor. Every Dict is itself gc-tracked and traverses its
+// own entries, so visiting the dict object (rather than walking its
+// entries inline) keeps the refcount accounting consistent with the
+// dict's tp_traverse. Built-in tp_traverse slots call this in addition
+// to visiting their own payload (list items, set members) so a cycle
+// that runs through a subclass instance's attributes is reachable.
+//
+// CPython: Objects/typeobject.c:1356 subtype_traverse (Py_VISIT(*dictptr))
+func visitAttrDict(o Object, visit Visitor) error {
+	h, ok := o.(AttrDictHolder)
+	if !ok {
+		return nil
+	}
+	d := h.AttrDict()
+	if d == nil {
+		return nil
+	}
+	return visit(d)
+}
+
+// attrDictHolderTraverse is the tp_traverse for a built-in type whose
+// only collectable references live in the managed __dict__ a subclass
+// picks up (bytes, str, float, bytearray, property, weakref). Plain
+// (non-subclass) instances never allocate the dict, so the visit is a
+// no-op for them. Mirrors subtype_traverse for immutable bases that
+// contribute no payload of their own.
+//
+// CPython: Objects/typeobject.c:1356 subtype_traverse
+func attrDictHolderTraverse(o Object, visit Visitor) error {
+	return visitAttrDict(o, visit)
+}
+
+// trackAttrDictHolder registers a subclass instance with the cycle
+// collector the first time it materializes its managed __dict__. An
+// instance with no attributes references nothing mutable and cannot
+// anchor a cycle, so gopy defers the track to first attribute store
+// rather than to construction. GCTrackHook is idempotent, so callers may
+// invoke this unconditionally from EnsureAttrDict.
+//
+// CPython: Objects/typeobject.c:1748 type_call _PyObject_GC_TRACK
+func trackAttrDictHolder(o Object) {
+	if h := GCTrackHook; h != nil {
+		h(o)
+	}
+}
+
 // GenericGetAttr is the default Getattro slot. It looks up name in
 // the type's MRO and:
 //   - calls DescrGet if the descriptor is a data descriptor (has both
@@ -52,7 +101,8 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
-	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
 	if descr != nil {
 		dt := descr.Type()
 		if dt.DescrGet != nil && dt.DescrSet != nil {
@@ -70,6 +120,9 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 		if dt.DescrGet != nil {
 			return dt.DescrGet(descr, o, tp)
 		}
+		// CPython: Objects/object.c:995 _PyObject_GenericGetAttrWithDict
+		// Py_INCREF(res) before returning a plain type-level attribute.
+		Incref(descr)
 		return descr, nil
 	}
 	// CPython: Objects/typeobject.c:7254 object_getsets — every object
@@ -102,47 +155,79 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 			return dset(descr, o, value)
 		}
 	}
-	if inst, ok := o.(*Instance); ok && inst.dict != nil {
-		if value == nil {
-			if _, err := inst.dict.GetItem(name); err != nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			inst.inlineValid = false
-			return inst.dict.DelItem(name)
-		}
-		// Mirror instanceSetAttr: any name first stored on an instance
-		// must enter the type's shared-keys set so the LOAD_ATTR
-		// specializer refuses NONDESCRIPTOR_WITH_VALUES for it. Frozen
-		// dataclass __init__ writes through object.__setattr__, which
-		// lands here instead of instanceSetAttr, so the AddCachedKey
-		// hook has to live in both places.
-		//
-		// CPython: Objects/dictobject.c:5132 insert_split_key
-		if u, ok := name.(*Unicode); ok {
-			tp.AddCachedKey(u.v)
-		}
-		return inst.dict.SetItem(name, value)
+	if inst, ok := o.(*Instance); ok {
+		return setAttrOnInstance(inst, tp, name, value)
 	}
 	if h, ok := o.(AttrDictHolder); ok && tp.HasDict {
-		if value == nil {
-			d := h.AttrDict()
-			if d == nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			if _, err := d.GetItem(name); err != nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
-			}
-			return d.DelItem(name)
-		}
-		if u, ok := name.(*Unicode); ok {
-			tp.AddCachedKey(u.v)
-		}
-		return h.EnsureAttrDict().SetItem(name, value)
+		return setAttrOnHolder(h, tp, name, value)
 	}
 	if value == nil {
 		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
 	}
 	return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+}
+
+// setAttrOnInstance stores or deletes name on an *Instance's managed dict,
+// materializing it lazily on first store. Split out of GenericSetAttr to keep
+// the slot dispatcher's cognitive complexity in check.
+//
+// CPython: Objects/object.c:1693 _PyObject_GenericSetAttrWithDict (instance dict path)
+func setAttrOnInstance(inst *Instance, tp *Type, name, value Object) error {
+	if inst.dict == nil {
+		if !tp.HasDict {
+			if value == nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			}
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		if value == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		// LAZY_DICT: first store materializes the managed dict.
+		//
+		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+		inst.dict = NewDict()
+	}
+	if value == nil {
+		if _, err := inst.dict.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		inst.inlineValid = false
+		return inst.dict.DelItem(name)
+	}
+	// Mirror instanceSetAttr: any name first stored on an instance
+	// must enter the type's shared-keys set so the LOAD_ATTR
+	// specializer refuses NONDESCRIPTOR_WITH_VALUES for it. Frozen
+	// dataclass __init__ writes through object.__setattr__, which
+	// lands here instead of instanceSetAttr, so the AddCachedKey
+	// hook has to live in both places.
+	//
+	// CPython: Objects/dictobject.c:5132 insert_split_key
+	if u, ok := name.(*Unicode); ok {
+		tp.AddCachedKey(u.v)
+	}
+	return inst.dict.SetItem(name, value)
+}
+
+// setAttrOnHolder stores or deletes name on an AttrDictHolder's attribute
+// dict. Split out of GenericSetAttr for the same reason as setAttrOnInstance.
+//
+// CPython: Objects/object.c:1693 _PyObject_GenericSetAttrWithDict (tp_dictoffset path)
+func setAttrOnHolder(h AttrDictHolder, tp *Type, name, value Object) error {
+	if value == nil {
+		d := h.AttrDict()
+		if d == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		if _, err := d.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		}
+		return d.DelItem(name)
+	}
+	if u, ok := name.(*Unicode); ok {
+		tp.AddCachedKey(u.v)
+	}
+	return h.EnsureAttrDict().SetItem(name, value)
 }
 
 // instanceAttrDict returns the per-instance attribute dict for o (an

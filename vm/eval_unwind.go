@@ -23,6 +23,7 @@ import (
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/future"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/module/gc"
 	"github.com/tamnd/gopy/objects"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/symtable"
@@ -115,47 +116,10 @@ func synthesizeException(err error) *pyerrors.Exception {
 	if errors.Is(err, objects.ErrGeneratorExit) {
 		return pyerrors.New(pyerrors.PyExc_GeneratorExit, nil)
 	}
-	// Structured parser SyntaxError: lift filename/lineno/offset/text
-	// into the (msg, info) 2-arg form so the SyntaxError instance
-	// carries the full set of attributes Python user code expects.
-	// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
-	// (PyErr_SetObject builds the typed instance from these fields).
-	var se *parsererrors.SyntaxError
-	if errors.As(err, &se) {
-		return pyerrors.SyntaxFromParser(se)
-	}
-	// Structured symtable SyntaxError: same idea as the parser branch,
-	// but the location data lives in symtable.SyntaxError.Pos rather
-	// than the parser record.
-	var stse *symtable.SyntaxError
-	if errors.As(err, &stse) {
-		return pyerrors.SyntaxFromSymtable(stse)
-	}
-	// Structured compile-time SyntaxError: codegen visitor passes
-	// surface _PyCompile_Error through compile.SyntaxError with
-	// filename / ast.Pos already pinned to the offending node.
-	// CPython: Python/compile.c:1191 _PyCompile_Error
-	var cse *compile.SyntaxError
-	if errors.As(err, &cse) {
-		return pyerrors.SyntaxFromCompile(cse)
-	}
-	// Structured future-scanner SyntaxError: future_check_features raises
-	// for "braces" (easter egg) and unknown feature names.
-	// CPython: Python/future.c:L8 future_check_features
-	var fse *future.SyntaxError
-	if errors.As(err, &fse) {
-		return pyerrors.SyntaxFromFuture(fse)
-	}
-	// Structured codec UnicodeEncodeError: carries encoding, object, start,
-	// end, reason so Python code can access exc.object[exc.start:exc.end].
-	// CPython: Objects/exceptions.c:3040 UnicodeError_init
-	var uee *codecs.UnicodeEncodeErr
-	if errors.As(err, &uee) {
-		return pyerrors.NewUnicodeEncodeError(uee.Encoding, objects.NewStr(uee.Object), uee.Start, uee.End, uee.Reason)
-	}
-	var ude *codecs.UnicodeDecodeErr
-	if errors.As(err, &ude) {
-		return pyerrors.NewUnicodeDecodeError(ude.Encoding, ude.Object, ude.Start, ude.End, ude.Reason)
+	// Structured errors (SyntaxError variants, codec errors) carry their
+	// own location/codec fields and convert directly to a typed instance.
+	if exc, ok := synthesizeStructured(err); ok {
+		return exc
 	}
 	msg := err.Error()
 	// Drop a leading "vm: " prefix added by some callers.
@@ -164,6 +128,11 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}
 	for prefix, typ := range errorPrefixToType {
 		if strings.HasPrefix(msg, prefix) {
+			if isOSErrorType(typ) {
+				if exc := buildOSErrorFromGo(err); exc != nil {
+					return exc
+				}
+			}
 			typ = promoteOSErrorByErrno(typ, err)
 			return buildExceptionForType(typ, strings.TrimSpace(msg[len(prefix):]))
 		}
@@ -198,6 +167,56 @@ func synthesizeException(err error) *pyerrors.Exception {
 	}))
 }
 
+// synthesizeStructured converts the Go error types that carry their own
+// structured fields (the SyntaxError family plus the codec errors) into a
+// typed Python exception. ok is false when err is not one of these shapes, so
+// the caller falls through to prefix-based message parsing.
+func synthesizeStructured(err error) (*pyerrors.Exception, bool) {
+	// Structured parser SyntaxError: lift filename/lineno/offset/text
+	// into the (msg, info) 2-arg form so the SyntaxError instance
+	// carries the full set of attributes Python user code expects.
+	// CPython: Parser/pegen_errors.c:317 _PyPegen_raise_error_known_location
+	// (PyErr_SetObject builds the typed instance from these fields).
+	var se *parsererrors.SyntaxError
+	if errors.As(err, &se) {
+		return pyerrors.SyntaxFromParser(se), true
+	}
+	// Structured symtable SyntaxError: same idea as the parser branch,
+	// but the location data lives in symtable.SyntaxError.Pos rather
+	// than the parser record.
+	var stse *symtable.SyntaxError
+	if errors.As(err, &stse) {
+		return pyerrors.SyntaxFromSymtable(stse), true
+	}
+	// Structured compile-time SyntaxError: codegen visitor passes
+	// surface _PyCompile_Error through compile.SyntaxError with
+	// filename / ast.Pos already pinned to the offending node.
+	// CPython: Python/compile.c:1191 _PyCompile_Error
+	var cse *compile.SyntaxError
+	if errors.As(err, &cse) {
+		return pyerrors.SyntaxFromCompile(cse), true
+	}
+	// Structured future-scanner SyntaxError: future_check_features raises
+	// for "braces" (easter egg) and unknown feature names.
+	// CPython: Python/future.c:L8 future_check_features
+	var fse *future.SyntaxError
+	if errors.As(err, &fse) {
+		return pyerrors.SyntaxFromFuture(fse), true
+	}
+	// Structured codec UnicodeEncodeError: carries encoding, object, start,
+	// end, reason so Python code can access exc.object[exc.start:exc.end].
+	// CPython: Objects/exceptions.c:3040 UnicodeError_init
+	var uee *codecs.UnicodeEncodeErr
+	if errors.As(err, &uee) {
+		return pyerrors.NewUnicodeEncodeError(uee.Encoding, objects.NewStr(uee.Object), uee.Start, uee.End, uee.Reason), true
+	}
+	var ude *codecs.UnicodeDecodeErr
+	if errors.As(err, &ude) {
+		return pyerrors.NewUnicodeDecodeError(ude.Encoding, ude.Object, ude.Start, ude.End, ude.Reason), true
+	}
+	return nil, false
+}
+
 // buildExceptionForType is the single-arg constructor path used by the
 // prefix-table arms. Most exception types are happy with pyerrors.New
 // (which calls BaseException_init via tp.Init), but the SyntaxError
@@ -207,12 +226,12 @@ func synthesizeException(err error) *pyerrors.Exception {
 // "<no detail available>" string.
 //
 // CPython: Objects/exceptions.c:2713 SyntaxError_init runs through the
-// type's tp_init / tp_call, so a bare PyObject_New does not populate
+// type's tp_new / tp_init, so a bare PyObject_New does not populate
 // the members.
 func buildExceptionForType(typ *objects.Type, msg string) *pyerrors.Exception {
 	args := []objects.Object{objects.NewStr(msg)}
 	if isSyntaxErrorType(typ) {
-		out, err := typ.Call(typ, args, nil)
+		out, err := objects.Call(typ, objects.NewTuple(args), nil)
 		if err == nil {
 			if exc, ok := out.(*pyerrors.Exception); ok {
 				return exc
@@ -254,6 +273,60 @@ func attachExcNameAttr(exc *pyerrors.Exception, typ *objects.Type, msg string) {
 			}
 		}
 	}
+}
+
+// buildOSErrorFromGo reconstructs the full OSError instance CPython
+// would raise from a failed syscall. It pulls the errno, strerror and
+// filename(s) out of the Go error (os.PathError carries one filename,
+// os.LinkError carries two) and runs them through errors.NewOSError,
+// which promotes to the errnomap subclass and populates exc.errno /
+// exc.strerror / exc.filename. Returns nil when the error carries no
+// errno, so the caller falls back to the plain message path.
+//
+// CPython: Python/errors.c:778 PyErr_SetFromErrnoWithFilenameObjects
+func buildOSErrorFromGo(err error) *pyerrors.Exception {
+	var errno syscall.Errno
+	var filename, filename2 string
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	var sysErr *os.SyscallError
+	switch {
+	case errors.As(err, &pathErr):
+		filename = pathErr.Path
+		_ = errors.As(pathErr.Err, &errno)
+	case errors.As(err, &linkErr):
+		filename = linkErr.Old
+		filename2 = linkErr.New
+		_ = errors.As(linkErr.Err, &errno)
+	case errors.As(err, &sysErr):
+		_ = errors.As(sysErr.Err, &errno)
+	default:
+		if !errors.As(err, &errno) {
+			return nil
+		}
+	}
+	if errno == 0 {
+		return nil
+	}
+	return pyerrors.NewOSError(int(errno), strerrorString(errno), filename, filename2)
+}
+
+// strerrorString renders the errno's message the way CPython's
+// os.strerror does: the platform strerror text with a leading capital
+// letter ("No such file or directory"). Go's syscall.Errno.Error()
+// returns the same text lower-cased, so we upcase the first rune.
+//
+// CPython: Modules/posixmodule.c os_strerror_impl
+func strerrorString(errno syscall.Errno) string {
+	s := errno.Error()
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if r[0] >= 'a' && r[0] <= 'z' {
+		r[0] -= 'a' - 'A'
+	}
+	return string(r)
 }
 
 // promoteOSErrorByErrno mirrors CPython's PyErr_SetFromErrnoWithFilename
@@ -494,6 +567,7 @@ func (e *evalState) attachFrameTraceback() {
 	// frames.
 	//
 	// CPython: Objects/frameobject.c:1109 _PyFrame_New_NoTrack
+	// CPython: Python/traceback.c:154 PyTraceBack_Here PyObject_GC_Track
 	tb := &traceback.Traceback{
 		Entry:   entry,
 		Next:    exc.TB,
@@ -501,6 +575,7 @@ func (e *evalState) attachFrameTraceback() {
 		TbLasti: off,
 	}
 	tb.Init(traceback.Type)
+	gc.TrackSilent(tb)
 	exc.TB = tb
 }
 

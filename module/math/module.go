@@ -1064,14 +1064,21 @@ func mathFsum(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: fsum() takes exactly 1 argument (%d given)", len(args))
 	}
-	n, itemFn, err := seqItems(args[0], "fsum")
+	it, err := objects.Iter(args[0])
 	if err != nil {
 		return nil, err
 	}
 	// Shewchuk compensated sum.
-	partials := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		x, err := objectToFloat(itemFn(i), "fsum")
+	partials := make([]float64, 0, 8)
+	for {
+		item, err := objects.IterNext(it)
+		if err != nil {
+			if objects.IsStopIteration(err) {
+				break
+			}
+			return nil, err
+		}
+		x, err := objectToFloat(item, "fsum")
 		if err != nil {
 			return nil, err
 		}
@@ -1098,17 +1105,6 @@ func mathFsum(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	return objects.NewFloat(sum), nil
 }
 
-// seqItems returns the length and an item accessor for a list or tuple.
-func seqItems(o objects.Object, fname string) (int, func(int) objects.Object, error) {
-	switch x := o.(type) {
-	case *objects.List:
-		return x.Len(), func(i int) objects.Object { return x.Item(i) }, nil
-	case *objects.Tuple:
-		return x.Len(), func(i int) objects.Object { return x.Item(i) }, nil
-	}
-	return 0, nil, fmt.Errorf("TypeError: %s() argument must be iterable, not '%s'", fname, o.Type().Name)
-}
-
 // mathProd implements math.prod(iterable, *, start=1).
 // CPython: Modules/mathmodule.c:3291 math_prod_impl
 func mathProd(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -1119,16 +1115,29 @@ func mathProd(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	if v, ok := kwargs["start"]; ok {
 		start = v
 	}
-	n, itemFn, err := seqItems(args[0], "prod")
+	// Collect all items via the iterator protocol so any iterable works.
+	// CPython: Modules/mathmodule.c:3291 (PyIter_Next loop)
+	it, err := objects.Iter(args[0])
 	if err != nil {
 		return nil, err
+	}
+	var items []objects.Object
+	for {
+		item, err := objects.IterNext(it)
+		if err != nil {
+			if objects.IsStopIteration(err) {
+				break
+			}
+			return nil, err
+		}
+		items = append(items, item)
 	}
 	// If start is int and all elements are int, use big.Int product.
 	startInt, startIsInt := start.(*objects.Int)
 	allInts := startIsInt
 	if allInts {
-		for i := 0; i < n; i++ {
-			if _, ok := itemFn(i).(*objects.Int); !ok {
+		for _, item := range items {
+			if _, ok := item.(*objects.Int); !ok {
 				allInts = false
 				break
 			}
@@ -1136,8 +1145,8 @@ func mathProd(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	}
 	if allInts {
 		result := startInt.BigInt()
-		for i := 0; i < n; i++ {
-			result.Mul(result, itemFn(i).(*objects.Int).BigInt())
+		for _, item := range items {
+			result.Mul(result, item.(*objects.Int).BigInt())
 		}
 		return objects.NewIntFromBig(result), nil
 	}
@@ -1146,8 +1155,8 @@ func mathProd(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < n; i++ {
-		v, err := objectToFloat(itemFn(i), "prod")
+	for _, item := range items {
+		v, err := objectToFloat(item, "prod")
 		if err != nil {
 			return nil, err
 		}

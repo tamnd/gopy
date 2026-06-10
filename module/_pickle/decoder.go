@@ -31,16 +31,22 @@ import (
 //
 // CPython: Modules/_pickle.c:790 UnpicklerObject
 type unpickler struct {
-	buf   []byte
-	pos   int
-	stack []objects.Object
-	marks []int
-	memo  []objects.Object
-	proto int
+	buf        []byte
+	pos        int
+	stack      []objects.Object
+	marks      []int
+	memo       []objects.Object
+	proto      int
+	fixImports bool
 }
 
 func newUnpickler(buf []byte) *unpickler {
-	return &unpickler{buf: buf}
+	// fix_imports defaults to True; it only takes effect for proto < 3
+	// where it maps Python 2 module/global names onto their Python 3
+	// equivalents via _compat_pickle.
+	//
+	// CPython: Modules/_pickle.c:1669 Unpickler.__init__ (fix_imports=1)
+	return &unpickler{buf: buf, fixImports: true}
 }
 
 // read returns the next n bytes from the stream and advances the
@@ -348,25 +354,110 @@ func (u *unpickler) load() (objects.Object, error) {
 	}
 }
 
-// lookupGlobal resolves "module" + "name" against sys.modules, walking
-// dotted name components for nested attributes (e.g. "os.path" → "join").
+// findClass resolves a "module" + "name" pickle GLOBAL reference. For
+// proto < 3 with fix_imports enabled (the default) the old Python 2.x
+// names are mapped to their Python 3 equivalents via _compat_pickle
+// before the module is imported, so legacy streams that reference
+// __builtin__.xrange or cPickle.* still load. The module is imported
+// (not merely fetched from sys.modules) and dotted name components are
+// walked for nested attributes (e.g. "os.path" then "join").
 //
-// CPython: Modules/_pickle.c:5671 load_global (find_class call)
-func lookupGlobal(module, name string) (objects.Object, error) {
-	mod, ok := imp.GetModule(module)
-	if !ok {
-		return nil, fmt.Errorf("ModuleNotFoundError: No module named %q", module)
+// CPython: Modules/_pickle.c:7172 _pickle_Unpickler_find_class_impl
+func (u *unpickler) findClass(module, name string) (objects.Object, error) {
+	if u.proto < 3 && u.fixImports {
+		var err error
+		module, name, err = fixImportsMapping(module, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	mod, err := importModule(module)
+	if err != nil {
+		return nil, err
 	}
 	// Walk dotted name components.
 	var obj objects.Object = mod
 	for _, part := range strings.Split(name, ".") {
-		v, err := objects.GetAttr(obj, objects.NewStr(part))
-		if err != nil {
+		v, gErr := objects.GetAttr(obj, objects.NewStr(part))
+		if gErr != nil {
 			return nil, fmt.Errorf("AttributeError: %s: %q", module, part)
 		}
 		obj = v
 	}
 	return obj, nil
+}
+
+// importModule imports a module by name, using the ImportModuleHook
+// installed by the vm package when present (so modules not yet in
+// sys.modules are imported through the finder chain) and falling back
+// to a sys.modules lookup otherwise.
+//
+// CPython: Modules/_pickle.c:7240 PyImport_Import in find_class
+func importModule(module string) (objects.Object, error) {
+	if objects.ImportModuleHook != nil {
+		mod, err := objects.ImportModuleHook(module)
+		if err != nil {
+			return nil, fmt.Errorf("ModuleNotFoundError: No module named %q", module)
+		}
+		return mod, nil
+	}
+	mod, ok := imp.GetModule(module)
+	if !ok {
+		return nil, fmt.Errorf("ModuleNotFoundError: No module named %q", module)
+	}
+	return mod, nil
+}
+
+// fixImportsMapping applies the Python 2 to 3 rename tables from
+// _compat_pickle: NAME_MAPPING keyed on (module, name) takes priority,
+// otherwise IMPORT_MAPPING renames the module alone. A reference with
+// no mapping is returned unchanged.
+//
+// CPython: Modules/_pickle.c:7185 _pickle_Unpickler_find_class_impl (fix_imports block)
+func fixImportsMapping(module, name string) (string, string, error) {
+	compat, err := importModule("_compat_pickle")
+	if err != nil {
+		// Without the compat tables there is nothing to remap; fall back
+		// to the names as written.
+		return module, name, nil
+	}
+	nameMapping, err := objects.GetAttr(compat, objects.NewStr("NAME_MAPPING"))
+	if err != nil {
+		return module, name, nil
+	}
+	key := objects.NewTuple([]objects.Object{objects.NewStr(module), objects.NewStr(name)})
+	item, found, err := objects.MappingGetOptionalItem(nameMapping, key)
+	if err != nil {
+		return "", "", err
+	}
+	if found {
+		pair, ok := item.(*objects.Tuple)
+		if !ok || pair.Len() != 2 {
+			return "", "", fmt.Errorf("RuntimeError: _compat_pickle.NAME_MAPPING values should be 2-tuples, not %.200s", item.Type().Name)
+		}
+		newMod, ok1 := pair.Item(0).(*objects.Unicode)
+		newName, ok2 := pair.Item(1).(*objects.Unicode)
+		if !ok1 || !ok2 {
+			return "", "", fmt.Errorf("RuntimeError: _compat_pickle.NAME_MAPPING values should be pairs of str, not (%.200s, %.200s)", pair.Item(0).Type().Name, pair.Item(1).Type().Name)
+		}
+		return newMod.Value(), newName.Value(), nil
+	}
+	importMapping, err := objects.GetAttr(compat, objects.NewStr("IMPORT_MAPPING"))
+	if err != nil {
+		return module, name, nil
+	}
+	modItem, found, err := objects.MappingGetOptionalItem(importMapping, objects.NewStr(module))
+	if err != nil {
+		return "", "", err
+	}
+	if found {
+		newMod, ok := modItem.(*objects.Unicode)
+		if !ok {
+			return "", "", fmt.Errorf("RuntimeError: _compat_pickle.IMPORT_MAPPING values should be strings, not %.200s", modItem.Type().Name)
+		}
+		module = newMod.Value()
+	}
+	return module, name, nil
 }
 
 // loadGlobal reads two newline-terminated strings (module and name)
@@ -377,7 +468,7 @@ func (u *unpickler) loadGlobal() error {
 	// Proto < 4: two NL-terminated ASCII lines.
 	module := u.readLine()
 	name := u.readLine()
-	obj, err := lookupGlobal(module, name)
+	obj, err := u.findClass(module, name)
 	if err != nil {
 		return err
 	}
@@ -416,7 +507,7 @@ func (u *unpickler) loadStackGlobal() error {
 	if !ok1 || !ok2 {
 		return errors.New("UnpicklingError: STACK_GLOBAL requires two str objects")
 	}
-	obj, err := lookupGlobal(modStr.Value(), nameStr.Value())
+	obj, err := u.findClass(modStr.Value(), nameStr.Value())
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // setEntry is one slot in the set's open-addressed table.
@@ -77,6 +78,8 @@ func init() {
 	// explicitly unhashable so subclasses inherit that property.
 	SetTypeDescr(SetType, "__hash__", None())
 	SetType.RichCmp = setRichCmp
+	// CPython: Objects/setobject.c:2220 PySet_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(SetType)
 	SetType.TpFlags |= TpFlagMatchSelf
 	FrozensetType.TpFlags |= TpFlagMatchSelf
 	SetType.Iter = setIter
@@ -118,6 +121,34 @@ func init() {
 	SetTypeDescr(SetType, "intersection", NewMethodDescr(SetType, "intersection", setIntersectionMethod))
 	SetTypeDescr(SetType, "union", NewMethodDescr(SetType, "union", setUnionMethod))
 	SetTypeDescr(SetType, "difference", NewMethodDescr(SetType, "difference", setDifferenceMethod))
+	// Dunder wrappers for number slots so set.__sub__ etc. are accessible as
+	// type attributes and callable as set.__sub__(a, b).
+	//
+	// CPython: Objects/typeobject.c add_operators (nb_subtract / nb_and / nb_or / nb_xor rows)
+	SetTypeDescr(SetType, "__sub__", NewMethodDescr(SetType, "__sub__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: __sub__() takes exactly 2 arguments (%d given)", len(args))
+		}
+		return setSubtract(args[0], args[1])
+	}))
+	SetTypeDescr(SetType, "__and__", NewMethodDescr(SetType, "__and__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: __and__() takes exactly 2 arguments (%d given)", len(args))
+		}
+		return setAnd(args[0], args[1])
+	}))
+	SetTypeDescr(SetType, "__or__", NewMethodDescr(SetType, "__or__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: __or__() takes exactly 2 arguments (%d given)", len(args))
+		}
+		return setOr(args[0], args[1])
+	}))
+	SetTypeDescr(SetType, "__xor__", NewMethodDescr(SetType, "__xor__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: __xor__() takes exactly 2 arguments (%d given)", len(args))
+		}
+		return setXor(args[0], args[1])
+	}))
 	SetTypeDescr(SetType, "issubset", NewMethodDescr(SetType, "issubset", setIsSubsetMethod))
 	SetTypeDescr(SetType, "issuperset", NewMethodDescr(SetType, "issuperset", setIsSupersetMethod))
 	SetTypeDescr(SetType, "isdisjoint", NewMethodDescr(SetType, "isdisjoint", setIsDisjointMethod))
@@ -255,10 +286,10 @@ func init() {
 func setDealloc(o Object) {
 	if fn := o.Type().Finalize; fn != nil {
 		h := o.Hdr()
-		h.refcnt = 1
+		atomic.StoreInt64(&h.refcnt, 1)
 		fn(o)
-		h.refcnt--
-		if h.refcnt != 0 {
+		atomic.AddInt64(&h.refcnt, -1)
+		if atomic.LoadInt64(&h.refcnt) != 0 {
 			return
 		}
 	}
@@ -281,7 +312,7 @@ func setTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
-	return nil
+	return visitAttrDict(o, visit)
 }
 
 // NewSet creates an empty mutable set.
@@ -1073,6 +1104,23 @@ func setSymDiff(proto, a, b *Set) (*Set, error) {
 func toSet(o Object) (*Set, bool) {
 	s, ok := o.(*Set)
 	return s, ok
+}
+
+// mutableSetCopy returns a fresh mutable set holding s's elements,
+// whether or not s is frozen. The dict view set operators use it so
+// their result is always a plain `set`, matching PySet_New.
+//
+// CPython: Objects/dictobject.c:6300 dictviews_or (PySet_New base)
+func mutableSetCopy(s *Set) (*Set, error) {
+	out := NewSet()
+	for _, e := range s.entries {
+		if e.used {
+			if err := out.insert(e.hash, e.key); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }
 
 // Set binary operations (Number slots).

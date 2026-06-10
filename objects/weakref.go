@@ -152,8 +152,27 @@ func (w *Weakref) AttrDict() *Dict { return w.attrs }
 func (w *Weakref) EnsureAttrDict() *Dict {
 	if w.attrs == nil {
 		w.attrs = NewDict()
+		trackAttrDictHolder(w)
 	}
 	return w.attrs
+}
+
+// weakrefTraverse visits the callback and the managed __dict__ a subclass
+// carries. It deliberately does NOT visit the referent: that edge is weak,
+// so the collector must be able to reclaim the referent independently.
+//
+// CPython: Objects/weakrefobject.c:113 gc_traverse (Py_VISIT(self->wr_callback))
+func weakrefTraverse(o Object, visit Visitor) error {
+	w, ok := o.(*Weakref)
+	if !ok {
+		return nil
+	}
+	if w.callback != nil {
+		if err := visit(w.callback); err != nil {
+			return err
+		}
+	}
+	return visitAttrDict(o, visit)
 }
 
 type weakrefKind uint8
@@ -175,6 +194,8 @@ func init() {
 	WeakrefType.Hash = weakrefHash
 	WeakrefType.Call = weakrefCall
 	WeakrefType.RichCmp = weakrefRichCompare
+	// CPython: Objects/weakrefobject.c:113 gc_traverse
+	WeakrefType.TpTraverse = weakrefTraverse
 	// weakref_ref_new: ref(object[, callback])
 	// CPython: Objects/weakrefobject.c:276 weakref___new__
 	WeakrefType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
@@ -737,7 +758,19 @@ func weakrefCall(o Object, args []Object, kwargs map[string]Object) (Object, err
 	if len(args) != 0 || len(kwargs) != 0 {
 		return nil, errWeakrefArgs
 	}
-	return o.(*Weakref).Referent(), nil
+	// Return the referent as a new (owned) reference, exactly as CPython's
+	// weakref_vectorcall hands back Py_NewRef(ref->wr_object). The eval
+	// loop treats a tp_call result as owned: COMPARE_OP / IS_OP decref it,
+	// POP_TOP decrefs it, STORE_FAST takes ownership. Handing back a
+	// borrowed reference instead lets `wr() is gi` over-decref the referent
+	// (IS_OP releases both operands) and free a still-live object.
+	//
+	// CPython: Objects/weakrefobject.c:172 weakref_vectorcall
+	r := o.(*Weakref).Referent()
+	if r != None() {
+		Incref(r)
+	}
+	return r, nil
 }
 
 // weakrefRepr formats a weakref using CPython's format string. The

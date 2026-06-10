@@ -28,6 +28,16 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// nbBinarySubscr is the BINARY_OP suboperator that selects PyObject_GetItem
+// (NB_SUBSCR in CPython 3.14). The BINARY_OP handler uses it to recognize the
+// one arm whose result is a borrowed container element rather than a freshly
+// built object, so it can promote that element to an owned reference before
+// running DECREF_INPUTS. It mirrors the nbSubscr value in binaryOp's local
+// suboperator table.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h NB_SUBSCR
+const nbBinarySubscr = 26
+
 // init wires the const-wrap hook so objects.wrapConstAttr (the path
 // dis.py and friends take when they read co_consts) can convert
 // compile-pipeline value types into Objects without dragging the
@@ -262,8 +272,35 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		a := e.popObject()
 		out, berr := binaryOp(int32(oparg), a, b)
 		if berr != nil {
+			objects.Decref(a)
+			objects.Decref(b)
 			return 0, true, berr
 		}
+		// DECREF_INPUTS: BINARY_OP owns both popped operands and releases
+		// them once the result is computed. CPython's nb_*/sq_* slots each
+		// return a new reference; gopy's containers do not incref on store,
+		// so its element/key subscript slots hand back a borrowed slot and
+		// the in-place arms hand back the borrowed left operand. Promote
+		// those to owned references before the drop.
+		//
+		// A slice subscript is the exception: every slice path builds a
+		// fresh container (sliceSequence, listGetSlice, the mp_subscript
+		// slice arms, memoryViewGetSlice), which is already a genuine new
+		// reference. Increffing it again strands a phantom count that, for a
+		// gc-tracked result (list/tuple/memoryview slice), pins the object
+		// as a Go root and keeps its weakref alive forever. So skip the
+		// promotion when the key is a slice.
+		//
+		// CPython: Python/bytecodes.c BINARY_OP (res = ...; DECREF_INPUTS())
+		if out == a || out == b {
+			objects.Incref(out)
+		} else if int(oparg) == nbBinarySubscr {
+			if _, isSlice := b.(*objects.Slice); !isSlice {
+				objects.Incref(out)
+			}
+		}
+		objects.Decref(a)
+		objects.Decref(b)
 		e.pushObject(out)
 		return e.cacheAdvance(compile.BINARY_OP), true, nil
 
@@ -275,6 +312,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		// reserved for adaptive specialization.
 		cmpOp := objects.CompareOp((oparg >> 5) & 0xf)
 		out, cerr := objects.RichCmp(a, b, cmpOp)
+		// DECREF_INPUTS: the comparison returns a fresh bool (or the rich
+		// result of a user __eq__/__lt__), never a borrowed operand, so the
+		// two operands are released unconditionally.
+		//
+		// CPython: Python/bytecodes.c COMPARE_OP (res = ...; DECREF_INPUTS())
+		objects.Decref(a)
+		objects.Decref(b)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -321,7 +365,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 			}
 			return 0, true, nerr
 		}
-		e.pushObject(v)
+		// tp_iternext returns a new reference in CPython; mirror that
+		// by creating an owned stack slot so STORE_FAST's Close() on the
+		// previous loop variable is balanced.
+		//
+		// CPython: Python/bytecodes.c:1395 FOR_ITER (tp_iternext new ref)
+		e.push(stackref.FromObjectNew(v))
 		return e.cacheAdvance(compile.FOR_ITER), true, nil
 
 	case compile.END_FOR:
@@ -410,6 +459,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		haystack := e.popObject()
 		needle := e.popObject()
 		hit, cerr := containsItem(haystack, needle)
+		// CPython: Python/bytecodes.c:2769 _CONTAINS_OP (DECREF_INPUTS before ERROR_IF)
+		objects.Decref(haystack)
+		objects.Decref(needle)
 		if cerr != nil {
 			return 0, true, cerr
 		}
@@ -431,8 +483,13 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		case 0:
 			// Bare `raise` re-raises the currently-handled exception
 			// (PUSH_EXC_INFO stashed it on entry to the except block).
-			// CPython: Python/bytecodes.c:1648 RAISE_VARARGS oparg==0
-			// reads tstate->exc_info->exc_value via _PyErr_GetRaisedException.
+			// CPython's do_raise with exc==NULL returns 1 and the caller
+			// jumps directly to exception_unwind (NOT through the error
+			// label), so PyTraceBack_Here is NOT called. Mirror this by
+			// returning a reraiseError so attachFrameTraceback is skipped.
+			//
+			// CPython: Python/bytecodes.c:1165 RAISE_VARARGS (oparg==0 path)
+			// CPython: Python/ceval.c:2197 do_raise (exc == NULL branch)
 			handled := e.ts.HandledException()
 			if handled == nil {
 				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
@@ -442,7 +499,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 				return 0, true, errors.New("RuntimeError: No active exception to re-raise")
 			}
 			pyerrors.Raise(e.ts, exc)
-			return 0, true, excSentinel(exc)
+			return 0, true, &reraiseError{exc: exc}
 		case 1:
 			val := e.popObject()
 			exc := raiseValue(e.ts, val, nil)
@@ -612,7 +669,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		dst := frame.NLocalsPlusOf(e.f.Code) - n
 		for i := 0; i < n; i++ {
 			cell := fn.Closure.Item(i)
-			e.f.LocalsPlus[dst+i] = stackref.FromObject(cell)
+			// CPython: Python/bytecodes.c:1925 COPY_FREE_VARS uses
+			// PyStackRef_FromPyObjectNew which Increfs the cell. The frame
+			// slot owns the reference; frame.Clear() drops it via Close().
+			e.f.LocalsPlus[dst+i] = stackref.FromObjectNew(cell)
 		}
 		return e.advance(), true, nil
 

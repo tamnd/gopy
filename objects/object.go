@@ -93,6 +93,15 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
 	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+
+	// All static built-in types are immortal: CPython stamps them with
+	// _Py_IMMORTAL_REFCNT in _PyStaticType_InitBuiltin so tp_dealloc
+	// never fires. objectType is the only *Type whose initializer does
+	// not go through NewType (which calls MakeImmortal), so we stamp it
+	// here once all descriptors are registered.
+	//
+	// CPython: Objects/typeobject.c:352 _PyStaticType_InitBuiltin
+	objectType.MakeImmortal()
 }
 
 // objectSetDict implements object.__dict__ set for HasDict-bearing
@@ -413,6 +422,42 @@ func richCompareDescr(op CompareOp) func(args []Object, kwargs map[string]Object
 	}
 }
 
+// BindRichCmpDescriptors installs type-specific __lt__/__le__/__gt__/__ge__
+// slot wrappers on t. CPython does this via slot_tp_richcompare for every
+// type whose tp_richcompare overrides object's; the wrappers are different
+// objects from object.__lt__ etc. so that functools.total_ordering (which
+// uses `getattr(cls, op) is not getattr(object, op)`) can detect
+// inheritance-through-subclassing correctly.
+//
+// CPython: Objects/typeobject.c:7094 slot_tp_richcompare wrapper installation
+func BindRichCmpDescriptors(t *Type) {
+	for _, pair := range []struct {
+		name string
+		op   CompareOp
+	}{
+		{"__lt__", CompareLT},
+		{"__le__", CompareLE},
+		{"__gt__", CompareGT},
+		{"__ge__", CompareGE},
+		{"__eq__", CompareEQ},
+		{"__ne__", CompareNE},
+	} {
+		op := pair.op
+		SetTypeDescr(t, pair.name, NewMethodDescr(t, pair.name,
+			func(args []Object, _ map[string]Object) (Object, error) {
+				if len(args) != 2 {
+					return nil, fmt.Errorf("TypeError: expected 2 arguments, got %d", len(args))
+				}
+				rcmp := args[0].Type().RichCmp
+				if rcmp == nil {
+					return notImplemented(), nil
+				}
+				return rcmp(args[0], args[1], op)
+			},
+		))
+	}
+}
+
 // objectFormatDescr is object.__format__(self, format_spec). Empty
 // format_spec returns str(self); a non-empty spec raises TypeError
 // (the default formatter does not understand format codes).
@@ -564,10 +609,9 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 	if !fits {
 		return nil, fmt.Errorf("OverflowError: __reduce_ex__() protocol out of range")
 	}
-	// Detect __reduce__ override: when the type's __reduce__
-	// descriptor is the one we installed on objectType, the
-	// subclass inherits the default and CPython falls through to
-	// _common_reduce. Otherwise call the override.
+	// Detect __reduce__ override: compare the __reduce__ descriptor on
+	// type(self) against the one on objectType.
+	// CPython: Objects/typeobject.c:8062 object_reduce_ex_impl
 	clsReduce, _ := LookupDescriptor(self.Type(), "__reduce__")
 	baseReduce, _ := LookupDescriptor(objectType, "__reduce__")
 	if clsReduce != nil && clsReduce != baseReduce {
@@ -575,7 +619,12 @@ func objectReduceExDescr(args []Object, _ map[string]Object) (Object, error) {
 		if err != nil {
 			return nil, err
 		}
-		return Call(fn, NewTuple(nil), nil)
+		if err := EnterRecursiveCall("while reducing an object"); err != nil {
+			return nil, err
+		}
+		result, callErr := Call(fn, NewTuple(nil), nil)
+		LeaveRecursiveCall()
+		return result, callErr
 	}
 	return commonReduce(self, int(protoVal))
 }
@@ -609,7 +658,9 @@ func objectInitSubclass(args []Object, kwargs map[string]Object) (Object, error)
 //
 // CPython: Objects/typeobject.c:7000 object_get_class
 func objectGetClass(o Object) (Object, error) {
-	return o.Type(), nil
+	t := o.Type()
+	Incref(t)
+	return t, nil
 }
 
 // objectSetClass implements object.__class__ set. CPython checks that
@@ -619,6 +670,9 @@ func objectGetClass(o Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7208 object_set_class
 func objectSetClass(o Object, value Object) error {
+	if value == nil {
+		return fmt.Errorf("TypeError: can't delete __class__ attribute")
+	}
 	newType, ok := value.(*Type)
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)

@@ -58,6 +58,14 @@ type Type struct {
 	Bases []*Type
 	MRO   []*Type
 
+	// basesReleased latches the single base-reference release that
+	// typeUserDealloc performs, mirroring type_dealloc running once per
+	// type. gopy's refcounting can re-enter dealloc on a type that hits
+	// refcount 0 more than once; without this latch the inherited base
+	// references (taken in newTypeE) would be decref'd repeatedly and free
+	// an ancestor that the type still depends on.
+	basesReleased bool
+
 	Repr    func(o Object) (string, error)
 	Str     func(o Object) (string, error)
 	Hash    func(o Object) (int64, error)
@@ -82,6 +90,13 @@ type Type struct {
 	//
 	// CPython: Include/cpython/typeobject.h tp_new
 	TpNew func(cls *Type, args []Object, kwargs map[string]Object) (Object, error)
+	// TpNewWithDict is an optional variant of TpNew that receives the kwargs
+	// as an insertion-ordered *Dict instead of a Go map. When non-nil,
+	// typeCallViaTpNewWithDict calls this slot instead of converting to a map,
+	// preserving the keyword argument order supplied at the call site. Types
+	// that need ordered kwargs (e.g. partial, whose Keywords dict must mirror
+	// call-site order) set this slot in addition to TpNew.
+	TpNewWithDict func(cls *Type, args []Object, kwargs *Dict) (Object, error)
 	// Vectorcall is the PEP 590 fast-call slot. When non-nil, the call
 	// machinery uses this instead of going through Call. args is a flat
 	// array of positional values followed by keyword values; nargsf is
@@ -209,6 +224,19 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
 	HasWeakref bool
 
+	// OpaqueCState marks a built-in type whose instances carry C-level
+	// state (in gopy, Go struct fields) that the default pickler cannot
+	// reach through __dict__ / __slots__. It is the gopy stand-in for
+	// CPython's "tp_basicsize > base" comparison in
+	// object_getstate_default: when the default reducer runs with
+	// required=true on such a type it raises "cannot pickle '%s' object"
+	// rather than emitting a state of None that would round-trip to a
+	// blank instance. memoryview is the canonical example.
+	//
+	// CPython: Objects/typeobject.c:7363 object_getstate_default
+	// (Py_TYPE(obj)->tp_basicsize > basicsize)
+	OpaqueCState bool
+
 	// ClassAttrDict is the live attribute dict for user types, mirroring
 	// CPython's tp_dict. SetTypeDescr writes through to this dict so that
 	// PEP 695 type alias thunks using LOAD_FROM_DICT_OR_GLOBALS with the
@@ -322,6 +350,24 @@ type Visitor func(Object) error
 type GCRoot interface {
 	GCRoot() bool
 }
+
+// GCExecutingRootsHook is wired by the vm so the cycle collector can
+// see the objects an executing interpreter frame holds in its fast
+// locals, cell/free vars, and operand stack. CPython gets this for
+// free: every value an active frame holds is reachable from
+// tstate->current_frame, which gc_collect_main never collects. gopy's
+// interpreter frames live in a per-thread arena that is a plain Go
+// allocation, invisible to the refcount-based collector, so a value
+// referenced only by a live frame local (for example a suspended
+// generator a test still holds in a local) collapses to gc_refs == 0
+// under subtract_refs and move_unreachable would reclaim it out from
+// under the running program. The vm walks every active thread's frame
+// stack and reports each held object through pin; the collector
+// re-floats any matching candidate to a positive ref count. nil until
+// the vm initializes.
+//
+// CPython: Python/gc.c:1430 gc_collect_main (tstate->current_frame roots)
+var GCExecutingRootsHook func(pin func(Object))
 
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //
@@ -494,7 +540,14 @@ var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype}
 
 func init() {
 	typeType.typ = typeType
-	typeType.refcnt = 1
+	// typeType is a static built-in type (analogous to PyType_Type). Static
+	// types are immortal in CPython (_PyStaticType_InitBuiltin stamps
+	// _Py_IMMORTAL_REFCNT) so tp_dealloc never fires for them. gopy stamps
+	// ImmortalRefcnt here so Incref/Decref are no-ops and typeUserDealloc
+	// can never clear typeType's typeDescrTable entries.
+	//
+	// CPython: Objects/typeobject.c:352 _PyStaticType_InitBuiltin
+	typeType.MakeImmortal()
 	// type inherits from object. CPython: Objects/typeobject.c:6361
 	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
 	// in type's MRO so metatype lookup of __class__ / __dict__ finds
@@ -503,6 +556,24 @@ func init() {
 	typeType.MRO = []*Type{typeType, objectType}
 	typeType.Hash = identityHash
 
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __call__)
+	// Install type.__call__ so Callable ABC detection finds it in type.__dict__
+	// via _check_methods. Routes through typeCallViaTpNew (TpNew + __init__) to
+	// avoid the infinite-recursion that would arise from calling Call(self, ...)
+	// when self is a type (Call would re-enter type.__call__ as the metacall).
+	//
+	// CPython: Objects/typeobject.c:6753 type_call
+	SetTypeDescr(typeType, "__call__", NewMethodDescr(typeType, "__call__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __call__() missing self argument")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: type.__call__() requires a type argument")
+		}
+		rest := args[1:]
+		return typeCallViaTpNew(cls, rest, kwargs)
+	}))
 	// CPython: Objects/typeobject.c type_type_params getset
 	SetTypeDescr(typeType, "__type_params__", NewGetSetDescr("__type_params__",
 		func(o Object) (Object, error) {
@@ -614,6 +685,23 @@ func newTypeE(name string, bases []*Type) (*Type, error) {
 		if b == nil {
 			continue
 		}
+		// A type owns a counted reference to each of its bases. CPython
+		// keeps tp_base, tp_bases and tp_mro as owned references, so a
+		// subclass holds its ancestors alive for its whole lifetime; the
+		// matching releases happen in type_dealloc. gopy mirrors the
+		// tp_bases edge here (increfing every direct base transitively
+		// pins the whole ancestor chain). Without this, a class whose only
+		// base is an unbound temporary, e.g.
+		// `class C(collections.namedtuple('C', 'a b')): ...`, loses the
+		// namedtuple base the moment the class statement's stack slot is
+		// dropped, and the base's descriptor table (its generated __new__,
+		// _make, _fields) is cleared out from under C. The decref is in
+		// typeUserDealloc. Immortal static built-in bases make this a
+		// no-op, so only heap bases take a real reference.
+		//
+		// CPython: Objects/typeobject.c:3638 type_new_set_bases
+		//          (Py_INCREF on tp_bases / tp_base)
+		Incref(b)
 		b.addSubclass(t)
 		// MATCH_SELF carries from every base independently: bool is a
 		// self-matching int subclass, and we want that bit to ride

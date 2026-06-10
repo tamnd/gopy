@@ -105,9 +105,16 @@ func siftup(heap *objects.List, pos int) error {
 			if err != nil {
 				return err
 			}
+			// CPython: Modules/_heapqmodule.c:54 size-change guard
+			if heap.Len() != endpos {
+				return fmt.Errorf("RuntimeError: list changed size during iteration")
+			}
 			if !lt {
 				childpos = rightpos
 			}
+		}
+		if childpos >= heap.Len() {
+			return fmt.Errorf("RuntimeError: list changed size during iteration")
 		}
 		if err := listSet(heap, pos, heap.Item(childpos)); err != nil {
 			return err
@@ -271,11 +278,29 @@ func heapify(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 //
 // CPython: Modules/_heapqmodule.c:370 _heapq_nlargest_impl
 func nlargest(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(kwargs) != 0 {
-		return nil, errors.New("TypeError: nlargest() takes no keyword arguments")
+	var key objects.Object
+	for k, v := range kwargs {
+		if k == "key" {
+			key = v
+		} else {
+			return nil, fmt.Errorf("TypeError: nlargest() got an unexpected keyword argument '%s'", k)
+		}
 	}
-	if len(args) != 2 {
+	// Accept key as optional third positional argument.
+	switch len(args) {
+	case 3:
+		if key != nil {
+			return nil, errors.New("TypeError: nlargest() got multiple values for argument 'key'")
+		}
+		key = args[2]
+		args = args[:2]
+	case 2:
+		// ok
+	default:
 		return nil, fmt.Errorf("TypeError: nlargest() expected 2 arguments, got %d", len(args))
+	}
+	if key == objects.None() {
+		key = nil
 	}
 	nInt, ok := args[0].(*objects.Int)
 	if !ok {
@@ -288,6 +313,37 @@ func nlargest(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	n := int(nVal)
 	if n < 0 {
 		n = 0
+	}
+	// When a key function is provided, collect all items, sort by key, return top n.
+	// CPython: Modules/_heapqmodule.c:370 _heapq_nlargest_impl (key path via heapq.py)
+	if key != nil {
+		it, err := objects.Iter(args[1])
+		if err != nil {
+			return nil, err
+		}
+		allItems := objects.NewList(nil)
+		for {
+			v, iterErr := objects.IterNext(it)
+			if iterErr != nil {
+				if errors.Is(iterErr, objects.ErrStopIteration) {
+					break
+				}
+				return nil, iterErr
+			}
+			allItems.Append(v)
+		}
+		if err := allItems.Sort(key, true); err != nil {
+			return nil, err
+		}
+		count := allItems.Len()
+		if n > count {
+			n = count
+		}
+		out := make([]objects.Object, n)
+		for i := 0; i < n; i++ {
+			out[i] = allItems.Item(i)
+		}
+		return objects.NewList(out), nil
 	}
 	it, err := objects.Iter(args[1])
 	if err != nil {
@@ -340,11 +396,29 @@ func nlargest(args []objects.Object, kwargs map[string]objects.Object) (objects.
 //
 // CPython: Modules/_heapqmodule.c:440 _heapq_nsmallest_impl
 func nsmallest(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	if len(kwargs) != 0 {
-		return nil, errors.New("TypeError: nsmallest() takes no keyword arguments")
+	var key objects.Object
+	for k, v := range kwargs {
+		if k == "key" {
+			key = v
+		} else {
+			return nil, fmt.Errorf("TypeError: nsmallest() got an unexpected keyword argument '%s'", k)
+		}
 	}
-	if len(args) != 2 {
+	// Accept key as optional third positional argument.
+	switch len(args) {
+	case 3:
+		if key != nil {
+			return nil, errors.New("TypeError: nsmallest() got multiple values for argument 'key'")
+		}
+		key = args[2]
+		args = args[:2]
+	case 2:
+		// ok
+	default:
 		return nil, fmt.Errorf("TypeError: nsmallest() expected 2 arguments, got %d", len(args))
+	}
+	if key == objects.None() {
+		key = nil
 	}
 	nInt, ok := args[0].(*objects.Int)
 	if !ok {
@@ -373,7 +447,7 @@ func nsmallest(args []objects.Object, kwargs map[string]objects.Object) (objects
 		}
 		allItems.Append(v)
 	}
-	if err := allItems.Sort(nil, false); err != nil {
+	if err := allItems.Sort(key, false); err != nil {
 		return nil, err
 	}
 	count := allItems.Len()

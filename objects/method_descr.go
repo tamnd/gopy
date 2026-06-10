@@ -25,11 +25,12 @@ import "fmt"
 // CPython: Include/cpython/descrobject.h PyMethodDescrObject
 type MethodDescr struct {
 	Header
-	name  string
-	doc   string
-	conv  MethFlag
-	fn    func(args []Object, kwargs map[string]Object) (Object, error)
-	owner *Type
+	name    string
+	doc     string
+	textSig string
+	conv    MethFlag
+	fn      func(args []Object, kwargs map[string]Object) (Object, error)
+	owner   *Type
 }
 
 // MethodDescrType is the type singleton for method descriptors.
@@ -48,6 +49,19 @@ func init() {
 	addDescriptorSlotWrappers(MethodDescrType)
 	AddCallSlotWrapper(MethodDescrType)
 	addDescrIntrospectionDescriptors(MethodDescrType)
+	// __text_signature__: Argument Clinic signature string used by
+	// inspect._signature_from_builtin. Returns None when not set.
+	//
+	// CPython: Objects/methodobject.c:286 meth_getsets __text_signature__
+	SetTypeDescr(MethodDescrType, "__text_signature__", NewGetSetDescr("__text_signature__",
+		func(o Object) (Object, error) {
+			if d, ok := o.(*MethodDescr); ok && d.textSig != "" {
+				return NewStr(d.textSig), nil
+			}
+			return None(), nil
+		},
+		nil,
+	))
 }
 
 // Owner returns the type this method descriptor is registered on.
@@ -89,6 +103,19 @@ func (d *MethodDescr) WithDoc(doc string) *MethodDescr {
 	d.doc = doc
 	return d
 }
+
+// WithTextSignature attaches an Argument Clinic text signature and returns
+// the descriptor. inspect._signature_from_builtin reads __text_signature__
+// to build a Signature for method descriptors that have no code object.
+//
+// CPython: Objects/methodobject.c:286 meth_getsets __text_signature__
+func (d *MethodDescr) WithTextSignature(sig string) *MethodDescr {
+	d.textSig = sig
+	return d
+}
+
+// TextSig returns the text signature string, or "" if none is set.
+func (d *MethodDescr) TextSig() string { return d.textSig }
 
 // Conv returns the METH_* calling-convention tag the specializer
 // uses to pick the descriptor-specific CALL fast arm.

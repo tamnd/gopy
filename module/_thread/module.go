@@ -330,18 +330,26 @@ func lockAcquire(lk *lockObject, args []objects.Object, kwargs map[string]object
 		}
 	}
 	if t, ok := kwargs["timeout"]; ok {
-		f, ok2 := t.(*objects.Float)
-		if !ok2 {
+		switch tv := t.(type) {
+		case *objects.Float:
+			timeoutSecs = tv.Float64()
+		case *objects.Int:
+			n, _ := tv.Int64()
+			timeoutSecs = float64(n)
+		default:
 			return nil, fmt.Errorf("TypeError: acquire() timeout must be float")
 		}
-		timeoutSecs = f.Float64()
 	}
 	if len(args) >= 2 {
-		f, ok := args[1].(*objects.Float)
-		if !ok {
+		switch tv := args[1].(type) {
+		case *objects.Float:
+			timeoutSecs = tv.Float64()
+		case *objects.Int:
+			n, _ := tv.Int64()
+			timeoutSecs = float64(n)
+		default:
 			return nil, fmt.Errorf("TypeError: acquire() timeout must be float")
 		}
-		timeoutSecs = f.Float64()
 	}
 
 	if !blocking {
@@ -684,7 +692,10 @@ func (lc *localObj) ldict() (*objects.Dict, error) {
 //
 // CPython: Modules/_threadmodule.c:1752 local_getattro
 func localGetattr(o objects.Object, name objects.Object) (objects.Object, error) {
-	lc := o.(*localObj)
+	lc, ok := o.(*localObj)
+	if !ok {
+		return objects.GenericGetAttr(o, name)
+	}
 	d, err := lc.ldict()
 	if err != nil {
 		return nil, err
@@ -707,7 +718,10 @@ func localGetattr(o objects.Object, name objects.Object) (objects.Object, error)
 //
 // CPython: Modules/_threadmodule.c:1691 local_setattro
 func localSetattr(o objects.Object, name objects.Object, value objects.Object) error {
-	lc := o.(*localObj)
+	lc, ok := o.(*localObj)
+	if !ok {
+		return objects.GenericSetAttr(o, name, value)
+	}
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return fmt.Errorf("TypeError: attribute name must be string")

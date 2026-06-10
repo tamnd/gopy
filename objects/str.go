@@ -104,6 +104,7 @@ func (u *Unicode) AttrDict() *Dict { return u.attrs }
 func (u *Unicode) EnsureAttrDict() *Dict {
 	if u.attrs == nil {
 		u.attrs = NewDict()
+		trackAttrDictHolder(u)
 	}
 	return u.attrs
 }
@@ -248,8 +249,12 @@ func init() {
 	strType.Str = unicodeStr
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
+	// CPython: Objects/unicodeobject.c:12358 PyUnicode_Type.tp_richcompare slot wrapper
+	BindRichCmpDescriptors(strType)
 	strType.Getattro = GenericGetAttr
 	strType.TpFlags |= TpFlagMatchSelf
+	// CPython: Objects/typeobject.c:1356 subtype_traverse
+	strType.TpTraverse = attrDictHolderTraverse
 	SetTypeDescr(strType, "__repr__", NewMethodDescr(strType, "__repr__", unicodeReprDescr))
 	SetTypeDescr(strType, "__str__", NewMethodDescr(strType, "__str__", unicodeStrDescr))
 	SetTypeDescr(strType, "__hash__", NewMethodDescr(strType, "__hash__", unicodeHashDescr))
@@ -577,6 +582,42 @@ func runeToStr(r rune) string {
 	}
 	return string(r)
 }
+
+// StrFromCodepoint builds a one-character string for code point r,
+// preserving lone surrogates (U+D800..U+DFFF) via pseudo-UTF-8 rather
+// than collapsing them to U+FFFD the way Go's string(rune) does.
+// Ordinals < 256 return the shared latin1 singleton, matching
+// PyUnicode_FromOrdinal's get_latin1_char short-circuit.
+//
+// CPython: Objects/unicodeobject.c:2389 PyUnicode_FromOrdinal
+func StrFromCodepoint(r rune) Object {
+	if r >= 0 && r < 256 {
+		return GetLatin1Char(int(r))
+	}
+	return NewStr(runeToStr(r))
+}
+
+// Runes returns the code points of u, preserving lone surrogates. Lone
+// surrogates are stored as 3-byte pseudo-UTF-8 in v; this decodes them
+// back rather than re-running Go's surrogate-rejecting UTF-8 walk.
+func (u *Unicode) Runes() []rune { return strLenientRunes(u.v) }
+
+// RunesToStr encodes a code-point slice to a Go string, preserving lone
+// surrogates via pseudo-UTF-8 (the inverse of strLenientRunes). Use this
+// instead of string(rs) anywhere the runes may contain surrogates, since
+// Go's string([]rune) maps them to U+FFFD.
+func RunesToStr(rs []rune) string {
+	var b strings.Builder
+	for _, r := range rs {
+		b.WriteString(runeToStr(r))
+	}
+	return b.String()
+}
+
+// LenientRunes decodes s to code points, accepting lone surrogates
+// stored as 3-byte pseudo-UTF-8. Exported wrapper over strLenientRunes
+// for cross-package callers that must walk surrogate-bearing strings.
+func LenientRunes(s string) []rune { return strLenientRunes(s) }
 
 // Value returns the canonical Go string. Same-package callers may
 // also read s.v directly; this getter exists for cross-package use.

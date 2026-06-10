@@ -16,6 +16,7 @@ package vm
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/stackref"
 )
 
 // fastForIter shared exit shape. On exhaustion the iterator stays on
@@ -39,7 +40,12 @@ func (e *evalState) fastForIterList(oparg uint32) (int, bool) {
 	if exhausted {
 		return e.forIterJump(oparg), true
 	}
-	e.pushObject(v)
+	// ListIterNextFast returns a borrowed ref from the list's items slice;
+	// promote to an owned stack slot so STORE_FAST's Close() on the previous
+	// loop variable is balanced, mirroring the slow-path FromObjectNew call.
+	//
+	// CPython: Python/bytecodes.c _ITER_NEXT_LIST (Py_INCREF item before push)
+	e.push(stackref.FromObjectNew(v))
 	return e.cacheAdvance(compile.FOR_ITER), true
 }
 
@@ -56,7 +62,12 @@ func (e *evalState) fastForIterTuple(oparg uint32) (int, bool) {
 	if exhausted {
 		return e.forIterJump(oparg), true
 	}
-	e.pushObject(v)
+	// TupleIterNextFast returns a borrowed ref from the tuple's items slice;
+	// promote to an owned stack slot so STORE_FAST's Close() on the previous
+	// loop variable is balanced, mirroring the slow-path FromObjectNew call.
+	//
+	// CPython: Python/bytecodes.c _ITER_NEXT_TUPLE (Py_INCREF item before push)
+	e.push(stackref.FromObjectNew(v))
 	return e.cacheAdvance(compile.FOR_ITER), true
 }
 
