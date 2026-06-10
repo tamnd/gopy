@@ -24,8 +24,8 @@ import (
 // CPython: Python/bltinmodule.c:1228 builtin_getattr
 // CPython: Objects/object.c:1392 PyObject_GetOptionalAttr (PyErr_Clear)
 func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: getattr expected 2 or 3 arguments, got %d", len(args))
+	if err := objects.CheckPositional("getattr", len(args), 2, 3); err != nil {
+		return nil, err
 	}
 	v, err := objects.GetAttr(args[0], args[1])
 	if err == nil {
@@ -35,6 +35,7 @@ func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		if objects.ClearCurrentExceptionHook != nil {
 			objects.ClearCurrentExceptionHook()
 		}
+		//nolint:gosec // G602: the len(args) == 3 guard above bounds args[2]
 		return args[2], nil
 	}
 	return nil, err
@@ -51,8 +52,8 @@ func GetAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 // CPython: Python/bltinmodule.c:1301 builtin_hasattr_impl
 // CPython: Objects/object.c:1392 PyObject_GetOptionalAttr (PyErr_Clear)
 func HasAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) != 2 {
-		return nil, fmt.Errorf("TypeError: hasattr expected 2 arguments, got %d", len(args))
+	if err := objects.CheckPositional("hasattr", len(args), 2, 2); err != nil {
+		return nil, err
 	}
 	_, err := objects.GetAttr(args[0], args[1])
 	if err == nil {

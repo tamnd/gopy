@@ -88,6 +88,14 @@ func minMax(args []objects.Object, kwargs map[string]objects.Object, op objects.
 	// keyword list min_max uses.
 	//
 	// CPython: Python/bltinmodule.c:1845 min_max
+	//
+	// min_max forwards its keyword arguments to _PyArg_ParseStack-
+	// AndKeywords with zero positional arguments (the iterable is read
+	// separately), so the over-supply check fires on the keyword count
+	// alone before any individual name is validated.
+	if err := objects.CheckKeywordCount(name, 0, len(kwargs), 2); err != nil {
+		return nil, err
+	}
 	for k := range kwargs {
 		if k != "key" && k != "default" {
 			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'", name, k)

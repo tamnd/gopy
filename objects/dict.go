@@ -230,8 +230,8 @@ func dictItemsMethod(args []Object, _ map[string]Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:3823 dict_get_impl
 func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: get expected 1 to 2 arguments, got %d", len(args)-1)
+	if err := CheckPositional("get", len(args)-1, 1, 2); err != nil {
+		return nil, err
 	}
 	d := args[0].(*Dict)
 	v, err := d.GetItem(args[1])
@@ -880,8 +880,8 @@ func DecrefThrowawayKwargs(d *Dict) {
 //
 // CPython: Objects/dictobject.c:3821 dict_pop_impl
 func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: pop expected 1 to 2 arguments, got %d", len(args)-1)
+	if err := CheckPositional("pop", len(args)-1, 1, 2); err != nil {
+		return nil, err
 	}
 	d := args[0].(*Dict)
 	v, err := d.GetItem(args[1])
@@ -1207,8 +1207,8 @@ func dictNumberIOr(a, b Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:3863 dict_setdefault_impl
 func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: setdefault expected 1 to 2 arguments, got %d", len(args)-1)
+	if err := CheckPositional("setdefault", len(args)-1, 1, 2); err != nil {
+		return nil, err
 	}
 	d := args[0].(*Dict)
 	// setdefault hashes (and compares) the key exactly once: it threads a
@@ -1233,8 +1233,8 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:3869 dict_fromkeys_impl
 func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, fmt.Errorf("TypeError: fromkeys expected 1 to 2 arguments, got %d", len(args)-1)
+	if err := CheckPositional("fromkeys", len(args)-1, 1, 2); err != nil {
+		return nil, err
 	}
 	var value Object
 	if len(args) == 3 {

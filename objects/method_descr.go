@@ -213,6 +213,15 @@ func methodDescrCheckArity(d *MethodDescr, nargs, nkw int) error {
 		return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
 	}
 	switch d.conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod) {
+	case MethVarargs:
+		// METH_VARARGS without METH_KEYWORDS: method_vectorcall_VARARGS
+		// routes through method_check_args, which rejects any keyword
+		// arguments. The METH_KEYWORDS variant skips this check.
+		//
+		// CPython: Objects/descrobject.c:266 method_check_args
+		if nkw > 0 {
+			return noKeyword()
+		}
 	case MethNoArgs:
 		if nkw > 0 {
 			return noKeyword()

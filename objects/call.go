@@ -305,11 +305,47 @@ func CallPrepend(callable Object, obj Object, args *Tuple, kwargs *Dict) (Object
 }
 
 // objectIsNotCallable formats the canonical TypeError raised when a
-// callable lacks both vectorcall and tp_call.
+// callable lacks both vectorcall and tp_call. When the object is a
+// module whose __name__ matches a callable attribute (the classic
+// `import pprint; pprint(x)` mistake), CPython appends a
+// "Did you mean: 'name.name(...)'?" hint.
 //
-// CPython: Objects/call.c:162 object_is_not_callable
+// CPython: Objects/call.c:163 object_is_not_callable
 func objectIsNotCallable(callable Object) error {
+	if mod, ok := callable.(*Module); ok {
+		if hint := moduleCallableHint(mod); hint != "" {
+			return fmt.Errorf("TypeError: '%s' object is not callable. Did you mean: '%s(...)'?",
+				callable.Type().Name, hint)
+		}
+	}
 	return fmt.Errorf("TypeError: '%s' object is not callable", callable.Type().Name)
+}
+
+// moduleCallableHint returns "name.name" when the module's __name__ is
+// also the name of a callable attribute on the module, else "".
+//
+// CPython: Objects/call.c:171 (PyModule_GetNameObject + PyCallable_Check)
+func moduleCallableHint(mod *Module) string {
+	d := mod.Dict()
+	if d == nil {
+		return ""
+	}
+	nameObj, err := d.GetItem(NewStr("__name__"))
+	if err != nil || nameObj == nil {
+		return ""
+	}
+	name, ok := nameObj.(*Unicode)
+	if !ok {
+		return ""
+	}
+	attr, err := d.GetItem(NewStr(name.Value()))
+	if err != nil || attr == nil {
+		return ""
+	}
+	if !Callable(attr) {
+		return ""
+	}
+	return name.Value() + "." + name.Value()
 }
 
 // dictToMap copies a *Dict's entries into the map[string]Object shape

@@ -22,6 +22,23 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// keywordCandidates lists the parameter names eligible for keyword
+// binding so UnexpectedKeywordError can offer a "Did you mean 'X'?"
+// suggestion. It mirrors CPython's co_varnames[posonlyargcount :
+// total_args]: positional-only slots and the *args slot are skipped.
+//
+// CPython: Python/ceval.c:1792 (possible_keywords list)
+func keywordCandidates(co *objects.Code, nposonly, npos, kwWindow int, hasVarargs bool) []string {
+	out := make([]string, 0, kwWindow)
+	for i := nposonly; i < kwWindow; i++ {
+		if i == npos && hasVarargs {
+			continue
+		}
+		out = append(out, co.Varnames[i])
+	}
+	return out
+}
+
 // forceGenPrev wires the next stack.Push to use the running generator's
 // saved frame as f_back instead of the FrameStack top. Generator frames
 // live in activeEvalFrames (not on the FrameStack), so a regular function
@@ -500,7 +517,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k)
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
@@ -726,7 +743,7 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 				if !hasVarkw {
 					// Best-effort string repr for error message.
 					ks, _ := objects.Str(kwname)
-					return nil, objects.UnexpectedKeywordError(qualname, ks)
+					return nil, objects.UnexpectedKeywordError(qualname, ks, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 				}
 				rawKwEntries = append(rawKwEntries, rawKwEntry{key: kwname, val: val})
 			}
@@ -864,7 +881,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k)
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)

@@ -107,7 +107,7 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		}
 	}
 	for _, fn := range attributePanel() {
-		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunctionConv(fn.name, fn.conv, fn.impl)); err != nil {
 			return nil, err
 		}
 	}
@@ -513,20 +513,16 @@ func aggregationPanel() []struct {
 // attributePanel returns the v0.7 attribute builtins (1651-builtins-C).
 //
 // CPython: Python/bltinmodule.c builtin_methods getattr / hasattr /
-// setattr / delattr
-func attributePanel() []struct {
-	name string
-	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-} {
-	return []struct {
-		name string
-		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-	}{
-		{"getattr", GetAttr},
-		{"hasattr", HasAttr},
-		{"setattr", SetAttr},
-		{"delattr", DelAttr},
-		{"dir", Dir},
+// setattr / delattr. getattr/hasattr/setattr/delattr are METH_FASTCALL,
+// so they reject keyword arguments before binding ("getattr() takes no
+// keyword arguments"); dir is METH_VARARGS.
+func attributePanel() []builtinRow {
+	return []builtinRow{
+		{name: "getattr", conv: objects.MethFastcall, impl: GetAttr},
+		{name: "hasattr", conv: objects.MethFastcall, impl: HasAttr},
+		{name: "setattr", conv: objects.MethFastcall, impl: SetAttr},
+		{name: "delattr", conv: objects.MethFastcall, impl: DelAttr},
+		{name: "dir", conv: objects.MethVarargs, impl: Dir},
 	}
 }
 

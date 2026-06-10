@@ -352,18 +352,34 @@ func objectHashDescr(args []Object, _ map[string]Object) (Object, error) {
 	return NewInt(h), nil
 }
 
+// checkNumArgs validates the user-supplied argument count for a slot
+// wrapper. args includes the bound receiver at index 0, so the
+// caller-visible count is len(args)-1; n is the number of arguments the
+// wrapper accepts after self. The message omits the function name,
+// exactly like CPython's check_num_args (the wrapper layer prepends
+// nothing).
+//
+// CPython: Objects/typeobject.c:8847 check_num_args
+func checkNumArgs(args []Object, n int) error {
+	got := len(args) - 1
+	if got == n {
+		return nil
+	}
+	return fmt.Errorf("TypeError: expected %d argument%s, got %d", n, plural(n), got)
+}
+
 // objectGetattributeDescr is the slot wrapper for tp_getattro.
 func objectGetattributeDescr(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) != 2 {
-		return nil, fmt.Errorf("TypeError: expected 2 arguments, got %d", len(args))
+	if err := checkNumArgs(args, 1); err != nil {
+		return nil, err
 	}
 	return GenericGetAttr(args[0], args[1])
 }
 
 // objectSetattrDescr is the slot wrapper for tp_setattro (set branch).
 func objectSetattrDescr(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) != 3 {
-		return nil, fmt.Errorf("TypeError: expected 3 arguments, got %d", len(args))
+	if err := checkNumArgs(args, 2); err != nil {
+		return nil, err
 	}
 	if err := GenericSetAttr(args[0], args[1], args[2]); err != nil {
 		return nil, err
@@ -373,8 +389,8 @@ func objectSetattrDescr(args []Object, _ map[string]Object) (Object, error) {
 
 // objectDelattrDescr is the slot wrapper for tp_setattro (delete branch).
 func objectDelattrDescr(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) != 2 {
-		return nil, fmt.Errorf("TypeError: expected 2 arguments, got %d", len(args))
+	if err := checkNumArgs(args, 1); err != nil {
+		return nil, err
 	}
 	if err := GenericSetAttr(args[0], args[1], nil); err != nil {
 		return nil, err

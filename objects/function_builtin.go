@@ -232,6 +232,20 @@ func builtinFunctionCall(o Object, args []Object, kwargs map[string]Object) (Obj
 	return bf.Fn(args, kwargs)
 }
 
+// builtinFunctionNoKeywordsError renders the "takes no keyword
+// arguments" TypeError through _PyObject_FunctionStr, so a module
+// function reports its dotted name ("_struct.pack()") and a builtin
+// keeps its bare name ("getattr()"), matching cfunction_check_kwargs.
+//
+// CPython: Objects/methodobject.c:399 cfunction_check_kwargs
+func builtinFunctionNoKeywordsError(bf *BuiltinFunction) error {
+	funcstr, err := FunctionStr(bf)
+	if err != nil {
+		funcstr = bf.Name + "()"
+	}
+	return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
+}
+
 // builtinFunctionCheckKwargs raises TypeError when a kwargs-less
 // calling convention received any keyword arguments. Mirrors
 // cfunction_check_kwargs over BuiltinFunction.Conv.
@@ -244,7 +258,7 @@ func builtinFunctionCheckKwargs(bf *BuiltinFunction, nkw int) error {
 	calling := bf.Conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod)
 	switch calling {
 	case MethNoArgs, MethO, MethFastcall:
-		return fmt.Errorf("TypeError: %s() takes no keyword arguments", bf.Name)
+		return builtinFunctionNoKeywordsError(bf)
 	}
 	return nil
 }

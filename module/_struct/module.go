@@ -43,8 +43,8 @@ func buildModule() (*objects.Module, error) {
 		val  objects.Object
 	}{
 		{"calcsize", objects.NewBuiltinFunction("calcsize", moduleCalcsize)},
-		{"pack", objects.NewBuiltinFunction("pack", modulePack)},
-		{"pack_into", objects.NewBuiltinFunction("pack_into", modulePackInto)},
+		{"pack", objects.NewBuiltinFunctionConv("pack", objects.MethFastcall, modulePack)},
+		{"pack_into", objects.NewBuiltinFunctionConv("pack_into", objects.MethFastcall, modulePackInto)},
 		{"unpack", objects.NewBuiltinFunction("unpack", moduleUnpack)},
 		{"unpack_from", objects.NewBuiltinFunction("unpack_from", moduleUnpackFrom)},
 		{"iter_unpack", objects.NewBuiltinFunction("iter_unpack", moduleIterUnpack)},
@@ -1457,9 +1457,9 @@ func newStructType() *objects.Type {
 	}))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", structInit))
 	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescrConv(t, "__sizeof__", objects.MethNoArgs, structSizeof))
-	objects.SetTypeDescr(t, "pack", objects.NewMethodDescr(t, "pack", structPack))
+	objects.SetTypeDescr(t, "pack", objects.NewMethodDescrConv(t, "pack", objects.MethVarargs, structPack))
 	objects.SetTypeDescr(t, "unpack", objects.NewMethodDescr(t, "unpack", structUnpack))
-	objects.SetTypeDescr(t, "pack_into", objects.NewMethodDescr(t, "pack_into", structPackInto))
+	objects.SetTypeDescr(t, "pack_into", objects.NewMethodDescrConv(t, "pack_into", objects.MethVarargs, structPackInto))
 	objects.SetTypeDescr(t, "unpack_from", objects.NewMethodDescr(t, "unpack_from", structUnpackFrom))
 	objects.SetTypeDescr(t, "iter_unpack", objects.NewMethodDescr(t, "iter_unpack", structIterUnpackMethod))
 	return t

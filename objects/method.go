@@ -442,15 +442,21 @@ func init() {
 	// classmethod(fn): wrap fn so attribute access binds to the class.
 	//
 	// CPython: Objects/funcobject.c:1487 cm_init
-	ClassMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
-		if len(args) < 1 {
-			return nil, fmt.Errorf("TypeError: classmethod expected 1 argument, got 0")
+	ClassMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: classmethod() takes no keyword arguments")
+		}
+		if err := CheckPositional("classmethod", len(args), 1, 1); err != nil {
+			return nil, err
 		}
 		return NewClassMethod(args[0]), nil
 	}
-	StaticMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
-		if len(args) < 1 {
-			return nil, fmt.Errorf("TypeError: staticmethod expected 1 argument, got 0")
+	StaticMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		if len(kwargs) != 0 {
+			return nil, fmt.Errorf("TypeError: staticmethod() takes no keyword arguments")
+		}
+		if err := CheckPositional("staticmethod", len(args), 1, 1); err != nil {
+			return nil, err
 		}
 		return NewStaticMethod(args[0]), nil
 	}

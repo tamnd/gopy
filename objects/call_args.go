@@ -121,6 +121,68 @@ func MissingArgumentsError(qualname, kind string, names []string) error {
 		qualname, len(names), kind, plural, joinQuotedNames(names))
 }
 
+// CheckPositional reports whether nargs positional arguments fall
+// within [min, max] for a C-level function named name, returning the
+// CPython-exact TypeError otherwise. Clinic-generated functions call
+// this before binding, so the message wording ("expected at least N"
+// when too few, "expected at most N" when too many, dropping the
+// "at least/most" qualifier when min == max) must match byte-for-byte.
+//
+// CPython: Python/getargs.c:2693 _PyArg_CheckPositional
+func CheckPositional(name string, nargs, minArgs, maxArgs int) error {
+	if nargs < minArgs {
+		qual := "at least "
+		if minArgs == maxArgs {
+			qual = ""
+		}
+		return fmt.Errorf("TypeError: %s expected %s%d argument%s, got %d",
+			name, qual, minArgs, plural(minArgs), nargs)
+	}
+	if nargs == 0 {
+		return nil
+	}
+	if nargs > maxArgs {
+		qual := "at most "
+		if minArgs == maxArgs {
+			qual = ""
+		}
+		return fmt.Errorf("TypeError: %s expected %s%d argument%s, got %d",
+			name, qual, maxArgs, plural(maxArgs), nargs)
+	}
+	return nil
+}
+
+// plural returns "s" unless n is 1, matching CPython's "argument%s"
+// pluralisation in _PyArg_CheckPositional.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// CheckKeywordCount ports the over-supply branch of vgetargskeywords:
+// when the positional plus keyword count exceeds the number of declared
+// parameters, PyArg_ParseTupleAndKeywords raises "takes at most N
+// argument(s) (M given)". The "keyword " qualifier is inserted only
+// when nargs is zero (all the surplus came through keywords), matching
+// bpo-31229. Builtins that consume their leading positionals separately
+// (min/max read the iterable, product reads the pools) pass nargs=0 so
+// the keyword variant fires.
+//
+// CPython: Python/getargs.c:1638 vgetargskeywords
+func CheckKeywordCount(name string, nargs, nkwargs, maxParams int) error {
+	if nargs+nkwargs <= maxParams {
+		return nil
+	}
+	kwQual := ""
+	if nargs == 0 {
+		kwQual = "keyword "
+	}
+	return fmt.Errorf("TypeError: %s() takes at most %d %sargument%s (%d given)",
+		name, maxParams, kwQual, plural(maxParams), nargs+nkwargs)
+}
+
 // TooManyPositionalError formats the TypeError raised when *args
 // supplies more positional values than the signature accepts (and the
 // function has no *args bucket). atLeast equals max minus the number
@@ -151,9 +213,17 @@ func TooManyPositionalError(qualname string, given, atLeast, atMost, kwonlyGiven
 
 // UnexpectedKeywordError is the TypeError raised when a caller passes
 // a keyword the signature doesn't declare (and there's no **kwargs).
+// candidates lists the parameter names eligible for keyword binding
+// (positional-only names excluded); when one is a near miss for the
+// offending keyword the message gains a "Did you mean 'X'?" tail, just
+// like the CPython argument binder.
 //
-// CPython: Python/ceval.c (kwonly mismatch branch) + Objects/call.c
-func UnexpectedKeywordError(qualname, name string) error {
+// CPython: Python/ceval.c:1810 (keyword bind miss + _Py_CalculateSuggestions)
+func UnexpectedKeywordError(qualname, name string, candidates []string) error {
+	if suggestion := CalculateSuggestions(candidates, name); suggestion != "" {
+		return fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'. Did you mean '%s'?",
+			qualname, name, suggestion)
+	}
 	return fmt.Errorf("TypeError: %s() got an unexpected keyword argument '%s'", qualname, name)
 }
 
