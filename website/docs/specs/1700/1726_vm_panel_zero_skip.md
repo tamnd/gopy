@@ -68,7 +68,7 @@ Per panel file, `gopy skip count` vs `CPython skip count` on the same file:
 - [x] Conformance bridge: `check_impl_detail` treats gopy as cpython for impl-detail gating
 - [x] `dict.__contains__` rebind to METH_O (kwargs rejected before arity)
 - [x] `PySeqIter` index overflow guard -> `test_iter.test_iter_overflow` green
-- [ ] `test_call` `@cpython_only` message drift (~29 failures): hasattr/getattr/staticmethod/classmethod/struct/deque/min/print + get min/max + keyword suggestions
+- [x] `test_call` `@cpython_only` message drift: hasattr/getattr/staticmethod/classmethod/struct/deque/min/print + get min/max + keyword suggestions (down to the 2 failures + 1 error that need the `_testcapi`/`_testinternalcapi` ports below)
 - [ ] Port `module/_testcapi/` vectorcall.c (pyobject_vectorcall/fastcalldict + Meth* + MethodDescriptor* heap types)
 - [ ] Port `_testcapi.raise_SIGINT_then_send_None` for `test_generators`
 - [ ] Port `_testinternalcapi` sizeof hook for `test_frame.test_sizeof`
