@@ -79,11 +79,11 @@ func init() {
 	SetTypeDescr(frameLocalsProxyType, "__setitem__",
 		NewMethodDescr(frameLocalsProxyType, "__setitem__", frameLocalsProxySetItemMethod))
 	SetTypeDescr(frameLocalsProxyType, "keys",
-		NewMethodDescr(frameLocalsProxyType, "keys", frameLocalsProxyKeysMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "keys", MethNoArgs, frameLocalsProxyKeysMethod))
 	SetTypeDescr(frameLocalsProxyType, "values",
-		NewMethodDescr(frameLocalsProxyType, "values", frameLocalsProxyValuesMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "values", MethNoArgs, frameLocalsProxyValuesMethod))
 	SetTypeDescr(frameLocalsProxyType, "items",
-		NewMethodDescr(frameLocalsProxyType, "items", frameLocalsProxyItemsMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "items", MethNoArgs, frameLocalsProxyItemsMethod))
 	SetTypeDescr(frameLocalsProxyType, "get",
 		NewMethodDescr(frameLocalsProxyType, "get", frameLocalsProxyGetMethod))
 	SetTypeDescr(frameLocalsProxyType, "setdefault",
@@ -91,11 +91,11 @@ func init() {
 	SetTypeDescr(frameLocalsProxyType, "pop",
 		NewMethodDescr(frameLocalsProxyType, "pop", frameLocalsProxyPopMethod))
 	SetTypeDescr(frameLocalsProxyType, "update",
-		NewMethodDescr(frameLocalsProxyType, "update", frameLocalsProxyUpdateMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "update", MethO, frameLocalsProxyUpdateMethod))
 	SetTypeDescr(frameLocalsProxyType, "copy",
-		NewMethodDescr(frameLocalsProxyType, "copy", frameLocalsProxyCopyMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "copy", MethNoArgs, frameLocalsProxyCopyMethod))
 	SetTypeDescr(frameLocalsProxyType, "__reversed__",
-		NewMethodDescr(frameLocalsProxyType, "__reversed__", frameLocalsProxyReversedMethod))
+		NewMethodDescrConv(frameLocalsProxyType, "__reversed__", MethNoArgs, frameLocalsProxyReversedMethod))
 	SetTypeDescr(frameLocalsProxyType, "__len__",
 		NewMethodDescr(frameLocalsProxyType, "__len__", frameLocalsProxyLenMethod))
 	SetTypeDescr(frameLocalsProxyType, "__iter__",

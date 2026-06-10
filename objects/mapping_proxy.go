@@ -46,11 +46,11 @@ func init() {
 	MappingProxyType.TpNew = mappingProxyNew
 
 	SetTypeDescr(MappingProxyType, "get", NewMethodDescr(MappingProxyType, "get", mappingProxyGetMethod))
-	SetTypeDescr(MappingProxyType, "keys", NewMethodDescr(MappingProxyType, "keys", mappingProxyForwardNoArgs("keys")))
-	SetTypeDescr(MappingProxyType, "values", NewMethodDescr(MappingProxyType, "values", mappingProxyForwardNoArgs("values")))
-	SetTypeDescr(MappingProxyType, "items", NewMethodDescr(MappingProxyType, "items", mappingProxyForwardNoArgs("items")))
-	SetTypeDescr(MappingProxyType, "copy", NewMethodDescr(MappingProxyType, "copy", mappingProxyForwardNoArgs("copy")))
-	SetTypeDescr(MappingProxyType, "__reversed__", NewMethodDescr(MappingProxyType, "__reversed__", mappingProxyForwardNoArgs("__reversed__")))
+	SetTypeDescr(MappingProxyType, "keys", NewMethodDescrConv(MappingProxyType, "keys", MethNoArgs, mappingProxyForwardNoArgs("keys")))
+	SetTypeDescr(MappingProxyType, "values", NewMethodDescrConv(MappingProxyType, "values", MethNoArgs, mappingProxyForwardNoArgs("values")))
+	SetTypeDescr(MappingProxyType, "items", NewMethodDescrConv(MappingProxyType, "items", MethNoArgs, mappingProxyForwardNoArgs("items")))
+	SetTypeDescr(MappingProxyType, "copy", NewMethodDescrConv(MappingProxyType, "copy", MethNoArgs, mappingProxyForwardNoArgs("copy")))
+	SetTypeDescr(MappingProxyType, "__reversed__", NewMethodDescrConv(MappingProxyType, "__reversed__", MethNoArgs, mappingProxyForwardNoArgs("__reversed__")))
 }
 
 // mappingProxyForwardNoArgs returns a closure that forwards a no-arg

@@ -515,7 +515,7 @@ func init() {
 	//          Objects/dictobject.c:6790 dictvalues_reversed
 	//          Objects/dictobject.c:6700 dictitems_reversed
 	for _, vt := range []*Type{dictKeysViewType, dictValuesViewType, dictItemsViewType} {
-		SetTypeDescr(vt, "__reversed__", NewMethodDescr(vt, "__reversed__", dictViewReversed))
+		SetTypeDescr(vt, "__reversed__", NewMethodDescrConv(vt, "__reversed__", MethNoArgs, dictViewReversed))
 		SetTypeDescr(vt, "mapping", NewGetSetDescr("mapping", dictViewMappingGet, nil))
 		// A view keeps its backing dict alive, so it joins the cycle and
 		// must be traversable. CPython: Objects/dictobject.c:6087
