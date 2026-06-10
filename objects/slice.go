@@ -79,8 +79,6 @@ func init() {
 			}
 			return s.Step, nil
 		}, nil))
-	// CPython: Objects/sliceobject.c:L249 slice_getnewargs
-	SetTypeDescr(SliceType, "__getnewargs__", NewMethodDescr(SliceType, "__getnewargs__", sliceGetNewArgs))
 	// CPython: Objects/sliceobject.c:571 slice_reduce (METH_NOARGS)
 	SetTypeDescr(SliceType, "__reduce__", NewMethodDescrConv(SliceType, "__reduce__", MethNoArgs, sliceReduce))
 	// CPython: Objects/sliceobject.c:570 slice_indices (METH_O)
@@ -254,21 +252,6 @@ func sliceRepr(o Object) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("slice(%s, %s, %s)", startR, stopR, stepR), nil
-}
-
-// sliceGetNewArgs implements slice.__getnewargs__(): returns (start, stop, step)
-// so that pickle/copy can reconstruct the slice via slice.__new__.
-//
-// CPython: Objects/sliceobject.c:L249 slice_getnewargs
-func sliceGetNewArgs(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("TypeError: __getnewargs__() takes no arguments (%d given)", len(args)-1)
-	}
-	s, ok := asSlice(args[0])
-	if !ok {
-		return nil, fmt.Errorf("TypeError: descriptor '__getnewargs__' for 'slice' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
-	}
-	return NewTuple([]Object{s.Start, s.Stop, s.Step}), nil
 }
 
 // sliceHash implements slice.__hash__. A slice is hashable when all
