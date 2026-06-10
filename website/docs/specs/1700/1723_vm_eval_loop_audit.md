@@ -669,16 +669,43 @@ port therefore CANNOT ship on its own. The gate tests
 (`test_iter.test_ref_counting_behavior`, `test_frame.test_clear_refcycles`)
 require the full eval-loop stack-ref discipline below as a prerequisite.
 
+**The discipline is interlocked, not uniformly loose.** A closer audit shows
+gopy's eval loop is not "no refcounting" but an inconsistent mix, and that is
+why no single piece can be made faithful in isolation:
+
+- Loads DO incref. `LOAD_FAST` is `e.localAt(oparg).Dup()`
+  (`vm/eval_dispatch_gen.go:744`), and `Dup` increfs (`stackref/stackref.go:83`).
+- Frame teardown DOES decref. `Frame.DropStack` and `Frame.Clear`
+  (`frame/frame.go:353`, `:369`) `Close()` every slot.
+- But `decrefInputs` is a no-op (`vm/eval_helpers.go:27`), so the per-opcode
+  consumed inputs never get released (they leak upward, which is safe but wrong).
+- And iteration BORROWS instead of owning. `listIterType.IterNext` returns
+  `it.src.items[it.pos]` with no incref (`objects/list.go:791`), diverging from
+  CPython `listiter_next`, which returns an owned reference via
+  `list_get_item_ref` (`Objects/listobject.c:4018`, `:4026`).
+
+So the net per-object count is neither a clean borrow model nor a clean owned
+model. That mix is what makes a targeted fix unsafe: e.g. adding the faithful
+`Py_DECREF(it)` / item-close discipline to the failed-unpack path
+(`unpackSeq`, `vm/eval_simple.go:1744`, porting
+`Python/ceval.c:2387 _PyEval_UnpackIterableStackRef`) would over-decref, because
+the items `IterNext` handed back were borrowed from the list, not owned.
+
 **Prerequisite P11.0 — eval-loop stack-ref discipline.** Before any container
 `Dealloc` can fire at refcount 0, the stack must own its references the way
 CPython's stackref machinery does: each load pushes an owned reference (increfs
-its source), every consumed input is closed (`decrefInputs` becomes a real
-`Decref` over the popped slots), and stores into locals/cells/containers/attrs
-incref. CPython model: `Python/ceval_macros.h DECREF_INPUTS`,
+its source), iterators return owned references (`listiter_next` increfs),
+every consumed input is closed (`decrefInputs` becomes a real `Decref` over the
+popped slots), and stores into locals/cells/containers/attrs incref. CPython
+model: `Python/ceval_macros.h DECREF_INPUTS`,
 `Include/internal/pycore_stackref.h PyStackRef_DUP`/`PyStackRef_CLOSE`,
-`Python/bytecodes.c` (every `LOAD_*`/`STORE_*` uop). Only once the refcount is a
-true liveness signal do P11.1 (container deallocs) and P11.2 (generator
-tracking) become safe to land.
+`Python/bytecodes.c` (every `LOAD_*`/`STORE_*`/`FOR_ITER` uop),
+`Objects/listobject.c:4018 listiter_next`. The change is coherent-whole: making
+`listiter_next` own its result forces every `IterNext` consumer (FOR_ITER,
+`list()`, `unpackSeq`, comprehensions) to close it, and making `decrefInputs`
+real forces every opcode's inputs to be genuinely owned at entry. Only once the
+refcount is a true liveness signal do the failed-unpack decref, P11.1 (container
+deallocs), and P11.2 (generator tracking) become safe to land.
 
 ### P11.2 — Wire `GCTrackHook` in `NewGenerator`
 
