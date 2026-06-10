@@ -81,10 +81,10 @@ func init() {
 		}, nil))
 	// CPython: Objects/sliceobject.c:L249 slice_getnewargs
 	SetTypeDescr(SliceType, "__getnewargs__", NewMethodDescr(SliceType, "__getnewargs__", sliceGetNewArgs))
-	// CPython: Objects/sliceobject.c:561 slice_reduce
-	SetTypeDescr(SliceType, "__reduce__", NewMethodDescr(SliceType, "__reduce__", sliceReduce))
-	// CPython: Objects/sliceobject.c:201 slice_indices
-	SetTypeDescr(SliceType, "indices", NewMethodDescr(SliceType, "indices", sliceIndicesMethod))
+	// CPython: Objects/sliceobject.c:571 slice_reduce (METH_NOARGS)
+	SetTypeDescr(SliceType, "__reduce__", NewMethodDescrConv(SliceType, "__reduce__", MethNoArgs, sliceReduce))
+	// CPython: Objects/sliceobject.c:570 slice_indices (METH_O)
+	SetTypeDescr(SliceType, "indices", NewMethodDescrConv(SliceType, "indices", MethO, sliceIndicesMethod))
 	// Expose __new__ so slice.__new__(slice, ...) routes to sliceTpNew
 	// instead of falling back to object.__new__ which returns *Instance.
 	// CPython: Objects/sliceobject.c:L319 slice_new via staticmethod wrapper
