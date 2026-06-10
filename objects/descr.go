@@ -101,8 +101,13 @@ func descrObjclassGetter(owner Object) (Object, error) {
 	return nil, errors.New("AttributeError: __objclass__")
 }
 
-// descrQualnameGetter returns Owner.__qualname__.Name, matching
-// descr_get_qualname (Objects/descrobject.c:144).
+// descrQualnameGetter returns "<owner type __qualname__>.<descr name>",
+// matching calculate_qualname, which formats "%S.%S" from the owning
+// type's __qualname__ (not tp_name) and the descriptor name. For static
+// types __qualname__ strips the dotted module prefix (_PyType_Name), so
+// datetime.timedelta.__reduce__ renders as "timedelta.__reduce__".
+//
+// CPython: Objects/descrobject.c:593 calculate_qualname
 func descrQualnameGetter(owner Object) (Object, error) {
 	n, hasName := owner.(descrNamer)
 	if !hasName {
@@ -112,7 +117,11 @@ func descrQualnameGetter(owner Object) (Object, error) {
 	if !hasOwner || o.Owner() == nil {
 		return NewStr(n.Name()), nil
 	}
-	return NewStr(o.Owner().Name + "." + n.Name()), nil
+	typeQualname, err := Str(TypeGetQualName(o.Owner()))
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(typeQualname + "." + n.Name()), nil
 }
 
 // NewGetSetDescr builds a getset descriptor that exposes name on the

@@ -108,17 +108,17 @@ func newDequeType() *objects.Type {
 	objects.SetTypeDescr(t, "insert", objects.NewMethodDescr(t, "insert", dequeInsertMethod))
 	objects.SetTypeDescr(t, "clear", objects.NewMethodDescr(t, "clear", dequeClearMethod))
 	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", dequeCopyMethod))
-	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", dequeCopyMethod))
+	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescrConv(t, "__copy__", objects.MethNoArgs, dequeCopyMethod))
 	// __repr__ slot wrapper. Binding distinct descriptors per type
 	// keeps pprint's dispatch table from collapsing every C type onto
 	// object.__repr__.
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
 	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", dequeReprMethod))
-	objects.SetTypeDescr(t, "__reversed__", objects.NewMethodDescr(t, "__reversed__", dequeReversedMethod))
+	objects.SetTypeDescr(t, "__reversed__", objects.NewMethodDescrConv(t, "__reversed__", objects.MethNoArgs, dequeReversedMethod))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", dequeInitMethod))
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", dequeReduceMethod))
-	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescr(t, "__sizeof__", dequeSizeofMethod))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, dequeReduceMethod))
+	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescrConv(t, "__sizeof__", objects.MethNoArgs, dequeSizeofMethod))
 	return t
 }
 
@@ -1050,7 +1050,7 @@ func newDequeIterType() *objects.Type {
 	t.IterNext = dequeIterNext
 	objects.AddIterSlotWrappers(t)
 	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len
-	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescr(t, "__length_hint__", dequeIterLenHint))
+	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescrConv(t, "__length_hint__", objects.MethNoArgs, dequeIterLenHint))
 	return t
 }
 
@@ -1111,7 +1111,7 @@ func newDequeRevIterType() *objects.Type {
 	t.IterNext = dequeRevIterNext
 	objects.AddIterSlotWrappers(t)
 	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len (shared with forward)
-	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescr(t, "__length_hint__", dequeIterLenHint))
+	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescrConv(t, "__length_hint__", objects.MethNoArgs, dequeIterLenHint))
 	return t
 }
 
@@ -1198,13 +1198,13 @@ func newDefaultDictType() *objects.Type {
 	objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescr(t, "__repr__", defaultDictReprMethod))
 	objects.SetTypeDescr(t, "__missing__", objects.NewMethodDescr(t, "__missing__", defaultDictMissing))
 	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", defaultDictCopy))
-	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", defaultDictCopy))
+	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescrConv(t, "__copy__", objects.MethNoArgs, defaultDictCopy))
 	objects.SetTypeDescr(t, "keys", objects.NewMethodDescr(t, "keys", defaultDictKeys))
 	objects.SetTypeDescr(t, "values", objects.NewMethodDescr(t, "values", defaultDictValues))
 	objects.SetTypeDescr(t, "items", objects.NewMethodDescr(t, "items", defaultDictItems))
 	objects.SetTypeDescr(t, "get", objects.NewMethodDescr(t, "get", defaultDictGet))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", defaultDictInitMethod))
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", defaultDictReduceMethod))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, defaultDictReduceMethod))
 	objects.SetTypeDescr(t, "__or__", objects.NewMethodDescr(t, "__or__", defaultDictOrMethod))
 	objects.SetTypeDescr(t, "__ror__", objects.NewMethodDescr(t, "__ror__", defaultDictRorMethod))
 	objects.SetTypeDescr(t, "__ior__", objects.NewMethodDescr(t, "__ior__", defaultDictIorMethod))
