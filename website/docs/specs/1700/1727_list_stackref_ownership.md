@@ -102,6 +102,59 @@ CPython references: `Objects/listobject.c` (`PyList_New`,
   `test_weakref`) + `import textwrap/re/json` smoke under the underflow
   detector; flip the dealloc flag; confirm both gates pass; commit.
 
+## Underflow detector (the audit tool)
+
+P4 is driven by a temporary diagnostic, not by reading code blind. A hook in
+`Decref` logs (does not panic) the type, name, and Go stack whenever a mortal
+refcount drops below zero, capped at a few hundred lines so a whole program runs
+to completion and surfaces every under-ownership site in one pass:
+
+```go
+// objects/refcount.go, temporary
+newrc := atomic.AddInt64(&h.refcnt, -1)
+if newrc < 0 { probeUnderflow(o, newrc) } // log type/name/stack, capped
+```
+
+Run `import textwrap` (pulls in `re`, the f-string machinery, and BUILD_STRING)
+under the probe, read the stacks, fix the producer at the top of each, rebuild,
+repeat. The probe and its `objects/refcount_probe.go` companion are removed
+before every commit; the tree never ships with the hook.
+
+## P4 progress (2026-06-10)
+
+Three eval-loop value producers were pushing borrowed references that the
+following consumer then decref'd, driving the object negative. Each is now fixed
+to push an owned reference exactly where the CPython bytecode increfs. Commit
+`621d84c7`.
+
+| Producer | Bug | Fix | CPython |
+| --- | --- | --- | --- |
+| `LOAD_CONST` (eval.go fast path + eval_dispatch_gen.go) | stole the borrowed `co_consts` entry; gopy consts are not immortal so the push must own | `FromObject` → `FromObjectNew` | `Python/bytecodes.c` LOAD_CONST (Py_INCREF on non-immortal const) |
+| `LOAD_BUILD_CLASS` (eval_dispatch_gen.go) | stole the borrowed `__build_class__` slot returned by `MappingGetOptionalItem` (which, unlike CPython, returns borrowed) | `FromObject` → `FromObjectNew` | `Python/bytecodes.c:1556` LOAD_BUILD_CLASS (`Py_INCREF(bc)`) |
+| `FORMAT_SIMPLE` exact-str passthrough (eval_dispatch_gen.go) | aliased the borrowed input, then `drop(1)` decref'd it while `push` re-pushed the same object uncounted | `res = value` → `res = value.Dup()` | `Python/bytecodes.c` FORMAT_SIMPLE (str branch keeps the input live) |
+
+Measured state after these fixes: the noisiest monotonic over-decrefs are gone,
+but ~430 under-ownership sites remain across multiple producers. Bucket counts
+from the textwrap run (top of stack, deduped by type):
+
+| Type | Underflows | Likely producer family |
+| --- | --- | --- |
+| builtin_function_or_method | 108 | LOAD_GLOBAL / LOAD_METHOD borrowed push |
+| tuple | 96 | BUILD_TUPLE / BINARY_SUBSCR |
+| int | 53 | LOAD_FAST / arithmetic results |
+| list | 52 | BUILD_LIST / list_concat / list_slice |
+| str | 44 | LOAD_ATTR / BUILD_STRING |
+| dict | 10 | BUILD_MAP / LOAD_GLOBAL globals |
+| module | 8 | IMPORT_NAME / LOAD_ATTR on module |
+
+This is the P4 worklist: each family needs its push site audited against the
+matching `Python/bytecodes.c` op so the reference it pushes is owned. The count
+is too large to drive to zero in one session, which is the multi-session scope
+this spec was opened for. `list_dealloc` (P5) stays disabled until P4 reaches
+zero, because enabling it now would convert these latent under-counts (harmless
+negative refcounts that never free) into active corruption (premature free of
+live contents), exactly the `IndexError` failure mode measured above.
+
 ## Caller audit table (P3)
 
 Filled in as each package is classified. Format: `package` — steal / borrow /
@@ -121,7 +174,7 @@ unchanged.
 - [ ] P1 convention + API (NewList/Append borrow, NewListSteal/AppendSteal)
 - [ ] P2 list mutators balanced
 - [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
-- [ ] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS
+- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (3 producers fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE; ~430 sites remain, see bucket table)
 - [ ] P5 list_dealloc content-release sweep
 - [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
 - [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91
