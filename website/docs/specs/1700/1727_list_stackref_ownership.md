@@ -155,6 +155,48 @@ zero, because enabling it now would convert these latent under-counts (harmless
 negative refcounts that never free) into active corruption (premature free of
 live contents), exactly the `IndexError` failure mode measured above.
 
+### Producer attribution via per-object history
+
+The Decref stack alone names the *consumer*, never the producer that pushed the
+under-owned reference. To close that gap the probe was extended to record a
+short INCREF/DECREF history (with a trimmed stack per event) keyed by object
+pointer, and to dump the whole life of the first object that goes negative.
+Replaying one object's history end to end shows exactly which op pushed a
+borrowed reference that a later op then over-released.
+
+The first textwrap underflow attributed this way is a `dict.setdefault` result:
+`setdefault` returned the stored value borrowed, the eval loop treated the call
+result as owned, and a following `LOAD_ATTR` (`DECREF_INPUTS`) dropped it below
+zero. That is one instance of a broader bug class.
+
+### Bug class: builtin returns borrowed where CPython returns Py_NewRef
+
+A vectorcall result is owned by contract (`CALL` pushes it owned, the eventual
+consumer decrefs). Several gopy builtins that *return a value they looked up in
+a container* hand it back borrowed, while the matching CPython impl wraps it in
+`Py_NewRef`. Each such builtin is an isolated, faithful fix at the method-call
+boundary, and each strictly reduces under-ownership (turns a negative into a
+balanced count). Fixed so far:
+
+| Method | gopy bug | CPython |
+| --- | --- | --- |
+| `dict.setdefault` | returned the stored value borrowed (the `incref_result=0` helper) | `Objects/dictobject.c:4542` dict_setdefault_impl (incref_result=1, Py_NewRef) |
+| `dict.get` | returned the found value and the default borrowed | `Objects/dictobject.c:4387` dict_get_impl (Py_NewRef) |
+
+Measured: textwrap smoke 430 → 422 under-zero decrefs after these two, no test
+regression (test_dict's pre-existing `test_splittable_popitem` failure is
+unchanged). The reduction is real (the counts drop, they do not shift), which
+validates the attribution method.
+
+**Shared-helper trap.** The fix must land at the method-call boundary, not in a
+shared helper. `dict.__getitem__` routes through `dictMappingGet`, which returns
+the stored slot *borrowed* on a hit but the `__missing__` *call result* owned on
+a subclass miss. The same helper also backs the `mp_subscript` slot, and the
+generic `BINARY_SUBSCR` arm already increfs its borrowed return. Blanket-increfing
+inside the helper would double-incref the `BINARY_SUBSCR` path and leak the
+`__missing__` result, so `__getitem__` needs its own boundary incref that skips
+the `__missing__` branch. Deferred to a careful pass rather than rushed.
+
 ## Caller audit table (P3)
 
 Filled in as each package is classified. Format: `package` — steal / borrow /
@@ -174,7 +216,7 @@ unchanged.
 - [ ] P1 convention + API (NewList/Append borrow, NewListSteal/AppendSteal)
 - [ ] P2 list mutators balanced
 - [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
-- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (3 producers fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE; ~430 sites remain, see bucket table)
+- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get; 422 sites remain; dict.__getitem__ deferred per shared-helper trap)
 - [ ] P5 list_dealloc content-release sweep
 - [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
 - [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91
