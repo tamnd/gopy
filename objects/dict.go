@@ -895,12 +895,22 @@ func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
 	if err != nil {
 		if errors.Is(err, errKeyNotFound) {
 			if len(args) == 3 {
+				// dict_pop_default returns Py_NewRef(default_value); the
+				// caller owns the result it discards or stores.
+				Incref(args[2])
 				return args[2], nil
 			}
 			return nil, raiseKeyError(args[1])
 		}
 		return nil, err
 	}
+	// GetItem hands back the borrowed slot value. Take a reference before
+	// DelItem releases the dict's: _PyDict_Pop transfers the entry's own
+	// reference to the caller (delitem_common(..., Py_NewRef(old_value));
+	// *result = old_value), leaving the object's count unchanged.
+	//
+	// CPython: Objects/dictobject.c:3144 _PyDict_Pop_KnownHash
+	Incref(v)
 	_ = d.DelItem(args[1])
 	return v, nil
 }

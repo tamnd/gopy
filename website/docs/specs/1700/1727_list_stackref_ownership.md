@@ -182,11 +182,30 @@ balanced count). Fixed so far:
 | --- | --- | --- |
 | `dict.setdefault` | returned the stored value borrowed (the `incref_result=0` helper) | `Objects/dictobject.c:4542` dict_setdefault_impl (incref_result=1, Py_NewRef) |
 | `dict.get` | returned the found value and the default borrowed | `Objects/dictobject.c:4387` dict_get_impl (Py_NewRef) |
+| `dict.pop` | `DelItem` dropped the slot's reference, then the now-borrowed value was returned; the discarded result then under-decreffed | `Objects/dictobject.c:3144` _PyDict_Pop_KnownHash (`delitem_common(..., Py_NewRef(old_value)); *result = old_value`); default arm `Py_NewRef(default_value)` |
 
-Measured: textwrap smoke 430 → 422 under-zero decrefs after these two, no test
-regression (test_dict's pre-existing `test_splittable_popitem` failure is
-unchanged). The reduction is real (the counts drop, they do not shift), which
-validates the attribution method.
+The dict.pop case was found by adding a per-event opcode label to the probe.
+The dominant remaining textwrap underflow was a list stored via
+`d.setdefault(k, []).append(...)`, read back, iterated, then removed by
+`d.pop(k)` as a statement. The opcode label pinned the over-decref to the
+`POP_TOP` that discards `pop`'s result: `pop` removed the entry (decref) and
+returned the value borrowed, so the discard drove it negative. CPython's
+`_PyDict_Pop` transfers the entry's own reference to the caller instead, so the
+fix increfs the value before `DelItem` and increfs the default.
+
+A separate, latent instance lives in the specialized UNPACK arms
+(`UNPACK_SEQUENCE_TWO_TUPLE` / `_TUPLE` / `_LIST`): each read `seq.Item(i)`
+(a borrowed slot) and pushed it stolen, where CPython does
+`PyStackRef_FromPyObjectNew` on every element before closing the seq input
+(`Python/bytecodes.c:1585/1599/1614`). It is masked today because `list_dealloc`
+is disabled, but it would corrupt once P5 flips dealloc on, so it is fixed now.
+
+Measured: textwrap smoke 430 → 422 (setdefault, get) → 241 (dict.pop, unpack)
+under-zero decrefs, no test regression (core objects/vm/stackref/frame green;
+test_dict's pre-existing `test_splittable_popitem` failure is unchanged). The
+dict.pop reduction is large because it fires once per loop iteration. The
+reduction is real (the counts drop, they do not shift), which validates the
+attribution method.
 
 **Shared-helper trap.** The fix must land at the method-call boundary, not in a
 shared helper. `dict.__getitem__` routes through `dictMappingGet`, which returns
@@ -216,7 +235,7 @@ unchanged.
 - [ ] P1 convention + API (NewList/Append borrow, NewListSteal/AppendSteal)
 - [ ] P2 list mutators balanced
 - [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
-- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get; 422 sites remain; dict.__getitem__ deferred per shared-helper trap)
+- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get, dict.pop, UNPACK_SEQUENCE_TWO_TUPLE/_TUPLE/_LIST; textwrap smoke down to 241; dict.__getitem__ deferred per shared-helper trap)
 - [ ] P5 list_dealloc content-release sweep
 - [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
 - [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91
