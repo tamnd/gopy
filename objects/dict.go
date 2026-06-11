@@ -240,22 +240,29 @@ func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
 		// an unhashable key or an exception raised by a key's __eq__ must
 		// propagate, matching dict_get_impl which returns NULL on error.
 		//
-		// CPython: Objects/dictobject.c:4290 dict_get_impl
+		// CPython: Objects/dictobject.c:4387 dict_get_impl
 		if !errors.Is(err, errKeyNotFound) {
 			return nil, err
 		}
-		if len(args) == 3 {
-			return args[2], nil
-		}
-		return None(), nil
+		v = nil
 	}
-	if v != nil {
-		return v, nil
+	// dict.get returns a new reference in every branch: the found value
+	// comes back incref'd from _Py_dict_lookup_threadsafe, and the default
+	// (explicit arg or None) is wrapped in Py_NewRef. GetItem returns the
+	// stored value borrowed, so incref here to match.
+	//
+	// CPython: Objects/dictobject.c:4387 dict_get_impl (Py_NewRef)
+	var res Object
+	switch {
+	case v != nil:
+		res = v
+	case len(args) == 3:
+		res = args[2]
+	default:
+		res = None()
 	}
-	if len(args) == 3 {
-		return args[2], nil
-	}
-	return None(), nil
+	Incref(res)
+	return res, nil
 }
 
 // dictContainsMethod backs dict.__contains__. CPython's dict_contains
