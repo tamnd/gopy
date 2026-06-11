@@ -1225,7 +1225,18 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 	} else {
 		dflt = None()
 	}
-	return dictSetDefault(d, h, args[1], dflt)
+	// dictSetDefault is the incref_result=0 variant: it returns the stored
+	// value borrowed. dict.setdefault returns a new reference, so incref
+	// here to match dict_setdefault_impl's incref_result=1 call.
+	//
+	// CPython: Objects/dictobject.c:4542 dict_setdefault_impl
+	//	(dict_setdefault_ref_lock_held with incref_result=1, Py_NewRef(value))
+	val, err := dictSetDefault(d, h, args[1], dflt)
+	if err != nil {
+		return nil, err
+	}
+	Incref(val)
+	return val, nil
 }
 
 // dictFromKeysMethod backs dict.fromkeys(iterable[, value]).
