@@ -86,6 +86,25 @@ they cannot land individually while dealloc is off without regressing weakref. T
 two P11 gates therefore stay red until the content-borrow sites and the dealloc
 flip land as one verified-green step. Reported red, not skipped.
 
+**P11 blast radius confirmed (2026-06-11, second dry-run).** A fuller dealloc
+attempt (incref on every list insert/mutator plus the `STORE_SUBSCR_LIST_INT`
+stack-ref close, dealloc flipped on) still passes the gate scenario and is
+race-clean, but corrupts the corpus one level deeper than the insert sites. The
+minimal repro is `list(zip(...))` / `list(map(...))` / `list(iter([...]))`
+returning `[]`: every iterator that holds a list source (`listIter`, `zip`,
+`map`, `SeqIter`, `Filter`, `Enumerate`, `Reversed`, the dict/set iterators)
+keeps it *borrowed*, where CPython does `Py_INCREF(seq)` in the iterator
+constructor. With dealloc live the borrowed source reaches refcount 0 while the
+iterator still walks it, `list_dealloc` wipes the slice, and the iterator yields
+nothing (which is what breaks `dict(zip(...))` and the `re` `CH_NEGATE` table).
+The decisive conclusion: the insert convention is necessary but not sufficient.
+Every holder that keeps a list past one op must incref, which is a conversion of
+the whole runtime to strict CPython refcounting (it currently under-counts
+everywhere and leans on the Go GC). That is multi-session scope; this dry-run was
+reverted to baseline so the tree stays green and the two gates stay honestly red.
+Full diagnosis and the next-pass plan (port `Py_INCREF(seq)` into every iterator
+constructor first, flip dealloc last) is in spec 1727, "P5 second dry-run".
+
 ## Goal
 
 Run every test in the spec 1700 VM/eval-loop panel (22 files), confirm which

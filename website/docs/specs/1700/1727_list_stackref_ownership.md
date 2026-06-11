@@ -273,6 +273,51 @@ the `list_dealloc` flip, and verify the full corpus green in one step rather
 than per-site. Until that atomic landing the two gates stay red, and this spec
 reports them red rather than skipped.
 
+## P5 second dry-run: the blast radius is every borrowing holder, not just inserts (2026-06-11)
+
+A second, fuller pass took the content-insert fixes further (incref on `NewList`,
+`newListAdopt`, `Append`, `SetItem`, `SetSlice`, `Insert`, `Remove`, `Clear`,
+`listInPlaceRepeat`, the slice/del paths) plus the matching stack-ref close in
+the `STORE_SUBSCR_LIST_INT` arm, and flipped `list_dealloc` on. The gate scenario
+passes exactly (`del l` → `C.count` 0; clean tree leaves it at 3). The objects
+and vm packages are race-clean. But the corpus still corrupts, and bisecting it
+pinned the failure one level deeper than the content-insert sites:
+
+- Minimal repro: `list(zip([1,2],[3,4]))` → `[]`, `list(map(str,[1,2,3]))` → `[]`,
+  `list(iter([1,2,3]))` → `[]`. `list(g())` for a generator, `list(range(3))`,
+  `list([1,2,3])`, `list((1,2,3))` all stay correct. The empty results are what
+  break `dict(zip(...))` (the `re`/`_sre` `CH_NEGATE` table builds this way, hence
+  `KeyError: CATEGORY_NOT_WORD`).
+- Root cause: the broken cases all wrap a **list source held borrowed by an
+  iterator**. `listIter` stores `src: o.(*List)` with no incref (CPython's
+  `list___iter___` does `Py_INCREF(seq)`); `zip` / `map` / `SeqIter` / `Filter` /
+  `Enumerate` / `Reversed` / `dict_iter` do the same. With `list_dealloc` off this
+  is harmless (Go's GC keeps the borrowed source alive). With `list_dealloc` on,
+  the temporary source list reaches refcount 0 *while the iterator still holds it*
+  (the iterator's hold does not count), `list_dealloc` fires, nils the slice, and
+  the iterator then walks an empty source.
+
+This is the decisive finding: **the content-insert convention is necessary but
+not sufficient.** gopy's object model deliberately under-counts everywhere and
+leans on the Go GC for liveness; refcount 0 does *not* mean unreachable. A
+`list_dealloc` that destroys on refcount 0 is only safe once *every* holder that
+keeps a list past a single op increfs it: not just the eval-loop inserts, but
+`listIter` / `listRevIter` / `SeqIter` / `CallIter` / `Map` / `Filter` /
+`Enumerate` / `Reversed` / `zip` / the dict and set iterators, every generator
+frame that pins a list local, and the C-level temporaries throughout the
+modules. That is a conversion of the whole runtime from "Go-GC-backed,
+refcount-for-finalizers" to strict CPython refcounting, which is the multi-session
+scope this spec was opened for and is not landable in one pass without shipping
+intermediate corruption.
+
+Per the project's standing rule (never commit corrupting code; revert and report
+when a port cannot be made green in budget), this dry-run was reverted to the
+06b35097 baseline. The two gates stay red and honest. The next pass should treat
+the holder-incref audit as the gating work: port `Py_INCREF(seq)` into every
+iterator constructor first (smallest faithful CPython-shaped units, each green on
+its own because it only adds a leak while dealloc is off), and only flip
+`list_dealloc` once the holder set and the insert set are both complete.
+
 ## Caller audit table (P3)
 
 Filled in as each package is classified. Format: `package` — steal / borrow /
@@ -293,6 +338,6 @@ unchanged.
 - [ ] P2 list mutators balanced
 - [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
 - [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get, dict.pop, UNPACK_SEQUENCE_TWO_TUPLE/_TUPLE/_LIST; textwrap smoke down to 241; dict.__getitem__ deferred per shared-helper trap)
-- [~] P5 list_dealloc content-release sweep (dry-run done 2026-06-11: dealloc body written and proven to pass the gate scenario; reverted because the content-insert borrow sites must land with it atomically. See the P5 dry-run section.)
+- [~] P5 list_dealloc content-release sweep (two dry-runs done 2026-06-11: dealloc body proven to pass the gate scenario; reverted twice. First dry-run pinned the content-insert borrow sites; second pinned the deeper blast radius (every iterator that holds a list borrowed: listIter/zip/map/SeqIter/Filter/Enumerate/...). Both must land atomically with the flip. See the two P5 dry-run sections.)
 - [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
 - [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91
