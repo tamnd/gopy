@@ -216,6 +216,63 @@ inside the helper would double-incref the `BINARY_SUBSCR` path and leak the
 `__missing__` result, so `__getitem__` needs its own boundary incref that skips
 the `__missing__` branch. Deferred to a careful pass rather than rushed.
 
+## P5 dealloc dry-run: the content-borrow coupling (2026-06-11)
+
+Wired a faithful `list_dealloc` (Finalize dance, `GCUntrackHook`, `ClearWeakRefs`,
+then `Py_XDECREF` each item from the tail backwards, per
+`Objects/listobject.c:2813`) and flipped `ListType.Dealloc` on to measure what
+the content-release sweep actually surfaces. Findings, all reverted to keep the
+tree green, recorded here so the next pass starts from the diagnosis instead of
+re-deriving it:
+
+1. **The gate scenario works.** With `list_dealloc` live, the exact body of
+   `test_ref_counting_behavior` drives `C.count` to 0 on `del l` (was stuck at 3
+   with dealloc off). So the mechanism is correct; the only blocker is making
+   every list-content path refcount-clean first.
+
+2. **`BUILD_LIST` is already balanced; the content-insert paths are not.**
+   `listFromStackRef` increfs each element and `BUILD_LIST` then drops the stack
+   refs, so a BUILD_LIST list owns a real reference per item and `list_dealloc`
+   balances it. `LIST_EXTEND` does not: `iterToSlice` returns the source's items
+   *borrowed* (the List/Tuple fast path just reads `Item(i)`; the iterator path
+   returns the borrowed `IterNext` result), `l.Append` steals (no incref), and
+   then the arm closes the source iterable. With dealloc off the source list
+   leaks and the borrow stays alive; with dealloc on the source's `list_dealloc`
+   decrefs those shared items and the target is left holding freed slots. The
+   first concrete corruption is `_collections_abc` import: `Coroutine.register`
+   vanishes because an ABC-machinery list extended from a borrowed source is
+   dealloc'd mid-build. CPython's `list_extend` does `Py_INCREF` per copied item
+   (`Objects/listobject.c:1023`); the fix is the matching incref in the
+   `LIST_EXTEND` arm, and it makes the ABC import clean.
+
+3. **It is whack-a-mole across every content-borrow site, and the sites are
+   coupled to dealloc.** Fixing `LIST_EXTEND` surfaced the next premature free
+   (`KeyError: CATEGORY_NOT_WORD` from the `re`/`_sre` constant tables). Each
+   borrow-without-incref site (LIST_EXTEND, the `list.extend`/`+=` method, slice
+   assignment, `list()` from an iterator, comprehension `LIST_APPEND`, and the
+   `IterNext`-returns-borrowed convention behind FOR_ITER) is a separate fix.
+   They cannot be banked one at a time while dealloc is off: task #137
+   deliberately made `Append` *not* incref to make a weakref self-cycle reclaim
+   fire, so adding a content-path incref *without* dealloc reintroduces that leak
+   and regresses the weakref reclaim tests. The increfs and the dealloc flip are
+   one atomic landing (or a sequence verified green only at the end), not
+   independent green increments.
+
+4. **A real latent dict under-count rides along.** `buildClass`'s final
+   `DecrefThrowawayKwargs(ns)` (`vm/build_class.go:196`) takes the class
+   namespace dict below zero: the metaclass `Call` path already released `ns` to
+   0, so the documented "last owner" decref underflows. Harmless today (dict has
+   no dealloc) but it is a genuine over-decref to chase in the P4 sweep
+   (`Python/bltinmodule.c:246` does a single `Py_DECREF(ns)` and type_new only
+   borrows the namespace).
+
+Plan crystallized by this dry-run: enumerate the content-insert borrow sites
+(item 3), convert each to the BUILD_LIST discipline (the target owns a real
+incref per element, matching the CPython `Py_INCREF`), land them together with
+the `list_dealloc` flip, and verify the full corpus green in one step rather
+than per-site. Until that atomic landing the two gates stay red, and this spec
+reports them red rather than skipped.
+
 ## Caller audit table (P3)
 
 Filled in as each package is classified. Format: `package` — steal / borrow /
@@ -236,6 +293,6 @@ unchanged.
 - [ ] P2 list mutators balanced
 - [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
 - [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get, dict.pop, UNPACK_SEQUENCE_TWO_TUPLE/_TUPLE/_LIST; textwrap smoke down to 241; dict.__getitem__ deferred per shared-helper trap)
-- [ ] P5 list_dealloc content-release sweep
+- [~] P5 list_dealloc content-release sweep (dry-run done 2026-06-11: dealloc body written and proven to pass the gate scenario; reverted because the content-insert borrow sites must land with it atomically. See the P5 dry-run section.)
 - [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
 - [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91

@@ -72,6 +72,20 @@ as recorded under P11.1 below. So the panel does not yet meet the zero-skip
 "every gate green" bar; the gap is fully enumerated, cited, and tracked rather
 than papered over.
 
+**P11 sharpened (2026-06-11).** A `list_dealloc` dry-run (spec 1727, "P5 dealloc
+dry-run") pinned the remaining work precisely. The dealloc body itself is correct
+and makes `test_iter.test_ref_counting_behavior`'s `del l` drive `C.count` to 0;
+the blocker is that the list content-insert paths (`LIST_EXTEND`, `list.extend`,
+slice assignment, `list()` from an iterator, comprehension `LIST_APPEND`, and the
+borrow-returning `IterNext` convention) hand items to the list without the
+`Py_INCREF` that `Objects/listobject.c` does, so flipping dealloc frees still-held
+items (concrete repro: `_collections_abc` import loses `Coroutine.register`; then
+`re`/`_sre` loses `CATEGORY_NOT_WORD`). These increfs are coupled to the dealloc
+flip: task #137 made `Append` not-incref on purpose to fire a weakref reclaim, so
+they cannot land individually while dealloc is off without regressing weakref. The
+two P11 gates therefore stay red until the content-borrow sites and the dealloc
+flip land as one verified-green step. Reported red, not skipped.
+
 ## Goal
 
 Run every test in the spec 1700 VM/eval-loop panel (22 files), confirm which
