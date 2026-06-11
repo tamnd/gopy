@@ -426,7 +426,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			}
 			res = stackref.FromObject(res_o)
 		} else {
-			res = value
+			// Exact-str passthrough. The non-str branch hands back an owned
+			// res; this branch must too, otherwise the drop(1) below decrefs
+			// the input slot while push re-pushes the same borrowed object,
+			// leaving a phantom-owned reference the next consumer over-decrefs.
+			// Dup so the pushed ref owns its own count, balancing drop(1).
+			//
+			// CPython: Python/bytecodes.c FORMAT_SIMPLE (exact-str is a no-op;
+			// the value keeps its single stack reference)
+			res = value.Dup()
 		}
 		e.drop(1)
 		e.push(res)
@@ -715,7 +723,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setPendingErr("NameError: __build_class__ not found")
 			return 0, e.error("error")
 		}
-		bc = stackref.FromObject(bc_o)
+		// mappingGetOptionalItem hands back a borrowed reference to the
+		// builtins dict slot. CPython's LOAD_BUILD_CLASS does Py_INCREF(bc)
+		// before pushing so the following CALL's DECREF_INPUTS balances
+		// against the new reference, not the dict's. Use FromObjectNew to
+		// own the pushed reference.
+		//
+		// CPython: Python/bytecodes.c:1556 LOAD_BUILD_CLASS (Py_INCREF(bc))
+		bc = stackref.FromObjectNew(bc_o)
 		e.push(bc)
 		return e.advance(), nil
 	case compile.LOAD_COMMON_CONSTANT:
@@ -727,7 +742,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var value stackref.Ref
 		obj := e.constAt(int(oparg))
 		_ = obj
-		value = stackref.FromObject(obj)
+		value = stackref.FromObjectNew(obj)
 		e.push(value)
 		return e.advance(), nil
 	case compile.LOAD_DEREF:

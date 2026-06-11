@@ -237,7 +237,7 @@ func (e *evalState) run() (objects.Object, error) {
 			if obj == nil {
 				obj = e.constAtSlow(co, int(oparg))
 			}
-			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObject(obj)
+			f.LocalsPlus[f.StackBase+f.StackTop] = stackref.FromObjectNew(obj)
 			f.StackTop++
 			f.PrevInstr = f.InstrPtr
 			f.InstrPtr += 2
