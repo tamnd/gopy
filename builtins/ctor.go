@@ -794,7 +794,9 @@ func ListCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	if err != nil {
 		return nil, err
 	}
-	return objects.NewList(items), nil
+	l := objects.NewList(items)
+	releaseDrained(items)
+	return l, nil
 }
 
 // bindListCtor wires list's constructor as separate TpNew (allocate) and
@@ -846,6 +848,7 @@ func bindListCtor(t *objects.Type) {
 			for _, v := range items {
 				l.Append(v)
 			}
+			releaseDrained(items)
 		}
 		return objects.None(), nil
 	}))
@@ -867,7 +870,9 @@ func TupleCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if err != nil {
 		return nil, err
 	}
-	return objects.NewTuple(items), nil
+	t := objects.NewTuple(items)
+	releaseDrained(items)
+	return t, nil
 }
 
 // SetCtor ports set_new. Allocates an empty set of the correct subtype.
@@ -1051,6 +1056,15 @@ func mergeMappingInto(dst *objects.Dict, m objects.Object) error {
 	}
 }
 
+// releaseDrained drops the one owned reference drainIterable took on each
+// collected element. Callers invoke it after they have built their own
+// container (NewList/NewTuple/etc.), which takes its own counted reference.
+func releaseDrained(items []objects.Object) {
+	for _, v := range items {
+		objects.Decref(v)
+	}
+}
+
 func drainIterable(o objects.Object) ([]objects.Object, error) {
 	it, err := abstract.Iter(o)
 	if err != nil {
@@ -1070,8 +1084,22 @@ func drainIterable(o objects.Object) ([]objects.Object, error) {
 			return items, nil
 		}
 		if err != nil {
+			// Release the owned references collected so far before bailing.
+			for _, x := range items {
+				objects.Decref(x)
+			}
 			return nil, err
 		}
+		// IterNext returns a borrowed reference (gopy's iterator convention,
+		// see objects.IterNext). The batch must own each element so a
+		// self-recycling slot such as the dict item iterator, which decrefs
+		// the tuple it handed out on the next advance, cannot free an element
+		// already collected here. CPython's PyIter_Next returns an owned
+		// reference for the same reason. Callers release one count per
+		// element after they have built their container.
+		//
+		// CPython: Objects/abstract.c:2852 PyIter_Next (owned return)
+		objects.Incref(v)
 		items = append(items, v)
 	}
 }
@@ -1500,9 +1528,12 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 			return err
 		}
 		if len(pair) != 2 {
+			releaseDrained(pair)
 			return fmt.Errorf("ValueError: dictionary update sequence element #%d has length %d; 2 is required", i, len(pair))
 		}
-		if err := dst.SetItem(pair[0], pair[1]); err != nil {
+		err = dst.SetItem(pair[0], pair[1])
+		releaseDrained(pair)
+		if err != nil {
 			return err
 		}
 		i++

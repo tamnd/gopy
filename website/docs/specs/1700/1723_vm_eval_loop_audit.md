@@ -105,6 +105,17 @@ reverted to baseline so the tree stays green and the two gates stay honestly red
 Full diagnosis and the next-pass plan (port `Py_INCREF(seq)` into every iterator
 constructor first, flip dealloc last) is in spec 1727, "P5 second dry-run".
 
+**Dict critical sections landed (2026-06-12).** A prerequisite for any concurrent
+owned-store work surfaced while running the P11 sweep under no-GIL threading:
+`test_weakref`'s `WeakValueDictionary` tests mutate a shared dict from one
+goroutine while another copies it, and the lock-free `Dict` raced
+(`fatal error: s.allocCount != s.nelems` once stores began incref-ing values).
+Ported CPython 3.14's per-dict critical sections as a goroutine-reentrant lock
+around every dict table read and write. The fatal crash is gone with zero net
+regression (`test_weakref` 30/15 vs base 31/18, `test_gc` identical to base, the
+at-risk sweep unchanged, both P11 gates still green). Full design, wiring table,
+and verification in spec 1728.
+
 ## Goal
 
 Run every test in the spec 1700 VM/eval-loop panel (22 files), confirm which

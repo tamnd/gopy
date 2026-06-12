@@ -532,13 +532,30 @@ func (c *Code) SyncConstObjs() {
 		c.ConstObjs = nil
 		return
 	}
+	// Release the pin held on any tuple const from a previous sync before
+	// the slice is overwritten, so a re-sync does not leak the old pin.
+	for _, old := range c.ConstObjs {
+		if t, ok := old.(*Tuple); ok {
+			Decref(t)
+		}
+	}
 	if cap(c.ConstObjs) < len(c.Consts) {
 		c.ConstObjs = make([]Object, len(c.Consts))
 	} else {
 		c.ConstObjs = c.ConstObjs[:len(c.Consts)]
 	}
 	for i, v := range c.Consts {
-		c.ConstObjs[i] = wrapConstAttr(v)
+		obj := wrapConstAttr(v)
+		// Pin tuple consts: co_consts is an un-counted Go field, so a
+		// constant tuple would otherwise sit at refcount 0 while live
+		// and be torn down by tuple_dealloc the first time the VM
+		// transiently decrefs it (e.g. after a LOAD_CONST is consumed).
+		// CPython holds co_consts as a counted reference; this Incref is
+		// that reference.
+		if t, ok := obj.(*Tuple); ok {
+			Incref(t)
+		}
+		c.ConstObjs[i] = obj
 	}
 }
 

@@ -64,6 +64,9 @@ func loadAtCapacity(used, capacity int) bool { return used >= usableFraction(cap
 // CPython: Objects/dictobject.c:1891 insertdict
 // CPython: Objects/dictobject.c:1832 insert_split_key
 func dictInsert(d *Dict, h int64, key, value Object) error {
+	// CPython: Objects/dictobject.c:2707 PyDict_SetItem (Py_BEGIN_CRITICAL_SECTION(mp))
+	d.lock()
+	defer d.unlock()
 	if d.sharedKeys != nil {
 		return dictInsertSplit(d, h, key, value)
 	}
@@ -96,6 +99,10 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 		d.fill++
 	}
 	*slot = dictEntry{hash: h, key: key, value: value, used: true}
+	// The combined table owns a counted reference on both key and value;
+	// dictDelete and clearContents release them on removal/teardown.
+	// CPython: Objects/dictobject.c:1869 insertdict (Py_INCREF(key), Py_INCREF(value))
+	Incref(key)
 	Incref(value)
 	d.order = append(d.order, idx)
 	d.used++
@@ -116,6 +123,9 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 //
 // CPython: Objects/dictobject.c:4400 dict_setdefault_ref_lock_held
 func dictSetDefault(d *Dict, h int64, key, dflt Object) (Object, error) {
+	// CPython: Objects/dictobject.c:4512 dict_setdefault_ref (Py_BEGIN_CRITICAL_SECTION(d))
+	d.lock()
+	defer d.unlock()
 	if d.sharedKeys != nil {
 		d.ensureCombined()
 	}
@@ -136,6 +146,9 @@ func dictSetDefault(d *Dict, h int64, key, dflt Object) (Object, error) {
 		d.fill++
 	}
 	*slot = dictEntry{hash: h, key: key, value: dflt, used: true}
+	// Combined table owns a reference on both key and value.
+	// CPython: Objects/dictobject.c:4435 dict_setdefault_ref_lock_held (Py_INCREF)
+	Incref(key)
 	Incref(dflt)
 	d.order = append(d.order, idx)
 	d.used++
@@ -209,6 +222,9 @@ func dictInsertSplit(d *Dict, h int64, key, value Object) error {
 //
 // CPython: Objects/dictobject.c:2790 delitem_common
 func dictDelete(d *Dict, key Object) error {
+	// CPython: Objects/dictobject.c:2881 PyDict_DelItem (Py_BEGIN_CRITICAL_SECTION(op))
+	d.lock()
+	defer d.unlock()
 	h, err := dictKeyHash(key)
 	if err != nil {
 		return err

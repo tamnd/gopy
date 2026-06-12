@@ -1068,7 +1068,10 @@ func (e *evalState) listAppendTakeRef(list, item objects.Object) int32 {
 		e.pendingErr = errors.New("TypeError: _PyList_AppendTakeRef expected list")
 		return -1
 	}
-	objects.Incref(item)
+	// List.Append now takes its own counted reference on the item
+	// (PyList_SET_ITEM + Py_INCREF), so the dispatch arm's following
+	// drop(1) Closes the stack slot and the list keeps its own reference.
+	// No extra Incref here.
 	l.Append(item)
 	return 0
 }
@@ -1358,13 +1361,10 @@ func (e *evalState) unicodeJoinArray(sep objects.Object, items []objects.Object,
 // since the action body's `values[oparg]` sized input is rendered as a
 // peek loop above) and the count.
 //
-// CPython steals refs from the stack array (no per-item Py_INCREF, and
-// the surrounding STACK_SHRINK does not Py_DECREF). gopy's translator
-// emits an unconditional e.drop(oparg) after this call which Closes
-// each stack slot and Decref's its object, so the items must be Incref'd
-// here to balance the impending decref. Without this, items with a
-// non-trivial Dealloc (e.g. slice via sliceFreeList) get torn down
-// while the new tuple still references them.
+// NewTuple now takes its own counted reference per item (PyTuple_SET_ITEM
+// + the ownership invariant in tuple.go), so the items are read borrowed
+// here; the dispatch arm's following drop(oparg) Closes each stack slot.
+// No extra Incref, mirroring listFromStackRef.
 //
 // CPython: Objects/tupleobject.c:226 _PyTuple_FromStackRefStealOnSuccess
 func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.Object {
@@ -1375,7 +1375,6 @@ func (e *evalState) tupleFromStackRef(values []stackref.Ref, n uint32) objects.O
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
-		objects.Incref(items[i])
 	}
 	return objects.NewTuple(items)
 }
@@ -1390,10 +1389,12 @@ func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Ob
 		e.pendingErr = errors.New("BUILD_LIST: count exceeds values slice")
 		return nil
 	}
+	// NewList takes its own counted reference per item (PyList_SET_ITEM +
+	// Py_INCREF), so the items are read borrowed here; the dispatch arm's
+	// following drop(oparg) Closes each stack slot. No extra Incref.
 	items := make([]objects.Object, n)
 	for i := range items {
 		items[i] = values[i].AsObject()
-		objects.Incref(items[i])
 	}
 	return objects.NewList(items)
 }

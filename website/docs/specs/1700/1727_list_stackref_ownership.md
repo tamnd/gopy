@@ -8,10 +8,26 @@ description: "Make Python lists own a strong reference to every stored item, so 
 
 ## Status
 
-Active. Branch `feat/v0.13.2-vm-zero-skip-conformance`, stacked under spec 1726.
+Done. Branch `feat/v0.13.2-vm-zero-skip-conformance`, stacked under spec 1726.
 This is the subsystem the spec 1726 P11 gate
 (`test_iter.test_ref_counting_behavior`) and `test_frame.test_clear_refcycles`
-both block on.
+both blocked on; both gates now pass.
+
+**Landed (2026-06-12).** The conversion the dry-runs below charted is now in the
+tree and verified green. The list owns a strong reference to every stored item
+(`Incref` on `PyList_New` / `Append` / `SetItem` / `list_ass_slice` /
+`list_inplace_repeat`), `listDealloc` walks the slots tail-first and `Decref`s
+each one under a resurrection guard, and every iterator that holds a list source
+(`listIter`, `zip`, `map`, `SeqIter`, `Filter`, `Enumerate`, `Reversed`, the
+dict/set iterators) increfs its source in the constructor. The owned-store path
+needed concurrent dict access to be race-safe first, which spec 1728 supplied
+(per-dict critical sections). Both gates
+(`test_iter.test_ref_counting_behavior`, `test_frame.test_clear_refcycles`) now
+pass, the corpus repros the dry-runs flagged (`import re` / `textwrap`,
+`list(zip(...))`, `dict(zip(...))`, `list(map(...))`, `list(iter([...]))`) are
+all clean, the at-risk sweep shows no regression vs base, and `go vet` /
+`TestCfgPhaseParity` / the package unit tests are green. The dry-run
+archaeology below is kept as the record of why the partial slices failed.
 
 ## Why this exists
 
@@ -334,10 +350,12 @@ unchanged.
 
 ## Checklist
 
-- [ ] P1 convention + API (NewList/Append borrow, NewListSteal/AppendSteal)
-- [ ] P2 list mutators balanced
-- [ ] P3 145 NewList + 4 newListAdopt caller audit and reclassification
-- [~] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS (fixed: LOAD_CONST, LOAD_BUILD_CLASS, FORMAT_SIMPLE, dict.setdefault, dict.get, dict.pop, UNPACK_SEQUENCE_TWO_TUPLE/_TUPLE/_LIST; textwrap smoke down to 241; dict.__getitem__ deferred per shared-helper trap)
-- [~] P5 list_dealloc content-release sweep (two dry-runs done 2026-06-11: dealloc body proven to pass the gate scenario; reverted twice. First dry-run pinned the content-insert borrow sites; second pinned the deeper blast radius (every iterator that holds a list borrowed: listIter/zip/map/SeqIter/Filter/Enumerate/...). Both must land atomically with the flip. See the two P5 dry-run sections.)
-- [ ] P6 full panel + smoke under underflow detector, flip, both gates pass
-- [ ] spec 1726 P11 + spec 1723 status updated, human PR comment on #91
+- [x] P1 convention + API (list owns every stored item, Incref on store)
+- [x] P2 list mutators balanced (SetItem, ass_slice, inplace_repeat Incref/Decref)
+- [x] P3 NewList + Append call sites incref on store
+- [x] P4 eval-loop producers push owned + UNPACK DECREF_INPUTS
+- [x] P5 list_dealloc content-release sweep (tail-first Decref under resurrection guard) + every list-holding iterator increfs its source in the constructor
+- [x] P6 panel + corpus smoke clean, dealloc flipped, both gates pass
+- [x] dict critical sections (spec 1728) land first so the owned store is race-safe
+- [x] spec 1726 P11 + spec 1723 status updated
+- [ ] human PR comment on #91 (after merge #90 / rebase)

@@ -62,6 +62,14 @@ type dictIterObj struct {
 	// builds for draining borrows src instead, so it leaves owns false
 	// and never touches the source dict's refcount.
 	owns bool
+	// result caches the most recent (key, value) tuple the item iterator
+	// handed out (di->di_result). The slot owns this reference; the next
+	// advance displaces and decrefs it, which runs any __del__ on the
+	// displaced value synchronously, and dictIterDealloc decrefs whatever
+	// remains. Only the item iterators allocate it.
+	//
+	// CPython: Objects/dictobject.c:5697 dictiter_iternextitem (di_result)
+	result *Tuple
 }
 
 var (
@@ -333,6 +341,10 @@ func dictIterDealloc(o Object) {
 	}
 	it.src = nil
 	it.owns = false
+	if it.result != nil {
+		Decref(it.result)
+		it.result = nil
+	}
 }
 
 // advance walks past dummy and empty slots until it finds the next
@@ -349,6 +361,14 @@ func (it *dictIterObj) advance() (Object, Object, error) {
 	if it.src == nil {
 		return nil, nil, ErrStopIteration
 	}
+	// Serialize the table read against a concurrent insert/delete on
+	// another goroutine. Capture the dict so the deferred unlock still
+	// fires after release() nils it.src on exhaustion.
+	//
+	// CPython: Objects/dictobject.c:5227 dictiter_iternextkey_lock_held (Py_BEGIN_CRITICAL_SECTION(d))
+	d := it.src
+	d.lock()
+	defer d.unlock()
 	if it.snapUsed != it.src.used {
 		if it.owns {
 			Decref(it.src)
@@ -442,12 +462,45 @@ func dictIterNextValue(o Object) (Object, error) {
 	return v, nil
 }
 
+// dictIterNextItem yields the next (key, value) pair as a fresh two-tuple.
+// The tuple takes its own references on the key and value (the container
+// port has tuples own their items).
+//
+// gopy's IterNext slots return a borrowed reference: the shared Next /
+// FOR_ITER / IterNext consumers take their own Incref where they retain the
+// result (see builtins.Next and dictIterNextKey/Value, which return the
+// dict's borrowed key/value). A `for k, v in d.items()` loop drops the
+// previous pair when it rebinds the loop targets, and that decref decrefs
+// the displaced value, running any __del__ synchronously. So a mutation
+// during iteration (e.g. the value's finalizer clearing the dict) is
+// observed on the next advance, which catches the size change.
+//
+// CPython recycles its di_result template tuple in place when it is uniquely
+// referenced, decreffing the displaced pair inline so a __del__ on the old
+// value runs at that point. gopy does not recycle in place: a fresh tuple is
+// allocated per advance (recycling would alias elements that an owned-return
+// consumer keeps), but the slot still caches the latest tuple and decrefs the
+// previous one on the next advance, which reproduces the same observable
+// __del__ timing. This requires every consumer that retains the result to own
+// a counted reference to it; the batch drain helpers (drainIterable,
+// DrainIterable) take that reference as CPython's PyIter_Next does.
+//
+// CPython: Objects/dictobject.c:5697 dictiter_iternextitem
 func dictIterNextItem(o Object) (Object, error) {
-	k, v, err := o.(*dictIterObj).advance()
+	it := o.(*dictIterObj)
+	k, v, err := it.advance()
 	if err != nil {
 		return nil, err
 	}
-	return NewTuple([]Object{k, v}), nil
+	// NewTuple takes its own references on k and v. Cache it as the slot's
+	// owned hold and release the previous tuple: that decref drops the
+	// displaced value, firing any __del__ synchronously.
+	fresh := NewTuple([]Object{k, v})
+	if it.result != nil {
+		Decref(it.result)
+	}
+	it.result = fresh
+	return fresh, nil
 }
 
 // dictView is the shared payload behind dict.keys()/values()/items().
@@ -521,6 +574,7 @@ func init() {
 		// must be traversable. CPython: Objects/dictobject.c:6087
 		// dictview_traverse.
 		vt.TpTraverse = dictViewTraverse
+		vt.Dealloc = dictViewDealloc
 		// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __iter__)
 		AddIterSlotWrappers(vt)
 	}
@@ -608,6 +662,13 @@ func dictViewIsDisjoint(args []Object, _ map[string]Object) (Object, error) {
 func (d *Dict) KeysView() Object {
 	v := &dictView{src: d, kind: dictIterKeys}
 	v.init(dictKeysViewType)
+	// A view owns a counted reference on the dict it is bound to, matching
+	// dictview_new's dv_dict = Py_NewRef(dict). dictViewTraverse visits src,
+	// so the cyclic collector can only balance that visit if the reference
+	// it accounts for actually exists.
+	//
+	// CPython: Objects/dictobject.c:5928 dictview_new (Py_NewRef(dict))
+	Incref(d)
 	if h := GCTrackHook; h != nil {
 		h(v)
 	}
@@ -620,6 +681,8 @@ func (d *Dict) KeysView() Object {
 func (d *Dict) ValuesView() Object {
 	v := &dictView{src: d, kind: dictIterValues}
 	v.init(dictValuesViewType)
+	// CPython: Objects/dictobject.c:5928 dictview_new (Py_NewRef(dict))
+	Incref(d)
 	if h := GCTrackHook; h != nil {
 		h(v)
 	}
@@ -632,10 +695,26 @@ func (d *Dict) ValuesView() Object {
 func (d *Dict) ItemsView() Object {
 	v := &dictView{src: d, kind: dictIterItems}
 	v.init(dictItemsViewType)
+	// CPython: Objects/dictobject.c:5928 dictview_new (Py_NewRef(dict))
+	Incref(d)
 	if h := GCTrackHook; h != nil {
 		h(v)
 	}
 	return v
+}
+
+// dictViewDealloc drops the view's strong reference to its backing dict.
+//
+// CPython: Objects/dictobject.c:5904 dictview_dealloc (Py_XDECREF(dv->dv_dict))
+func dictViewDealloc(o Object) {
+	v, ok := o.(*dictView)
+	if !ok {
+		return
+	}
+	if v.src != nil {
+		Decref(v.src)
+		v.src = nil
+	}
 }
 
 func dictViewIter(o Object) (Object, error) {

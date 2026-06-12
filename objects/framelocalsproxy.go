@@ -38,6 +38,12 @@ func init() {
 	// CPython: Objects/frameobject.c:786 PyFrameLocalsProxy_Type
 	// (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_MAPPING)
 	frameLocalsProxyType.TpFlags |= TpFlagMapping
+	// CPython stamps Py_TPFLAGS_HAVE_GC and a traverse that visits the
+	// frame, so the cycle collector reaches the frame (and through it the
+	// f_extra_locals spill dict) when the proxy is the only live holder.
+	//
+	// CPython: Objects/frameobject.c:760 framelocalsproxy_visit
+	frameLocalsProxyType.TpTraverse = frameLocalsProxyTraverse
 	frameLocalsProxyType.Repr = frameLocalsProxyRepr
 	frameLocalsProxyType.RichCmp = frameLocalsProxyRichCompare
 	frameLocalsProxyType.Iter = frameLocalsProxyIter
@@ -112,7 +118,29 @@ func FrameLocalsProxyType() *Type { return frameLocalsProxyType }
 func NewFrameLocalsProxy(f *Frame) *FrameLocalsProxy {
 	p := &FrameLocalsProxy{frame: f}
 	p.init(frameLocalsProxyType)
+	// Track the proxy so the cycle collector walks proxy -> frame ->
+	// f_extra_locals; the frame is held only through the un-counted Go
+	// field below, so the traverse edge is what keeps its spill values
+	// alive across a collection.
+	//
+	// CPython: Objects/frameobject.c:418 framelocalsproxy_new (PyObject_GC_Track)
+	if h := GCTrackHook; h != nil {
+		h(p)
+	}
 	return p
+}
+
+// frameLocalsProxyTraverse visits the wrapped frame so the cycle
+// collector can reach the frame's fast locals and f_extra_locals spill
+// dict through the proxy.
+//
+// CPython: Objects/frameobject.c:760 framelocalsproxy_visit
+func frameLocalsProxyTraverse(o Object, visit Visitor) error {
+	p := o.(*FrameLocalsProxy)
+	if p.frame != nil {
+		return visit(p.frame)
+	}
+	return nil
 }
 
 // frameLocalsProxyTpNew is FrameLocalsProxy's tp_new. Builds a proxy
@@ -350,7 +378,17 @@ func frameLocalsProxySetItem(self, key, value Object) error {
 	}
 	if value == nil {
 		if p.frame.extraLocals != nil {
-			return p.frame.extraLocals.DelItem(key)
+			// The spill dict owns its values, mirroring CPython's
+			// f_extra_locals being a real owning dict. Release the stored
+			// reference once the slot is gone.
+			old, getErr := p.frame.extraLocals.GetItem(key)
+			if err := p.frame.extraLocals.DelItem(key); err != nil {
+				return err
+			}
+			if getErr == nil && old != nil {
+				Decref(old)
+			}
+			return nil
 		}
 		s, _ := Repr(key)
 		return fmt.Errorf("KeyError: %s", s)
@@ -358,7 +396,19 @@ func frameLocalsProxySetItem(self, key, value Object) error {
 	if p.frame.extraLocals == nil {
 		p.frame.extraLocals = NewDict()
 	}
-	return p.frame.extraLocals.SetItem(key, value)
+	// The spill dict owns its values. Take a new reference on the stored
+	// value and drop the reference held by any displaced value, matching
+	// CPython's dict_set storing into f_extra_locals.
+	old, getErr := p.frame.extraLocals.GetItem(key)
+	Incref(value)
+	if err := p.frame.extraLocals.SetItem(key, value); err != nil {
+		Decref(value)
+		return err
+	}
+	if getErr == nil && old != nil && old != value {
+		Decref(old)
+	}
+	return nil
 }
 
 // frameLocalsProxyDelItem implements del proxy[key].
@@ -663,12 +713,21 @@ func frameLocalsProxySetDefaultMethod(args []Object, _ map[string]Object) (Objec
 	if len(args) == 3 {
 		def = args[2]
 	}
+	// setdefault returns a new reference to the stored value, matching
+	// dict.setdefault's incref_result=1. The spill dict now owns its
+	// values, so without this incref the only counted holder of a freshly
+	// stored list would be the chained bound method, whose dealloc would
+	// then zero the list out from under the caller.
+	//
+	// CPython: Objects/dictobject.c:4542 dict_setdefault_impl (Py_NewRef)
 	if v, err := frameLocalsProxyGetItem(args[0], args[1]); err == nil {
+		Incref(v)
 		return v, nil
 	}
 	if err := frameLocalsProxySetItem(args[0], args[1], def); err != nil {
 		return nil, err
 	}
+	Incref(def)
 	return def, nil
 }
 

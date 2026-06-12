@@ -87,6 +87,14 @@ type Dict struct {
 	//
 	// CPython: Include/cpython/dictobject.h:23 _ma_watcher_tag
 	watcherTag uint64
+
+	// mu serializes table reads and writes across goroutines, standing in
+	// for the per-object ob_mutex CPython 3.14's free-threaded build locks
+	// in every Py_BEGIN_CRITICAL_SECTION(mp). gopy has no GIL, so without
+	// it concurrent dict ops race the entries/order slices. See dict_lock.go.
+	//
+	// CPython: Include/object.h ob_mutex (free-threaded PyObject)
+	mu dictMutex
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
@@ -345,6 +353,9 @@ func (d *Dict) Len() int { return d.used }
 //
 // CPython: Objects/dictobject.c PyDict_Keys
 func (d *Dict) Keys() []Object {
+	// CPython: Objects/dictobject.c:3193 keys_lock_held (Py_BEGIN_CRITICAL_SECTION(op))
+	d.lock()
+	defer d.unlock()
 	out := make([]Object, 0, d.used)
 	for _, slot := range d.order {
 		out = append(out, d.slotKey(slot))
@@ -358,6 +369,9 @@ func (d *Dict) Keys() []Object {
 //
 // CPython: Objects/dictobject.c:3512 _PyDict_Next
 func (d *Dict) ForEachWithHash(fn func(key Object, hash int64) error) error {
+	// CPython: Objects/dictobject.c:3492 _PyDict_Next (Py_BEGIN_CRITICAL_SECTION(self))
+	d.lock()
+	defer d.unlock()
 	for _, slot := range d.order {
 		e := &d.entries[slot]
 		if !e.used {
@@ -407,6 +421,9 @@ func (d *Dict) GetItem(key Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// CPython: Objects/dictobject.c:1576 PyDict_GetItemRef (Py_BEGIN_CRITICAL_SECTION(op))
+	d.lock()
+	defer d.unlock()
 	idx, ok, err := d.lookup(h, key)
 	if err != nil {
 		return nil, err
@@ -423,6 +440,9 @@ func (d *Dict) GetItem(key Object) (Object, error) {
 //
 // CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
 func (d *Dict) GetItemKnownHash(key Object, h int64) (Object, error) {
+	// CPython: Objects/dictobject.c:1576 PyDict_GetItemRef (Py_BEGIN_CRITICAL_SECTION(op))
+	d.lock()
+	defer d.unlock()
 	idx, ok, err := d.lookup(h, key)
 	if err != nil {
 		return nil, err
@@ -437,6 +457,9 @@ func (d *Dict) GetItemKnownHash(key Object, h int64) (Object, error) {
 //
 // CPython: Objects/dictobject.c:2530 _PyDict_Contains_KnownHash
 func (d *Dict) ContainsKnownHash(key Object, h int64) (bool, error) {
+	// CPython: Objects/dictobject.c:2706 _PyDict_Contains_KnownHash (Py_BEGIN_CRITICAL_SECTION(mp))
+	d.lock()
+	defer d.unlock()
 	_, ok, err := d.lookup(h, key)
 	return ok, err
 }
@@ -463,6 +486,9 @@ func (d *Dict) Contains(key Object) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// CPython: Objects/dictobject.c:2706 PyDict_Contains (Py_BEGIN_CRITICAL_SECTION(mp))
+	d.lock()
+	defer d.unlock()
 	_, ok, err := d.lookup(h, key)
 	return ok, err
 }
@@ -730,19 +756,37 @@ func dictEqual(a, b *Dict) (bool, error) {
 	for _, k := range a.Keys() {
 		av, err := a.GetItem(k)
 		if err != nil {
+			if errors.Is(err, errKeyNotFound) {
+				// The key vanished from a between Keys() and the read;
+				// treat the snapshot as stale and not-equal.
+				return false, nil
+			}
 			return false, err
 		}
+		// Hold a counted reference on the key and aval BEFORE the b lookup.
+		// Looking key up in b runs key.__hash__/__eq__, which can clear or
+		// resize a and free k or av out from under us. CPython pins both
+		// before the b probe and the RichCompareBool (bpo-27945, bpo-38588).
+		//
+		// CPython: Objects/dictobject.c:3494 dict_equal (Py_INCREF key/aval)
+		Incref(k)
+		Incref(av)
 		bv, err := b.GetItem(k)
 		if err != nil {
+			Decref(k)
+			Decref(av)
 			if errors.Is(err, errKeyNotFound) {
 				return false, nil
 			}
 			return false, err
 		}
-		if av == bv {
-			continue
-		}
+		// Pin bval too across the value compare; a re-entrant __eq__ can
+		// clear b. CPython: Objects/dictobject.c:3506 dict_equal (Py_INCREF bval).
+		Incref(bv)
 		eq, err := RichCmpBool(av, bv, CompareEQ)
+		Decref(k)
+		Decref(av)
+		Decref(bv)
 		if err != nil {
 			return false, err
 		}
@@ -816,7 +860,10 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	//
 	// CPython: Objects/dictobject.c:2979 PyDict_Clear
 	notifyDictEvent(DictEventCleared, d, nil, nil)
+	// CPython: Objects/dictobject.c:2938 PyDict_Clear (Py_BEGIN_CRITICAL_SECTION(op))
+	d.lock()
 	d.clearContents()
+	d.unlock()
 	return None(), nil
 }
 
@@ -861,12 +908,14 @@ func (d *Dict) clearContents() {
 // DecrefThrowawayKwargs releases the temporary keyword dict the eval
 // loop builds for a CALL_FUNCTION_EX (BUILD_MAP followed by DICT_MERGE).
 // Dropping the call's reference normally leaves the dict at refcount
-// zero, but gopy dicts carry no synchronous tp_dealloc, so the values
-// the merge incref'd into it would stay pinned by a refcount no
-// container actually holds. The cycle collector cannot help: those
-// values are still reachable from the caller's live locals when the
-// throwaway dict dies, so it never classifies them as garbage and the
-// pin never lifts.
+// zero, but gopy dicts carry no synchronous tp_dealloc (a global one is
+// unsafe: namespace dicts such as a module or type __dict__ are reachable
+// only through an un-counted Go field, so their Python refcount routinely
+// sits at zero while the dict is live), so the values the merge incref'd
+// into it would stay pinned by a refcount no container actually holds.
+// The cycle collector cannot help: those values are still reachable from
+// the caller's live locals when the throwaway dict dies, so it never
+// classifies them as garbage and the pin never lifts.
 //
 // Clearing is gated on the dict reaching refcount zero, which at this
 // call site is a precise signal that nothing else references it (the
@@ -878,6 +927,24 @@ func (d *Dict) clearContents() {
 // final decref of the keyword dict CALL_FUNCTION_EX owns)
 func DecrefThrowawayKwargs(d *Dict) {
 	Decref(d)
+	if d.Hdr().Refcnt() == 0 {
+		d.clearContents()
+	}
+}
+
+// ReleaseDeadDictContents drops one reference on d and, when that leaves
+// it at refcount zero, releases the references the dict owns on its
+// stored values. It is the frame-clear analogue of DecrefThrowawayKwargs:
+// when frame.clear() closes a local slot holding a **kwargs parameter
+// dict, the slot's Close decrefs the dict, but with no synchronous dict
+// tp_dealloc the captured values would stay pinned by a refcount nothing
+// holds. Gating on refcount zero keeps this safe (a dict the caller still
+// references is left intact); clearContents decrefs only the dict's owned
+// values, leaving its borrowed keys alone.
+//
+// CPython: Objects/dictobject.c:2768 dict_dealloc (final decref of a
+// frame-local dict during frame_clear)
+func ReleaseDeadDictContents(d *Dict) {
 	if d.Hdr().Refcnt() == 0 {
 		d.clearContents()
 	}
@@ -1088,13 +1155,30 @@ func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
 	notifyDictEvent(DictEventCloned, dst, src, nil)
 	had := atomic.LoadUint64(&dst.watcherTag) & dictWatcherMask
 	atomic.AndUint64(&dst.watcherTag, ^dictWatcherMask)
+	// Hold src's table lock across the whole snapshot-and-read loop so a
+	// concurrent goroutine cannot delete an entry between Keys() and the
+	// matching GetItem (test_threaded_weak_key_dict_copy). This mirrors
+	// CPython's copy_lock_held running under Py_BEGIN_CRITICAL_SECTION(o);
+	// the per-dict lock is goroutine-reentrant, so the nested Keys()/
+	// GetItem acquisitions on the same goroutine pass straight through.
+	//
+	// CPython: Objects/dictobject.c:4147 copy_lock_held
+	src.lock()
 	for _, k := range src.Keys() {
-		v, _ := src.GetItem(k)
+		v, err := src.GetItem(k)
+		if err != nil || v == nil {
+			// Even under the lock a key can be absent if a key's __eq__
+			// rejected it during the GetItem probe; skip rather than
+			// inserting a nil value.
+			continue
+		}
 		if err := dst.SetItem(k, v); err != nil {
+			src.unlock()
 			atomic.OrUint64(&dst.watcherTag, had)
 			return nil, err
 		}
 	}
+	src.unlock()
 	atomic.OrUint64(&dst.watcherTag, had)
 	return dst, nil
 }

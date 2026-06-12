@@ -3,6 +3,7 @@ package objects
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // Tuple is the Python tuple, an immutable ordered sequence.
@@ -69,6 +70,8 @@ func init() {
 		GetItem: tupleSubscript,
 	}
 	TupleType.TpTraverse = tupleTraverse
+	// CPython: Objects/tupleobject.c:233 tuple_dealloc
+	TupleType.Dealloc = tupleDealloc
 	TupleType.Getattro = GenericGetAttr
 	// __repr__ slot wrapper. add_operators exposes tp_repr as a
 	// distinct descriptor so callers can do `tuple.__repr__(t)` and so
@@ -128,6 +131,14 @@ func init() {
 		// CPython: Objects/abstract.c:2820 PySequence_Tuple
 		if cls == TupleType && len(args) == 1 {
 			if t, ok := args[0].(*Tuple); ok && t.Type() == TupleType {
+				// Hand back a counted reference, not a borrow: the caller
+				// owns the result and the argument it was built from is a
+				// distinct stack temporary that the eval loop decrefs after
+				// the call. Without the incref a bare temporary (tuple(x*2))
+				// hits zero and tuple_dealloc nils its shared item slice.
+				//
+				// CPython: Objects/abstract.c:2820 PySequence_Tuple (Py_INCREF(v))
+				Incref(t)
 				return t, nil
 			}
 		}
@@ -142,6 +153,23 @@ func init() {
 		if cls == TupleType && len(items) == 0 {
 			return emptyTuple, nil
 		}
+		// The tuple takes a counted reference on every element it stores.
+		// gopy's list and dict eagerly release their contents on teardown
+		// (listDealloc, ReleaseDeadDictContents), so any object that is also
+		// reachable through one of those containers would be over-decref'd if
+		// the tuple borrowed it. Owning the reference keeps the shared object
+		// alive for as long as the tuple does. No matching teardown decref is
+		// wired: a blanket tuple tp_dealloc is unsafe (tuples back co_consts
+		// and other un-counted Go fields whose Python refcount sits at zero
+		// while live), so the reference is intentionally leaked and reclaimed
+		// by the Go GC, matching the over-incref bias the refcount layer uses.
+		//
+		// DrainIterable already handed back one owned reference per element,
+		// so the tuple steals those rather than taking a second count. An
+		// empty subtype build (tuple() on a subclass, items==nil) has nothing
+		// to steal.
+		//
+		// CPython: Objects/tupleobject.c:784 tuple_new_impl (PyTuple_SET_ITEM steals an owned ref)
 		t := &Tuple{items: items}
 		t.init(cls)
 		t.size = int64(len(items))
@@ -149,8 +177,60 @@ func init() {
 	}
 	emptyTuple = &Tuple{}
 	emptyTuple.init(TupleType)
+	// The empty tuple is a process-wide singleton handed back by every
+	// NewTuple(nil) and PyTuple_New(0). Stamp it immortal so the throwaway
+	// argument tuples that dunder dispatchers build and release (a bound
+	// __hash__/__repr__ call carries no positionals, so NewTuple(nil)
+	// returns this singleton) cannot drive its refcount toward zero.
+	// CPython: Objects/tupleobject.c the static empty tuple is immortal.
+	emptyTuple.Hdr().MakeImmortal()
 	// CPython: Objects/typeobject.c add_operators slotdefs tp_iter row
 	AddIterSlotWrappers(TupleType)
+}
+
+// tupleDealloc fires when a tuple's Python refcount reaches zero. Like
+// list_dealloc it releases the counted reference the tuple holds on each
+// element (tail-first), so a contained object whose last holder is this
+// tuple gets its own __del__ run deterministically. A subclass __del__
+// (tp_finalize) runs first under a resurrection guard, matching
+// listDealloc / set_dealloc.
+//
+// This balances the incref-on-store in tuple_new / NewTuple. It is only
+// safe because every tuple reachable through an un-counted Go field
+// (co_consts on a Code object, a function's __defaults__/__kwdefaults__,
+// constant tuples cached in a type __dict__) is pinned with an explicit
+// Incref by its holder, so such a tuple never sits at refcount zero while
+// it is still live. A transient tuple (BUILD_TUPLE result, call argument
+// pack, items() pair) is owned by an honest refcount and tears down here.
+//
+// CPython: Objects/tupleobject.c:233 tuple_dealloc
+func tupleDealloc(o Object) {
+	t := o.(*Tuple)
+	if t == emptyTuple {
+		return
+	}
+	if fn := o.Type().Finalize; fn != nil {
+		h := o.Hdr()
+		atomic.StoreInt64(&h.refcnt, 1)
+		fn(o)
+		atomic.AddInt64(&h.refcnt, -1)
+		if atomic.LoadInt64(&h.refcnt) != 0 {
+			return
+		}
+	}
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
+	// Tail-first item release mirrors tuple_dealloc's reversed walk.
+	for i := len(t.items) - 1; i >= 0; i-- {
+		it := t.items[i]
+		t.items[i] = nil
+		if it != nil {
+			Decref(it)
+		}
+	}
+	t.items = nil
 }
 
 // NewTuple builds a tuple from items. The empty tuple returns the
@@ -164,6 +244,19 @@ func NewTuple(items []Object) *Tuple {
 	t := &Tuple{items: append([]Object(nil), items...)}
 	t.init(TupleType)
 	t.size = int64(len(items))
+	// Own a counted reference per stored item, balancing the eager content
+	// release that list and dict perform on teardown so a shared object is
+	// never over-decref'd while this tuple still references it. tupleDealloc
+	// drops one reference per item on the last Decref, so a tuple released
+	// through the refcount path (rather than abandoned to the Go GC) returns
+	// each item to its prior count.
+	//
+	// CPython: Objects/tupleobject.c:163 PyTuple_New + the PyTuple_SET_ITEM contract
+	for _, it := range t.items {
+		if it != nil {
+			Incref(it)
+		}
+	}
 	// CPython: Objects/tupleobject.c:170 PyTuple_New (PyObject_GC_Track tail)
 	if h := GCTrackHook; h != nil {
 		h(t)
@@ -577,12 +670,35 @@ func init() {
 	tupleIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*tupleIterator)
 		if it.src == nil || it.pos >= len(it.src.items) {
-			it.src = nil
+			// tupleiter_next clears it_seq on exhaustion. Drop the
+			// counted reference the iterator holds on the tuple so the
+			// tuple (and its contents) can be released right away.
+			// CPython: Objects/tupleobject.c:1073 tupleiter_next
+			if it.src != nil {
+				old := it.src
+				it.src = nil
+				Decref(old)
+			}
 			return nil, ErrStopIteration
 		}
 		v := it.src.items[it.pos]
 		it.pos++
 		return v, nil
+	}
+	// tupleiter_dealloc drops the iterator's reference on the source tuple
+	// if exhaustion has not already cleared it.
+	//
+	// CPython: Objects/tupleobject.c:1063 tupleiter_dealloc
+	tupleIterType.Dealloc = func(o Object) {
+		if h := GCUntrackHook; h != nil {
+			h(o)
+		}
+		ClearWeakRefs(o)
+		it := o.(*tupleIterator)
+		if it.src != nil {
+			Decref(it.src)
+			it.src = nil
+		}
 	}
 	tupleIterType.Iter = SelfIter
 	AddIterSlotWrappers(tupleIterType)
@@ -662,6 +778,12 @@ func tupleIter(o Object) (Object, error) {
 		}
 		t = NewTuple(items)
 	}
+	// tupleiter holds a counted reference on the tuple (it_seq), matching
+	// CPython where PyObject_GetIter does Py_INCREF on the sequence. The
+	// matching Decref runs on exhaustion or in tupleiter_dealloc.
+	//
+	// CPython: Objects/tupleobject.c:1091 tuple_iter
+	Incref(t)
 	it := &tupleIterator{src: t}
 	it.init(tupleIterType)
 	return it, nil
@@ -791,7 +913,11 @@ func TupleIterNextFast(o Object) (value Object, exhausted bool, ok bool) {
 		return nil, false, false
 	}
 	if it.src == nil || it.pos >= len(it.src.items) {
-		it.src = nil
+		if it.src != nil {
+			old := it.src
+			it.src = nil
+			Decref(old)
+		}
 		return nil, true, true
 	}
 	v := it.src.items[it.pos]

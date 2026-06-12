@@ -522,7 +522,15 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
 		}
-		f.SetLocal(idx, stackref.FromObject(v))
+		// The keyword value is borrowed from the caller's kwargs map. The
+		// frame slot must own its own counted reference because Frame.Clear
+		// Closes (Decrefs) every local on return; stealing the borrow would
+		// over-decref the value (fatal now that list/tuple/dict tear their
+		// contents down at refcount zero). Mirror the positional path's
+		// FromObjectNew and CPython's Py_INCREF of args copied into localsplus.
+		//
+		// CPython: Python/ceval.c _PyEval_MakeFrameVector (Py_INCREF(x))
+		f.SetLocal(idx, stackref.FromObjectNew(v))
 	}
 	if len(posonlyAsKw) > 0 {
 		ordered := make([]string, 0, len(posonlyAsKw))
@@ -546,7 +554,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 				continue
 			}
 			if f.LocalAt(slot).IsNull() {
-				f.SetLocal(slot, stackref.FromObject(fn.Defaults.Item(i)))
+				f.SetLocal(slot, stackref.FromObjectNew(fn.Defaults.Item(i)))
 			}
 		}
 	}
@@ -564,7 +572,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 			name := co.Varnames[slot]
 			v, err := fn.KwDefaults.GetItem(objects.NewStr(name))
 			if err == nil && v != nil {
-				f.SetLocal(slot, stackref.FromObject(v))
+				f.SetLocal(slot, stackref.FromObjectNew(v))
 			}
 		}
 	}
@@ -925,7 +933,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 				continue
 			}
 			if f.LocalAt(slot).IsNull() {
-				f.SetLocal(slot, stackref.FromObject(fn.Defaults.Item(i)))
+				f.SetLocal(slot, stackref.FromObjectNew(fn.Defaults.Item(i)))
 			}
 		}
 	}
@@ -942,7 +950,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 			name := co.Varnames[slot]
 			v, err := fn.KwDefaults.GetItem(objects.NewStr(name))
 			if err == nil && v != nil {
-				f.SetLocal(slot, stackref.FromObject(v))
+				f.SetLocal(slot, stackref.FromObjectNew(v))
 			}
 		}
 	}

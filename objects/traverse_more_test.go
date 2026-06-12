@@ -101,6 +101,7 @@ func (f *fakeInterp) FrameDropSnapshot()          {}
 func (f *fakeInterp) FrameRegisterWrapper(Object) {}
 func (f *fakeInterp) FrameMarkExposed()           {}
 func (f *fakeInterp) FrameExposed() bool          { return false }
+func (f *fakeInterp) VarkeywordsDict() *Dict      { return nil }
 func (f *fakeInterp) FrameNumStack() int          { return 0 }
 func (f *fakeInterp) FrameStackItem(int) Object   { return nil }
 func (f *fakeInterp) FrameGenOwner() Object       { return nil }

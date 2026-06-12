@@ -275,6 +275,11 @@ func (d *Dict) ensureCombined() {
 		if v == nil {
 			continue
 		}
+		// The combined table now owns a counted reference on the key it
+		// adopts from the shared table; clearContents/dictDelete release it
+		// on teardown, while the shared table keeps its own reference.
+		// CPython: Objects/dictobject.c:7530 _PyDict_DetachFromObject (Py_INCREF key)
+		Incref(sk.entries[slot].key)
 		newEntries[slot] = dictEntry{
 			hash:  sk.entries[slot].hash,
 			key:   sk.entries[slot].key,

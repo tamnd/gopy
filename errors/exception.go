@@ -115,6 +115,21 @@ func (e *Exception) ExceptionArgs() *objects.Tuple {
 	return e.Args
 }
 
+// setArgs replaces the exception's owned args tuple. It takes a counted
+// reference on the new tuple and releases the previous one, balancing the
+// exception->args edge that excTraverse reports to the cyclic collector.
+//
+// CPython: Objects/exceptions.c:359 BaseException_args_set_impl
+// (Py_INCREF(args) then Py_XSETREF(self->args, args))
+func (e *Exception) setArgs(t *objects.Tuple) {
+	objects.Incref(t)
+	old := e.Args
+	e.Args = t
+	if old != nil {
+		objects.Decref(old)
+	}
+}
+
 // New constructs an exception with the given type and args. Mirrors
 // BaseException_new + BaseException_init.
 //
@@ -123,6 +138,15 @@ func New(t *objects.Type, args *objects.Tuple) *Exception {
 	if args == nil {
 		args = objects.NewTuple(nil)
 	}
+	// BaseException owns its args tuple: excTraverse visits Args, so the
+	// cyclic collector accounts for an exception->args edge during trial
+	// deletion. The edge must correspond to a real counted reference or
+	// subtractRefs drives the tuple to zero and tuple_dealloc nils its
+	// items while the live exception still points at it (e.args goes
+	// empty). Take that reference here.
+	//
+	// CPython: Objects/exceptions.c:60 BaseException_init (self->args = Py_NewRef(args))
+	objects.Incref(args)
 	e := &Exception{ExcType: t, Args: args}
 	if t != nil {
 		e.Init(t)

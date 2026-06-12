@@ -1174,10 +1174,10 @@ func fixupHashAndIter(t *Type) {
 	if isOwnDescriptor(t, "__eq__") && !isOwnDescriptor(t, "__hash__") {
 		t.Hash = unhashableTypeHash
 		SetTypeDescr(t, "__hash__", None())
-		if lookupDunderCallable(t, "__iter__") {
+		if isOwnDescriptor(t, "__iter__") {
 			t.Iter = slotTpIter
 		}
-		if lookupDunderCallable(t, "__next__") {
+		if isOwnDescriptor(t, "__next__") {
 			t.IterNext = slotTpIterNext
 		}
 		return
@@ -1193,10 +1193,21 @@ func fixupHashAndIter(t *Type) {
 	case t.Hash == nil:
 		t.Hash = identityHash
 	}
-	if lookupDunderCallable(t, "__iter__") {
+	// Only swap to the generic dispatcher when __iter__/__next__ is
+	// defined directly on t. A purely inherited descriptor means the
+	// C-level Iter slot that inheritSlotsAllMRO already copied (e.g.
+	// list's listIter) is the right one; installing slotTpIter in that
+	// case routes every iter(subclass) back through a Python-level
+	// __iter__ round-trip that over-increfs the source.
+	//
+	// CPython: Objects/typeobject.c:9874 update_one_slot keeps the
+	// inherited wrapper's C function (d_wrapped) when the resolved
+	// descriptor is the base wrapper_descriptor, only installing the
+	// generic slot for a real override.
+	if isOwnDescriptor(t, "__iter__") {
 		t.Iter = slotTpIter
 	}
-	if lookupDunderCallable(t, "__next__") {
+	if isOwnDescriptor(t, "__next__") {
 		t.IterNext = slotTpIterNext
 	}
 }
@@ -1588,14 +1599,17 @@ func lookupMaybeMethod(self Object, name string) (Object, bool, error) {
 // sole positional argument; when false, fn is already bound and the
 // call carries no args.
 //
-// The args tuple is auto-tracked on creation (see NewTuple), and Go's
-// runtime cannot reclaim a tuple that still has a tracked-map entry.
-// Without an explicit GCUntrackHook the tuple lingers forever, holds
-// a phantom tp_traverse edge to self, and a subsequent cycle scan
-// over-decrements self.refs by one. The over-decrement matters most
-// in the resurrection path: a __del__ that hands self back to the
-// caller wants the next Collect to detect the lone-cycle and reclaim
-// it, but the lingering args tuple breaks the refcount math.
+// CPython's call_unbound_noarg passes self on a borrowed vectorcall
+// stack, so nothing pins self past the call. gopy threads arguments
+// through a real argument tuple, and NewTuple takes a counted reference
+// on every item it stores (so self.refs goes up by one for the unbound
+// path). That reference must be released once the call returns or it
+// leaks: a single d[o]=1 whose key hashes through slot_tp_hash would
+// otherwise strand a permanent +1 on the key, and the cycle collector
+// would never see the instance go unreachable. Decref on the throwaway
+// tuple runs tupleDealloc, which both untracks it from the collector and
+// drops the per-item reference, so self is balanced exactly as CPython's
+// borrowed stack leaves it.
 //
 // CPython: Objects/typeobject.c:2308 call_unbound_noarg
 func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
@@ -1606,9 +1620,7 @@ func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
 		args = NewTuple(nil)
 	}
 	result, err := Call(fn, args, nil)
-	if h := GCUntrackHook; h != nil {
-		h(args)
-	}
+	Decref(args)
 	return result, err
 }
 
@@ -1638,9 +1650,10 @@ func vectorcallMethod(o Object, name string, extra ...Object) (Object, error) {
 	}
 	args := NewTuple(callArgs)
 	res, callErr := Call(fn, args, nil)
-	if h := GCUntrackHook; h != nil {
-		h(args)
-	}
+	// NewTuple counted a reference on every argument (self plus extra);
+	// release the throwaway tuple so tupleDealloc untracks it and drops
+	// those per-item references rather than stranding them.
+	Decref(args)
 	if !unbound {
 		Decref(fn)
 	}
@@ -1676,9 +1689,10 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 		}
 	}
 	res, callErr := Call(fn, posArgs, kwDict)
-	if h := GCUntrackHook; h != nil {
-		h(posArgs)
-	}
+	// NewTuple counted a reference on each positional; release the
+	// throwaway tuple so tupleDealloc untracks it and drops those
+	// per-item references rather than stranding them.
+	Decref(posArgs)
 	if !unbound {
 		Decref(fn)
 	}

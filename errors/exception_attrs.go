@@ -189,7 +189,7 @@ func baseExceptionInit(args []objects.Object, _ map[string]objects.Object) (obje
 	if !ok {
 		return objects.None(), nil
 	}
-	e.Args = objects.NewTuple(args[1:])
+	e.setArgs(objects.NewTuple(args[1:]))
 	return objects.None(), nil
 }
 
@@ -215,7 +215,7 @@ func argsSet(owner objects.Object, value objects.Object) error {
 		return errors.New("TypeError: args may not be deleted")
 	}
 	if t, ok := value.(*objects.Tuple); ok {
-		e.Args = t
+		e.setArgs(t)
 		return nil
 	}
 	iter, err := objects.Iter(value)
@@ -233,7 +233,7 @@ func argsSet(owner objects.Object, value objects.Object) error {
 		}
 		items = append(items, next)
 	}
-	e.Args = objects.NewTuple(items)
+	e.setArgs(objects.NewTuple(items))
 	return nil
 }
 

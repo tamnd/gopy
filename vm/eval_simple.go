@@ -418,13 +418,21 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		n := int(oparg)
 		items, uerr := unpackSeq(seq, n)
 		if uerr != nil {
+			objects.Decref(seq)
 			return 0, true, uerr
 		}
-		// Push in reverse so items[0] ends up at the top, matching
-		// the assignment order CPython documents.
+		// Each unpacked element becomes a new reference, mirroring CPython's
+		// tp_iternext (Py_NewRef) and the specialized UNPACK_SEQUENCE arms.
+		// unpackSeq hands back borrowed iterator results, so promoting them
+		// here (and releasing the seq input afterwards) keeps the stored
+		// locals balanced against Frame.Clear's Close. Push in reverse so
+		// items[0] lands on TOS, matching the assignment order.
+		//
+		// CPython: Python/bytecodes.c UNPACK_SEQUENCE (_PyEval_UnpackIterableStackRef)
 		for i := n - 1; i >= 0; i-- {
-			e.pushObject(items[i])
+			e.push(stackref.FromObjectNew(items[i]))
 		}
+		objects.Decref(seq)
 		return e.cacheAdvance(compile.UNPACK_SEQUENCE), true, nil
 
 	case compile.STORE_SUBSCR:
@@ -1750,6 +1758,15 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		return nil, ierr
 	}
+	// PyObject_GetIter hands back a new reference (self+1 when seq is
+	// already an iterator, a fresh iterator otherwise). CPython holds it
+	// only for the duration of the unpack and drops it before returning,
+	// so the iterator does not linger and pin the source after a partial
+	// or failed unpack. The extracted values are borrowed from the
+	// underlying container and the caller promotes them to owned refs.
+	//
+	// CPython: Python/ceval.c:2443 _PyEval_UnpackIterableStackRef (Py_DECREF(it))
+	defer objects.Decref(it)
 	if it.Type().IterNext == nil {
 		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", it.Type().Name)
 	}
@@ -1999,11 +2016,12 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 // container adopted ownership of the key and/or value reference, so the
 // STORE_SUBSCR arm can release exactly the inputs CPython's
 // DECREF_INPUTS would. gopy's container storage contracts are not
-// uniform: an exact dict increfs the value it stores but steals the key
+// uniform: an exact dict increfs both the key and value it stores
 // (dictInsert), an exact list steals the value it stores (listSetItem),
 // and every other path (user __setitem__, bytearray, dict/list
 // subclasses) treats its arguments as borrowed. keepKey / keepValue
-// stay false unless the container took the matching reference.
+// stay false unless the container adopted the matching stack reference
+// rather than taking its own.
 //
 // CPython: Python/bytecodes.c STORE_SUBSCR
 func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool, err error) {
@@ -2011,10 +2029,12 @@ func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool,
 		if serr := setItem(container, key, value); serr != nil {
 			return false, false, serr
 		}
-		// dictInsert steals the key reference and increfs its own copy of
-		// the value, so the key transfers into the dict and the value
-		// stack reference is released by the caller.
-		return true, false, nil
+		// dictInsert increfs its own copy of both key and value
+		// (insertdict's Py_INCREF(key)/Py_INCREF(value)), so neither stack
+		// reference transfers into the dict; the caller releases both.
+		//
+		// CPython: Objects/dictobject.c:1869 insertdict
+		return false, false, nil
 	}
 	if objects.IsExactList(container) {
 		if serr := setItem(container, key, value); serr != nil {
