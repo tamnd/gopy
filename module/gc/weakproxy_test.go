@@ -39,6 +39,8 @@ func TestCollectClearsWeakProxyForCycle(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	p := objects.NewWeakProxy(a, nil)
 	RegisterWeakProxy(p)
@@ -61,6 +63,8 @@ func TestWeakProxyCallbackFiresOnce(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	calls := 0
 	var seen objects.Object

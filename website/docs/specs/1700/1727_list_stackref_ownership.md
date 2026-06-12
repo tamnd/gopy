@@ -334,6 +334,37 @@ iterator constructor first (smallest faithful CPython-shaped units, each green o
 its own because it only adds a leak while dealloc is off), and only flip
 `list_dealloc` once the holder set and the insert set are both complete.
 
+## GC cycle-collector test reconciliation (downstream of P5)
+
+Flipping `list_dealloc` and making `Append` own its stored ref changed the
+refcount inputs the `module/gc` cycle-collector unit tests feed `Collect`. Those
+tests pre-date list ownership: they built a cycle with bare `Append`, `Track`ed
+it, and called `Collect` expecting reclaim, without ever dropping the creating
+scope's reference. That only worked while `Append` was a no-op on refcounts. The
+`TestParityDict` case already modeled the right shape (`d.SetItem(1, d); Track(d);
+Decref(d) // simulate del d`) because dicts always owned their stored refs; the
+list and tuple cases simply omitted the `del`.
+
+CPython agrees: `l = []; l.append(l); gc.collect()` does **not** reclaim `l`
+while the local still holds it. `subtractRefs` (`refs.go`) computes the
+external-only count, so a freshly built self-cycle with a live creator reference
+is correctly read as reachable. The fix is to make each list/tuple cycle test
+drop the creator reference after wiring the cycle (`objects.Decref(x) // simulate
+del`), matching `TestParityDict` and the literal `del l` / `del t,l` in the
+CPython citations. Sites updated: `cycle_test.go`, `garbage_test.go`,
+`finalize_type_slot_test.go`, `module_debug_test.go`, `test_gc_parity_test.go`,
+`weakref_test.go`, `weakproxy_test.go`. The `linkInto` / `linkContainer` helpers
+keep their extra `Incref` (now a stand-in for an external root, not a
+compensation for a non-owning `Append`); their doc comments were corrected to say
+so. No collector code changed; all of `module/gc` is green.
+
+While the full lint ran over the audited eval loop it flagged `storeSubscr`'s
+`keepKey` return as dead (`unparam`): no container path adopts the key's stack
+reference (an exact dict increfs its own copy, an exact list stores the value
+under an integer index). The return was dropped to `(keepValue, err)` and the
+STORE_SUBSCR arm always closes the key, with the stale comment claiming the dict
+"steals the key" corrected to match `insertdict`.
+
 ## Caller audit table (P3)
 
 Filled in as each package is classified. Format: `package` — steal / borrow /
@@ -358,4 +389,5 @@ unchanged.
 - [x] P6 panel + corpus smoke clean, dealloc flipped, both gates pass
 - [x] dict critical sections (spec 1728) land first so the owned store is race-safe
 - [x] spec 1726 P11 + spec 1723 status updated
+- [x] module/gc cycle-collector tests reconciled to the owned-store refcount model (drop the creating reference, `del`-style, in every list/tuple cycle test) + `storeSubscr` dead `keepKey` return removed
 - [ ] human PR comment on #91 (after merge #90 / rebase)

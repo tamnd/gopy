@@ -439,20 +439,18 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		keyR := e.pop()
 		containerR := e.pop()
 		valueR := e.pop()
-		keepKey, keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
+		keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
 		// CPython's STORE_SUBSCR runs DECREF_INPUTS on container, sub, and
 		// value after the store, whether it succeeded or raised. gopy's
 		// container ownership contracts are not uniform: an exact dict
-		// increfs the value it keeps but steals the key (dictInsert), and
-		// an exact list steals the value. keepKey / keepValue report which
-		// input the container adopted so we leave that stack reference in
-		// place and release the rest.
+		// increfs its own copy of both key and value (dictInsert), and an
+		// exact list steals the value. No container adopts the key, so the
+		// container and key references always release here; keepValue
+		// reports when the value's stack reference moved into the container.
 		//
 		// CPython: Python/bytecodes.c STORE_SUBSCR DECREF_INPUTS
 		containerR.Close()
-		if !keepKey {
-			keyR.Close()
-		}
+		keyR.Close()
 		if !keepValue {
 			valueR.Close()
 		}
@@ -2013,40 +2011,41 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 //
 // CPython: Objects/abstract.c PyObject_SetItem
 // storeSubscr performs container[key] = value and reports whether the
-// container adopted ownership of the key and/or value reference, so the
+// container adopted ownership of the value reference, so the
 // STORE_SUBSCR arm can release exactly the inputs CPython's
 // DECREF_INPUTS would. gopy's container storage contracts are not
-// uniform: an exact dict increfs both the key and value it stores
+// uniform: an exact dict increfs its own copy of both key and value
 // (dictInsert), an exact list steals the value it stores (listSetItem),
 // and every other path (user __setitem__, bytearray, dict/list
-// subclasses) treats its arguments as borrowed. keepKey / keepValue
-// stay false unless the container adopted the matching stack reference
-// rather than taking its own.
+// subclasses) treats its arguments as borrowed. No container adopts the
+// key's stack reference, so the caller always releases the key.
+// keepValue is true only when the container took over the value's stack
+// reference rather than taking its own.
 //
 // CPython: Python/bytecodes.c STORE_SUBSCR
-func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool, err error) {
+func storeSubscr(container, key, value objects.Object) (keepValue bool, err error) {
 	if objects.IsExactDict(container) {
 		if serr := setItem(container, key, value); serr != nil {
-			return false, false, serr
+			return false, serr
 		}
 		// dictInsert increfs its own copy of both key and value
 		// (insertdict's Py_INCREF(key)/Py_INCREF(value)), so neither stack
 		// reference transfers into the dict; the caller releases both.
 		//
 		// CPython: Objects/dictobject.c:1869 insertdict
-		return false, false, nil
+		return false, nil
 	}
 	if objects.IsExactList(container) {
 		if serr := setItem(container, key, value); serr != nil {
-			return false, false, serr
+			return false, serr
 		}
 		// listSetItem steals the value; the integer index is not stored.
-		return false, true, nil
+		return true, nil
 	}
 	if serr := setItem(container, key, value); serr != nil {
-		return false, false, serr
+		return false, serr
 	}
-	return false, false, nil
+	return false, nil
 }
 
 func setItem(container, key, value objects.Object) error {

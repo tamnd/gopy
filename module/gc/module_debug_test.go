@@ -137,6 +137,8 @@ func TestIsFinalizedAfterUnreachable(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	fired := 0
 	RegisterFinalizer(a, func(objects.Object) { fired++ })

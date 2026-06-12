@@ -51,6 +51,8 @@ func TestCollectClearsWeakrefForCycle(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	w := objects.NewWeakref(a, nil)
 	RegisterWeakref(w)
@@ -73,6 +75,8 @@ func TestWeakrefCallbackFiresOnceWithWeakrefArg(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	var calls int
 	var seen objects.Object
@@ -111,8 +115,8 @@ func TestWeakrefSurvivesIfReferentSurvives(t *testing.T) {
 	defer untrackAll()
 	defer clearWeakrefs()
 	// Externally rooted target must keep its weakref alive across a
-	// collection. Use linkInto's manual Incref to stand in for the
-	// container-refcount work that 1679-A will land.
+	// collection. The extra Incref stands in for a root outside the
+	// candidate set keeping target reachable.
 	target := objects.NewList(nil)
 	objects.Incref(target)
 	defer objects.Decref(target)
@@ -140,6 +144,8 @@ func TestCollectWithNoWeakrefsIsCallbackFree(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	if Collect(2) != 2 {
 		t.Fatalf("cycle did not reclaim without weakrefs")

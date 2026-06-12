@@ -15,9 +15,10 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// linkContainer wires container.Append plus the matching refcount
-// bump that CPython's container ops apply. Mirrors the helper in
-// cycle_test.go.
+// linkContainer appends child and adds one extra reference to stand in
+// for an external owner. container.Append already owns a strong ref to
+// child (spec 1727 list ownership); the second Incref here simulates a
+// root outside the candidate set. Mirrors linkInto in cycle_test.go.
 func linkContainer(container *objects.List, child objects.Object) {
 	container.Append(child)
 	objects.Incref(child)
@@ -31,6 +32,7 @@ func TestParityList(t *testing.T) {
 	l := objects.NewList(nil)
 	l.Append(l)
 	Track(l)
+	objects.Decref(l) // simulate del l: Append now owns the internal ref
 
 	if got := Collect(2); got != 1 {
 		t.Fatalf("Collect() = %d, want 1 (list self-cycle)", got)
@@ -68,6 +70,8 @@ func TestParityTuple(t *testing.T) {
 	l.Append(tup)
 	Track(l)
 	Track(tup)
+	objects.Decref(l) // simulate del t, l: NewTuple and Append now own the refs
+	objects.Decref(tup)
 
 	if got := Collect(2); got != 2 {
 		t.Fatalf("Collect() = %d, want 2 (list+tuple cycle)", got)
@@ -169,6 +173,7 @@ func TestParityIsFinalized(t *testing.T) {
 	a := objects.NewList(nil)
 	a.Append(a)
 	Track(a)
+	objects.Decref(a) // simulate del a: Append now owns the internal ref
 	if IsFinalized(a) {
 		t.Fatalf("IsFinalized before Collect = true, want false")
 	}
@@ -355,6 +360,7 @@ func TestParityResurrectionOnlyHappensOnce(t *testing.T) {
 	a := objects.NewList(nil)
 	a.Append(a)
 	Track(a)
+	objects.Decref(a) // simulate del a: Append now owns the internal ref
 
 	calls := 0
 	RegisterFinalizer(a, func(o objects.Object) {
@@ -426,11 +432,13 @@ func TestParityResurrectionDoesNotBlockCleanup(t *testing.T) {
 	a := objects.NewList(nil)
 	a.Append(a)
 	Track(a)
+	objects.Decref(a) // simulate del a: Append now owns the internal ref
 
 	// Cycle Z: self-loop, resurrecting finalizer. Should survive.
 	z := objects.NewList(nil)
 	z.Append(z)
 	Track(z)
+	objects.Decref(z) // simulate del z: Append now owns the internal ref
 	RegisterFinalizer(z, func(o objects.Object) {
 		objects.Incref(o)
 	})
@@ -467,6 +475,8 @@ func TestParityBug21435(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	fired := 0
 	RegisterFinalizer(b, func(_ objects.Object) {
