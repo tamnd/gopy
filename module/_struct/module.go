@@ -1390,7 +1390,7 @@ var structIterUnpackType = func() *objects.Type {
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = structIterUnpackNext
 	objects.AddIterSlotWrappers(t)
-	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescr(t, "__length_hint__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescrConv(t, "__length_hint__", objects.MethNoArgs, func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		if len(args) != 1 {
 			return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
 		}
@@ -1456,7 +1456,7 @@ func newStructType() *objects.Type {
 		return structNew(cls, args[1:], kwargs)
 	}))
 	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", structInit))
-	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescr(t, "__sizeof__", structSizeof))
+	objects.SetTypeDescr(t, "__sizeof__", objects.NewMethodDescrConv(t, "__sizeof__", objects.MethNoArgs, structSizeof))
 	objects.SetTypeDescr(t, "pack", objects.NewMethodDescr(t, "pack", structPack))
 	objects.SetTypeDescr(t, "unpack", objects.NewMethodDescr(t, "unpack", structUnpack))
 	objects.SetTypeDescr(t, "pack_into", objects.NewMethodDescr(t, "pack_into", structPackInto))

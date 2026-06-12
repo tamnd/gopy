@@ -697,7 +697,7 @@ func init() {
 	t.TpTraverse = itemgetterTraverse
 	// CPython: Modules/_operator.c:1145 itemgetter_dealloc
 	t.Dealloc = itemgetterDealloc
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", itemgetterReduce))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, itemgetterReduce))
 }
 
 // itemgetterNew is operator.itemgetter.__new__: stash the requested
@@ -846,7 +846,7 @@ func init() {
 	t.Call = attrgetterCall
 	t.TpNew = attrgetterNew
 	t.Getattro = objects.GenericGetAttr
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", attrgetterReduce))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, attrgetterReduce))
 }
 
 // attrgetterNew is operator.attrgetter.__new__: validate that every
@@ -978,7 +978,7 @@ func init() {
 	t.TpTraverse = methodcallerTraverse
 	// CPython: Modules/_operator.c:1755 methodcaller_dealloc
 	t.Dealloc = methodcallerDealloc
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", methodcallerReduce))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, methodcallerReduce))
 }
 
 // methodcallerNew validates the name is a str and stashes the

@@ -738,7 +738,7 @@ var TeeType = objects.NewType("_tee", []*objects.Type{objects.ObjectType()})
 func init() {
 	finishType(TeeType, teeNext)
 	TeeType.TpNew = teeNewSlot
-	objects.SetTypeDescr(TeeType, "__copy__", objects.NewMethodDescr(TeeType, "__copy__", teeCopyMethod))
+	objects.SetTypeDescr(TeeType, "__copy__", objects.NewMethodDescrConv(TeeType, "__copy__", objects.MethNoArgs, teeCopyMethod))
 }
 
 // teeCopyImpl mirrors tee_copy_impl: build a new cursor over the same
@@ -2263,7 +2263,7 @@ func init() {
 	RepeatType.Repr = repeatRepr
 	RepeatType.Str = repeatRepr
 	objects.SetTypeDescr(RepeatType, "__length_hint__",
-		objects.NewMethodDescr(RepeatType, "__length_hint__", repeatLengthHint))
+		objects.NewMethodDescrConv(RepeatType, "__length_hint__", objects.MethNoArgs, repeatLengthHint))
 }
 
 // repeatNew is itertools.repeat.__new__.

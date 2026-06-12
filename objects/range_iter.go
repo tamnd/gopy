@@ -39,7 +39,7 @@ func init() {
 	}
 	AddIterSlotWrappers(rangeIterType)
 	// CPython: Objects/rangeobject.c:1064 longrangeiter_reduce
-	SetTypeDescr(rangeIterType, "__reduce__", NewMethodDescr(rangeIterType, "__reduce__",
+	SetTypeDescr(rangeIterType, "__reduce__", NewMethodDescrConv(rangeIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -62,7 +62,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/rangeobject.c:1006 longrangeiter_len
-	SetTypeDescr(rangeIterType, "__length_hint__", NewMethodDescr(rangeIterType, "__length_hint__",
+	SetTypeDescr(rangeIterType, "__length_hint__", NewMethodDescrConv(rangeIterType, "__length_hint__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
@@ -71,7 +71,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/rangeobject.c:1095 longrangeiter_setstate
-	SetTypeDescr(rangeIterType, "__setstate__", NewMethodDescr(rangeIterType, "__setstate__",
+	SetTypeDescr(rangeIterType, "__setstate__", NewMethodDescrConv(rangeIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")

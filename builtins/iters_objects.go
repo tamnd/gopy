@@ -54,7 +54,7 @@ func init() {
 		return v, nil
 	}
 	// CPython: Objects/iterobject.c:133 iter_reduce
-	objects.SetTypeDescr(seqIterType, "__reduce__", objects.NewMethodDescr(seqIterType, "__reduce__",
+	objects.SetTypeDescr(seqIterType, "__reduce__", objects.NewMethodDescrConv(seqIterType, "__reduce__", objects.MethNoArgs,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -80,7 +80,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/iterobject.c:152 iter_setstate
-	objects.SetTypeDescr(seqIterType, "__setstate__", objects.NewMethodDescr(seqIterType, "__setstate__",
+	objects.SetTypeDescr(seqIterType, "__setstate__", objects.NewMethodDescrConv(seqIterType, "__setstate__", objects.MethO,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
@@ -157,7 +157,7 @@ func init() {
 		return v, nil
 	}
 	// CPython: Objects/iterobject.c:237 calliter_reduce
-	objects.SetTypeDescr(callIterType, "__reduce__", objects.NewMethodDescr(callIterType, "__reduce__",
+	objects.SetTypeDescr(callIterType, "__reduce__", objects.NewMethodDescrConv(callIterType, "__reduce__", objects.MethNoArgs,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -207,9 +207,9 @@ var reversedIterType = objects.NewType("reversed", []*objects.Type{objects.Objec
 func init() {
 	reversedIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	reversedIterType.IterNext = reversedIterNext
-	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescr(reversedIterType, "__reduce__", reversedIterReduce))
-	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescr(reversedIterType, "__setstate__", reversedIterSetState))
-	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescr(reversedIterType, "__length_hint__", reversedIterLengthHint))
+	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescrConv(reversedIterType, "__reduce__", objects.MethNoArgs, reversedIterReduce))
+	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescrConv(reversedIterType, "__setstate__", objects.MethO, reversedIterSetState))
+	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescrConv(reversedIterType, "__length_hint__", objects.MethNoArgs, reversedIterLengthHint))
 	objects.AddIterSlotWrappers(reversedIterType)
 }
 
@@ -336,8 +336,8 @@ var ZipType = objects.NewType("zip", []*objects.Type{objects.ObjectType()})
 func init() {
 	ZipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	ZipType.IterNext = zipIterNext
-	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescr(ZipType, "__reduce__", zipReduce))
-	objects.SetTypeDescr(ZipType, "__setstate__", objects.NewMethodDescr(ZipType, "__setstate__", zipSetState))
+	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescrConv(ZipType, "__reduce__", objects.MethNoArgs, zipReduce))
+	objects.SetTypeDescr(ZipType, "__setstate__", objects.NewMethodDescrConv(ZipType, "__setstate__", objects.MethO, zipSetState))
 }
 
 // CPython: Python/bltinmodule.c:3222 zip_next

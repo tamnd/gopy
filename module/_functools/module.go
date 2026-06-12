@@ -184,7 +184,7 @@ func newPartialType() *objects.Type {
 	//
 	// CPython: Modules/_functoolsmodule.c:697 partial_reduce
 	// CPython: Modules/_functoolsmodule.c:706 partial_setstate
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__",
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) < 1 {
 				return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a 'partial' argument")
@@ -196,7 +196,7 @@ func newPartialType() *objects.Type {
 			return partialReduce(p)
 		},
 	))
-	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescr(t, "__setstate__",
+	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescrConv(t, "__setstate__", objects.MethO,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
@@ -1364,7 +1364,7 @@ func newLruCacheWrapperType() *objects.Type {
 	objects.SetTypeDescr(t, "__copy__", objects.NewMethodDescr(t, "__copy__", lruCacheCopy))
 	objects.SetTypeDescr(t, "__deepcopy__", objects.NewMethodDescr(t, "__deepcopy__", lruCacheCopy))
 	// CPython: Modules/_functoolsmodule.c:1718 lru_cache_reduce
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__",
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs,
 		func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if len(args) == 0 {
 				return nil, fmt.Errorf("TypeError: descriptor '__reduce__' requires a '_lru_cache_wrapper' argument")

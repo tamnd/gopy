@@ -228,7 +228,7 @@ func init() {
 	//
 	// CPython: Modules/_datetimemodule.c:3018 delta_reduce
 	objects.SetTypeDescr(TimedeltaType, "__reduce__",
-		objects.NewMethodDescr(TimedeltaType, "__reduce__", timedeltaReduce))
+		objects.NewMethodDescrConv(TimedeltaType, "__reduce__", objects.MethNoArgs, timedeltaReduce))
 }
 
 // timedeltaNewBuiltin is the Python-level wrapper that exposes
@@ -728,7 +728,7 @@ func init() {
 	//
 	// CPython: Modules/_datetimemodule.c:3902 date_reduce
 	objects.SetTypeDescr(DateType, "__reduce__",
-		objects.NewMethodDescr(DateType, "__reduce__", dateReduce))
+		objects.NewMethodDescrConv(DateType, "__reduce__", objects.MethNoArgs, dateReduce))
 	objects.SetTypeDescr(DateType, "today",
 		objects.NewClassMethod(objects.NewBuiltinFunction("today", dateTodayMethod)))
 	objects.SetTypeDescr(DateType, "fromtimestamp",
@@ -1343,7 +1343,7 @@ func init() {
 	objects.SetTypeDescr(TimezoneType, "__getinitargs__",
 		objects.NewMethodDescr(TimezoneType, "__getinitargs__", timezoneGetinitargs))
 	objects.SetTypeDescr(TimezoneType, "__reduce__",
-		objects.NewMethodDescr(TimezoneType, "__reduce__", timezoneReduce))
+		objects.NewMethodDescrConv(TimezoneType, "__reduce__", objects.MethNoArgs, timezoneReduce))
 }
 
 // timezoneNewBuiltin exposes timezoneNew as timezone.__new__.
@@ -1625,7 +1625,7 @@ func init() {
 	objects.SetTypeDescr(TimeType, "__new__",
 		objects.NewBuiltinFunction("time.__new__", timeNewBuiltin))
 	objects.SetTypeDescr(TimeType, "__reduce__",
-		objects.NewMethodDescr(TimeType, "__reduce__", timeReduce))
+		objects.NewMethodDescrConv(TimeType, "__reduce__", objects.MethNoArgs, timeReduce))
 	objects.SetTypeDescr(TimeType, "__reduce_ex__",
 		objects.NewMethodDescr(TimeType, "__reduce_ex__", timeReduceEx))
 }
@@ -2274,7 +2274,7 @@ func init() {
 	objects.SetTypeDescr(DatetimeType, "__new__",
 		objects.NewBuiltinFunction("datetime.__new__", datetimeNewBuiltin))
 	objects.SetTypeDescr(DatetimeType, "__reduce__",
-		objects.NewMethodDescr(DatetimeType, "__reduce__", datetimeReduce))
+		objects.NewMethodDescrConv(DatetimeType, "__reduce__", objects.MethNoArgs, datetimeReduce))
 	objects.SetTypeDescr(DatetimeType, "__reduce_ex__",
 		objects.NewMethodDescr(DatetimeType, "__reduce_ex__", datetimeReduceEx))
 }

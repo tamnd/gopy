@@ -26,8 +26,8 @@ func init() {
 	objects.SetTypeDescr(t, "add_note", objects.NewMethodDescr(t, "add_note", baseExceptionAddNote))
 	objects.SetTypeDescr(t, "__notes__", objects.NewGetSetDescr("__notes__", notesGet, notesSet))
 	objects.SetTypeDescr(t, "with_traceback", objects.NewMethodDescr(t, "with_traceback", baseExceptionWithTraceback))
-	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescr(t, "__setstate__", baseExceptionSetState))
-	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescr(t, "__reduce__", baseExceptionReduce))
+	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescrConv(t, "__setstate__", objects.MethO, baseExceptionSetState))
+	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, baseExceptionReduce))
 }
 
 // baseExceptionWithTraceback writes tb into self.__traceback__ and

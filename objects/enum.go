@@ -33,7 +33,7 @@ func init() {
 	EnumerateType.Iter = SelfIter
 	EnumerateType.IterNext = enumerateNext
 	AddIterSlotWrappers(EnumerateType)
-	SetTypeDescr(EnumerateType, "__reduce__", NewMethodDescr(EnumerateType, "__reduce__", enumerateReduce))
+	SetTypeDescr(EnumerateType, "__reduce__", NewMethodDescrConv(EnumerateType, "__reduce__", MethNoArgs, enumerateReduce))
 }
 
 // NewEnumerateOfType is the gopy port of enum_new_impl. It builds an

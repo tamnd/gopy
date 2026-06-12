@@ -39,7 +39,7 @@ func init() {
 	// CPython: Objects/object.c ellipsis_reduce - returning a string causes
 	// pickle to serialize as "builtins.Ellipsis" (GLOBAL opcode) so loads
 	// returns the singleton rather than creating a new instance.
-	SetTypeDescr(ellipsisType, "__reduce__", NewMethodDescr(ellipsisType, "__reduce__",
+	SetTypeDescr(ellipsisType, "__reduce__", NewMethodDescrConv(ellipsisType, "__reduce__", MethNoArgs,
 		func(_ []Object, _ map[string]Object) (Object, error) {
 			return NewStr("Ellipsis"), nil
 		}))

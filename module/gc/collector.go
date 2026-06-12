@@ -68,6 +68,19 @@ func runCollect(gen int, forceGoGC bool) int {
 		state.mu.Unlock()
 		return 0
 	}
+	// Re-entrancy guard. A finalizer (tp_finalize / __del__) run during
+	// the finalize window in collectMain can call gc.collect() from
+	// Python. CPython makes that nested call a no-op via an atomic
+	// compare-exchange on gcstate->collecting; we mirror it here so the
+	// nested collection cannot relink the gcHead nodes the outer
+	// finalizeGarbage loop is still walking (which spun the collector).
+	//
+	// CPython: Python/gc.c:1332 gc_collect_main
+	if state.collecting {
+		state.mu.Unlock()
+		return 0
+	}
+	state.collecting = true
 	cbList := state.callbacks
 	state.mu.Unlock()
 	invokeGCCallback(cbList, "start", gen, 0, 0)
@@ -94,6 +107,10 @@ func runCollect(gen int, forceGoGC bool) int {
 
 	invokeWeakrefCallbacks(pending)
 	invokeGCCallback(cbList, "stop", gen, collected, 0)
+
+	state.mu.Lock()
+	state.collecting = false
+	state.mu.Unlock()
 	return collected
 }
 

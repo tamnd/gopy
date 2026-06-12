@@ -68,24 +68,18 @@ func init() {
 	// range_methods: count and index, both METH_O.
 	//
 	// CPython: Objects/rangeobject.c:769 range_methods
-	SetTypeDescr(RangeType, "count", NewMethodDescr(RangeType, "count",
+	SetTypeDescr(RangeType, "count", NewMethodDescrConv(RangeType, "count", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
-			if len(args) != 2 {
-				return nil, fmt.Errorf("TypeError: count() takes exactly one argument (%d given)", len(args)-1)
-			}
 			return rangeCount(args[0], args[1])
 		},
 	))
-	SetTypeDescr(RangeType, "index", NewMethodDescr(RangeType, "index",
+	SetTypeDescr(RangeType, "index", NewMethodDescrConv(RangeType, "index", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
-			if len(args) != 2 {
-				return nil, fmt.Errorf("TypeError: index() takes exactly one argument (%d given)", len(args)-1)
-			}
 			return rangeIndex(args[0], args[1])
 		},
 	))
 	// CPython: Objects/rangeobject.c:939 range_reduce
-	SetTypeDescr(RangeType, "__reduce__", NewMethodDescr(RangeType, "__reduce__",
+	SetTypeDescr(RangeType, "__reduce__", NewMethodDescrConv(RangeType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -144,11 +138,8 @@ func init() {
 		},
 	))
 	// CPython: Objects/rangeobject.c:1215 range_reverse
-	SetTypeDescr(RangeType, "__reversed__", NewMethodDescr(RangeType, "__reversed__",
+	SetTypeDescr(RangeType, "__reversed__", NewMethodDescrConv(RangeType, "__reversed__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
-			if len(args) != 1 {
-				return nil, fmt.Errorf("TypeError: __reversed__() takes no arguments (%d given)", len(args)-1)
-			}
 			return rangeReverse(args[0])
 		},
 	))

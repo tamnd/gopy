@@ -44,16 +44,22 @@ func init() {
 	// CPython: Objects/typeobject.c:7950 object_methods
 	SetTypeDescr(objectType, "__new__", NewBuiltinFunction("object.__new__", objectNewBuiltin))
 	SetTypeDescr(objectType, "__init__", NewMethodDescr(objectType, "__init__", objectInitDescr))
-	SetTypeDescr(objectType, "__reduce_ex__", NewMethodDescr(objectType, "__reduce_ex__", objectReduceExDescr))
-	SetTypeDescr(objectType, "__reduce__", NewMethodDescr(objectType, "__reduce__", objectReduceDescr))
-	SetTypeDescr(objectType, "__getstate__", NewMethodDescr(objectType, "__getstate__", objectGetstateDescr))
+	// METH_O / METH_NOARGS rows carry their clinic flag so
+	// methodDescrCheckArity formats the arity TypeError through
+	// _PyObject_FunctionStr, yielding "object.__reduce__() takes no
+	// arguments (N given)" etc. for every type that inherits these.
+	//
+	// CPython: Objects/clinic/typeobject.c.h object_methods flags
+	SetTypeDescr(objectType, "__reduce_ex__", NewMethodDescrConv(objectType, "__reduce_ex__", MethO, objectReduceExDescr))
+	SetTypeDescr(objectType, "__reduce__", NewMethodDescrConv(objectType, "__reduce__", MethNoArgs, objectReduceDescr))
+	SetTypeDescr(objectType, "__getstate__", NewMethodDescrConv(objectType, "__getstate__", MethNoArgs, objectGetstateDescr))
 	SetTypeDescr(objectType, "__subclasshook__", NewClassMethod(
 		NewBuiltinFunction("__subclasshook__", objectSubclasshook)))
 	SetTypeDescr(objectType, "__init_subclass__", NewClassMethod(
 		NewBuiltinFunction("__init_subclass__", objectInitSubclass)))
-	SetTypeDescr(objectType, "__format__", NewMethodDescr(objectType, "__format__", objectFormatDescr))
-	SetTypeDescr(objectType, "__sizeof__", NewMethodDescr(objectType, "__sizeof__", objectSizeofDescr))
-	SetTypeDescr(objectType, "__dir__", NewMethodDescr(objectType, "__dir__", objectDirDescr))
+	SetTypeDescr(objectType, "__format__", NewMethodDescrConv(objectType, "__format__", MethO, objectFormatDescr))
+	SetTypeDescr(objectType, "__sizeof__", NewMethodDescrConv(objectType, "__sizeof__", MethNoArgs, objectSizeofDescr))
+	SetTypeDescr(objectType, "__dir__", NewMethodDescrConv(objectType, "__dir__", MethNoArgs, objectDirDescr))
 
 	// object_getsets table.
 	//

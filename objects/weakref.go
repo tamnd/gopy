@@ -744,8 +744,17 @@ func armWeakrefFinalizer(referent Object) {
 
 	hdr := referent.Hdr()
 	runtime.SetFinalizer(hdr, func(h *Header) {
-		if h.weakrefs != nil {
-			clearListAndFire(h.weakrefs)
+		// clearListAndFire runs weakref callbacks, which are Python
+		// code. CPython fires those under the GIL; route them to the
+		// interpreter goroutine so they never run concurrently with the
+		// eval loop. Falls back to inline when no interpreter is up.
+		cleanup := func() {
+			if h.weakrefs != nil {
+				clearListAndFire(h.weakrefs)
+			}
+		}
+		if !deferFinalizer(cleanup) {
+			cleanup()
 		}
 	})
 }

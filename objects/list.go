@@ -797,7 +797,7 @@ func init() {
 	// can round-trip the iterator including its current position.
 	//
 	// CPython: Objects/listobject.c listiter_reduce
-	SetTypeDescr(listIterType, "__reduce__", NewMethodDescr(listIterType, "__reduce__",
+	SetTypeDescr(listIterType, "__reduce__", NewMethodDescrConv(listIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -819,7 +819,7 @@ func init() {
 	// __setstate__ restores the iterator position after unpickling.
 	//
 	// CPython: Objects/listobject.c listiter_setstate
-	SetTypeDescr(listIterType, "__setstate__", NewMethodDescr(listIterType, "__setstate__",
+	SetTypeDescr(listIterType, "__setstate__", NewMethodDescrConv(listIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
@@ -847,7 +847,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/listobject.c:3593 listiter_len
-	SetTypeDescr(listIterType, "__length_hint__", NewMethodDescr(listIterType, "__length_hint__",
+	SetTypeDescr(listIterType, "__length_hint__", NewMethodDescrConv(listIterType, "__length_hint__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")
@@ -912,7 +912,7 @@ func init() {
 	// restores the index.
 	//
 	// CPython: Objects/listobject.c:4207 listreviter_reduce
-	SetTypeDescr(listRevIterType, "__reduce__", NewMethodDescr(listRevIterType, "__reduce__",
+	SetTypeDescr(listRevIterType, "__reduce__", NewMethodDescrConv(listRevIterType, "__reduce__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __reduce__() takes no arguments")
@@ -936,7 +936,7 @@ func init() {
 	// next pointer past either end.
 	//
 	// CPython: Objects/listobject.c:4213 listreviter_setstate
-	SetTypeDescr(listRevIterType, "__setstate__", NewMethodDescr(listRevIterType, "__setstate__",
+	SetTypeDescr(listRevIterType, "__setstate__", NewMethodDescrConv(listRevIterType, "__setstate__", MethO,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("TypeError: __setstate__() takes exactly one argument")
@@ -963,7 +963,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/listobject.c:4196 listreviter_len
-	SetTypeDescr(listRevIterType, "__length_hint__", NewMethodDescr(listRevIterType, "__length_hint__",
+	SetTypeDescr(listRevIterType, "__length_hint__", NewMethodDescrConv(listRevIterType, "__length_hint__", MethNoArgs,
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("TypeError: __length_hint__ takes no arguments")

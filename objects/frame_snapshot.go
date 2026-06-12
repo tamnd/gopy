@@ -142,10 +142,19 @@ func SnapshotFrameWithLocals(src InterpreterFrame) *FrameSnapshot {
 		}
 	}
 	runtime.SetFinalizer(s, func(s *FrameSnapshot) {
-		for _, v := range s.LocalsPlus {
-			if v != nil {
-				Decref(v)
+		// Decref can run __del__; route it to the interpreter goroutine
+		// instead of running it here on the Go runtime finalizer
+		// goroutine, where it would race the eval loop. Falls back to
+		// inline when no interpreter is running (deferFinalizer false).
+		cleanup := func() {
+			for _, v := range s.LocalsPlus {
+				if v != nil {
+					Decref(v)
+				}
 			}
+		}
+		if !deferFinalizer(cleanup) {
+			cleanup()
 		}
 	})
 	return s

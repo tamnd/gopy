@@ -175,7 +175,7 @@ func NewStructSeqTypeDesc(desc StructSeqDesc) *Type {
 	}
 	SetTypeDescr(tp, "__match_args__", NewTuple(matchNames))
 
-	SetTypeDescr(tp, "__reduce__", NewMethodDescr(tp, "__reduce__", structSeqReduceMethod))
+	SetTypeDescr(tp, "__reduce__", NewMethodDescrConv(tp, "__reduce__", MethNoArgs, structSeqReduceMethod))
 	SetTypeDescr(tp, "__replace__", NewMethodDescr(tp, "__replace__", structSeqReplaceMethod))
 	return tp
 }

@@ -90,7 +90,7 @@ func init() {
 	// imag returns 0.0. CPython exposes both as get-only descriptors.
 	SetTypeDescr(FloatType, "real", NewGetSetDescr("real", floatRealGetter, nil))
 	SetTypeDescr(FloatType, "imag", NewGetSetDescr("imag", floatImagGetter, nil))
-	SetTypeDescr(FloatType, "conjugate", NewMethodDescr(FloatType, "conjugate", floatConjugateMethod))
+	SetTypeDescr(FloatType, "conjugate", NewMethodDescrConv(FloatType, "conjugate", MethNoArgs, floatConjugateMethod))
 	// Install float.__hash__ as a descriptor so that subclasses that also
 	// inherit from a mixin with __hash__ resolve float's tp_hash first in
 	// the MRO. fixupHashAndIter uses LookupDescriptor(t, "__hash__") to

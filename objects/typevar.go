@@ -290,7 +290,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/typevarobject.c:829 typevar_reduce_impl
-	SetTypeDescr(TypeVarType, "__reduce__", NewMethodDescr(TypeVarType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+	SetTypeDescr(TypeVarType, "__reduce__", NewMethodDescrConv(TypeVarType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
 		}
@@ -443,7 +443,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/typevarobject.c:1394 paramspec_reduce
-	SetTypeDescr(ParamSpecType, "__reduce__", NewMethodDescr(ParamSpecType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+	SetTypeDescr(ParamSpecType, "__reduce__", NewMethodDescrConv(ParamSpecType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
 		}
@@ -537,7 +537,7 @@ func init() {
 		},
 	))
 	// CPython: Objects/typevarobject.c:1647 typevartuple_reduce
-	SetTypeDescr(TypeVarTupleType, "__reduce__", NewMethodDescr(TypeVarTupleType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+	SetTypeDescr(TypeVarTupleType, "__reduce__", NewMethodDescrConv(TypeVarTupleType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
 		}
@@ -1169,7 +1169,7 @@ func init() {
 	TypeAliasObjType.Number = &NumberMethods{Or: unionTypeOr}
 
 	// CPython: Objects/typevarobject.c:2059 typealias_reduce_impl
-	SetTypeDescr(TypeAliasObjType, "__reduce__", NewMethodDescr(TypeAliasObjType, "__reduce__", func(args []Object, _ map[string]Object) (Object, error) {
+	SetTypeDescr(TypeAliasObjType, "__reduce__", NewMethodDescrConv(TypeAliasObjType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __reduce__() missing self")
 		}

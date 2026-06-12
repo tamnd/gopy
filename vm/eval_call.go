@@ -113,8 +113,19 @@ func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
 		prev = v.(*state.Thread)
 	}
 	activeThreads.Store(g, ts)
+	// An interpreter goroutine now exists to drain the deferred finalizer
+	// queue, so the Go runtime finalizer goroutine can hand its Python
+	// teardown off instead of racing the eval loop. Idempotent.
+	enableFinalizerDeferral()
 	return prev, g
 }
+
+// enableFinalizerDeferral flips on the deferred finalizer queue exactly
+// once, the first time any goroutine enters Eval.
+var enableFinalizerDeferral = func() func() {
+	var once sync.Once
+	return func() { once.Do(objects.EnableFinalizerDeferral) }
+}()
 
 // restoreActiveThread is the defer-side of setActiveThread. Takes the
 // cached goid from setActiveThread so we avoid a second goid() call
