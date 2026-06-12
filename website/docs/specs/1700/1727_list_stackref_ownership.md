@@ -390,4 +390,4 @@ unchanged.
 - [x] dict critical sections (spec 1728) land first so the owned store is race-safe
 - [x] spec 1726 P11 + spec 1723 status updated
 - [x] module/gc cycle-collector tests reconciled to the owned-store refcount model (drop the creating reference, `del`-style, in every list/tuple cycle test) + `storeSubscr` dead `keepKey` return removed
-- [ ] human PR comment on #91 (after merge #90 / rebase)
+- [x] human PR comment on #91 (after merge #90 / rebase)
