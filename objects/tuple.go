@@ -666,40 +666,44 @@ type tupleIterator struct {
 
 var tupleIterType = NewType("tuple_iterator", []*Type{objectType})
 
-func init() {
-	tupleIterType.IterNext = func(o Object) (Object, error) {
-		it := o.(*tupleIterator)
-		if it.src == nil || it.pos >= len(it.src.items) {
-			// tupleiter_next clears it_seq on exhaustion. Drop the
-			// counted reference the iterator holds on the tuple so the
-			// tuple (and its contents) can be released right away.
-			// CPython: Objects/tupleobject.c:1073 tupleiter_next
-			if it.src != nil {
-				old := it.src
-				it.src = nil
-				Decref(old)
-			}
-			return nil, ErrStopIteration
-		}
-		v := it.src.items[it.pos]
-		it.pos++
-		return v, nil
-	}
-	// tupleiter_dealloc drops the iterator's reference on the source tuple
-	// if exhaustion has not already cleared it.
-	//
-	// CPython: Objects/tupleobject.c:1063 tupleiter_dealloc
-	tupleIterType.Dealloc = func(o Object) {
-		if h := GCUntrackHook; h != nil {
-			h(o)
-		}
-		ClearWeakRefs(o)
-		it := o.(*tupleIterator)
+// tupleIterNext yields the next item, clearing the source reference on
+// exhaustion so the tuple (and its contents) can be released right away.
+//
+// CPython: Objects/tupleobject.c:1073 tupleiter_next
+func tupleIterNext(o Object) (Object, error) {
+	it := o.(*tupleIterator)
+	if it.src == nil || it.pos >= len(it.src.items) {
 		if it.src != nil {
-			Decref(it.src)
+			old := it.src
 			it.src = nil
+			Decref(old)
 		}
+		return nil, ErrStopIteration
 	}
+	v := it.src.items[it.pos]
+	it.pos++
+	return v, nil
+}
+
+// tupleIterDealloc drops the iterator's reference on the source tuple if
+// exhaustion has not already cleared it.
+//
+// CPython: Objects/tupleobject.c:1063 tupleiter_dealloc
+func tupleIterDealloc(o Object) {
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
+	it := o.(*tupleIterator)
+	if it.src != nil {
+		Decref(it.src)
+		it.src = nil
+	}
+}
+
+func init() {
+	tupleIterType.IterNext = tupleIterNext
+	tupleIterType.Dealloc = tupleIterDealloc
 	tupleIterType.Iter = SelfIter
 	AddIterSlotWrappers(tupleIterType)
 	// CPython: Objects/tupleobject.c:1132 tupleiter_reduce

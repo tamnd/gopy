@@ -131,7 +131,6 @@ func listDealloc(o Object) {
 	l.size = 0
 }
 
-
 // listTraverse visits every item. Mirrors list_traverse.
 //
 // CPython: Objects/listobject.c:2829 list_traverse
@@ -968,43 +967,47 @@ type listIterator struct {
 
 var listIterType = NewType("list_iterator", []*Type{objectType})
 
+// listIterNext yields the next item, clearing the source reference on
+// exhaustion so the iterator becomes a sink state and frees its hold on the
+// list (free_after_iterating).
+//
+// CPython: Objects/listobject.c:3573 listiter_next
+func listIterNext(o Object) (Object, error) {
+	it := o.(*listIterator)
+	if it.src == nil {
+		return nil, ErrStopIteration
+	}
+	if it.pos >= len(it.src.items) {
+		old := it.src
+		it.src = nil
+		Decref(old)
+		return nil, ErrStopIteration
+	}
+	v := it.src.items[it.pos]
+	it.pos++
+	return v, nil
+}
+
+// listIterDealloc drops the iterator's reference on the source list if it has
+// not already been cleared by exhaustion.
+//
+// CPython: Objects/listobject.c:3530 listiter_dealloc
+func listIterDealloc(o Object) {
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
+	it := o.(*listIterator)
+	if it.src != nil {
+		Decref(it.src)
+		it.src = nil
+	}
+}
+
 func init() {
 	listIterType.Iter = SelfIter
-	listIterType.IterNext = func(o Object) (Object, error) {
-		it := o.(*listIterator)
-		if it.src == nil {
-			return nil, ErrStopIteration
-		}
-		if it.pos >= len(it.src.items) {
-			// CPython: Objects/listobject.c:3573 listiter_next — clears
-			// it_seq on exhaustion so the iterator is a sink state:
-			// appending to the list after exhaustion does not resume it.
-			// free_after_iterating: drop the iterator's reference on the
-			// source list as soon as it is exhausted.
-			old := it.src
-			it.src = nil
-			Decref(old)
-			return nil, ErrStopIteration
-		}
-		v := it.src.items[it.pos]
-		it.pos++
-		return v, nil
-	}
-	// listiter_dealloc drops the iterator's reference on the source list if
-	// it has not already been cleared by exhaustion.
-	//
-	// CPython: Objects/listobject.c:3530 listiter_dealloc
-	listIterType.Dealloc = func(o Object) {
-		if h := GCUntrackHook; h != nil {
-			h(o)
-		}
-		ClearWeakRefs(o)
-		it := o.(*listIterator)
-		if it.src != nil {
-			Decref(it.src)
-			it.src = nil
-		}
-	}
+	listIterType.IterNext = listIterNext
+	listIterType.Dealloc = listIterDealloc
 	AddIterSlotWrappers(listIterType)
 	// __reduce__ returns (iter, (list_snapshot,), current_pos) so pickle
 	// can round-trip the iterator including its current position.

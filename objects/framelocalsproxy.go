@@ -331,74 +331,93 @@ func frameLocalsProxySetItem(self, key, value Object) error {
 		return err
 	}
 	if i >= 0 {
-		if value == nil {
-			return fmt.Errorf("ValueError: cannot remove local variables from FrameLocalsProxy")
-		}
-		code := p.frame.interp.FrameCode()
-		kind := code.LocalsplusKinds[i]
-		oldVal := p.frame.interp.FrameLocalsPlusItem(i)
-		var cell *Cell
-		switch {
-		case kind&CoFastFree != 0:
-			if c, ok2 := oldVal.(*Cell); ok2 {
-				cell = c
-			}
-		case kind&CoFastCell != 0 && oldVal != nil:
-			if c, ok2 := oldVal.(*Cell); ok2 {
-				cell = c
-			}
-		}
-		if cell != nil {
-			// CPython: Py_XINCREF(value); PyCell_SetTakeRef(cell, value).
-			// The cell takes a new owning reference to value and drops the
-			// reference it held on the previous contents. Without the incref
-			// the proxy would adopt the caller's stack reference, which
-			// STORE_SUBSCR then closes, leaving the cell pointing at a value
-			// whose only reference just went away.
-			Incref(value)
-			old := cell.Contents
-			cell.Contents = value
-			if old != nil {
-				Decref(old)
-			}
-			return nil
-		}
-		// CPython: fast[i] = PyStackRef_FromPyObjectNew(value) after closing
-		// the old slot. The identity guard mirrors CPython skipping the
-		// store when value is already the slot's object.
-		if value == oldVal {
-			return nil
-		}
+		return frameLocalsProxyStoreFast(p, i, value)
+	}
+	return frameLocalsProxyStoreExtra(p, key, value)
+}
+
+// frameLocalsProxyStoreFast writes value into the fast/cell/free local at
+// index i. Deletion is rejected (CPython forbids removing real locals); a
+// cell slot takes a new owning reference and drops its prior contents, a
+// plain fast slot does the same with an identity guard.
+//
+// CPython: Objects/frameobject.c:246 framelocalsproxy_setitem
+func frameLocalsProxyStoreFast(p *FrameLocalsProxy, i int, value Object) error {
+	if value == nil {
+		return fmt.Errorf("ValueError: cannot remove local variables from FrameLocalsProxy")
+	}
+	code := p.frame.interp.FrameCode()
+	kind := code.LocalsplusKinds[i]
+	oldVal := p.frame.interp.FrameLocalsPlusItem(i)
+	if cell := frameLocalsProxyCellAt(kind, oldVal); cell != nil {
+		// CPython: Py_XINCREF(value); PyCell_SetTakeRef(cell, value).
+		// The cell takes a new owning reference to value and drops the
+		// reference it held on the previous contents. Without the incref
+		// the proxy would adopt the caller's stack reference, which
+		// STORE_SUBSCR then closes, leaving the cell pointing at a value
+		// whose only reference just went away.
 		Incref(value)
-		p.frame.interp.FrameSetLocalsPlusItem(i, value)
-		if oldVal != nil {
-			Decref(oldVal)
+		old := cell.Contents
+		cell.Contents = value
+		if old != nil {
+			Decref(old)
 		}
 		return nil
 	}
-	if value == nil {
-		if p.frame.extraLocals != nil {
-			// The spill dict owns its values, mirroring CPython's
-			// f_extra_locals being a real owning dict. Release the stored
-			// reference once the slot is gone.
-			old, getErr := p.frame.extraLocals.GetItem(key)
-			if err := p.frame.extraLocals.DelItem(key); err != nil {
-				return err
-			}
-			if getErr == nil && old != nil {
-				Decref(old)
-			}
-			return nil
+	// CPython: fast[i] = PyStackRef_FromPyObjectNew(value) after closing
+	// the old slot. The identity guard mirrors CPython skipping the
+	// store when value is already the slot's object.
+	if value == oldVal {
+		return nil
+	}
+	Incref(value)
+	p.frame.interp.FrameSetLocalsPlusItem(i, value)
+	if oldVal != nil {
+		Decref(oldVal)
+	}
+	return nil
+}
+
+// frameLocalsProxyCellAt returns the *Cell backing the slot when the kind is
+// a cell or free variable, else nil.
+func frameLocalsProxyCellAt(kind uint8, oldVal Object) *Cell {
+	switch {
+	case kind&CoFastFree != 0:
+		if c, ok := oldVal.(*Cell); ok {
+			return c
 		}
-		s, _ := Repr(key)
-		return fmt.Errorf("KeyError: %s", s)
+	case kind&CoFastCell != 0 && oldVal != nil:
+		if c, ok := oldVal.(*Cell); ok {
+			return c
+		}
+	}
+	return nil
+}
+
+// frameLocalsProxyStoreExtra writes (or deletes, when value is nil) key in
+// the frame's spill dict. That dict owns its values, mirroring CPython's
+// f_extra_locals, so a store takes a new reference and a delete releases the
+// stored one.
+//
+// CPython: Objects/frameobject.c:246 framelocalsproxy_setitem
+func frameLocalsProxyStoreExtra(p *FrameLocalsProxy, key, value Object) error {
+	if value == nil {
+		if p.frame.extraLocals == nil {
+			s, _ := Repr(key)
+			return fmt.Errorf("KeyError: %s", s)
+		}
+		old, getErr := p.frame.extraLocals.GetItem(key)
+		if err := p.frame.extraLocals.DelItem(key); err != nil {
+			return err
+		}
+		if getErr == nil && old != nil {
+			Decref(old)
+		}
+		return nil
 	}
 	if p.frame.extraLocals == nil {
 		p.frame.extraLocals = NewDict()
 	}
-	// The spill dict owns its values. Take a new reference on the stored
-	// value and drop the reference held by any displaced value, matching
-	// CPython's dict_set storing into f_extra_locals.
 	old, getErr := p.frame.extraLocals.GetItem(key)
 	Incref(value)
 	if err := p.frame.extraLocals.SetItem(key, value); err != nil {

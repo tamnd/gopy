@@ -934,7 +934,7 @@ func DecrefThrowawayKwargs(d *Dict) {
 
 // ReleaseDeadDictContents drops one reference on d and, when that leaves
 // it at refcount zero, releases the references the dict owns on its
-// stored values. It is the frame-clear analogue of DecrefThrowawayKwargs:
+// stored values. It is the frame-clear analog of DecrefThrowawayKwargs:
 // when frame.clear() closes a local slot holding a **kwargs parameter
 // dict, the slot's Close decrefs the dict, but with no synchronous dict
 // tp_dealloc the captured values would stay pinned by a refcount nothing
