@@ -411,6 +411,16 @@ func typeUserDealloc(o Object) {
 	//          (Py_XDECREF(type->tp_bases / tp_base / tp_mro))
 	if !t.basesReleased {
 		t.basesReleased = true
+		// Drop this type from each base's tp_subclasses before releasing the
+		// base reference, so __subclasses__() stops reporting a type that is
+		// being torn down (bpo-46417).
+		//
+		// CPython: Objects/typeobject.c type_dealloc (remove_all_subclasses)
+		for _, b := range t.Bases {
+			if b != nil {
+				b.removeSubclass(t)
+			}
+		}
 		for _, b := range t.Bases {
 			if b != nil {
 				Decref(b)

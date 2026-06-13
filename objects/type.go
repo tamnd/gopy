@@ -824,6 +824,23 @@ func (t *Type) Subclasses() []*Type {
 	return out
 }
 
+// RemoveAllSubclasses drops t from every direct base's tp_subclasses.
+// CPython does this synchronously in type_dealloc; gopy stores the
+// subclass list as plain pointers (the Go GC owns the memory), so the
+// cycle collector calls this when it reclaims a heap type, otherwise
+// __subclasses__() keeps reporting a type that no longer exists.
+//
+// CPython: Objects/typeobject.c:5897 remove_subclass
+//
+//	(remove_all_subclasses loop in type_dealloc)
+func RemoveAllSubclasses(t *Type) {
+	for _, b := range t.Bases {
+		if b != nil {
+			b.removeSubclass(t)
+		}
+	}
+}
+
 // SetFlagsRecursive ORs add into t.TpFlags after clearing the bits in
 // mask, then propagates the same edit to every transitive subclass.
 // Mirrors _PyType_SetFlagsRecursive.
