@@ -39,7 +39,7 @@ tree before porting.
 | `test_class` | 1 failure (deferred, see below) |
 | `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
 | `test_descr` | 18 failures, 9 errors |
-| `test_types` | 9 failures, 7 errors |
+| `test_types` | 2 failures, 4 errors (CoroutineTests + ClassCreationTests green) |
 | `test_typing` | 115 failures / 164 errors (no abort) |
 | `test_enum` | error (missing `pydoc`) |
 
@@ -172,6 +172,37 @@ type. Vendored `format_string` plus its helpers (`_group`,
 `Lib/locale.py`, running off the existing `localeconv()`, and added `'n'` to
 the float renderer (it is `'g'` plus LC_NUMERIC grouping).
 
+### Stable generator names and await value extraction
+
+`test_types.CoroutineTests` pins a generator/coroutine attribute at wrapper
+construction (`types._GeneratorWrapper.__init__` captures `gen.__name__`) and
+later asserts identity against a fresh read. The `__name__` / `__qualname__`
+getsets rebuilt a `str` on every access, so the identity never held. They now
+cache the PyObject form on the generator and return the same object, matching
+`gen_get_name` / `gen_get_qualname`.
+
+`test_duck_functional_gen` awaits a duck-typed coroutine (a plain object with
+`send`/`throw`/`close` wrapped by `types.coroutine`). When its `send()` raises
+`StopIteration(v)`, the `SEND` opcode must take the value out and resume the
+awaiting frame. The generic (non-generator) `SEND` path extracted the value
+from the sub-iterator's Python-level `StopIteration` but left the exception
+live on the thread state, so the enclosing coroutine's own `RETURN` re-reported
+the stale `StopIteration` instead of completing with `return value + 100`.
+`SEND` now clears the indicator once it fetches the value, mirroring
+`_PyGen_FetchStopIterationValue`.
+
+### shape_differs walks the MRO-resolved size
+
+Setting `object.__basicsize__` to its CPython value (16) made plain user
+classes read `0` for their own `tp_basicsize` field while resolving `16`
+through the MRO. `shape_differs` compared the raw fields, so a user class
+looked different from `object` and became its own solid base, which made
+`class D(B[str], float)` raise a spurious instance-layout conflict. It now
+compares through `typeBasicSize` / `typeItemSize` (the same MRO walk the
+`__basicsize__` getset uses), so a class that inherits its layout is no longer
+treated as a distinct solid base. Fixes `ClassCreationTests.test_get_original_bases`
+and `test_new_class_with_mro_entry_genericalias`.
+
 ---
 
 ## Checklist
@@ -185,8 +216,11 @@ the float renderer (it is `'g'` plus LC_NUMERIC grouping).
 - [x] test_abc, test_super, test_property, test_descrtut, test_dynamicclassattribute, test_genericalias green
 - [x] test_types: UnionTests green (union exc-clear + re-hash, TypeVar/ParamSpec `__or__`, GenericAlias subclass `__new__`/`__repr__`)
 - [x] test_types: int/float `__format__` descriptors + `locale.format_string` + float `'n'` presentation type
+- [x] test_types: MappingProxy dunders, ClassCreationTests (type.__new__ arity, __prepare__ mapping check, tuple-subclass __bases__ gh-132176), internal_sizes (object.__basicsize__)
+- [x] test_types: CoroutineTests green (stable gi_name/gi_qualname identity + await StopIteration-value extraction)
+- [x] shape_differs walks the MRO-resolved size so user classes are not spurious solid bases after object gained a nonzero basicsize
 - [ ] test_types: bound builtin method type (`''.join` should be `builtin_function_or_method`, not Python `method`) — `method_get` must produce a `PyCMethod`-style bound object; affects `test_names`, `test_method_descriptor_types`
-- [ ] test_types: residual MappingProxy / CoroutineTests / ClassCreation / internal_sizes
+- [ ] test_types: residual errors need C-extension support (`_testcapi` capsule/dunder-get-signature, `_queue`, subinterpreters)
 - [ ] test_descr: clear the remaining 18 failures / 9 errors
 - [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite.
 - [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — dominates the remaining errors
