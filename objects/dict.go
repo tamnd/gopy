@@ -650,6 +650,19 @@ func dictSubclassSetAttr(o Object, name Object, value Object) error {
 			return dset(descr, o, value)
 		}
 	}
+	// A dict subclass that declares __slots__ (and inherits no __dict__)
+	// has no instance namespace for arbitrary attributes. Slot names were
+	// handled by the data-descriptor branch above, so any name reaching here
+	// is a non-slot attribute: reject it with the same message
+	// GenericSetAttr raises rather than silently storing it.
+	//
+	// CPython: Objects/object.c:2040 PyObject_GenericSetAttr (no tp_dictoffset)
+	if !tp.HasDict {
+		if value == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+		}
+		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, nameStr)
+	}
 	// Store in instance attrs.
 	if d.attrs == nil {
 		d.attrs = NewDict()

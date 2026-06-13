@@ -61,6 +61,13 @@ func init() {
 	SetTypeDescr(objectType, "__sizeof__", NewMethodDescrConv(objectType, "__sizeof__", MethNoArgs, objectSizeofDescr))
 	SetTypeDescr(objectType, "__dir__", NewMethodDescrConv(objectType, "__dir__", MethNoArgs, objectDirDescr))
 
+	// type_ready_set_dict fills __doc__ from tp_doc for every static type.
+	// object carries a real docstring, so it lands in object.__dict__ and,
+	// through the MRO, in dir() of every type that does not override it.
+	//
+	// CPython: Objects/typeobject.c:8551 type_dict_set_doc (object_doc)
+	SetTypeDescr(objectType, "__doc__", NewStr("The base class of the class hierarchy.\n\nWhen called, it accepts no arguments and returns a new featureless\ninstance that has no instance attributes and cannot be given any.\n"))
+
 	// object_getsets table.
 	//
 	// CPython: Objects/typeobject.c:7254 object_getsets
@@ -91,14 +98,15 @@ func init() {
 	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__", richCompareDescr(CompareGT)))
 	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__", richCompareDescr(CompareGE)))
 
-	// __dict__ getset is installed by subtype_dict in CPython when the
-	// type has tp_dictoffset != 0. gopy installs it on object so any
-	// HasDict-bearing instance has a working accessor; non-dict
-	// instances raise AttributeError, matching subtype_dict's
-	// dispatch.
+	// __dict__ getset is installed by subtype_dict in CPython only on the
+	// type that first introduces a managed dict (tp_dictoffset != 0), not
+	// on object: plain object() has no instance dict, so dir(object) and
+	// dir(list) must not list __dict__. installInstanceDictDescr stamps it
+	// onto heap types from configureManagedDict instead; subclasses inherit
+	// the descriptor through the MRO.
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
-	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+	// (type_new_descriptors only adds __dict__ when add_dict is set)
 
 	// All static built-in types are immortal: CPython stamps them with
 	// _Py_IMMORTAL_REFCNT in _PyStaticType_InitBuiltin so tp_dealloc
@@ -733,6 +741,17 @@ func objectSetClass(o Object, value Object) error {
 // tp_dictoffset is non-zero.
 //
 // CPython: Objects/typeobject.c subtype_dict
+// installInstanceDictDescr stamps the __dict__ getset onto t. CPython's
+// type_new_descriptors adds it only to the type that first introduces a
+// managed dict; subclasses inherit it through the MRO. Skipped if t (or a
+// base, via the SetTypeDescr-on-self check at the call site) already
+// carries one, so the descriptor lands on exactly one class per chain.
+//
+// CPython: Objects/typeobject.c subtype_dict (added when add_dict is set)
+func installInstanceDictDescr(t *Type) {
+	SetTypeDescr(t, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+}
+
 func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
 	case *Instance:

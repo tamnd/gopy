@@ -456,14 +456,25 @@ func hasNoSlotsDeclared(ns *Dict) bool {
 // Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types with
 // a managed dict)
 func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
+	inheritedDict := false
 	for _, b := range bases {
 		if b != nil && b.HasDict {
 			t.HasDict = true
+			inheritedDict = true
 			break
 		}
 	}
 	if noSlotsDeclared {
 		t.HasDict = true
+	}
+	// The __dict__ getset lands on the class that first introduces the
+	// managed dict; a class that merely inherits one already sees the
+	// descriptor through its MRO. This mirrors dir(C) listing __dict__ for
+	// `class C: pass` but not for a subclass of C.
+	//
+	// CPython: Objects/typeobject.c type_new_descriptors (add_dict gate)
+	if t.HasDict && !inheritedDict {
+		installInstanceDictDescr(t)
 	}
 	// HasWeakref tracks tp_weaklistoffset. It inherits from any base that
 	// provides weak-reference support, and the no-__slots__ case adds it
