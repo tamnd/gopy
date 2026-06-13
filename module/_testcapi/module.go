@@ -210,6 +210,8 @@ func buildModule() (*objects.Module, error) {
 		"MethClass":    methClass,
 		"MethStatic":   methStatic,
 		"awaitType":    awaitType,
+		"Generic":      genericType,
+		"GenericAlias": genericAliasType,
 	} {
 		if err := d.SetItem(objects.NewStr(name), t); err != nil {
 			return nil, err

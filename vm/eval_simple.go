@@ -1919,7 +1919,12 @@ func typeSubscript(cls *objects.Type, key objects.Object) (objects.Object, error
 		return objects.NewGenericAlias(cls, key), nil
 	}
 	descr, _ := objects.LookupDescriptor(cls, "__class_getitem__")
-	if descr != nil {
+	// A __class_getitem__ set to None disables subscription: CPython treats
+	// the None attribute as absent and falls through to the not-subscriptable
+	// error rather than trying to call None.
+	//
+	// CPython: Objects/abstract.c:181 PyObject_GetItem (meth != Py_None gate)
+	if descr != nil && !objects.IsNone(descr) {
 		// Bind the descriptor against cls so a classmethod (or a plain
 		// callable installed via SetTypeDescr) sees the class as its
 		// implicit first argument.

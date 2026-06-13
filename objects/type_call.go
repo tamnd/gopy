@@ -336,6 +336,19 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	for i := 0; i < basesT.Len(); i++ {
 		t, ok := basesT.Item(i).(*Type)
 		if !ok {
+			// A non-type base carrying __mro_entries__ is the class-statement
+			// case (e.g. a typing.Generic alias). The 3-arg type() call does
+			// not run MRO entry resolution, so CPython rejects it outright and
+			// points the caller at types.new_class().
+			//
+			// CPython: Objects/typeobject.c:3640 type_new_get_bases
+			entries, err := LookupAttrString(basesT.Item(i), "__mro_entries__")
+			if err != nil {
+				return nil, err
+			}
+			if entries != nil {
+				return nil, fmt.Errorf("TypeError: type() doesn't support MRO entry resolution; use types.new_class()")
+			}
 			return nil, fmt.Errorf("TypeError: type() bases must contain types, got %s", typeNameOf(basesT.Item(i)))
 		}
 		bases = append(bases, t)
