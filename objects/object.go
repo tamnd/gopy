@@ -869,7 +869,14 @@ func compatibleWithTpBase(child *Type) bool {
 	if parent == nil {
 		return false
 	}
-	return len(child.Slots) == 0 &&
+	// A built-in such as dict or list differs from object only in its
+	// tp_basicsize, which the slot/dict/weakref comparison alone misses;
+	// shapeDiffers catches that so dict does not collapse to object during
+	// the layout walk. CPython compares tp_basicsize/tp_itemsize directly.
+	//
+	// CPython: Objects/typeobject.c:7136 compatible_with_tp_base
+	return !shapeDiffers(child, parent) &&
+		len(child.Slots) == 0 &&
 		child.HasDict == parent.HasDict &&
 		child.HasWeakref == parent.HasWeakref
 }
@@ -880,6 +887,15 @@ func compatibleWithTpBase(child *Type) bool {
 //
 // CPython: Objects/typeobject.c:7100 same_slots_added
 func sameSlotsAdded(a, b *Type) bool {
+	// Two built-in (non-heap) types never share an instance layout even when
+	// neither adds named slots: their differing tp_basicsize is not modeled
+	// here, so list and dict must read as incompatible. CPython bails the same
+	// way by requiring both operands carry Py_TPFLAGS_HEAPTYPE.
+	//
+	// CPython: Objects/typeobject.c:7113 same_slots_added
+	if !a.IsUser || !b.IsUser {
+		return false
+	}
 	if len(a.Slots) != len(b.Slots) {
 		return false
 	}
