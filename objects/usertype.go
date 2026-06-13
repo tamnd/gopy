@@ -82,6 +82,18 @@ func installSubclassAttrSlots(t *Type) {
 		t.Getattro = intSubclassGetAttr
 		t.Setattro = intSubclassSetAttr
 		t.TpNew = IntType.TpNew
+	case IsSubtype(t, SuperType):
+		// super publishes a custom tp_getattro (the cooperative MRO walk)
+		// and an allocation-only tp_new, but no tp_setattro, so the generic
+		// customAttrBase heuristic (which keys off a custom setter) misses
+		// it. A subclass like mysuper(super) must inherit super's getattro
+		// and new or its instances are plain *Instance objects and the MRO
+		// walk never runs.
+		//
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_getattro/tp_new)
+		t.Getattro = superGetAttr
+		t.Setattro = instanceSetAttr
+		t.TpNew = SuperType.TpNew
 	case customAttrBase(t) != nil:
 		// A built-in base on the MRO stores instance attributes through a
 		// custom tp_setattro (for example _thread._local, which keeps a
