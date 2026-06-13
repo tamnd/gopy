@@ -2342,19 +2342,23 @@ func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8444 slot_tp_descr_get
 func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
-	var objArg Object
-	if obj == nil {
-		objArg = None()
-	} else {
+	// CPython looks __get__ up raw (no descriptor binding) and calls it with
+	// the explicit (self, obj, type) stack. Binding self here would drop a
+	// positional argument when __get__ is a plain built-in function rather
+	// than a method-like descriptor (bpo-25750's bad_get is exactly that).
+	get, _ := LookupDescriptor(descr.Type(), "__get__")
+	if get == nil {
+		return descr, nil
+	}
+	objArg := None()
+	if obj != nil {
 		objArg = obj
 	}
-	var typeArg Object
-	if tp == nil {
-		typeArg = None()
-	} else {
+	typeArg := None()
+	if tp != nil {
 		typeArg = tp
 	}
-	return vectorcallMethod(descr, "__get__", objArg, typeArg)
+	return Call(get, NewTuple([]Object{descr, objArg, typeArg}), nil)
 }
 
 // slotTpDescrSet dispatches __set__(self, obj, value) or

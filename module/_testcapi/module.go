@@ -236,6 +236,8 @@ func buildModule() (*objects.Module, error) {
 		{"make_vectorcall_class", makeVectorcallClass},
 		{"has_vectorcall_flag", hasVectorcallFlag},
 		{"function_setvectorcall", functionSetvectorcall},
+		{"test_with_docstring", testWithDocstring},
+		{"bad_get", badGet},
 	}
 	for _, w := range wrappers {
 		if err := d.SetItem(objects.NewStr(w.name), objects.NewBuiltinFunction(w.name, w.fn)); err != nil {
