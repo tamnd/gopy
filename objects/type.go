@@ -778,6 +778,19 @@ func (t *Type) addSubclass(sub *Type) {
 	t.subclasses = append(t.subclasses, sub)
 }
 
+// removeSubclass drops the first registration of sub from t.subclasses.
+// Used when __bases__ assignment moves sub off this base.
+//
+// CPython: Objects/typeobject.c:5897 remove_subclass
+func (t *Type) removeSubclass(sub *Type) {
+	for i, s := range t.subclasses {
+		if s == sub {
+			t.subclasses = append(t.subclasses[:i], t.subclasses[i+1:]...)
+			return
+		}
+	}
+}
+
 // Subclasses returns the direct subclasses of t in registration order.
 // Mirrors type.__subclasses__().
 //

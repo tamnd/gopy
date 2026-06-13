@@ -400,18 +400,81 @@ func typeSetBases(o Object, v Object) error {
 		if !ok {
 			return fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
 		}
-		if b == t {
+		// A base that already has t in its ancestry (or is t itself) would
+		// close an inheritance cycle.
+		//
+		// CPython: Objects/typeobject.c:1823 type_set_bases_unlocked
+		if b == t || IsSubtype(b, t) {
 			return fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
 		}
 		newBases = append(newBases, b)
 	}
+	// The new best base must lay its instances out compatibly with the old
+	// one, the same gate object.__class__ assignment uses.
+	//
+	// CPython: Objects/typeobject.c:1847 type_set_bases_unlocked
+	newBase, err := bestBase(newBases)
+	if err != nil {
+		return err
+	}
+	oldBase, _ := bestBase(t.Bases)
+	if oldBase != nil && newBase != nil && !compatibleForAssignment(oldBase, newBase) {
+		return fmt.Errorf("TypeError: __bases__ assignment: '%s' object layout differs from '%s'", newBase.Name, oldBase.Name)
+	}
+
+	oldBases := t.Bases
 	t.Bases = newBases
+	// Recompute the MRO for t and every transitive subclass, recording the
+	// prior MROs so a C3 conflict deeper in the tree can be rolled back.
+	//
+	// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
+	var saved []mroSnapshot
+	if err := mroHierarchy(t, &saved); err != nil {
+		for i := len(saved) - 1; i >= 0; i-- {
+			saved[i].cls.MRO = saved[i].oldMRO
+		}
+		t.Bases = oldBases
+		return err
+	}
+	// Move t between the old and new bases' subclass lists, then re-derive
+	// the inherited slots for t and its subclasses.
+	//
+	// CPython: Objects/typeobject.c:1878 remove_all_subclasses / add_all_subclasses / update_all_slots
+	for _, b := range oldBases {
+		b.removeSubclass(t)
+	}
+	for _, b := range newBases {
+		b.addSubclass(t)
+	}
+	refixupSlotDispatchers(t)
+	t.InvalidateVersionTag()
+	return nil
+}
+
+// mroSnapshot pairs a type with the MRO it had before a __bases__
+// assignment, so the whole hierarchy can be rolled back on a later
+// failure.
+type mroSnapshot struct {
+	cls    *Type
+	oldMRO []*Type
+}
+
+// mroHierarchy recomputes t's MRO and then recurses into every direct
+// subclass, appending each (type, old MRO) pair to saved as it goes.
+//
+// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
+func mroHierarchy(t *Type, saved *[]mroSnapshot) error {
 	mro, err := c3Linearize(t)
 	if err != nil {
 		return err
 	}
+	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: t.MRO})
 	t.MRO = mro
-	t.InvalidateVersionTag()
+	for _, sub := range t.Subclasses() {
+		if err := mroHierarchy(sub, saved); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
