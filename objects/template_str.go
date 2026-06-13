@@ -102,6 +102,11 @@ func init() {
 			if ts.strings == nil {
 				return NewTuple(nil), nil
 			}
+			// Return a new reference: CPython's member/getset getters
+			// hand back Py_NewRef, and the value stack that receives the
+			// attribute result will close it. Without the incref the
+			// stored tuple (refcount 1) is freed after the first read.
+			Incref(ts.strings)
 			return ts.strings, nil
 		}, nil))
 	SetTypeDescr(TemplateStrType, "interpolations", NewGetSetDescr("interpolations",
@@ -113,6 +118,8 @@ func init() {
 			if ts.interpolations == nil {
 				return NewTuple(nil), nil
 			}
+			// New reference, as with strings above.
+			Incref(ts.interpolations)
 			return ts.interpolations, nil
 		}, nil))
 	SetTypeDescr(TemplateStrType, "values", NewGetSetDescr("values",
@@ -278,6 +285,19 @@ type TemplateStr struct {
 //
 // CPython: Objects/templateobject.c _PyTemplate_Build
 func NewTemplateStr(strings, interpolations Object) *TemplateStr {
+	// CPython stores both sequences with Py_NewRef: _PyTemplate_Build
+	// takes borrowed references and the template owns its own. Without
+	// this incref, the freshly built interpolations tuple (refcount 1,
+	// held only by the value stack) is freed when BUILD_TEMPLATE closes
+	// its inputs, leaving the template pointing at a reclaimed tuple.
+	//
+	// CPython: Objects/templateobject.c:401 _PyTemplate_Build
+	if strings != nil {
+		Incref(strings)
+	}
+	if interpolations != nil {
+		Incref(interpolations)
+	}
 	ts := &TemplateStr{strings: strings, interpolations: interpolations}
 	ts.init(TemplateStrType)
 	return ts
@@ -351,6 +371,10 @@ func init() {
 					return nil, fmt.Errorf("TypeError: descriptor '%s' for 'Interpolation' objects doesn't apply", name)
 				}
 				if v := getter(ip); v != nil {
+					// New reference: the member getter hands back
+					// Py_NewRef in CPython and the value stack closes the
+					// attribute result.
+					Incref(v)
 					return v, nil
 				}
 				return None(), nil
@@ -458,6 +482,14 @@ func NewInterpolation(value, expr Object, conversion int, formatSpec Object) (*I
 	default:
 		return nil, fmt.Errorf("SystemError: Interpolation() argument 'conversion' must be one of 's', 'a' or 'r'")
 	}
+	// CPython stores value/expression/format_spec with Py_NewRef so the
+	// interpolation owns its references independently of the value stack
+	// that fed BUILD_INTERPOLATION (which closes those inputs).
+	//
+	// CPython: Objects/interpolationobject.c:188 _PyInterpolation_Build
+	Incref(value)
+	Incref(expr)
+	Incref(formatSpec)
 	ip := &Interpolation{
 		Value:      value,
 		Expression: expr,

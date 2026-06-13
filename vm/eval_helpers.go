@@ -1542,6 +1542,20 @@ func (e *evalState) templateBuild(strs, interpolations objects.Object) objects.O
 	return objects.NewTemplateStr(strs, interpolations)
 }
 
+// interpolationBuild wraps _PyInterpolation_Build for the BUILD_INTERPOLATION
+// arm. conversion is the FVC_* tag carried in oparg>>2; format may be nil for
+// an empty format spec.
+//
+// CPython: Objects/interpolationobject.c:188 _PyInterpolation_Build
+func (e *evalState) interpolationBuild(value, str objects.Object, conversion int, format objects.Object) objects.Object {
+	ip, err := objects.NewInterpolation(value, str, conversion, format)
+	if err != nil {
+		e.pendingErr = err
+		return nil
+	}
+	return ip
+}
+
 // objectFormat wraps PyObject_Format. spec may be nil for an empty
 // format spec.
 //
