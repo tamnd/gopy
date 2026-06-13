@@ -282,6 +282,33 @@ func (s *FrameSnapshot) FrameMarkExposed() {}
 // CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
 func (s *FrameSnapshot) FrameExposed() bool { return true }
 
+// VarkeywordsDict returns the **kwargs parameter dict copied into the
+// snapshot's LocalsPlus, or nil when the code has no CO_VARKEYWORDS
+// parameter or the slot does not hold a plain dict. When a traceback
+// outlives its activation record, tb_frame is backed by this snapshot
+// (not the live Frame), so frame.clear() reads the kwargs slot here to
+// release the dict's captured values once FrameDropSnapshot has dropped
+// the snapshot's own reference. The slot layout mirrors callPyFunction:
+// positional and keyword-only args, then the optional *args tuple, then
+// **kwargs.
+//
+// CPython: Objects/codeobject.c co_argcount / CO_VARKEYWORDS layout
+func (s *FrameSnapshot) VarkeywordsDict() *Dict {
+	co := s.Code
+	if co == nil || co.Flags&0x08 == 0 {
+		return nil
+	}
+	slot := co.Argcount + co.KwonlyArgcount
+	if co.Flags&0x04 != 0 {
+		slot++
+	}
+	if slot < 0 || slot >= len(s.LocalsPlus) {
+		return nil
+	}
+	d, _ := s.LocalsPlus[slot].(*Dict)
+	return d
+}
+
 // FrameGenOwner returns the generator that owned the original
 // activation record at snapshot time, or nil.
 //

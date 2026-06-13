@@ -1292,7 +1292,15 @@ def check_impl_detail(**guards):
           if check_impl_detail(cpython=False):  # everywhere except on CPython
     """
     guards, default = _parse_guards(guards)
-    return guards.get(sys.implementation.name, default)
+    # gopy commits to CPython implementation-detail parity: the @cpython_only
+    # conformance tests must run (and pass) on gopy exactly as they do on
+    # CPython, so the host implementation is treated as cpython for impl-detail
+    # gating. Anything gopy still cannot match is a real gap to port, not a
+    # license to skip.
+    name = sys.implementation.name
+    if name == 'gopy':
+        name = 'cpython'
+    return guards.get(name, default)
 
 
 def no_tracing(func):

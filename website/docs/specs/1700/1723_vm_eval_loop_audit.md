@@ -8,10 +8,143 @@ description: "Full audit of the 22 VM/eval-loop test files from spec 1700 agains
 
 ## Status
 
-Complete. All 22 panel files audited; the 21 in-scope files are green and
-test_eval is out-of-scope (no standalone module in 3.14). Re-audited
-2026-06-09 against `$HOME/cpython-314/`: every gate re-run from a clean build,
-no skips beyond the documented `_testcapi`/platform skips, no deferred fixes.
+Reopened 2026-06-10 under the zero-skip conformance standard (spec 1726).
+The 2026-06-09 "complete" sign-off counted the `@cpython_only` and
+`requires _testcapi` skips as acceptable. They are not: gopy must reproduce
+CPython's own run/skip decisions exactly, and CPython does not skip those.
+Running the panel under CPython 3.14 itself (same vendored files) skips only
+the FrameLocalsProxy design tests in `test_frame` (8 unconditional
+`@unittest.skip`s like "Unlike a mapping: no proxy.update"). Everything else
+CPython runs. So every other gopy skip is a real gap.
+
+The earlier source-level audit still holds for the eval loop itself: a fresh
+sweep found no behavioural defers (the residual "not implemented" strings are
+defensive switch defaults that no real bytecode reaches, e.g. the `BINARY_OP`
+suboperator default in `vm/eval_simple.go` which already covers all 27 NB_
+codes, plus the `FOR_ITER_GEN` specialization that intentionally falls through
+to the correct generic `FOR_ITER` body). The gaps are object-layer and harness
+gaps the skips were hiding, now tracked in spec 1726:
+
+- `@cpython_only` tests now run (gopy is treated as cpython for impl-detail
+  gating, since gopy commits to CPython implementation-detail parity). This
+  exposed real arg-count message drift the funcstr sweep (spec 1725) had not
+  reached: `test_call` alone has ~29 such failures.
+- `requires _testcapi` / `_testinternalcapi` tests need those test C-extension
+  modules ported (vectorcall.c heap types, etc.).
+- `test_frame` needs `ctypes` for one C-API test.
+- P11 (container refcount discipline) is no longer a free pass: it is exactly
+  what `test_iter.test_ref_counting_behavior` and the `_testcapi` getrefcount
+  tests measure.
+
+Fixed so far on this pass: `dict.__contains__` rebind to METH_O (kwargs are
+rejected before arity, matching `Objects/clinic/dictobject.c.h:66`), the
+`PySeqIter` index overflow guard (`Objects/iterobject.c:64`, clears
+`test_iter.test_iter_overflow`), and the `test_call` `@cpython_only` arg-count
+message drift (getattr/hasattr/setattr/delattr rebound to METH_FASTCALL,
+dict.get/pop/setdefault/fromkeys + classmethod/staticmethod routed through
+`CheckPositional`, ImportError keyword `__init__`, module-not-callable
+suggestion, and a faithful `Python/suggestions.c` port for the "Did you mean"
+tails).
+
+## Full-panel re-run (2026-06-10)
+
+Reran all 21 in-scope files (test_eval stays out-of-scope, no standalone 3.14
+module). 18 are fully green. Three carry a combined five failures, and every
+one traces to a subsystem the spec already tracks as a whole-port, not a
+partial slice:
+
+| File | Result | Remaining failures | Root cause |
+|------|--------|--------------------|------------|
+| test_call | 2 fail, 1 error | test_margin_is_sufficient (error) | needs `_testinternalcapi.get_stack_margin` (spec 1726 #245) |
+| | | test_varargs18_kw | clinic `_PyArg_UnpackKeywords` with real BadStr key objects + ordered kwargs (spec 1726 #243) |
+| | | test_unexpected_keyword_suggestion_via_getargs | same clinic path: `str.split` suggestion text + ordered ImportError kwargs (#243) |
+| test_frame | 1 fail | test_clear_refcycles | `frame.clear()` must decref locals so a pure-refcount (gc disabled) cycle breaks: P11 container refcount discipline |
+| test_iter | 1 fail | test_ref_counting_behavior | failed unpack `a, b = iter(l)` plus `del l` must deterministically run `__del__` at refcount 0: P11 (spec 1726 #246) |
+
+These are not skips: gopy runs every one of these tests (the `@cpython_only`
+bridge is live). They fail because gopy does not yet reproduce CPython's exact
+deterministic destruction (P11) or carry the test C-extension modules. P11 is
+deliberately a whole-subsystem port (`objects/dict.go`, `list.go`, `tuple.go`,
+`set.go`, `instance.go`, `frame/frame.go`, `vm/eval.go` all need faithful
+Incref/Decref on every store) because enabling generator tracking or
+half-wiring the refcounts regresses the conjoin/email/fun/coroutine doctests,
+as recorded under P11.1 below. So the panel does not yet meet the zero-skip
+"every gate green" bar; the gap is fully enumerated, cited, and tracked rather
+than papered over.
+
+**P11 sharpened (2026-06-11).** A `list_dealloc` dry-run (spec 1727, "P5 dealloc
+dry-run") pinned the remaining work precisely. The dealloc body itself is correct
+and makes `test_iter.test_ref_counting_behavior`'s `del l` drive `C.count` to 0;
+the blocker is that the list content-insert paths (`LIST_EXTEND`, `list.extend`,
+slice assignment, `list()` from an iterator, comprehension `LIST_APPEND`, and the
+borrow-returning `IterNext` convention) hand items to the list without the
+`Py_INCREF` that `Objects/listobject.c` does, so flipping dealloc frees still-held
+items (concrete repro: `_collections_abc` import loses `Coroutine.register`; then
+`re`/`_sre` loses `CATEGORY_NOT_WORD`). These increfs are coupled to the dealloc
+flip: task #137 made `Append` not-incref on purpose to fire a weakref reclaim, so
+they cannot land individually while dealloc is off without regressing weakref. The
+two P11 gates therefore stay red until the content-borrow sites and the dealloc
+flip land as one verified-green step. Reported red, not skipped.
+
+**P11 blast radius confirmed (2026-06-11, second dry-run).** A fuller dealloc
+attempt (incref on every list insert/mutator plus the `STORE_SUBSCR_LIST_INT`
+stack-ref close, dealloc flipped on) still passes the gate scenario and is
+race-clean, but corrupts the corpus one level deeper than the insert sites. The
+minimal repro is `list(zip(...))` / `list(map(...))` / `list(iter([...]))`
+returning `[]`: every iterator that holds a list source (`listIter`, `zip`,
+`map`, `SeqIter`, `Filter`, `Enumerate`, `Reversed`, the dict/set iterators)
+keeps it *borrowed*, where CPython does `Py_INCREF(seq)` in the iterator
+constructor. With dealloc live the borrowed source reaches refcount 0 while the
+iterator still walks it, `list_dealloc` wipes the slice, and the iterator yields
+nothing (which is what breaks `dict(zip(...))` and the `re` `CH_NEGATE` table).
+The decisive conclusion: the insert convention is necessary but not sufficient.
+Every holder that keeps a list past one op must incref, which is a conversion of
+the whole runtime to strict CPython refcounting (it currently under-counts
+everywhere and leans on the Go GC). That is multi-session scope; this dry-run was
+reverted to baseline so the tree stays green and the two gates stay honestly red.
+Full diagnosis and the next-pass plan (port `Py_INCREF(seq)` into every iterator
+constructor first, flip dealloc last) is in spec 1727, "P5 second dry-run".
+
+**Owned-store fallout cleared, both gates green (2026-06-13).** Re-running the
+full panel after the owned-store port (1727) and the per-dict critical sections
+(1728) surfaced six reference-discipline regressions the borrow model had hidden:
+a borrowed `cr_origin` getter, the async-gen firstiter/finalizer hooks leaking
+their args tuple, the async-gen value wrap/unwrap refcounts, an `END_SEND` slot
+mix-up, a `dict_iter` tuple-cache aliasing, and a per-dict-lock deadlock across a
+generator drive (the lock keyed reentrancy on the goroutine, but a generator body
+shares its driver's `*state.Thread`, so it now keys on the thread). All six are
+CPython-faithful ports, fully written up with citations in spec 1729. With them
+landed the panel is 20/21 fully green and the two P11 gates are now green:
+`test_iter.test_ref_counting_behavior` and `test_frame.test_clear_refcycles` both
+pass (the failed-unpack decref from spec 1726 #246 plus the owned-store deallocs
+made the refcount a true liveness signal for those two scenarios). The
+2026-06-10 re-run table below predates this and is superseded: `test_call` still
+carries its `_testcapi` whole-port gaps (#243/#245), but the `test_frame` and
+`test_iter` rows are no longer red. `test_gc` is byte-identical to the pre-fix
+build; the threaded `test_weakref` `MappingTestCase` tests still pass.
+
+**Dict critical sections landed (2026-06-12).** A prerequisite for any concurrent
+owned-store work surfaced while running the P11 sweep under no-GIL threading:
+`test_weakref`'s `WeakValueDictionary` tests mutate a shared dict from one
+goroutine while another copies it, and the lock-free `Dict` raced
+(`fatal error: s.allocCount != s.nelems` once stores began incref-ing values).
+Ported CPython 3.14's per-dict critical sections as a goroutine-reentrant lock
+around every dict table read and write. The fatal crash is gone with zero net
+regression (`test_weakref` 30/15 vs base 31/18, `test_gc` identical to base, the
+at-risk sweep unchanged, both P11 gates still green). Full design, wiring table,
+and verification in spec 1728.
+
+**test_coroutines green, test_call skips closed to the native subsystem (2026-06-13, commit 073e9c60).** Reran the full 21-file in-scope panel after porting the `_testcapi.awaitType` fixture. The three `test_coroutines.CAPITest` `tp_await` cases were erroring on a missing `awaitType` attribute (gopy's `_testcapi` imports, so the class never hit the `skipIf(_testcapi is None)` guard CPython also skips on a no-`_testcapi` build); they now run and pass. `awaitType` is a faithful port of `Modules/_testcapimodule.c:2796 awaitObject`: a type whose `tp_as_async->am_await` returns the stored object, exposed both as the async slot and a `__await__` method descriptor, with the stored iterator incref'd in `tp_new` and visited by `tp_traverse` (without that, the temporary `iter([1])` reached refcount 0 and the awaitable yielded nothing). `test_coroutines` is now fully green (99 pass, was 3 errors).
+
+Panel standing after this run: 21/21 in-scope files green except `test_call`, which keeps `failures=1, errors=1, skipped=3`. Every one of those five maps to the `_testcapi`/`_testinternalcapi` native test-fixture subsystem, not VM/eval-loop logic:
+
+| test_call row | kind | needs |
+|------|------|-------|
+| test_super_deep | fail | C-stack-margin recursion: each `_testcapi.pyobject_vectorcall` trampoline must consume the native recursion budget so `c_recurse(90_000)` overflows under limit 100_000 while plain `recurse(90_000)` does not. gopy counts Python frames on a goroutine stack, so the C trampoline is free. |
+| test_margin_is_sufficient | error | `_testinternalcapi.get_stack_pointer` / `get_stack_margin` reading the live C stack. |
+| test_setvectorcall (×3) | skip | `_testinternalcapi.SPECIALIZATION_THRESHOLD`. |
+
+A trial port of `_testinternalcapi` exposing just `SPECIALIZATION_THRESHOLD` did clear the three setvectorcall skips, but it is a partial slice that regresses the wider suite: `support.check_sizeof` and several other gates short-circuit on `import _testinternalcapi`, so merely making the module importable un-skips sizeof/immortality/native-stack assertions across `test_frame` (in-panel: `test_sizeof` flipped skip to fail), `test_builtin`, and `test_exceptions`, which need the full sizeof model (`SIZEOF_PYGC_HEAD` plus CPython C-struct basicsizes for every type), the immortal-refcount model, and the native C-stack hooks. Per the whole-subsystem rule that trial was reverted; `awaitType` (a complete `_testcapi` type) stays. The remaining `test_call` five and `test_frame`'s two divergent skips (`test_sizeof` needs `_testinternalcapi`, `test_basic` needs `ctypes`) plus `test_generators`'s one divergent skip (`_testcapi.raise_SIGINT_then_send_None`) are all the same native-fixture subsystem, tracked whole as #244 (`_testcapi.raise_SIGINT_then_send_None`) and #245 (`_testinternalcapi` sizeof/stack + `ctypes`). The eight `test_frame.FrameLocalsProxyMappingTests` skips are unconditional `@unittest.skip` in the test source, so they match CPython exactly.
 
 ## Goal
 
@@ -588,6 +721,65 @@ the model.
 **Shipping criterion:** with `NewGenerator` calling `GCTrackHook`, both the
 five-test cycle suite AND the conjoin/email/fun/coroutine/test_modify_f_locals
 panel pass. The order is: land P11.1, then enable tracking in P11.2.
+
+**Finding (2026-06-10): a container-only refcount port is unsafe here.**
+Implementing the full list refcount in isolation (`NewList` increfs each stored
+item under a borrow convention, `listDealloc` decrefs the contents, every
+mutation path in `objects/list.go` balanced) compiles cleanly and passes every
+simple repro, but corrupts real workloads: `import textwrap` dies with
+`IndexError: index out of range` inside `re._parser` because a live list reaches
+refcount 0 and `listDealloc` frees its backing slice while the interpreter still
+holds it (the list reports `len == 1` but `list[0]` is out of range, a
+length/contents desync). Disabling only `ListType.Dealloc = listDealloc` makes
+the import pass again, which pins the cause precisely.
+
+The root cause is the eval loop, not the container. `decrefInputs`
+(`vm/eval_helpers.go`, CPython `Python/ceval_macros.h DECREF_INPUTS`) is a
+deliberate no-op, and the load opcodes (`LOAD_FAST`, `LOAD_ATTR`, returns,
+iterator results) do not consistently `Incref` the value they push. So the
+Python refcount is not a coherent liveness signal: any container `Dealloc` that
+frees contents at refcount 0 will free still-live objects. The container-level
+port therefore CANNOT ship on its own. The gate tests
+(`test_iter.test_ref_counting_behavior`, `test_frame.test_clear_refcycles`)
+require the full eval-loop stack-ref discipline below as a prerequisite.
+
+**The discipline is interlocked, not uniformly loose.** A closer audit shows
+gopy's eval loop is not "no refcounting" but an inconsistent mix, and that is
+why no single piece can be made faithful in isolation:
+
+- Loads DO incref. `LOAD_FAST` is `e.localAt(oparg).Dup()`
+  (`vm/eval_dispatch_gen.go:744`), and `Dup` increfs (`stackref/stackref.go:83`).
+- Frame teardown DOES decref. `Frame.DropStack` and `Frame.Clear`
+  (`frame/frame.go:353`, `:369`) `Close()` every slot.
+- But `decrefInputs` is a no-op (`vm/eval_helpers.go:27`), so the per-opcode
+  consumed inputs never get released (they leak upward, which is safe but wrong).
+- And iteration BORROWS instead of owning. `listIterType.IterNext` returns
+  `it.src.items[it.pos]` with no incref (`objects/list.go:791`), diverging from
+  CPython `listiter_next`, which returns an owned reference via
+  `list_get_item_ref` (`Objects/listobject.c:4018`, `:4026`).
+
+So the net per-object count is neither a clean borrow model nor a clean owned
+model. That mix is what makes a targeted fix unsafe: e.g. adding the faithful
+`Py_DECREF(it)` / item-close discipline to the failed-unpack path
+(`unpackSeq`, `vm/eval_simple.go:1744`, porting
+`Python/ceval.c:2387 _PyEval_UnpackIterableStackRef`) would over-decref, because
+the items `IterNext` handed back were borrowed from the list, not owned.
+
+**Prerequisite P11.0 — eval-loop stack-ref discipline.** Before any container
+`Dealloc` can fire at refcount 0, the stack must own its references the way
+CPython's stackref machinery does: each load pushes an owned reference (increfs
+its source), iterators return owned references (`listiter_next` increfs),
+every consumed input is closed (`decrefInputs` becomes a real `Decref` over the
+popped slots), and stores into locals/cells/containers/attrs incref. CPython
+model: `Python/ceval_macros.h DECREF_INPUTS`,
+`Include/internal/pycore_stackref.h PyStackRef_DUP`/`PyStackRef_CLOSE`,
+`Python/bytecodes.c` (every `LOAD_*`/`STORE_*`/`FOR_ITER` uop),
+`Objects/listobject.c:4018 listiter_next`. The change is coherent-whole: making
+`listiter_next` own its result forces every `IterNext` consumer (FOR_ITER,
+`list()`, `unpackSeq`, comprehensions) to close it, and making `decrefInputs`
+real forces every opcode's inputs to be genuinely owned at entry. Only once the
+refcount is a true liveness signal do the failed-unpack decref, P11.1 (container
+deallocs), and P11.2 (generator tracking) become safe to land.
 
 ### P11.2 — Wire `GCTrackHook` in `NewGenerator`
 

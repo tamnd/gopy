@@ -82,6 +82,8 @@ func TestCollectInvokesTypeSlotForCycle(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	listType := a.Type()
 	saved := listType.Finalize

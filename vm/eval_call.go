@@ -22,6 +22,23 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// keywordCandidates lists the parameter names eligible for keyword
+// binding so UnexpectedKeywordError can offer a "Did you mean 'X'?"
+// suggestion. It mirrors CPython's co_varnames[posonlyargcount :
+// total_args]: positional-only slots and the *args slot are skipped.
+//
+// CPython: Python/ceval.c:1792 (possible_keywords list)
+func keywordCandidates(co *objects.Code, nposonly, npos, kwWindow int, hasVarargs bool) []string {
+	out := make([]string, 0, kwWindow)
+	for i := nposonly; i < kwWindow; i++ {
+		if i == npos && hasVarargs {
+			continue
+		}
+		out = append(out, co.Varnames[i])
+	}
+	return out
+}
+
 // forceGenPrev wires the next stack.Push to use the running generator's
 // saved frame as f_back instead of the FrameStack top. Generator frames
 // live in activeEvalFrames (not on the FrameStack), so a regular function
@@ -500,12 +517,20 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k)
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
 		}
-		f.SetLocal(idx, stackref.FromObject(v))
+		// The keyword value is borrowed from the caller's kwargs map. The
+		// frame slot must own its own counted reference because Frame.Clear
+		// Closes (Decrefs) every local on return; stealing the borrow would
+		// over-decref the value (fatal now that list/tuple/dict tear their
+		// contents down at refcount zero). Mirror the positional path's
+		// FromObjectNew and CPython's Py_INCREF of args copied into localsplus.
+		//
+		// CPython: Python/ceval.c _PyEval_MakeFrameVector (Py_INCREF(x))
+		f.SetLocal(idx, stackref.FromObjectNew(v))
 	}
 	if len(posonlyAsKw) > 0 {
 		ordered := make([]string, 0, len(posonlyAsKw))
@@ -529,7 +554,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 				continue
 			}
 			if f.LocalAt(slot).IsNull() {
-				f.SetLocal(slot, stackref.FromObject(fn.Defaults.Item(i)))
+				f.SetLocal(slot, stackref.FromObjectNew(fn.Defaults.Item(i)))
 			}
 		}
 	}
@@ -547,7 +572,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 			name := co.Varnames[slot]
 			v, err := fn.KwDefaults.GetItem(objects.NewStr(name))
 			if err == nil && v != nil {
-				f.SetLocal(slot, stackref.FromObject(v))
+				f.SetLocal(slot, stackref.FromObjectNew(v))
 			}
 		}
 	}
@@ -726,7 +751,7 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 				if !hasVarkw {
 					// Best-effort string repr for error message.
 					ks, _ := objects.Str(kwname)
-					return nil, objects.UnexpectedKeywordError(qualname, ks)
+					return nil, objects.UnexpectedKeywordError(qualname, ks, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 				}
 				rawKwEntries = append(rawKwEntries, rawKwEntry{key: kwname, val: val})
 			}
@@ -864,7 +889,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k)
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
@@ -908,7 +933,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 				continue
 			}
 			if f.LocalAt(slot).IsNull() {
-				f.SetLocal(slot, stackref.FromObject(fn.Defaults.Item(i)))
+				f.SetLocal(slot, stackref.FromObjectNew(fn.Defaults.Item(i)))
 			}
 		}
 	}
@@ -925,7 +950,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 			name := co.Varnames[slot]
 			v, err := fn.KwDefaults.GetItem(objects.NewStr(name))
 			if err == nil && v != nil {
-				f.SetLocal(slot, stackref.FromObject(v))
+				f.SetLocal(slot, stackref.FromObjectNew(v))
 			}
 		}
 	}

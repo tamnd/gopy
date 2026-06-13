@@ -80,6 +80,7 @@ func (f *fakeInterpFrame) FrameGenOwner() Object       { return nil }
 func (f *fakeInterpFrame) FrameRegisterWrapper(Object) {}
 func (f *fakeInterpFrame) FrameMarkExposed()           {}
 func (f *fakeInterpFrame) FrameExposed() bool          { return false }
+func (f *fakeInterpFrame) VarkeywordsDict() *Dict      { return nil }
 
 func TestFrameAccessors(t *testing.T) {
 	code := &Code{Name: "f", Filename: "t.py", Firstlineno: 10}

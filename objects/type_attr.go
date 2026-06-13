@@ -462,6 +462,32 @@ func typeSetAttr(o Object, name Object, value Object) error {
 		return nil
 	}
 	SetTypeDescr(tp, nameStr, value)
+	// Assigning a generic __call__ re-points tp_call at slot_tp_call,
+	// which is incompatible with vectorcall: clear Py_TPFLAGS_HAVE_VECTORCALL
+	// on tp and every subclass that inherits the slot.
+	//
+	// CPython: Objects/typeobject.c:11392 update_one_slot
+	if nameStr == "__call__" {
+		clearVectorcallForCallOverride(tp)
+	}
 	tp.InvalidateVersionTag()
 	return nil
+}
+
+// clearVectorcallForCallOverride re-wires tp_call to the generic
+// dispatcher and drops Py_TPFLAGS_HAVE_VECTORCALL on t, then recurses
+// into every subclass that does not define its own __call__ (a subclass
+// with its own __call__ governs its own subtree, so the walk stops).
+//
+// CPython: Objects/typeobject.c:11406 update_slots_callback / update_subclasses
+func clearVectorcallForCallOverride(t *Type) {
+	t.Call = slotTpCall
+	t.Vectorcall = nil
+	t.TpFlags &^= TpFlagHaveVectorcall
+	for _, sub := range t.Subclasses() {
+		if isOwnDescriptor(sub, "__call__") {
+			continue
+		}
+		clearVectorcallForCallOverride(sub)
+	}
 }

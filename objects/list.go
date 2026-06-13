@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -71,6 +72,8 @@ func init() {
 		DelItem: listMappingDel,
 	}
 	ListType.TpTraverse = listTraverse
+	// CPython: Objects/listobject.c:2841 list_dealloc
+	ListType.Dealloc = listDealloc
 	// TpNew allocates a bare *List bound to the requested class so
 	// `class S(list): pass; S()` returns an S instance rather than a
 	// plain list. Population happens in __init__ (wired in
@@ -87,6 +90,45 @@ func init() {
 	AddIterSlotWrappers(ListType)
 	// CPython: Objects/listobject.c:3373 list.__hash__ = None
 	SetTypeDescr(ListType, "__hash__", None())
+}
+
+// listDealloc fires when the list's Python refcount reaches zero. For
+// subclasses that define __del__ (tp_finalize), the finalizer runs first
+// under a resurrection guard, matching set_dealloc's structure. Then the
+// list releases its reference on every item, tail-first like CPython's
+// list_dealloc, so a contained object whose last holder is this list has
+// its own __del__ fired deterministically.
+//
+// Unlike the generic Decref dance, listDealloc runs the finalizer inline
+// here rather than delegating, so the per-item Decref below cannot
+// re-enter and double-fire the list's own __del__.
+//
+// CPython: Objects/listobject.c:2841 list_dealloc
+func listDealloc(o Object) {
+	l := o.(*List)
+	if fn := o.Type().Finalize; fn != nil {
+		h := o.Hdr()
+		atomic.StoreInt64(&h.refcnt, 1)
+		fn(o)
+		atomic.AddInt64(&h.refcnt, -1)
+		if atomic.LoadInt64(&h.refcnt) != 0 {
+			return
+		}
+	}
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
+	// Tail-first item release mirrors list_dealloc's reversed walk.
+	for i := len(l.items) - 1; i >= 0; i-- {
+		it := l.items[i]
+		l.items[i] = nil
+		if it != nil {
+			Decref(it)
+		}
+	}
+	l.items = nil
+	l.size = 0
 }
 
 // listTraverse visits every item. Mirrors list_traverse.
@@ -113,6 +155,19 @@ func NewList(items []Object) *List {
 	l := &List{items: append([]Object(nil), items...)}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// The list owns one counted reference per stored item. CPython fills
+	// the freshly allocated vector with PyList_SET_ITEM, which steals; the
+	// gopy callers hand NewList a slice of borrowed objects, so the list
+	// takes its own reference here and listDealloc releases one per item on
+	// teardown. This is what makes a contained __del__ fire deterministically
+	// when the list is the last holder.
+	//
+	// CPython: Objects/listobject.c:271 PyList_SET_ITEM (steal into slots)
+	for _, it := range l.items {
+		if it != nil {
+			Incref(it)
+		}
+	}
 	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
 	if h := GCTrackHook; h != nil {
 		h(l)
@@ -131,6 +186,18 @@ func newListAdopt(items []Object) *List {
 	l := &List{items: items}
 	l.init(ListType)
 	l.size = int64(len(items))
+	// Same ownership contract as NewList: the list takes a counted
+	// reference per item. newListAdopt only differs in skipping the
+	// defensive slice copy; the items themselves are still borrowed by the
+	// caller (built by copying l.items or appending), so they are increfed
+	// here just like NewList.
+	//
+	// CPython: Objects/listobject.c:271 PyList_SET_ITEM (steal into slots)
+	for _, it := range l.items {
+		if it != nil {
+			Incref(it)
+		}
+	}
 	// CPython: Objects/listobject.c:159 PyList_New (PyObject_GC_Track tail)
 	if h := GCTrackHook; h != nil {
 		h(l)
@@ -147,6 +214,14 @@ func (l *List) Len() int { return len(l.items) }
 //
 // CPython: Objects/listobject.c:L351 PyList_Append
 func (l *List) Append(v Object) {
+	// The list takes a counted reference on the appended value; listDealloc
+	// releases it. CPython's app1 does Py_INCREF via PyList_SET_ITEM after
+	// list_resize.
+	//
+	// CPython: Objects/listobject.c:351 PyList_Append (app1 -> Py_INCREF)
+	if v != nil {
+		Incref(v)
+	}
 	l.items = append(l.items, v)
 	l.size = int64(len(l.items))
 }
@@ -160,7 +235,25 @@ func (l *List) Item(i int) Object { return l.items[i] }
 // checking; out-of-range indices panic.
 //
 // CPython: Objects/listobject.c:271 PyList_SET_ITEM
-func (l *List) SetItem(i int, v Object) { l.items[i] = v }
+//
+// gopy's slot lives one level up from CPython's macro: list_ass_item is
+// the slot that does the Py_INCREF(new)/Py_SETREF(old) dance, while the
+// PyList_SET_ITEM macro is the raw steal-into-slot used right after
+// PyList_New. Since gopy lists own a counted reference per item, SetItem
+// takes a reference on the incoming value and drops the displaced one,
+// matching list_ass_item rather than the bare macro.
+//
+// CPython: Objects/listobject.c:3119 list_ass_item (Py_INCREF + Py_SETREF)
+func (l *List) SetItem(i int, v Object) {
+	old := l.items[i]
+	if v != nil {
+		Incref(v)
+	}
+	l.items[i] = v
+	if old != nil && old != v {
+		Decref(old)
+	}
+}
 
 // SetSlice replaces items[start:stop] with values. CPython implements
 // this through PyList_SetSlice; the gopy port keeps the contract
@@ -168,6 +261,23 @@ func (l *List) SetItem(i int, v Object) { l.items[i] = v }
 //
 // CPython: Objects/listobject.c PyList_SetSlice
 func (l *List) SetSlice(start, stop int, values []Object) {
+	// The [start:stop] region is dropped and replaced by values. The list
+	// owns a reference per item, so release the displaced items and take a
+	// reference on the incoming ones. Incref the new values before
+	// decreffing the old, in case a value is also one of the displaced
+	// items (it must not be torn down before the list re-adopts it).
+	//
+	// CPython: Objects/listobject.c:892 list_ass_slice_lock_held
+	for _, v := range values {
+		if v != nil {
+			Incref(v)
+		}
+	}
+	for _, old := range l.items[start:stop] {
+		if old != nil {
+			Decref(old)
+		}
+	}
 	tail := append([]Object(nil), l.items[stop:]...)
 	l.items = append(append(l.items[:start], values...), tail...)
 	l.size = int64(len(l.items))
@@ -336,6 +446,14 @@ func listInPlaceRepeat(o Object, n int) (rv Object, rerr error) {
 		return l, nil
 	}
 	if n < 1 {
+		// n<=0 empties the list: release the list's reference on each
+		// dropped item.
+		for i := range l.items {
+			if l.items[i] != nil {
+				Decref(l.items[i])
+			}
+			l.items[i] = nil
+		}
 		l.items = l.items[:0]
 		l.size = 0
 		return l, nil
@@ -356,6 +474,19 @@ func listInPlaceRepeat(o Object, n int) (rv Object, rerr error) {
 	for i := 0; i < n; i++ {
 		copy(dst[i*input:], l.items)
 	}
+	// The original items keep their existing reference; each of the n-1
+	// extra copies is a new stored reference, so incref the items n-1 times.
+	//
+	// CPython: Objects/listobject.c:1033 list_inplace_repeat_lock_held
+	// (_Py_RefcntAdd over the copied region)
+	for _, it := range l.items {
+		if it == nil {
+			continue
+		}
+		for k := 0; k < n-1; k++ {
+			Incref(it)
+		}
+	}
 	l.items = dst
 	l.size = int64(len(l.items))
 	return l, nil
@@ -369,7 +500,10 @@ func listSetItem(o Object, i int, v Object) error {
 	if i < 0 || i >= len(l.items) {
 		return errIndexOutOfRange
 	}
-	l.items[i] = v
+	// Route through SetItem so the displaced item is decreffed and the new
+	// value increfed (list_ass_item's Py_SETREF), keeping the per-item
+	// ownership invariant.
+	l.SetItem(i, v)
 	return nil
 }
 
@@ -432,6 +566,12 @@ func listDelIndex(l *List, i int) error {
 	if i < 0 || i >= len(l.items) {
 		return errIndexOutOfRange
 	}
+	// Release the list's reference on the removed item.
+	//
+	// CPython: Objects/listobject.c:806 list_ass_slice (Py_DECREF on removed)
+	if old := l.items[i]; old != nil {
+		Decref(old)
+	}
 	l.items = append(l.items[:i], l.items[i+1:]...)
 	l.size = int64(len(l.items))
 	return nil
@@ -486,8 +626,11 @@ func listSetSlice(l *List, s *Slice, v Object) error {
 	if len(src) != slicelen {
 		return fmt.Errorf("ValueError: attempt to assign sequence of size %d to extended slice of size %d", len(src), slicelen)
 	}
+	// Each extended-slice slot is overwritten; SetItem drops the displaced
+	// item and takes a reference on the new one, keeping the per-item
+	// ownership invariant.
 	for i, idx := 0, start; i < slicelen; i, idx = i+1, idx+step {
-		l.items[idx] = src[i]
+		l.SetItem(idx, src[i])
 	}
 	return nil
 }
@@ -540,6 +683,25 @@ func listAssSliceItems(l *List, ilow, ihigh int, items []Object) error {
 		ihigh = ilow
 	} else if ihigh > len(l.items) {
 		ihigh = len(l.items)
+	}
+	// The [ilow:ihigh] region is dropped and the items slice adopted. The
+	// list owns one counted reference per item, so take references on the
+	// incoming items and release the displaced ones. Below this point the
+	// copy() shuffles only move existing pointers between slots, which is
+	// reference-neutral. Incref before decref so a self-slice-assign (where
+	// items is a snapshot of l's own contents) does not tear an object down
+	// before it is re-adopted.
+	//
+	// CPython: Objects/listobject.c:892 list_ass_slice_lock_held
+	for _, v := range items {
+		if v != nil {
+			Incref(v)
+		}
+	}
+	for _, old := range l.items[ilow:ihigh] {
+		if old != nil {
+			Decref(old)
+		}
 	}
 	norig := ihigh - ilow
 	d := n - norig
@@ -599,6 +761,14 @@ func listDelSlice(l *List, s *Slice) error {
 		return nil
 	}
 	if step == 1 {
+		// Release the list's reference on each removed item.
+		//
+		// CPython: Objects/listobject.c:806 list_ass_slice (Py_DECREF loop)
+		for _, old := range l.items[start:stop] {
+			if old != nil {
+				Decref(old)
+			}
+		}
 		l.items = append(l.items[:start], l.items[stop:]...)
 		l.size = int64(len(l.items))
 		return nil
@@ -610,6 +780,11 @@ func listDelSlice(l *List, s *Slice) error {
 	out := l.items[:0]
 	for i, v := range l.items {
 		if drop[i] {
+			// Removed by the extended-step delete: drop the list's
+			// reference on it.
+			if v != nil {
+				Decref(v)
+			}
 			continue
 		}
 		out = append(out, v)
@@ -701,14 +876,28 @@ func DrainIterable(o Object) ([]Object, error) {
 	// PySequence_Fast fast-paths only PyList_CheckExact / PyTuple_CheckExact.
 	// A subclass may override __iter__ (seq_tests.LyingTuple yields values
 	// unrelated to its storage), so it must go through the iterator protocol.
+	// Every returned element carries one owned reference the caller must
+	// release (or steal). IterNext hands back a borrowed reference under
+	// gopy's iterator convention, so a self-recycling slot such as the dict
+	// item iterator would free an element already collected here; owning each
+	// element keeps it alive for the whole batch. CPython's PyIter_Next /
+	// PySequence_Fast own their elements for the same reason.
+	//
+	// CPython: Objects/abstract.c:2852 PyIter_Next (owned return)
 	if l, ok := o.(*List); ok && l.Type() == ListType {
 		out := make([]Object, len(l.items))
 		copy(out, l.items)
+		for _, v := range out {
+			Incref(v)
+		}
 		return out, nil
 	}
 	if t, ok := o.(*Tuple); ok && t.Type() == TupleType {
 		out := make([]Object, len(t.items))
 		copy(out, t.items)
+		for _, v := range out {
+			Incref(v)
+		}
 		return out, nil
 	}
 	it, err := Iter(o)
@@ -725,8 +914,12 @@ func DrainIterable(o Object) ([]Object, error) {
 			return out, nil
 		}
 		if err != nil {
+			for _, x := range out {
+				Decref(x)
+			}
 			return nil, err
 		}
+		Incref(v)
 		out = append(out, v)
 	}
 }
@@ -774,24 +967,47 @@ type listIterator struct {
 
 var listIterType = NewType("list_iterator", []*Type{objectType})
 
+// listIterNext yields the next item, clearing the source reference on
+// exhaustion so the iterator becomes a sink state and frees its hold on the
+// list (free_after_iterating).
+//
+// CPython: Objects/listobject.c:3573 listiter_next
+func listIterNext(o Object) (Object, error) {
+	it := o.(*listIterator)
+	if it.src == nil {
+		return nil, ErrStopIteration
+	}
+	if it.pos >= len(it.src.items) {
+		old := it.src
+		it.src = nil
+		Decref(old)
+		return nil, ErrStopIteration
+	}
+	v := it.src.items[it.pos]
+	it.pos++
+	return v, nil
+}
+
+// listIterDealloc drops the iterator's reference on the source list if it has
+// not already been cleared by exhaustion.
+//
+// CPython: Objects/listobject.c:3530 listiter_dealloc
+func listIterDealloc(o Object) {
+	if h := GCUntrackHook; h != nil {
+		h(o)
+	}
+	ClearWeakRefs(o)
+	it := o.(*listIterator)
+	if it.src != nil {
+		Decref(it.src)
+		it.src = nil
+	}
+}
+
 func init() {
 	listIterType.Iter = SelfIter
-	listIterType.IterNext = func(o Object) (Object, error) {
-		it := o.(*listIterator)
-		if it.src == nil {
-			return nil, ErrStopIteration
-		}
-		if it.pos >= len(it.src.items) {
-			// CPython: Objects/listobject.c:3573 listiter_next — clears
-			// it_seq on exhaustion so the iterator is a sink state:
-			// appending to the list after exhaustion does not resume it.
-			it.src = nil
-			return nil, ErrStopIteration
-		}
-		v := it.src.items[it.pos]
-		it.pos++
-		return v, nil
-	}
+	listIterType.IterNext = listIterNext
+	listIterType.Dealloc = listIterDealloc
 	AddIterSlotWrappers(listIterType)
 	// __reduce__ returns (iter, (list_snapshot,), current_pos) so pickle
 	// can round-trip the iterator including its current position.
@@ -866,7 +1082,16 @@ func init() {
 }
 
 func listIter(o Object) (Object, error) {
-	it := &listIterator{src: o.(*List)}
+	src := o.(*List)
+	// The iterator holds a counted reference on the list for its lifetime
+	// (Py_INCREF(seq) in list___iter___), released on exhaustion or in
+	// listiter_dealloc. Without this, a list held only by a live iterator
+	// could reach refcount 0 and listDealloc would tear down its items
+	// while the iterator still walks them.
+	//
+	// CPython: Objects/listobject.c:3552 list___iter___ (Py_INCREF(seq))
+	Incref(src)
+	it := &listIterator{src: src}
 	it.init(listIterType)
 	return it, nil
 }
@@ -891,18 +1116,31 @@ func init() {
 	listRevIterType.IterNext = func(o Object) (Object, error) {
 		it := o.(*listRevIterator)
 		if it.src == nil || it.index < 0 {
-			it.src = nil
-			it.index = -1
+			revIterClear(it)
 			return nil, ErrStopIteration
 		}
 		if it.index >= len(it.src.items) {
-			it.src = nil
-			it.index = -1
+			revIterClear(it)
 			return nil, ErrStopIteration
 		}
 		v := it.src.items[it.index]
 		it.index--
 		return v, nil
+	}
+	// listreviter_dealloc drops the iterator's reference on the source
+	// list when it has not already been cleared by exhaustion.
+	//
+	// CPython: Objects/listobject.c:4140 listreviter_dealloc
+	listRevIterType.Dealloc = func(o Object) {
+		if h := GCUntrackHook; h != nil {
+			h(o)
+		}
+		ClearWeakRefs(o)
+		it := o.(*listRevIterator)
+		if it.src != nil {
+			Decref(it.src)
+			it.src = nil
+		}
 	}
 	AddIterSlotWrappers(listRevIterType)
 	// __reduce__ returns (iter_fn, (list,), index) so pickle preserves
@@ -987,9 +1225,24 @@ func init() {
 //
 // CPython: Objects/listobject.c:4140 list___reversed___impl
 func listRevIter(l *List) Object {
+	// The reverse iterator holds a counted reference on the source list,
+	// released on exhaustion (revIterClear) or in listreviter_dealloc.
+	//
+	// CPython: Objects/listobject.c:4140 list___reversed___impl (Py_INCREF)
+	Incref(l)
 	it := &listRevIterator{src: l, index: len(l.items) - 1}
 	it.init(listRevIterType)
 	return it
+}
+
+// revIterClear drops the reverse iterator into its exhausted sink state,
+// releasing its reference on the source list exactly once.
+func revIterClear(it *listRevIterator) {
+	if it.src != nil {
+		Decref(it.src)
+		it.src = nil
+	}
+	it.index = -1
 }
 
 // ListIterNextFast advances o as a list_iterator without going through
@@ -1008,7 +1261,11 @@ func ListIterNextFast(o Object) (value Object, exhausted bool, ok bool) {
 		return nil, false, false
 	}
 	if it.src == nil || it.pos >= len(it.src.items) {
-		it.src = nil
+		if it.src != nil {
+			old := it.src
+			it.src = nil
+			Decref(old)
+		}
 		return nil, true, true
 	}
 	v := it.src.items[it.pos]

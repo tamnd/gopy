@@ -387,15 +387,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		return e.advance(), nil
 	case compile.END_SEND:
-		receiver := e.peek(1)
-		_ = receiver
-		value := e.peek(0)
-		_ = value
-		var val stackref.Ref
-		val = value
-		// receiver consumed input dropped by stack shrink
-		e.drop(1 + 1)
-		e.push(val)
+		// (receiver, value -- value): close receiver only; value flows
+		// through to the output slot with its reference intact. Popping
+		// value first hands its reference off (PopStack nulls the slot, so
+		// the following drop closes only receiver), then it is re-pushed.
+		// Dropping both slots would close value as well, a double release
+		// that empties a yielded container whose only live reference is the
+		// one threading through END_SEND (concretely, `async for x in agen()`
+		// over an async generator yielding a list returned a cleared list).
+		//
+		// CPython: Python/bytecodes.c END_SEND (PyStackRef_CLOSE(receiver))
+		value := e.pop()
+		e.drop(1)
+		e.push(value)
 		return e.advance(), nil
 	case compile.ENTER_EXECUTOR:
 		panic("vm: Py_FatalError")
@@ -426,7 +430,15 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			}
 			res = stackref.FromObject(res_o)
 		} else {
-			res = value
+			// Exact-str passthrough. The non-str branch hands back an owned
+			// res; this branch must too, otherwise the drop(1) below decrefs
+			// the input slot while push re-pushes the same borrowed object,
+			// leaving a phantom-owned reference the next consumer over-decrefs.
+			// Dup so the pushed ref owns its own count, balancing drop(1).
+			//
+			// CPython: Python/bytecodes.c FORMAT_SIMPLE (exact-str is a no-op;
+			// the value keeps its single stack reference)
+			res = value.Dup()
 		}
 		e.drop(1)
 		e.push(res)
@@ -569,22 +581,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		return e.advance(), nil
 	case compile.INSTRUMENTED_END_SEND:
 		receiver := e.peek(1)
-		_ = receiver
 		value := e.peek(0)
-		_ = value
-		var val stackref.Ref
 		receiver_o := receiver.AsObject()
-		_ = receiver_o
 		if objects.IsGenerator(receiver_o) || objects.IsCoroutine(receiver_o) {
 			err := e.monitorStopIteration(value.AsObject())
-			_ = err
 			if err != 0 {
 				return 0, e.error("error")
 			}
 		}
-		val = value
-		// receiver consumed input dropped by stack shrink
-		e.drop(1 + 1)
+		// (receiver, value -- value): close receiver only, value flows
+		// through unchanged. See the END_SEND arm above; dropping both
+		// slots double-releases value.
+		//
+		// CPython: Python/bytecodes.c INSTRUMENTED_END_SEND
+		val := e.pop()
+		e.drop(1)
 		e.push(val)
 		return e.advance(), nil
 	case compile.INSTRUMENTED_FOR_ITER:
@@ -715,7 +726,14 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 			e.setPendingErr("NameError: __build_class__ not found")
 			return 0, e.error("error")
 		}
-		bc = stackref.FromObject(bc_o)
+		// mappingGetOptionalItem hands back a borrowed reference to the
+		// builtins dict slot. CPython's LOAD_BUILD_CLASS does Py_INCREF(bc)
+		// before pushing so the following CALL's DECREF_INPUTS balances
+		// against the new reference, not the dict's. Use FromObjectNew to
+		// own the pushed reference.
+		//
+		// CPython: Python/bytecodes.c:1556 LOAD_BUILD_CLASS (Py_INCREF(bc))
+		bc = stackref.FromObjectNew(bc_o)
 		e.push(bc)
 		return e.advance(), nil
 	case compile.LOAD_COMMON_CONSTANT:
@@ -727,7 +745,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		var value stackref.Ref
 		obj := e.constAt(int(oparg))
 		_ = obj
-		value = stackref.FromObject(obj)
+		value = stackref.FromObjectNew(obj)
 		e.push(value)
 		return e.advance(), nil
 	case compile.LOAD_DEREF:

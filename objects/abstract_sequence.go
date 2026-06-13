@@ -346,7 +346,14 @@ func SequenceList(v Object) (*List, error) {
 //
 // CPython: Objects/abstract.c:1996 PySequence_Tuple
 func SequenceTuple(v Object) (*Tuple, error) {
+	// Exact-tuple fast path returns a new owned reference, never the
+	// borrowed input. Callers (the CALL_TUPLE_1 fast arm, tuple()) release
+	// the argument they passed in, so handing back the same object without
+	// a count drives it to zero and tuple_dealloc nils its items.
+	//
+	// CPython: Objects/abstract.c:2820 PySequence_Tuple (Py_INCREF(v))
 	if t, ok := v.(*Tuple); ok && t.Type() == TupleType {
+		Incref(t)
 		return t, nil
 	}
 	l, err := SequenceList(v)

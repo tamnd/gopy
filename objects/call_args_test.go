@@ -169,7 +169,7 @@ func TestTooManyPositionalErrorWithKwonly(t *testing.T) {
 }
 
 func TestUnexpectedKeywordError(t *testing.T) {
-	err := UnexpectedKeywordError("f", "z")
+	err := UnexpectedKeywordError("f", "z", nil)
 	want := "TypeError: f() got an unexpected keyword argument 'z'"
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err, want)

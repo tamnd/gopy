@@ -7,6 +7,7 @@ package builtins
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/tamnd/gopy/objects"
@@ -32,6 +33,13 @@ func init() {
 		it := o.(*seqIter)
 		if it.o == nil {
 			return nil, objects.ErrStopIteration
+		}
+		// CPython: Objects/iterobject.c:64 iter_iternext raises OverflowError
+		// once the cursor reaches PY_SSIZE_T_MAX, instead of advancing
+		// it_index past it. gopy's idx is a Go int, 64-bit (== sys.maxsize)
+		// on the platforms gopy targets.
+		if it.idx == math.MaxInt {
+			return nil, fmt.Errorf("OverflowError: iter index too large")
 		}
 		// CPython: Objects/iterobject.c:62 iter_iternext — never uses
 		// sq_length; always calls sq_item and stops on IndexError or

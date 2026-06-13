@@ -430,6 +430,27 @@ func typeGetMRO(o Object) (Object, error) {
 	return NewTuple(items), nil
 }
 
+// SetTypingParameters pins the __parameters__ tuple as a counted reference
+// on the type, dropping any previously pinned tuple. TypingParameters is an
+// un-counted Go field, so without this pin the tuple would sit at refcount 0
+// while still reachable through cls.__parameters__ and tuple_dealloc would
+// nil its items the first time the VM transiently decreffed it. CPython holds
+// cls.__parameters__ as a normal counted instance-dict entry.
+//
+// CPython: Lib/typing.py:1222 cls.__parameters__ = tuple(tvars)
+func SetTypingParameters(t *Type, tup *Tuple) {
+	if t.TypingParameters == tup {
+		return
+	}
+	if tup != nil {
+		Incref(tup)
+	}
+	if t.TypingParameters != nil {
+		Decref(t.TypingParameters)
+	}
+	t.TypingParameters = tup
+}
+
 // typeGetParameters returns the class's __parameters__ tuple. Priority:
 // 1. TypingParameters set by typing.Generic.__init_subclass__ (traditional generics)
 // 2. TypeParams set from the PEP 695 class body (__type_params__)
@@ -461,9 +482,9 @@ func typeSetParameters(o Object, v Object) error {
 		return fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if tup, ok2 := v.(*Tuple); ok2 {
-		t.TypingParameters = tup
+		SetTypingParameters(t, tup)
 	} else if v == None() {
-		t.TypingParameters = nil
+		SetTypingParameters(t, nil)
 	} else {
 		return fmt.Errorf("TypeError: __parameters__ must be a tuple")
 	}

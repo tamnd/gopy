@@ -44,8 +44,11 @@ func init() {
 	bind("strip", strStripMethod(StrStrip))
 	bind("lstrip", strStripMethod(StrLStrip))
 	bind("rstrip", strStripMethod(StrRStrip))
-	bind("split", strSplitMethod)
-	bind("rsplit", strRSplitMethod)
+	bindKw := func(name string, params []string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		SetTypeDescr(strType, name, NewMethodDescr(strType, name, fn).WithKwParams(name, params, 0))
+	}
+	bindKw("split", []string{"sep", "maxsplit"}, strSplitMethod)
+	bindKw("rsplit", []string{"sep", "maxsplit"}, strRSplitMethod)
 	bind("splitlines", strSplitLinesMethod)
 	bind("replace", strReplaceMethod)
 	bind("join", strJoinMethod)

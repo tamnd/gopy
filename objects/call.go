@@ -41,7 +41,34 @@ func vectorcallFunction(callable Object) func(Object, []Object, uint, *Tuple) (O
 	if callable == nil {
 		return nil
 	}
-	return callable.Type().Vectorcall
+	tp := callable.Type()
+	// Py_TPFLAGS_HAVE_VECTORCALL gates the fast path: a type whose
+	// __call__ was overridden has the flag cleared, so the call falls
+	// through to tp_call even though a Vectorcall slot may still hang
+	// off the type object.
+	//
+	// CPython: Include/internal/pycore_call.h:124 _PyVectorcall_FunctionInline
+	if tp.TpFlags&TpFlagHaveVectorcall == 0 {
+		return nil
+	}
+	// A per-instance vectorcall pointer mirrors tp_vectorcall_offset: a
+	// nil return means the slot is NULL and the call falls through to
+	// tp_call (PyVectorcall_Call handles that case).
+	if iv, ok := callable.(InstanceVectorcaller); ok {
+		return iv.InstanceVectorcall()
+	}
+	return tp.Vectorcall
+}
+
+// InstanceVectorcaller lets an object expose a per-instance vectorcall
+// function, the gopy analog of reading tp_vectorcall_offset off the
+// instance. A nil return models a NULL slot: the caller falls back to
+// tp_call. Types whose every instance shares one vectorcall (CFunction,
+// type, bound method) do not implement this and use Type.Vectorcall.
+//
+// CPython: Include/cpython/object.h tp_vectorcall_offset
+type InstanceVectorcaller interface {
+	InstanceVectorcall() func(Object, []Object, uint, *Tuple) (Object, error)
 }
 
 // MakeTpCall is the slow path used when a callable does not advertise
@@ -170,6 +197,14 @@ func Call(callable Object, args *Tuple, kwargs *Dict) (Object, error) {
 		return vectorcallCall(fn, callable, args, kwargs)
 	}
 	t := callable.Type()
+	// A ternaryfunc-style tp_call gets the original tuple straight through,
+	// matching PyObject_Call: this preserves identity for tp_calls that
+	// return their args tuple (f(*args) is args).
+	//
+	// CPython: Objects/call.c:242 _PyObject_Call (tp_call branch)
+	if t.CallTuple != nil {
+		return t.CallTuple(callable, args, kwargs)
+	}
 	if t.Call == nil {
 		return nil, objectIsNotCallable(callable)
 	}
@@ -305,11 +340,47 @@ func CallPrepend(callable Object, obj Object, args *Tuple, kwargs *Dict) (Object
 }
 
 // objectIsNotCallable formats the canonical TypeError raised when a
-// callable lacks both vectorcall and tp_call.
+// callable lacks both vectorcall and tp_call. When the object is a
+// module whose __name__ matches a callable attribute (the classic
+// `import pprint; pprint(x)` mistake), CPython appends a
+// "Did you mean: 'name.name(...)'?" hint.
 //
-// CPython: Objects/call.c:162 object_is_not_callable
+// CPython: Objects/call.c:163 object_is_not_callable
 func objectIsNotCallable(callable Object) error {
+	if mod, ok := callable.(*Module); ok {
+		if hint := moduleCallableHint(mod); hint != "" {
+			return fmt.Errorf("TypeError: '%s' object is not callable. Did you mean: '%s(...)'?",
+				callable.Type().Name, hint)
+		}
+	}
 	return fmt.Errorf("TypeError: '%s' object is not callable", callable.Type().Name)
+}
+
+// moduleCallableHint returns "name.name" when the module's __name__ is
+// also the name of a callable attribute on the module, else "".
+//
+// CPython: Objects/call.c:171 (PyModule_GetNameObject + PyCallable_Check)
+func moduleCallableHint(mod *Module) string {
+	d := mod.Dict()
+	if d == nil {
+		return ""
+	}
+	nameObj, err := d.GetItem(NewStr("__name__"))
+	if err != nil || nameObj == nil {
+		return ""
+	}
+	name, ok := nameObj.(*Unicode)
+	if !ok {
+		return ""
+	}
+	attr, err := d.GetItem(NewStr(name.Value()))
+	if err != nil || attr == nil {
+		return ""
+	}
+	if !Callable(attr) {
+		return ""
+	}
+	return name.Value() + "." + name.Value()
 }
 
 // dictToMap copies a *Dict's entries into the map[string]Object shape

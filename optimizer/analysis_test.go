@@ -106,6 +106,7 @@ func (s *stubFrame) FrameGenOwner() objects.Object              { return nil }
 func (s *stubFrame) FrameRegisterWrapper(objects.Object)        {}
 func (s *stubFrame) FrameMarkExposed()                          {}
 func (s *stubFrame) FrameExposed() bool                         { return false }
+func (s *stubFrame) VarkeywordsDict() *objects.Dict             { return nil }
 
 // TestRemoveGlobals_RewritesGuardToCheckFunction confirms that the
 // first _GUARD_GLOBALS_VERSION on a fresh trace becomes _CHECK_FUNCTION

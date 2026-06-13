@@ -302,6 +302,37 @@ func setDealloc(o Object) {
 		h(o)
 	}
 	ClearWeakRefs(o)
+	setDecrefEntries(o.(*Set).entries)
+}
+
+// setDecrefEntries drops the set's counted reference to every live key.
+// Used by set_dealloc, clear, re-init, and the in-place set-op table
+// replacements just before the old table is discarded.
+//
+// CPython: Objects/setobject.c:539 set_dealloc (Py_XDECREF over entries)
+func setDecrefEntries(entries []setEntry) {
+	for i := range entries {
+		e := &entries[i]
+		if e.used && e.key != nil {
+			Decref(e.key)
+		}
+	}
+}
+
+// setStealEntries replaces dst's table with src's: it releases dst's old
+// keys and takes over src's already-counted key references. src is emptied
+// so its own later teardown decrefs nothing (single-ownership transfer).
+// Used by the in-place set operators (&=, ^=, intersection_update, ...).
+//
+// CPython: Objects/setobject.c:1330 set_update_internal (table swap)
+func setStealEntries(dst, src *Set) {
+	setDecrefEntries(dst.entries)
+	dst.entries = src.entries
+	dst.used = src.used
+	dst.fill = src.fill
+	src.entries = nil
+	src.used = 0
+	src.fill = 0
 }
 
 // setTraverse visits each element of a set or frozenset.
@@ -474,6 +505,9 @@ func (s *Set) Discard(key Object) error {
 	// Mark as tombstone so probe chains threading through this slot
 	// remain intact. grow() rebuilds the table without tombstones.
 	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	if old := s.entries[idx].key; old != nil {
+		Decref(old)
+	}
 	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	s.version++
@@ -594,6 +628,10 @@ func (s *Set) insert(h int64, key Object) error {
 		return nil
 	}
 	wasTombstone := s.entries[idx].dummy
+	// The table now holds a counted reference to key; set_dealloc and the
+	// removal paths (discard/pop/clear) drop it again.
+	// CPython: Objects/setobject.c:246 set_add_entry (Py_INCREF(key))
+	Incref(key)
 	s.entries[idx] = setEntry{hash: h, key: key, used: true}
 	s.used++
 	s.version++
@@ -1192,8 +1230,7 @@ func setIAnd(a, b Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	as.entries = result.entries
-	as.used = result.used
+	setStealEntries(as, result)
 	return as, nil
 }
 
@@ -1229,8 +1266,7 @@ func setIXor(a, b Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	as.entries = result.entries
-	as.used = result.used
+	setStealEntries(as, result)
 	return as, nil
 }
 
@@ -1277,6 +1313,7 @@ func setInitMethod(args []Object, kwargs map[string]Object) (Object, error) {
 		return None(), nil
 	}
 	// Clear and repopulate.
+	setDecrefEntries(s.entries)
 	s.entries = make([]setEntry, setMinSize)
 	s.fill = 0
 	s.used = 0
@@ -1316,6 +1353,9 @@ func setRemoveMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	// Tombstone: mark deleted but keep probe chain intact.
 	// CPython: Objects/setobject.c:L743 set_discard_key DUMMY marker
+	if old := s.entries[idx].key; old != nil {
+		Decref(old)
+	}
 	s.entries[idx] = setEntry{dummy: true}
 	s.used--
 	s.version++
@@ -1344,6 +1384,7 @@ func setClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	}
 	s := args[0].(*Set)
 	s.version++
+	setDecrefEntries(s.entries)
 	s.entries = make([]setEntry, setMinSize)
 	s.used = 0
 	s.fill = 0
@@ -1631,8 +1672,7 @@ func setIntersectionUpdateMethod(args []Object, _ map[string]Object) (Object, er
 		if err != nil {
 			return nil, err
 		}
-		s.entries = result.entries
-		s.used = result.used
+		setStealEntries(s, result)
 	}
 	return None(), nil
 }
@@ -1655,8 +1695,7 @@ func setDifferenceUpdateMethod(args []Object, _ map[string]Object) (Object, erro
 		if err != nil {
 			return nil, err
 		}
-		s.entries = result.entries
-		s.used = result.used
+		setStealEntries(s, result)
 	}
 	return None(), nil
 }
@@ -1694,8 +1733,7 @@ func setSymmetricDifferenceUpdateMethod(args []Object, _ map[string]Object) (Obj
 	if err != nil {
 		return nil, err
 	}
-	s.entries = result.entries
-	s.used = result.used
+	setStealEntries(s, result)
 	return None(), nil
 }
 

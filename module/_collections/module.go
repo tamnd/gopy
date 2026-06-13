@@ -104,7 +104,7 @@ func newDequeType() *objects.Type {
 	objects.SetTypeDescr(t, "reverse", objects.NewMethodDescr(t, "reverse", dequeReverseMethod))
 	objects.SetTypeDescr(t, "count", objects.NewMethodDescr(t, "count", dequeCountMethod))
 	objects.SetTypeDescr(t, "remove", objects.NewMethodDescr(t, "remove", dequeRemoveMethod))
-	objects.SetTypeDescr(t, "index", objects.NewMethodDescr(t, "index", dequeIndexMethod))
+	objects.SetTypeDescr(t, "index", objects.NewMethodDescrConv(t, "index", objects.MethFastcall, dequeIndexMethod))
 	objects.SetTypeDescr(t, "insert", objects.NewMethodDescr(t, "insert", dequeInsertMethod))
 	objects.SetTypeDescr(t, "clear", objects.NewMethodDescr(t, "clear", dequeClearMethod))
 	objects.SetTypeDescr(t, "copy", objects.NewMethodDescr(t, "copy", dequeCopyMethod))

@@ -31,6 +31,21 @@ type MethodDescr struct {
 	conv    MethFlag
 	fn      func(args []Object, kwargs map[string]Object) (Object, error)
 	owner   *Type
+
+	// kwParams, when non-nil, names every keyword the underlying impl
+	// accepts. methodDescrVectorcall walks the kwnames tuple in caller
+	// order and rejects the first keyword absent from this list, exactly
+	// where Argument Clinic's _PyArg_UnpackKeywords scans for extraneous
+	// keywords before the impl runs. kwFname is the bare function name
+	// the message reports ("split", "ImportError"); kwCountLimit > 0
+	// switches to the vgetargskeywords "takes at most N keyword
+	// arguments" surplus check that fires ahead of the per-key scan.
+	//
+	// CPython: Python/getargs.c:1489 _PyArg_UnpackKeywords (per-key scan)
+	// CPython: Python/getargs.c:1638 vgetargskeywords (surplus count)
+	kwParams     []string
+	kwFname      string
+	kwCountLimit int
 }
 
 // MethodDescrType is the type singleton for method descriptors.
@@ -39,6 +54,11 @@ type MethodDescr struct {
 var MethodDescrType = NewType("method_descriptor", []*Type{objectType})
 
 func init() {
+	// PyMethodDescr_Type carries Py_TPFLAGS_METHOD_DESCRIPTOR and
+	// Py_TPFLAGS_HAVE_VECTORCALL (tp_vectorcall_offset = d_vectorcall).
+	//
+	// CPython: Objects/descrobject.c:1480 PyMethodDescr_Type tp_flags
+	MethodDescrType.TpFlags |= TpFlagMethodDescriptor | TpFlagHaveVectorcall
 	MethodDescrType.Repr = methodDescrRepr
 	MethodDescrType.Str = methodDescrRepr
 	MethodDescrType.DescrGet = methodDescrGet
@@ -86,6 +106,22 @@ func NewMethodDescr(owner *Type, name string, fn func(args []Object, kwargs map[
 func NewMethodDescrConv(owner *Type, name string, conv MethFlag, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
 	d := &MethodDescr{name: name, conv: conv, fn: fn, owner: owner}
 	d.init(MethodDescrType)
+	return d
+}
+
+// WithKwParams declares the keyword names the impl accepts so the
+// descriptor's vectorcall arm rejects extraneous keywords in caller
+// order, matching the Argument Clinic / getargs keyword scan. fname is
+// the bare name printed in the TypeError ("split"); a positive
+// countLimit enables the vgetargskeywords surplus check ("takes at most
+// N keyword arguments") ahead of the per-key scan, as exceptions like
+// ImportError do through PyArg_ParseTupleAndKeywords.
+//
+// CPython: Python/getargs.c:1489 _PyArg_UnpackKeywords
+func (d *MethodDescr) WithKwParams(fname string, params []string, countLimit int) *MethodDescr {
+	d.kwFname = fname
+	d.kwParams = params
+	d.kwCountLimit = countLimit
 	return d
 }
 
@@ -183,15 +219,49 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	var kwargs map[string]Object
 	if nkw > 0 {
 		kwargs = make(map[string]Object, nkw)
+		order := make([]string, 0, nkw)
 		for i := 0; i < nkw; i++ {
 			name, err := Str(kwnames.Item(i))
 			if err != nil {
 				return nil, err
 			}
 			kwargs[name] = args[nargs+i]
+			order = append(order, name)
+		}
+		if err := d.checkKwParams(order); err != nil {
+			return nil, err
 		}
 	}
 	return d.fn(pos, kwargs)
+}
+
+// checkKwParams runs the extraneous-keyword scan declared by
+// WithKwParams over the keyword names in caller order. The surplus
+// count check fires first when kwCountLimit is set (vgetargskeywords),
+// then the first keyword missing from kwParams raises the
+// unexpected-keyword TypeError with the suggestion tail.
+//
+// CPython: Python/getargs.c:1489 _PyArg_UnpackKeywords
+func (d *MethodDescr) checkKwParams(order []string) error {
+	if d.kwParams == nil {
+		return nil
+	}
+	if d.kwCountLimit > 0 && len(order) > d.kwCountLimit {
+		return CheckKeywordCount(d.kwFname, 0, len(order), d.kwCountLimit)
+	}
+	for _, k := range order {
+		known := false
+		for _, p := range d.kwParams {
+			if k == p {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return UnexpectedKeywordError(d.kwFname, k, d.kwParams)
+		}
+	}
+	return nil
 }
 
 // methodDescrCheckArity enforces the METH_NOARGS / METH_O calling
@@ -213,6 +283,15 @@ func methodDescrCheckArity(d *MethodDescr, nargs, nkw int) error {
 		return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
 	}
 	switch d.conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod) {
+	case MethVarargs:
+		// METH_VARARGS without METH_KEYWORDS: method_vectorcall_VARARGS
+		// routes through method_check_args, which rejects any keyword
+		// arguments. The METH_KEYWORDS variant skips this check.
+		//
+		// CPython: Objects/descrobject.c:266 method_check_args
+		if nkw > 0 {
+			return noKeyword()
+		}
 	case MethNoArgs:
 		if nkw > 0 {
 			return noKeyword()

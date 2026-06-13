@@ -885,6 +885,7 @@ func fixupSlotDispatchers(t *Type) {
 			inheritDirectBaseScalars(t, base)
 		}
 	}
+	inheritTpNewFromBestBase(t)
 	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
@@ -1095,6 +1096,28 @@ func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
 	return attr, nil
 }
 
+// inheritTpNewFromBestBase fixes tp_new to come from best_base rather than
+// whichever base happens to be first in the bases list. CPython's
+// inherit_special copies tp_new (and the instance layout) from tp_base, the
+// solid base chosen by best_base. inheritDirectBaseScalars runs per base in
+// list order, so a multiple-inheritance class whose layout-fixing base is not
+// first (class C(PyMixin, CStruct) where CStruct carries the instance struct)
+// would otherwise inherit the first base's generic object tp_new and allocate
+// the wrong struct. Override with the best base's tp_new so the right
+// allocator runs; fixupTpNew still routes to slotTpNew when a Python __new__
+// is in play.
+//
+// CPython: Objects/typeobject.c:7019 inherit_special (tp_new from tp_base)
+func inheritTpNewFromBestBase(t *Type) {
+	base, err := bestBase(t.Bases)
+	if err != nil || base == nil {
+		return
+	}
+	if base.TpNew != nil {
+		t.TpNew = base.TpNew
+	}
+}
+
 // fixupTpNew installs slotTpNew when the class body defines its own
 // __new__. Without this, typeCallViaTpNew would call the inherited
 // C-level tp_new (e.g. int's intTpNew) directly and skip the user's
@@ -1138,9 +1161,25 @@ func fixupTpNew(t *Type) {
 
 // fixupCallReprStr wires tp_call, tp_repr, and tp_str.
 func fixupCallReprStr(t *Type) {
-	if lookupDunderCallable(t, "__call__") {
+	if callOverridesVectorcall(t) {
 		t.Call = slotTpCall
 		t.Vectorcall = nil
+		// A generic __call__ is incompatible with vectorcall, so a heap
+		// type that defines its own __call__ does not advertise the flag.
+		//
+		// CPython: Objects/typeobject.c:11392 update_one_slot
+		t.TpFlags &^= TpFlagHaveVectorcall
+	} else {
+		// Inherit Py_TPFLAGS_HAVE_VECTORCALL from the nearest base in the
+		// MRO that advertises it, since tp_call was not overridden.
+		//
+		// CPython: Objects/typeobject.c:8354 inherit_slots
+		for _, b := range t.MRO {
+			if b != t && b.TpFlags&TpFlagHaveVectorcall != 0 {
+				t.TpFlags |= TpFlagHaveVectorcall
+				break
+			}
+		}
 	}
 	if lookupDunderCallable(t, "__repr__") {
 		t.Repr = slotTpRepr
@@ -1174,10 +1213,10 @@ func fixupHashAndIter(t *Type) {
 	if isOwnDescriptor(t, "__eq__") && !isOwnDescriptor(t, "__hash__") {
 		t.Hash = unhashableTypeHash
 		SetTypeDescr(t, "__hash__", None())
-		if lookupDunderCallable(t, "__iter__") {
+		if isOwnDescriptor(t, "__iter__") {
 			t.Iter = slotTpIter
 		}
-		if lookupDunderCallable(t, "__next__") {
+		if isOwnDescriptor(t, "__next__") {
 			t.IterNext = slotTpIterNext
 		}
 		return
@@ -1193,10 +1232,21 @@ func fixupHashAndIter(t *Type) {
 	case t.Hash == nil:
 		t.Hash = identityHash
 	}
-	if lookupDunderCallable(t, "__iter__") {
+	// Only swap to the generic dispatcher when __iter__/__next__ is
+	// defined directly on t. A purely inherited descriptor means the
+	// C-level Iter slot that inheritSlotsAllMRO already copied (e.g.
+	// list's listIter) is the right one; installing slotTpIter in that
+	// case routes every iter(subclass) back through a Python-level
+	// __iter__ round-trip that over-increfs the source.
+	//
+	// CPython: Objects/typeobject.c:9874 update_one_slot keeps the
+	// inherited wrapper's C function (d_wrapped) when the resolved
+	// descriptor is the base wrapper_descriptor, only installing the
+	// generic slot for a real override.
+	if isOwnDescriptor(t, "__iter__") {
 		t.Iter = slotTpIter
 	}
-	if lookupDunderCallable(t, "__next__") {
+	if isOwnDescriptor(t, "__next__") {
 		t.IterNext = slotTpIterNext
 	}
 }
@@ -1546,6 +1596,29 @@ func ensureSequenceMethods(t *Type) *SequenceMethods {
 // MRO via a real descriptor (Function, BuiltinFunction, etc.). Plain
 // data attributes are ignored: `__hash__ = None` on the class means
 // the type is explicitly unhashable.
+// callOverridesVectorcall reports whether t resolves __call__ to a real
+// override (a Python __call__ or any non-slot-wrapper callable) rather than
+// the auto-generated tp_call slot wrapper that a HAVE_VECTORCALL base
+// installs. Only a real override forces the generic slot_tp_call path and
+// clears Py_TPFLAGS_HAVE_VECTORCALL; inheriting the base's vectorcall wrapper
+// keeps the fast path, so MethodDescriptorHeap(Base) and DerivedType(Super)
+// stay vectorcall-capable.
+//
+// CPython: Objects/typeobject.c:11392 update_one_slot (tp_call / vectorcall)
+func callOverridesVectorcall(t *Type) bool {
+	d, _ := LookupDescriptor(t, "__call__")
+	if d == nil || d == None() {
+		return false
+	}
+	// The wrapper AddCallSlotWrapper installs is a method_descriptor named
+	// "__call__"; it routes through the owning type's tp_call/vectorcall and
+	// is therefore vectorcall-compatible.
+	if md, ok := d.(*MethodDescr); ok && md.Name() == "__call__" {
+		return false
+	}
+	return true
+}
+
 func lookupDunderCallable(t *Type, name string) bool {
 	d, _ := LookupDescriptor(t, name)
 	if d == nil {
@@ -1588,14 +1661,17 @@ func lookupMaybeMethod(self Object, name string) (Object, bool, error) {
 // sole positional argument; when false, fn is already bound and the
 // call carries no args.
 //
-// The args tuple is auto-tracked on creation (see NewTuple), and Go's
-// runtime cannot reclaim a tuple that still has a tracked-map entry.
-// Without an explicit GCUntrackHook the tuple lingers forever, holds
-// a phantom tp_traverse edge to self, and a subsequent cycle scan
-// over-decrements self.refs by one. The over-decrement matters most
-// in the resurrection path: a __del__ that hands self back to the
-// caller wants the next Collect to detect the lone-cycle and reclaim
-// it, but the lingering args tuple breaks the refcount math.
+// CPython's call_unbound_noarg passes self on a borrowed vectorcall
+// stack, so nothing pins self past the call. gopy threads arguments
+// through a real argument tuple, and NewTuple takes a counted reference
+// on every item it stores (so self.refs goes up by one for the unbound
+// path). That reference must be released once the call returns or it
+// leaks: a single d[o]=1 whose key hashes through slot_tp_hash would
+// otherwise strand a permanent +1 on the key, and the cycle collector
+// would never see the instance go unreachable. Decref on the throwaway
+// tuple runs tupleDealloc, which both untracks it from the collector and
+// drops the per-item reference, so self is balanced exactly as CPython's
+// borrowed stack leaves it.
 //
 // CPython: Objects/typeobject.c:2308 call_unbound_noarg
 func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
@@ -1606,9 +1682,7 @@ func callUnboundNoArg(unbound bool, fn Object, self Object) (Object, error) {
 		args = NewTuple(nil)
 	}
 	result, err := Call(fn, args, nil)
-	if h := GCUntrackHook; h != nil {
-		h(args)
-	}
+	Decref(args)
 	return result, err
 }
 
@@ -1638,9 +1712,10 @@ func vectorcallMethod(o Object, name string, extra ...Object) (Object, error) {
 	}
 	args := NewTuple(callArgs)
 	res, callErr := Call(fn, args, nil)
-	if h := GCUntrackHook; h != nil {
-		h(args)
-	}
+	// NewTuple counted a reference on every argument (self plus extra);
+	// release the throwaway tuple so tupleDealloc untracks it and drops
+	// those per-item references rather than stranding them.
+	Decref(args)
 	if !unbound {
 		Decref(fn)
 	}
@@ -1676,9 +1751,10 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 		}
 	}
 	res, callErr := Call(fn, posArgs, kwDict)
-	if h := GCUntrackHook; h != nil {
-		h(posArgs)
-	}
+	// NewTuple counted a reference on each positional; release the
+	// throwaway tuple so tupleDealloc untracks it and drops those
+	// per-item references rather than stranding them.
+	Decref(posArgs)
 	if !unbound {
 		Decref(fn)
 	}

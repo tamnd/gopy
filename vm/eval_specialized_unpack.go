@@ -17,6 +17,7 @@ package vm
 import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/stackref"
 )
 
 // fastUnpackSequenceTwoTuple implements UNPACK_SEQUENCE_TWO_TUPLE.
@@ -33,9 +34,13 @@ func (e *evalState) fastUnpackSequenceTwoTuple(oparg uint32) (int, bool) {
 	if seq.Len() != 2 {
 		return 0, false
 	}
+	// Each element is a new reference (PyStackRef_FromPyObjectNew); the
+	// items stay borrowed in the tuple until the seq input is closed below.
+	val1 := stackref.FromObjectNew(seq.Item(1))
+	val0 := stackref.FromObjectNew(seq.Item(0))
 	e.pop()
-	e.pushObject(seq.Item(1))
-	e.pushObject(seq.Item(0))
+	e.push(val1)
+	e.push(val0)
 	return e.cacheAdvance(compile.UNPACK_SEQUENCE), true
 }
 
@@ -51,9 +56,14 @@ func (e *evalState) fastUnpackSequenceTuple(oparg uint32) (int, bool) {
 	if seq.Len() != n {
 		return 0, false
 	}
+	// Each element becomes a new reference before the seq input is closed.
+	vals := make([]stackref.Ref, n)
+	for i := 0; i < n; i++ {
+		vals[i] = stackref.FromObjectNew(seq.Item(i))
+	}
 	e.pop()
 	for i := n - 1; i >= 0; i-- {
-		e.pushObject(seq.Item(i))
+		e.push(vals[i])
 	}
 	return e.cacheAdvance(compile.UNPACK_SEQUENCE), true
 }
@@ -70,9 +80,14 @@ func (e *evalState) fastUnpackSequenceList(oparg uint32) (int, bool) {
 	if seq.Len() != n {
 		return 0, false
 	}
+	// Each element becomes a new reference before the seq input is closed.
+	vals := make([]stackref.Ref, n)
+	for i := 0; i < n; i++ {
+		vals[i] = stackref.FromObjectNew(seq.Item(i))
+	}
 	e.pop()
 	for i := n - 1; i >= 0; i-- {
-		e.pushObject(seq.Item(i))
+		e.push(vals[i])
 	}
 	return e.cacheAdvance(compile.UNPACK_SEQUENCE), true
 }

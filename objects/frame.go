@@ -140,6 +140,15 @@ type InterpreterFrame interface {
 	//
 	// CPython: Objects/frameobject.c:1138 take_ownership (frame->frame_obj != NULL)
 	FrameExposed() bool
+	// VarkeywordsDict returns the borrowed **kwargs parameter dict bound
+	// in the frame's locals, or nil when the code has no CO_VARKEYWORDS
+	// parameter. frame.clear() reads this before clearing so it can
+	// release the captured values once both the frame slot and the
+	// take_ownership snapshot have dropped their references; gopy wires no
+	// global dict tp_dealloc, so the synchronous release lives here.
+	//
+	// CPython: Objects/codeobject.c co_argcount / CO_VARKEYWORDS layout
+	VarkeywordsDict() *Dict
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
@@ -289,6 +298,14 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 		return nil, fmt.Errorf("RuntimeError: cannot clear an executing frame")
 	}
 	if f.interp != nil {
+		// Capture the **kwargs parameter dict before clearing. The frame
+		// slot and the take_ownership snapshot each hold a reference to it,
+		// so its values are only safe to release once FrameDropSnapshot has
+		// run too. FrameClearLocals already releases the dict when no
+		// snapshot pins it (the generator/natural paths); doing it again
+		// here after the snapshot drops is idempotent (clearContents only
+		// fires at refcount zero and empties the table).
+		kwDict := f.interp.VarkeywordsDict()
 		f.interp.FrameClearLocals()
 		// Explicit clear() must drop the take_ownership snapshot too. The
 		// _PyGen_Finalize call above snapshots LocalsPlus (Dup'ing every
@@ -301,6 +318,12 @@ func frameClear(args []Object, _ map[string]Object) (Object, error) {
 		//
 		// CPython: Objects/frameobject.c:1994 frame_clear_impl
 		f.interp.FrameDropSnapshot()
+		// Both the frame slot and the snapshot have now dropped their
+		// references on the **kwargs dict, so this is the point where it
+		// reaches refcount zero and its captured values can be released.
+		if kwDict != nil {
+			ReleaseDeadDictContents(kwDict)
+		}
 	}
 	return None(), nil
 }
@@ -453,6 +476,18 @@ func frameTraverse(o Object, visit Visitor) error {
 	f := o.(*Frame)
 	if f.trace != nil {
 		if err := visit(f.trace); err != nil {
+			return err
+		}
+	}
+	// Visit the spill dict for names that are not fast locals. PEP 667
+	// writes to unknown names through the FrameLocalsProxy land here, and
+	// the dict is reachable only through this un-counted Go field, so
+	// without this visit the cycle collector never reaches the values it
+	// holds and reclaims them out from under a live frame.
+	//
+	// CPython: Objects/frameobject.c:1949 frame_traverse (Py_VISIT f_extra_locals)
+	if f.extraLocals != nil {
+		if err := visit(f.extraLocals); err != nil {
 			return err
 		}
 	}

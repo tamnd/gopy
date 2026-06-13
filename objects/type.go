@@ -80,6 +80,18 @@ type Type struct {
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
+	// CallTuple is an optional faithful rendering of CPython's ternaryfunc
+	// tp_call ABI: PyObject_Call hands the original positional tuple and
+	// keyword dict straight to tp_call without copying. gopy's Call slot
+	// instead explodes the tuple into a []Object, which loses the tuple's
+	// identity. Types whose tp_call returns its args tuple (so callers can
+	// assert `f(*args) is args`) set CallTuple; PyObject_Call (objects.Call)
+	// consults it before Call so the exact tuple flows through unchanged.
+	// The vectorcall->tp_call adapter (MakeTpCall) still rebuilds a fresh
+	// tuple, matching _PyObject_MakeTpCall.
+	//
+	// CPython: Objects/call.c:242 _PyObject_Call (tp_call branch)
+	CallTuple func(o Object, args *Tuple, kwargs *Dict) (Object, error)
 	// TpNew is the tp_new slot: the constructor invoked when the type
 	// is called (e.g. int(x)). typeCall reaches this through the
 	// metaclass tp_call. Built-in primitive types set TpNew rather
@@ -421,6 +433,20 @@ const (
 	//
 	// CPython: Include/object.h:280 Py_TPFLAGS_HEAPTYPE
 	TpFlagHeapType uint64 = 1 << 9
+	// TpFlagHaveVectorcall mirrors Py_TPFLAGS_HAVE_VECTORCALL: set on
+	// types whose instances expose a per-instance vectorcall pointer at
+	// tp_vectorcall_offset. A heap subclass inherits the bit, but loses
+	// it the moment __call__ is overridden (inherit_special clears it).
+	//
+	// CPython: Include/object.h:354 Py_TPFLAGS_HAVE_VECTORCALL
+	TpFlagHaveVectorcall uint64 = 1 << 11
+	// TpFlagMethodDescriptor mirrors Py_TPFLAGS_METHOD_DESCRIPTOR: set on
+	// PyFunction_Type and PyMethodDescr_Type so the LOAD_ATTR / CALL
+	// machinery treats them as unbound methods. A mutable heap subclass
+	// does NOT inherit it.
+	//
+	// CPython: Include/object.h:340 Py_TPFLAGS_METHOD_DESCRIPTOR
+	TpFlagMethodDescriptor uint64 = 1 << 17
 )
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.

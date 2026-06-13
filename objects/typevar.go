@@ -417,7 +417,11 @@ func init() {
 		if len(args) < 3 {
 			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
 		}
-		// alias is args[1], subst_args is args[2]; just return the args tuple unchanged
+		// alias is args[1], subst_args is args[2]; just return the args tuple unchanged.
+		// CPython returns Py_NewRef(args): the result is a new reference, so the
+		// borrowed input must be increffed before it is handed back, otherwise the
+		// caller's arg-drop over-decrefs the tuple (now caught by tuple_dealloc).
+		Incref(args[2])
 		return args[2], nil
 	}))
 
@@ -669,12 +673,12 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 	}
 	origBases, _ := GetAttr(cls, NewStr("__orig_bases__"))
 	if origBases == nil {
-		cls.TypingParameters = NewTuple(nil)
+		SetTypingParameters(cls, NewTuple(nil))
 		return None(), nil
 	}
 	ob, ok := origBases.(*Tuple)
 	if !ok {
-		cls.TypingParameters = NewTuple(nil)
+		SetTypingParameters(cls, NewTuple(nil))
 		return None(), nil
 	}
 	// Collect all type parameters from __orig_bases__.
@@ -733,9 +737,9 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 			return nil, fmt.Errorf("TypeError: Some type variables (%s) are not listed in Generic[%s]",
 				joinStrings(extra, ", "), s)
 		}
-		cls.TypingParameters = gvars
+		SetTypingParameters(cls, gvars)
 	} else {
-		cls.TypingParameters = allParams
+		SetTypingParameters(cls, allParams)
 	}
 	return None(), nil
 }

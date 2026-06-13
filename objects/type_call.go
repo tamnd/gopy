@@ -18,6 +18,12 @@ import (
 )
 
 func init() {
+	// PyType_Type advertises Py_TPFLAGS_HAVE_VECTORCALL
+	// (tp_vectorcall_offset = tp_vectorcall) so type(...) and class
+	// instantiation take the fast path.
+	//
+	// CPython: Objects/typeobject.c type_ready sets HAVE_VECTORCALL
+	typeType.TpFlags |= TpFlagHaveVectorcall
 	typeType.Call = typeCall
 	typeType.Vectorcall = typeVectorcall
 	// Register type.__new__ so super().__new__() inside a metaclass

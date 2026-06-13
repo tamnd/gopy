@@ -681,11 +681,16 @@ func buildModule() (*objects.Module, error) {
 		{"sequence_list", sequenceList},
 		{"sequence_tuple", sequenceTuple},
 		{"sequence_fast", sequenceFast},
+		{"call_vectorcall", callVectorcall},
+		{"call_vectorcall_method", callVectorcallMethod},
 	}
 	for _, mm := range methods {
 		if err := d.SetItem(objects.NewStr(mm.name), objects.NewBuiltinFunction(mm.name, mm.fn)); err != nil {
 			return nil, err
 		}
+	}
+	if err := buildVectorcallLimitedTypes(d); err != nil {
+		return nil, err
 	}
 	return m, nil
 }

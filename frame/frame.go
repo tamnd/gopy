@@ -521,11 +521,54 @@ func (f *Frame) FrameFreeLocal(i int) objects.Object {
 //
 // CPython: Python/frame.c:108 _PyFrame_ClearExceptCode
 func (f *Frame) FrameClearLocals() {
+	// Capture the **kwargs parameter dict before its slot is closed. It is
+	// freshly built by argument binding and owned exclusively by this
+	// frame, so when Close drops it to refcount zero its stored values
+	// must be released synchronously: gopy wires no global dict tp_dealloc
+	// (a namespace dict reachable only through an un-counted Go field
+	// routinely sits at refcount zero while live, so a blanket dealloc
+	// would corrupt it), and with the cycle collector disabled nothing
+	// else reclaims the captured values. Targeting only the varkeywords
+	// slot keeps a local that merely aliases a namespace dict
+	// (g = globals()) untouched.
+	//
+	// CPython: Python/frame.c:108 _PyFrame_ClearExceptCode (per-local
+	// Py_DECREF, where the kwargs dict's own tp_dealloc clears it)
+	kwDict := f.VarkeywordsDict()
 	for i := range f.LocalsPlus {
 		f.LocalsPlus[i].Close()
 		f.LocalsPlus[i] = stackref.Null
 	}
+	if kwDict != nil {
+		objects.ReleaseDeadDictContents(kwDict)
+	}
 	f.StackTop = 0
+}
+
+// VarkeywordsDict returns the borrowed **kwargs parameter dict bound in
+// LocalsPlus, or nil when the code has no CO_VARKEYWORDS parameter or the
+// slot does not currently hold a plain dict. The slot index mirrors the
+// layout argument binding builds in callPyFunction: positional and
+// keyword-only args, then the optional *args tuple, then **kwargs.
+// frame.clear() reads this before clearing so it can release the dict's
+// captured values once both the frame slot and the take_ownership
+// snapshot have dropped their references.
+//
+// CPython: Objects/codeobject.c co_argcount / CO_VARKEYWORDS layout
+func (f *Frame) VarkeywordsDict() *objects.Dict {
+	co := f.Code
+	if co == nil || co.Flags&0x08 == 0 {
+		return nil
+	}
+	slot := co.Argcount + co.KwonlyArgcount
+	if co.Flags&0x04 != 0 {
+		slot++
+	}
+	if slot < 0 || slot >= len(f.LocalsPlus) {
+		return nil
+	}
+	d, _ := f.LocalsPlus[slot].AsObject().(*objects.Dict)
+	return d
 }
 
 // FrameDropSnapshot releases the take_ownership snapshot. It is the

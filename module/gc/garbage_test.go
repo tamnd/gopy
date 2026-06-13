@@ -40,6 +40,8 @@ func TestGarbageListEmptyByDefault(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	if Collect(2) != 2 {
 		t.Fatalf("cycle did not reclaim")
@@ -63,6 +65,8 @@ func TestGarbageListPopulatedUnderSaveAll(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	SetDebug(DebugSaveAll)
 	if Collect(2) != 2 {
@@ -101,6 +105,7 @@ func TestGarbageListSharedWithModuleAttr(t *testing.T) {
 	a := objects.NewList(nil)
 	a.Append(a)
 	Track(a)
+	objects.Decref(a) // simulate del a: Append now owns the internal ref
 
 	SetDebug(DebugSaveAll)
 	if Collect(2) != 1 {
@@ -127,6 +132,8 @@ func TestResurrectionViaFinalizerPullsObjectBack(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 	defer Untrack(a)
 	defer Untrack(b)
 
@@ -163,6 +170,8 @@ func TestResurrectionDoesNotRefireFinalizer(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	calls := 0
 	RegisterFinalizer(a, func(o objects.Object) {
@@ -197,6 +206,7 @@ func TestSaveAllSkippedWhenDisabled(t *testing.T) {
 	a := objects.NewList(nil)
 	a.Append(a)
 	Track(a)
+	objects.Decref(a) // simulate del a: Append now owns the internal ref
 
 	SetDebug(DebugCollectable | DebugUncollectable)
 	if Collect(2) != 1 {

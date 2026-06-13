@@ -82,6 +82,12 @@ func (l *List) Insert(where int, value Object) {
 	if where > n {
 		where = n
 	}
+	// The list takes a counted reference on the inserted value; listDealloc
+	// releases one per item on teardown.
+	// CPython: Objects/listobject.c:1138 list_insert_impl (ins1 -> Py_INCREF)
+	if value != nil {
+		Incref(value)
+	}
 	l.items = append(l.items, nil)
 	copy(l.items[where+1:], l.items[where:])
 	l.items[where] = value
@@ -103,8 +109,14 @@ func (l *List) Remove(value Object) error {
 			if i >= len(l.items) {
 				break
 			}
+			// Drop the list's reference to the removed element.
+			// CPython: Objects/listobject.c:1408 list_remove (Py_DECREF)
+			old := l.items[i]
 			l.items = append(l.items[:i], l.items[i+1:]...)
 			l.size = int64(len(l.items))
+			if old != nil {
+				Decref(old)
+			}
 			return nil
 		}
 	}
@@ -141,12 +153,23 @@ func (l *List) Reverse() {
 	}
 }
 
-// Clear empties the list.
+// Clear empties the list, dropping the list's reference to every item.
+// The item vector is detached before any Decref runs, mirroring
+// list_clear which saves ob_item to a local, nulls the list, then
+// decrefs from the saved copy. A re-entrant reader (a RichCompareBool
+// that clears the list mid-iteration, bpo-39453) keeps walking the
+// detached array rather than a half-niled live one.
 //
-// CPython: Objects/listobject.c:1228 list_clear
+// CPython: Objects/listobject.c:1228 list_clear (Py_DECREF over the saved vector)
 func (l *List) Clear() {
-	l.items = l.items[:0]
+	old := l.items
+	l.items = nil
 	l.size = 0
+	for _, it := range old {
+		if it != nil {
+			Decref(it)
+		}
+	}
 }
 
 // Copy returns a shallow copy.

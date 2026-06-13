@@ -1348,6 +1348,10 @@ type lruListNode struct {
 
 func newLruCacheWrapperType() *objects.Type {
 	t := objects.NewType("functools._lru_cache_wrapper", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_functoolsmodule.c:1559 lru_cache_type_spec carries
+	// Py_TPFLAGS_METHOD_DESCRIPTOR and a tp_vectorcall_offset, so a cached
+	// wrapper reports both flags.
+	t.TpFlags |= objects.TpFlagMethodDescriptor | objects.TpFlagHaveVectorcall
 	t.HasDict = true
 	t.Getattro = lruCacheGetattr
 	t.Setattro = lruCacheSetattr

@@ -20,6 +20,7 @@ func TestCycleSelfReferenceReclaimed(t *testing.T) {
 	l := objects.NewList(nil)
 	l.Append(l)
 	Track(l)
+	objects.Decref(l) // simulate del l: Append now owns the internal ref
 
 	collected := Collect(2)
 	if collected < 1 {
@@ -41,6 +42,8 @@ func TestCycleTwoNodesReclaimed(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	collected := Collect(2)
 	if collected != 2 {
@@ -63,6 +66,8 @@ func TestCycleFinalizerFiresOnce(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	calls := map[objects.Object]int{}
 	RegisterFinalizer(a, func(o objects.Object) { calls[o]++ })
@@ -84,11 +89,11 @@ func TestCycleFinalizerFiresOnce(t *testing.T) {
 	}
 }
 
-// linkInto wires container.Append plus the matching refcount bump
-// that CPython's container ops apply. Container Append in
-// objects/list.go does not yet maintain refcounts (that lands with
-// 1679-A); these tests bump it explicitly so the cycle algorithm
-// has accurate inputs.
+// linkInto appends child and adds one extra reference to stand in for
+// an external owner keeping the chain alive. container.Append now owns
+// a strong ref to child on its own (spec 1727 list ownership), so the
+// second Incref here simulates a root outside the candidate set: the
+// reachable-chain tests want these nodes to survive Collect.
 func linkInto(container *objects.List, child objects.Object) {
 	container.Append(child)
 	objects.Incref(child)
@@ -146,6 +151,8 @@ func TestCycleWeakrefClearedBeforeFinalizer(t *testing.T) {
 	b.Append(a)
 	Track(a)
 	Track(b)
+	objects.Decref(a) // simulate del a, b: Append now owns the cross refs
+	objects.Decref(b)
 
 	w := objects.NewWeakref(a, nil)
 	RegisterWeakref(w)

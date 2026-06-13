@@ -24,6 +24,24 @@ func init() {
 	// right way: objects is a leaf both vm and module/_functools import.
 	objects.GoidHook = goid
 
+	// Key each dict's critical section on the active Python thread, not the
+	// raw goroutine. A generator/coroutine/async-generator body runs on its
+	// own goroutine but shares its driver's *state.Thread, so a driver that
+	// holds a dict lock and resumes a body touching the same dict must be
+	// recognised as the same reentrant owner or the body goroutine
+	// deadlocks. Returns 0 when no thread is active so the lock falls back
+	// to the goroutine id.
+	//
+	// CPython: Python/critical_section.c keys on PyThreadState; a generator
+	// shares the driver's tstate (Objects/genobject.c:248 gen_send_ex2).
+	objects.CriticalSectionOwnerHook = func() int64 {
+		ts := currentThread()
+		if ts == nil {
+			return 0
+		}
+		return int64(ts.ID())
+	}
+
 	// Resolve the active Python thread's identity for the running
 	// goroutine. Returns 0 when no thread is active so _thread falls back
 	// to the goroutine id.

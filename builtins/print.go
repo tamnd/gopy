@@ -25,6 +25,18 @@ import (
 // CPython: Python/bltinmodule.c:2224 builtin_print_impl
 // CPython: Python/bltinmodule.c:2231 (file == Py_None branch)
 func Print(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// print is parsed by _PyArg_ParseStackAndKeywords against the fixed
+	// keyword list {sep, end, file, flush}; any other keyword is rejected
+	// before the stream is touched.
+	//
+	// CPython: Python/getargs.c:1492 error_unexpected_keyword_arg
+	for k := range kwargs {
+		switch k {
+		case "sep", "end", "file", "flush":
+		default:
+			return nil, fmt.Errorf("TypeError: print() got an unexpected keyword argument '%s'", k)
+		}
+	}
 	file, err := resolveFileKwarg(kwargs["file"])
 	if err != nil {
 		return nil, err

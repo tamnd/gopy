@@ -47,6 +47,30 @@ type BuiltinFunction struct {
 	// CPython: Objects/typeobject.c:8026 type_add_method (METH_STATIC)
 	Self Object
 	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
+
+	// kwParams, when non-nil, names every keyword the Argument Clinic
+	// signature accepts. builtinFunctionVectorcall runs the AC
+	// extraneous-keyword scan over the original kwnames objects before
+	// the impl runs, so a str-subclass key that Python-compares equal to
+	// a real parameter name (yet hashes elsewhere, so it never binds)
+	// yields "invalid keyword argument for f()" rather than a plain
+	// "unexpected keyword argument", exactly as error_unexpected_keyword_arg
+	// does. kwFname is the bare name the message prints.
+	//
+	// CPython: Python/getargs.c:1442 error_unexpected_keyword_arg
+	kwParams []string
+	kwFname  string
+}
+
+// WithKwParams declares the Argument Clinic keyword list so the
+// vectorcall arm runs the faithful extraneous-keyword scan. It returns
+// the receiver for chaining at registration time.
+//
+// CPython: Python/getargs.c:1442 error_unexpected_keyword_arg
+func (bf *BuiltinFunction) WithKwParams(fname string, params []string) *BuiltinFunction {
+	bf.kwFname = fname
+	bf.kwParams = params
+	return bf
 }
 
 // BuiltinFunctionType is the type singleton for built-in functions.
@@ -55,6 +79,11 @@ type BuiltinFunction struct {
 var BuiltinFunctionType = NewType("builtin_function_or_method", []*Type{objectType})
 
 func init() {
+	// gopy's BuiltinFunction stands in for PyCFunction_Type, which
+	// advertises Py_TPFLAGS_HAVE_VECTORCALL.
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
+	BuiltinFunctionType.TpFlags |= TpFlagHaveVectorcall
 	BuiltinFunctionType.Repr = builtinFunctionRepr
 	BuiltinFunctionType.Str = builtinFunctionRepr
 	BuiltinFunctionType.Call = builtinFunctionCall
@@ -232,6 +261,20 @@ func builtinFunctionCall(o Object, args []Object, kwargs map[string]Object) (Obj
 	return bf.Fn(args, kwargs)
 }
 
+// builtinFunctionNoKeywordsError renders the "takes no keyword
+// arguments" TypeError through _PyObject_FunctionStr, so a module
+// function reports its dotted name ("_struct.pack()") and a builtin
+// keeps its bare name ("getattr()"), matching cfunction_check_kwargs.
+//
+// CPython: Objects/methodobject.c:399 cfunction_check_kwargs
+func builtinFunctionNoKeywordsError(bf *BuiltinFunction) error {
+	funcstr, err := FunctionStr(bf)
+	if err != nil {
+		funcstr = bf.Name + "()"
+	}
+	return fmt.Errorf("TypeError: %s takes no keyword arguments", funcstr)
+}
+
 // builtinFunctionCheckKwargs raises TypeError when a kwargs-less
 // calling convention received any keyword arguments. Mirrors
 // cfunction_check_kwargs over BuiltinFunction.Conv.
@@ -244,7 +287,7 @@ func builtinFunctionCheckKwargs(bf *BuiltinFunction, nkw int) error {
 	calling := bf.Conv & (MethVarargs | MethKeywords | MethNoArgs | MethO | MethFastcall | MethMethod)
 	switch calling {
 	case MethNoArgs, MethO, MethFastcall:
-		return fmt.Errorf("TypeError: %s() takes no keyword arguments", bf.Name)
+		return builtinFunctionNoKeywordsError(bf)
 	}
 	return nil
 }
@@ -268,6 +311,9 @@ func builtinFunctionVectorcall(callable Object, args []Object, nargsf uint, kwna
 		if err := builtinFunctionCheckKwargs(bf, nkw); err != nil {
 			return nil, err
 		}
+		if err := builtinFunctionScanExtraneousKw(bf, kwnames); err != nil {
+			return nil, err
+		}
 		kwargs = make(map[string]Object, nkw)
 		for i := range nkw {
 			name, err := Str(kwnames.Item(i))
@@ -278,4 +324,71 @@ func builtinFunctionVectorcall(callable Object, args []Object, nargsf uint, kwna
 		}
 	}
 	return bf.Fn(pos, kwargs)
+}
+
+// builtinFunctionScanExtraneousKw ports error_unexpected_keyword_arg for
+// built-ins that declared an Argument Clinic keyword list via
+// WithKwParams. It only runs when at least one keyword's exact string is
+// not a recognized parameter (the binder's error path). It then scans
+// the keyword names in caller order: the first one that does not
+// Python-compare equal to any parameter is the offending keyword and
+// gets the unexpected-keyword TypeError. If every key compares equal
+// (only reachable when a str subclass overrides __eq__), no single key
+// can be named, so the generic "invalid keyword argument" is raised.
+//
+// CPython: Python/getargs.c:1442 error_unexpected_keyword_arg
+func builtinFunctionScanExtraneousKw(bf *BuiltinFunction, kwnames *Tuple) error {
+	if bf.kwParams == nil || kwnames == nil {
+		return nil
+	}
+	n := kwnames.Len()
+	extraneous := false
+	for i := 0; i < n; i++ {
+		s, err := Str(kwnames.Item(i))
+		if err != nil {
+			return err
+		}
+		if !containsString(bf.kwParams, s) {
+			extraneous = true
+			break
+		}
+	}
+	if !extraneous {
+		return nil
+	}
+	for i := 0; i < n; i++ {
+		key := kwnames.Item(i)
+		if !IsSubtype(key.Type(), StrType()) {
+			return errKeywordsMustBeStrings
+		}
+		matched := false
+		for _, p := range bf.kwParams {
+			eq, err := RichCmpBool(NewStr(p), key, CompareEQ)
+			if err != nil {
+				return err
+			}
+			if eq {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			s, err := Str(key)
+			if err != nil {
+				return err
+			}
+			return UnexpectedKeywordError(bf.kwFname, s, bf.kwParams)
+		}
+	}
+	return fmt.Errorf("TypeError: invalid keyword argument for %s()", bf.kwFname)
+}
+
+// containsString reports whether s appears in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

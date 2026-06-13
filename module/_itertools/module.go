@@ -1414,6 +1414,15 @@ func init() {
 //
 // CPython: Modules/itertoolsmodule.c:1985 product_new
 func productNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	// product_new forwards kwds to PyArg_ParseTupleAndKeywords with an
+	// empty positional tuple and the single "repeat" keyword, so any
+	// surplus keyword trips the over-supply count check before the
+	// repeat value or unknown names are inspected.
+	//
+	// CPython: Modules/itertoolsmodule.c:1985 product_new
+	if err := objects.CheckKeywordCount("product", 0, len(kwargs), 1); err != nil {
+		return nil, err
+	}
 	repeat := 1
 	if v, ok := kwargs["repeat"]; ok {
 		r, err := asSsizeT(v)

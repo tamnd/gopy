@@ -418,33 +418,39 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		n := int(oparg)
 		items, uerr := unpackSeq(seq, n)
 		if uerr != nil {
+			objects.Decref(seq)
 			return 0, true, uerr
 		}
-		// Push in reverse so items[0] ends up at the top, matching
-		// the assignment order CPython documents.
+		// Each unpacked element becomes a new reference, mirroring CPython's
+		// tp_iternext (Py_NewRef) and the specialized UNPACK_SEQUENCE arms.
+		// unpackSeq hands back borrowed iterator results, so promoting them
+		// here (and releasing the seq input afterwards) keeps the stored
+		// locals balanced against Frame.Clear's Close. Push in reverse so
+		// items[0] lands on TOS, matching the assignment order.
+		//
+		// CPython: Python/bytecodes.c UNPACK_SEQUENCE (_PyEval_UnpackIterableStackRef)
 		for i := n - 1; i >= 0; i-- {
-			e.pushObject(items[i])
+			e.push(stackref.FromObjectNew(items[i]))
 		}
+		objects.Decref(seq)
 		return e.cacheAdvance(compile.UNPACK_SEQUENCE), true, nil
 
 	case compile.STORE_SUBSCR:
 		keyR := e.pop()
 		containerR := e.pop()
 		valueR := e.pop()
-		keepKey, keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
+		keepValue, serr := storeSubscr(containerR.AsObject(), keyR.AsObject(), valueR.AsObject())
 		// CPython's STORE_SUBSCR runs DECREF_INPUTS on container, sub, and
 		// value after the store, whether it succeeded or raised. gopy's
 		// container ownership contracts are not uniform: an exact dict
-		// increfs the value it keeps but steals the key (dictInsert), and
-		// an exact list steals the value. keepKey / keepValue report which
-		// input the container adopted so we leave that stack reference in
-		// place and release the rest.
+		// increfs its own copy of both key and value (dictInsert), and an
+		// exact list steals the value. No container adopts the key, so the
+		// container and key references always release here; keepValue
+		// reports when the value's stack reference moved into the container.
 		//
 		// CPython: Python/bytecodes.c STORE_SUBSCR DECREF_INPUTS
 		containerR.Close()
-		if !keepKey {
-			keyR.Close()
-		}
+		keyR.Close()
 		if !keepValue {
 			valueR.Close()
 		}
@@ -968,6 +974,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		argsObj := e.popObject()
 		selfOrNull := e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
+		// When the unpacked object is already an exact tuple, CALL_FUNCTION_EX
+		// forwards it unchanged; only non-tuple iterables get re-tupled. This
+		// keeps `f(*args)` passing the very same tuple to a ternaryfunc tp_call,
+		// so a slot that returns its args tuple stays identity-preserving.
+		//
+		// CPython: Python/bytecodes.c CALL_FUNCTION_EX (PyTuple_CheckExact gate)
+		if exact, ok := argsObj.(*objects.Tuple); ok {
+			out, cerr := objects.Call(callable, exact, kwargs)
+			objects.Decref(callable)
+			if selfOrNull != nil {
+				objects.Decref(selfOrNull)
+			}
+			objects.Decref(argsObj)
+			if kwargs != nil {
+				objects.DecrefThrowawayKwargs(kwargs)
+			}
+			if cerr != nil {
+				return 0, true, cerr
+			}
+			e.pushObject(out)
+			return e.advance(), true, nil
+		}
 		argsSlice, ierr := iterToSlice(argsObj)
 		if ierr != nil {
 			// check_args_iterable: when the unpacked object is not iterable
@@ -1750,6 +1778,15 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		}
 		return nil, ierr
 	}
+	// PyObject_GetIter hands back a new reference (self+1 when seq is
+	// already an iterator, a fresh iterator otherwise). CPython holds it
+	// only for the duration of the unpack and drops it before returning,
+	// so the iterator does not linger and pin the source after a partial
+	// or failed unpack. The extracted values are borrowed from the
+	// underlying container and the caller promotes them to owned refs.
+	//
+	// CPython: Python/ceval.c:2443 _PyEval_UnpackIterableStackRef (Py_DECREF(it))
+	defer objects.Decref(it)
 	if it.Type().IterNext == nil {
 		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", it.Type().Name)
 	}
@@ -1996,37 +2033,41 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 //
 // CPython: Objects/abstract.c PyObject_SetItem
 // storeSubscr performs container[key] = value and reports whether the
-// container adopted ownership of the key and/or value reference, so the
+// container adopted ownership of the value reference, so the
 // STORE_SUBSCR arm can release exactly the inputs CPython's
 // DECREF_INPUTS would. gopy's container storage contracts are not
-// uniform: an exact dict increfs the value it stores but steals the key
+// uniform: an exact dict increfs its own copy of both key and value
 // (dictInsert), an exact list steals the value it stores (listSetItem),
 // and every other path (user __setitem__, bytearray, dict/list
-// subclasses) treats its arguments as borrowed. keepKey / keepValue
-// stay false unless the container took the matching reference.
+// subclasses) treats its arguments as borrowed. No container adopts the
+// key's stack reference, so the caller always releases the key.
+// keepValue is true only when the container took over the value's stack
+// reference rather than taking its own.
 //
 // CPython: Python/bytecodes.c STORE_SUBSCR
-func storeSubscr(container, key, value objects.Object) (keepKey, keepValue bool, err error) {
+func storeSubscr(container, key, value objects.Object) (keepValue bool, err error) {
 	if objects.IsExactDict(container) {
 		if serr := setItem(container, key, value); serr != nil {
-			return false, false, serr
+			return false, serr
 		}
-		// dictInsert steals the key reference and increfs its own copy of
-		// the value, so the key transfers into the dict and the value
-		// stack reference is released by the caller.
-		return true, false, nil
+		// dictInsert increfs its own copy of both key and value
+		// (insertdict's Py_INCREF(key)/Py_INCREF(value)), so neither stack
+		// reference transfers into the dict; the caller releases both.
+		//
+		// CPython: Objects/dictobject.c:1869 insertdict
+		return false, nil
 	}
 	if objects.IsExactList(container) {
 		if serr := setItem(container, key, value); serr != nil {
-			return false, false, serr
+			return false, serr
 		}
 		// listSetItem steals the value; the integer index is not stored.
-		return false, true, nil
+		return true, nil
 	}
 	if serr := setItem(container, key, value); serr != nil {
-		return false, false, serr
+		return false, serr
 	}
-	return false, false, nil
+	return false, nil
 }
 
 func setItem(container, key, value objects.Object) error {
