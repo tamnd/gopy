@@ -176,7 +176,16 @@ func init() {
 	SetTypeDescr(DictType, "update", NewMethodDescr(DictType, "update", dictUpdateMethod))
 	SetTypeDescr(DictType, "copy", NewMethodDescrConv(DictType, "copy", MethNoArgs, dictCopyMethod))
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
-	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
+	// fromkeys is a METH_CLASS PyMethodDef, so it surfaces as a
+	// classmethod_descriptor (not a Python classmethod): binding it
+	// validates the bound type is a dict subtype via classmethod_get.
+	//
+	// CPython: Objects/dictobject.c:3869 dict_fromkeys / mapp_methods
+	SetTypeDescr(DictType, "fromkeys", NewClassMethodDescr(DictType, &MethodDef{
+		Name:    "fromkeys",
+		Flags:   MethVarargs | MethClass,
+		Varargs: dictFromKeysMethod,
+	}))
 	SetTypeDescr(DictType, "popitem", NewMethodDescrConv(DictType, "popitem", MethNoArgs, dictPopItemMethod))
 	SetTypeDescr(DictType, "__or__", NewMethodDescr(DictType, "__or__", dictOrMethod))
 	SetTypeDescr(DictType, "__ior__", NewMethodDescr(DictType, "__ior__", dictIOrMethod))
@@ -1357,23 +1366,24 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 // This is a classmethod: args[0] is the class (dict or subclass).
 //
 // CPython: Objects/dictobject.c:3869 dict_fromkeys_impl
-func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
-	if err := CheckPositional("fromkeys", len(args)-1, 1, 2); err != nil {
+func dictFromKeysMethod(self Object, args *Tuple) (Object, error) {
+	if err := CheckPositional("fromkeys", args.Len(), 1, 2); err != nil {
 		return nil, err
 	}
 	var value Object
-	if len(args) == 3 {
-		value = args[2]
+	if args.Len() == 2 {
+		value = args.Item(1)
 	} else {
 		value = None()
 	}
+	iterable := args.Item(0)
 	// _PyDict_FromKeys builds the result by calling cls(), so a dict
 	// subclass produces an instance of that subclass and a class whose
 	// __new__ returns a foreign mapping (collections.UserDict) is honored
 	// too. The set/dict fast paths only fire on an empty exact dict.
 	//
 	// CPython: Objects/dictobject.c:3924 _PyDict_FromKeys
-	cls := args[0]
+	cls := self
 	d, err := CallNoArgs(cls)
 	if err != nil {
 		return nil, err
@@ -1385,7 +1395,7 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 		// __hash__ on each key again.
 		//
 		// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
-		if ss, ok := args[1].(*Set); ok {
+		if ss, ok := iterable.(*Set); ok {
 			for _, e := range ss.Entries() {
 				if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
 					return nil, err
@@ -1394,7 +1404,7 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 			return out, nil
 		}
 	}
-	it, err := Iter(args[1])
+	it, err := Iter(iterable)
 	if err != nil {
 		return nil, err
 	}

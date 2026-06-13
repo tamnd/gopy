@@ -38,6 +38,12 @@ func init() {
 	ClassMethodDescrType.Call = classMethodDescrCall
 	ClassMethodDescrType.Hash = identityHash
 	addDescrIntrospectionDescriptors(ClassMethodDescrType)
+	// Expose __get__ so classmethod_get is reachable through the
+	// attribute path (descr.__get__(obj, type)), mirroring add_operators
+	// installing the tp_descr_get wrapper on the descriptor type.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	addDescriptorSlotWrappers(ClassMethodDescrType)
 }
 
 // NewClassMethodDescr builds a classmethod descriptor exposing def on

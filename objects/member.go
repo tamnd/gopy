@@ -95,6 +95,22 @@ func memberDescrRepr(o Object) (string, error) {
 	return "<member '" + d.name + "'>", nil
 }
 
+// descrCheck rejects an instance whose type is not a subtype of the
+// descriptor's owning type, matching CPython's descr_check /
+// descr_setcheck guard shared by member/method/getset access.
+//
+// CPython: Objects/descrobject.c:79 descr_check
+func (d *MemberDescr) descrCheck(owner Object) error {
+	if d.owner == nil || owner == nil {
+		return nil
+	}
+	if !IsSubtype(owner.Type(), d.owner) {
+		return fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
+			d.name, d.owner.Name, typeNameOf(owner))
+	}
+	return nil
+}
+
 // memberDescrGet reads the slot. owner==nil means access on the class
 // itself (class.slot_name), which returns the descriptor unchanged
 // like other descriptors. Reading an unset slot raises AttributeError
@@ -109,12 +125,11 @@ func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if owner == nil {
 		return descr, nil
 	}
+	if err := d.descrCheck(owner); err != nil {
+		return nil, err
+	}
 	// Built-in member backed by a getter closure (complex.real, ...).
 	if d.getter != nil {
-		if d.owner != nil && !IsSubtype(owner.Type(), d.owner) {
-			return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
-				d.name, d.owner.Name, typeNameOf(owner))
-		}
 		return d.getter(owner)
 	}
 	if inst, ok := owner.(*Instance); ok {
@@ -157,6 +172,9 @@ func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 // CPython: Objects/descrobject.c:198 member_set
 func memberDescrSet(descr Object, owner Object, value Object) error {
 	d := descr.(*MemberDescr)
+	if err := d.descrCheck(owner); err != nil {
+		return err
+	}
 	// Built-in member: read-only members reject all writes; a writable one
 	// dispatches to its setter.
 	if d.getter != nil {
