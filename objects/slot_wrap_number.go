@@ -151,7 +151,18 @@ func AddNumberSlotWrappers(t *Type) {
 		return
 	}
 	nb := t.Number
+	addNumberBinaryWrappers(t, nb)
+	addNumberUnaryWrappers(t, nb)
+	addNumberInplaceWrappers(t, nb)
+}
 
+// addNumberBinaryWrappers installs the infix binary number dunders
+// (__add__/__radd__ and friends, divmod and pow) from the type's number
+// slots. Split out of AddNumberSlotWrappers to keep each grouping's
+// cognitive complexity in check.
+//
+// CPython: Objects/typeobject.c slotdefs (binary nb_* SLOT entries)
+func addNumberBinaryWrappers(t *Type, nb *NumberMethods) {
 	binL := func(name, op string, slot func(a, b Object) (Object, error)) {
 		if slot == nil {
 			return
@@ -188,30 +199,6 @@ func AddNumberSlotWrappers(t *Type) {
 				}
 				if reversed {
 					return slot(args[0], self)
-				}
-				return slot(self, args[0])
-			})
-	}
-	unary := func(name, sig, doc string, slot func(o Object) (Object, error)) {
-		if slot == nil {
-			return
-		}
-		setWrapperIfAbsent(t, name, sig, doc,
-			func(self Object, args []Object) (Object, error) {
-				if err := checkWrapArgs(args, 0); err != nil {
-					return nil, err
-				}
-				return slot(self)
-			})
-	}
-	inplace := func(name, op string, slot func(a, b Object) (Object, error)) {
-		if slot == nil {
-			return
-		}
-		setWrapperIfAbsent(t, name, "($self, value, /)", "Return self"+op+"value.",
-			func(self Object, args []Object) (Object, error) {
-				if err := checkWrapArgs(args, 1); err != nil {
-					return nil, err
 				}
 				return slot(self, args[0])
 			})
@@ -253,15 +240,34 @@ func AddNumberSlotWrappers(t *Type) {
 		setWrapperIfAbsent(t, "__rpow__", "($self, value, mod=None, /)", "Return pow(value, self, mod).",
 			powWrapper(nb.Power, true))
 	}
+}
 
-	unary("__neg__", "($self, /)", "-self", nb.Negative)
-	unary("__pos__", "($self, /)", "+self", nb.Positive)
-	unary("__abs__", "($self, /)", "abs(self)", nb.Absolute)
-	unary("__invert__", "($self, /)", "~self", nb.Invert)
-	unary("__int__", "($self, /)", "int(self)", nb.Int)
-	unary("__float__", "($self, /)", "float(self)", nb.Float)
+// addNumberUnaryWrappers installs the unary number dunders (__neg__,
+// __abs__, __int__, __index__, __bool__, ...) from the type's number slots.
+//
+// CPython: Objects/typeobject.c slotdefs (unary nb_* SLOT entries)
+func addNumberUnaryWrappers(t *Type, nb *NumberMethods) {
+	unary := func(name, doc string, slot func(o Object) (Object, error)) {
+		if slot == nil {
+			return
+		}
+		setWrapperIfAbsent(t, name, "($self, /)", doc,
+			func(self Object, args []Object) (Object, error) {
+				if err := checkWrapArgs(args, 0); err != nil {
+					return nil, err
+				}
+				return slot(self)
+			})
+	}
+
+	unary("__neg__", "-self", nb.Negative)
+	unary("__pos__", "+self", nb.Positive)
+	unary("__abs__", "abs(self)", nb.Absolute)
+	unary("__invert__", "~self", nb.Invert)
+	unary("__int__", "int(self)", nb.Int)
+	unary("__float__", "float(self)", nb.Float)
 	if nb.Index != nil {
-		unary("__index__", "($self, /)",
+		unary("__index__",
 			"Return self converted to an integer, if self is suitable for use as an index into a list.",
 			nb.Index)
 	}
@@ -281,6 +287,25 @@ func AddNumberSlotWrappers(t *Type) {
 					return nil, err
 				}
 				return NewBool(b), nil
+			})
+	}
+}
+
+// addNumberInplaceWrappers installs the in-place number dunders
+// (__iadd__, __imul__, __ipow__, ...) from the type's number slots.
+//
+// CPython: Objects/typeobject.c slotdefs (in-place nb_* SLOT entries)
+func addNumberInplaceWrappers(t *Type, nb *NumberMethods) {
+	inplace := func(name, op string, slot func(a, b Object) (Object, error)) {
+		if slot == nil {
+			return
+		}
+		setWrapperIfAbsent(t, name, "($self, value, /)", "Return self"+op+"value.",
+			func(self Object, args []Object) (Object, error) {
+				if err := checkWrapArgs(args, 1); err != nil {
+					return nil, err
+				}
+				return slot(self, args[0])
 			})
 	}
 

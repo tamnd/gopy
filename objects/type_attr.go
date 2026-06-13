@@ -447,47 +447,12 @@ func typeSetAttr(o Object, name Object, value Object) error {
 	//
 	// CPython: Objects/typeobject.c:1647 type_set_abstractmethods
 	if nameStr == "__abstractmethods__" {
-		abstract := false
-		if value != nil {
-			t, err := IsTruthy(value)
-			if err != nil {
-				return err
-			}
-			abstract = t
-		}
-		if abstract {
-			tp.TpFlags |= TpFlagAbstract
-		} else {
-			tp.TpFlags &^= TpFlagAbstract
+		if err := typeSetAbstractMethodsFlag(tp, value); err != nil {
+			return err
 		}
 	}
 	if value == nil {
-		m, ok := typeDescrTable[tp]
-		if !ok {
-			return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
-		}
-		if _, ok := m[nameStr]; !ok {
-			return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
-		}
-		old := m[nameStr]
-		delete(m, nameStr)
-		// Release the typeDescrTable's owned reference.
-		//
-		// CPython: Objects/typeobject.c:5165 type_setattro
-		// (PyObject_GenericSetAttr -> PyDict_DelItemString drops the ref)
-		Decref(old)
-		if tp.ClassAttrDict != nil {
-			_ = tp.ClassAttrDict.DelItem(NewStr(nameStr))
-		}
-		// Deleting a special method must re-derive the affected slot from the
-		// base MRO (and refresh inheritors) the same way assignment does.
-		//
-		// CPython: Objects/typeobject.c:11455 update_slot
-		if isSlotDunderName(nameStr) {
-			refixupSlotDispatchers(tp)
-		}
-		tp.InvalidateVersionTag()
-		return nil
+		return typeDeleteAttr(tp, nameStr)
 	}
 	SetTypeDescr(tp, nameStr, value)
 	// Assigning a generic __call__ re-points tp_call at slot_tp_call,
@@ -504,6 +469,63 @@ func typeSetAttr(o Object, name Object, value Object) error {
 	// slotdef whose name matches; gopy re-runs the per-type fixup pass.
 	//
 	// CPython: Objects/typeobject.c:11455 update_slot / fixup_slot_dispatchers
+	if isSlotDunderName(nameStr) {
+		refixupSlotDispatchers(tp)
+	}
+	tp.InvalidateVersionTag()
+	return nil
+}
+
+// typeSetAbstractMethodsFlag toggles Py_TPFLAGS_IS_ABSTRACT off the
+// truthiness of the __abstractmethods__ value (cleared on delete), so
+// inspect.isabstract and the instantiation guard see the flag without
+// re-scanning.
+//
+// CPython: Objects/typeobject.c:1647 type_set_abstractmethods
+func typeSetAbstractMethodsFlag(tp *Type, value Object) error {
+	abstract := false
+	if value != nil {
+		t, err := IsTruthy(value)
+		if err != nil {
+			return err
+		}
+		abstract = t
+	}
+	if abstract {
+		tp.TpFlags |= TpFlagAbstract
+	} else {
+		tp.TpFlags &^= TpFlagAbstract
+	}
+	return nil
+}
+
+// typeDeleteAttr removes a type attribute (value==nil on type_setattro),
+// dropping the typeDescrTable's owned reference and re-deriving any slot the
+// deleted dunder backed.
+//
+// CPython: Objects/typeobject.c:5165 type_setattro (delete path)
+func typeDeleteAttr(tp *Type, nameStr string) error {
+	m, ok := typeDescrTable[tp]
+	if !ok {
+		return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
+	}
+	if _, ok := m[nameStr]; !ok {
+		return fmt.Errorf("AttributeError: type object '%s' has no attribute '%s'", tp.Name, nameStr)
+	}
+	old := m[nameStr]
+	delete(m, nameStr)
+	// Release the typeDescrTable's owned reference.
+	//
+	// CPython: Objects/typeobject.c:5165 type_setattro
+	// (PyObject_GenericSetAttr -> PyDict_DelItemString drops the ref)
+	Decref(old)
+	if tp.ClassAttrDict != nil {
+		_ = tp.ClassAttrDict.DelItem(NewStr(nameStr))
+	}
+	// Deleting a special method must re-derive the affected slot from the
+	// base MRO (and refresh inheritors) the same way assignment does.
+	//
+	// CPython: Objects/typeobject.c:11455 update_slot
 	if isSlotDunderName(nameStr) {
 		refixupSlotDispatchers(tp)
 	}

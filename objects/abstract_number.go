@@ -741,45 +741,46 @@ func ternaryNumberOp(a, b, c Object, opName string, pick func(*NumberMethods) fu
 	// CPython: Objects/abstract.c:1057 ternary_op (subtype-first block)
 	subtypeFirst := a.Type() != b.Type() && IsSubtype(b.Type(), a.Type())
 	if subtypeFirst {
-		if n := b.Type().Number; n != nil {
-			if fn := pick(n); fn != nil {
-				out, err := fn(a, b, c)
-				if err != nil {
-					return nil, err
-				}
-				if !IsNotImplemented(out) {
-					return out, nil
-				}
-			}
+		if out, handled, err := tryTernarySlot(b.Type(), a, b, c, pick); handled {
+			return out, err
 		}
 	}
-	if n := a.Type().Number; n != nil {
-		if fn := pick(n); fn != nil {
-			out, err := fn(a, b, c)
-			if err != nil {
-				return nil, err
-			}
-			if !IsNotImplemented(out) {
-				return out, nil
-			}
-		}
+	if out, handled, err := tryTernarySlot(a.Type(), a, b, c, pick); handled {
+		return out, err
 	}
-	if subtypeFirst {
-		// Already tried b's slot above; skip the duplicate trailing attempt.
-		return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", opName, a.Type().Name, b.Type().Name)
-	}
-	if n := b.Type().Number; n != nil {
-		if fn := pick(n); fn != nil {
-			out, err := fn(a, b, c)
-			if err != nil {
-				return nil, err
-			}
-			if !IsNotImplemented(out) {
-				return out, nil
-			}
+	// When b was tried first, its slot already ran above; skip the
+	// duplicate trailing attempt and fall straight to the TypeError.
+	if !subtypeFirst {
+		if out, handled, err := tryTernarySlot(b.Type(), a, b, c, pick); handled {
+			return out, err
 		}
 	}
 	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", opName, a.Type().Name, b.Type().Name)
+}
+
+// tryTernarySlot runs the ternary number slot picked from t for the
+// operands (a, b, c). handled is true when the slot existed and returned a
+// non-NotImplemented result (or errored), meaning the caller should stop;
+// false means the caller should try the next operand.
+//
+// CPython: Objects/abstract.c:1057 ternary_op (per-operand slot attempt)
+func tryTernarySlot(t *Type, a, b, c Object, pick func(*NumberMethods) func(a, b, mod Object) (Object, error)) (Object, bool, error) {
+	n := t.Number
+	if n == nil {
+		return nil, false, nil
+	}
+	fn := pick(n)
+	if fn == nil {
+		return nil, false, nil
+	}
+	out, err := fn(a, b, c)
+	if err != nil {
+		return nil, true, err
+	}
+	if IsNotImplemented(out) {
+		return nil, false, nil
+	}
+	return out, true, nil
 }
 
 // unaryNumberOp dispatches a unary arithmetic op. Returns a TypeError

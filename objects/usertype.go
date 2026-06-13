@@ -1507,9 +1507,7 @@ func fixupNumberSlots(t *Type) {
 	//
 	// CPython: Objects/typeobject.c:10129 SLOT1BINFULL(slot_nb_power_binary, ...)
 	if isOwnDescriptor(t, "__pow__") || isOwnDescriptor(t, "__rpow__") {
-		ensureNumberMethods(t).Power = func(a, b, mod Object) (Object, error) {
-			return slotPowerFull(a, b, mod)
-		}
+		ensureNumberMethods(t).Power = slotPowerFull
 	}
 	if isOwnDescriptor(t, "__ipow__") {
 		ensureNumberMethods(t).InPlacePower = func(a, b, _ Object) (Object, error) {

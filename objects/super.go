@@ -134,7 +134,11 @@ func supercheck(typ *Type, obj Object) (*Type, error) {
 		kind = "type"
 		name = t.Name
 	}
-	return nil, fmt.Errorf(
+	// The trailing period is part of CPython's message and must stay for
+	// parity; staticcheck's no-punctuation rule does not apply here.
+	//
+	// CPython: Objects/typeobject.c:11995 super_init_impl
+	return nil, fmt.Errorf( //nolint:staticcheck // ST1005: match CPython's message verbatim
 		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s).",
 		kind, name, typ.Name,
 	)

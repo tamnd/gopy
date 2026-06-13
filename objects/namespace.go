@@ -220,7 +220,7 @@ func namespaceRepr(o Object) (string, error) {
 	parts := make([]string, 0, n.dict.Len())
 	for _, k := range n.dict.Keys() {
 		s, ok := k.(*Unicode)
-		if !ok || len(s.v) == 0 {
+		if !ok || s.v == "" {
 			continue
 		}
 		v, err := n.dict.GetItem(k)
