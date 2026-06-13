@@ -9,6 +9,7 @@ package objects
 
 import (
 	"fmt"
+	"strings"
 )
 
 func init() {
@@ -458,6 +459,13 @@ func typeSetAttr(o Object, name Object, value Object) error {
 		if tp.ClassAttrDict != nil {
 			_ = tp.ClassAttrDict.DelItem(NewStr(nameStr))
 		}
+		// Deleting a special method must re-derive the affected slot from the
+		// base MRO (and refresh inheritors) the same way assignment does.
+		//
+		// CPython: Objects/typeobject.c:11455 update_slot
+		if isSlotDunderName(nameStr) {
+			refixupSlotDispatchers(tp)
+		}
 		tp.InvalidateVersionTag()
 		return nil
 	}
@@ -470,8 +478,36 @@ func typeSetAttr(o Object, name Object, value Object) error {
 	if nameStr == "__call__" {
 		clearVectorcallForCallOverride(tp)
 	}
+	// Assigning a special method to a live type must re-wire the matching
+	// C-level slot (and its inheritors), so e.g. `C.__int__ = lambda ...`
+	// makes int(c) dispatch to it. CPython runs update_one_slot for each
+	// slotdef whose name matches; gopy re-runs the per-type fixup pass.
+	//
+	// CPython: Objects/typeobject.c:11455 update_slot / fixup_slot_dispatchers
+	if isSlotDunderName(nameStr) {
+		refixupSlotDispatchers(tp)
+	}
 	tp.InvalidateVersionTag()
 	return nil
+}
+
+// isSlotDunderName reports whether name is a __dunder__ that could back a
+// C-level type slot, so a write to it on a live type triggers a slot
+// re-fixup. Plain attribute writes skip the work.
+func isSlotDunderName(name string) bool {
+	return len(name) > 4 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__")
+}
+
+// refixupSlotDispatchers re-runs fixupSlotDispatchers on t and every
+// subclass that does not override the affected slots, mirroring how
+// update_slot walks the subclass tree.
+//
+// CPython: Objects/typeobject.c:11455 update_slot (recursion over subclasses)
+func refixupSlotDispatchers(t *Type) {
+	fixupSlotDispatchers(t)
+	for _, sub := range t.Subclasses() {
+		refixupSlotDispatchers(sub)
+	}
 }
 
 // clearVectorcallForCallOverride re-wires tp_call to the generic
