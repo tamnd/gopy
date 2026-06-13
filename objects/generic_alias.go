@@ -60,11 +60,20 @@ func init() {
 //
 // CPython: Objects/genericaliasobject.c:1040 Py_GenericAlias
 func NewGenericAlias(origin Object, args Object) *GenericAlias {
+	return newGenericAliasOfType(GenericAliasType, origin, args)
+}
+
+// newGenericAliasOfType builds an alias whose type is cls. ga_new allocates
+// via type->tp_alloc(type, 0), so a GenericAlias subclass (e.g.
+// _collections_abc._CallableGenericAlias) gets an instance of itself.
+//
+// CPython: Objects/genericaliasobject.c:896 ga_new
+func newGenericAliasOfType(cls *Type, origin Object, args Object) *GenericAlias {
 	// setup_ga keeps a counted reference to origin (Py_NewRef) so the alias
 	// owns it independently of the caller's transient reference.
 	Incref(origin)
 	ga := &GenericAlias{origin: origin}
-	ga.init(GenericAliasType)
+	ga.init(cls)
 	gaSetupArgs(ga, args)
 	return ga
 }
@@ -445,14 +454,17 @@ func gaSubscript(o, item Object) (Object, error) {
 // gaNew is the tp_new slot for types.GenericAlias(origin, args).
 //
 // CPython: Objects/genericaliasobject.c:896 ga_new
-func gaNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+func gaNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 	if len(kwargs) != 0 {
 		return nil, fmt.Errorf("TypeError: GenericAlias() takes no keyword arguments")
 	}
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: GenericAlias expected 2 arguments, got %d", len(args))
 	}
-	return NewGenericAlias(args[0], args[1]), nil
+	if cls == nil {
+		cls = GenericAliasType
+	}
+	return newGenericAliasOfType(cls, args[0], args[1]), nil
 }
 
 // gaIterObject is the gopy port of CPython's gaiterobject. It yields the
@@ -917,6 +929,47 @@ func init() {
 	// tuple to zero and tupleDealloc empties it under the alias's feet.
 	//
 	// CPython: Objects/genericaliasobject.c:790 ga_members (Py_NewRef contract)
+	// Expose ga_new as __new__ so a Python subclass can reach it through
+	// super().__new__(cls, origin, args) instead of falling through to
+	// object.__new__ (which rejects the extra arguments).
+	//
+	// CPython: Objects/genericaliasobject.c:896 ga_new
+	SetTypeDescr(GenericAliasType, "__new__", NewBuiltinFunction("types.GenericAlias.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: GenericAlias.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: GenericAlias.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return gaNew(cls, args[1:], kwargs)
+	}))
+	// Expose the tp_repr/tp_hash slots as dunders so a Python subclass of
+	// types.GenericAlias inherits them. Without a __repr__ in the dict, a
+	// subclass's slot fixup finds object.__repr__ first and renders the
+	// default <object at 0x..> form instead of "list[int]".
+	//
+	// CPython: Objects/typeobject.c add_operators (slot wrappers)
+	SetTypeDescr(GenericAliasType, "__repr__", NewMethodDescrConv(GenericAliasType, "__repr__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __repr__() missing self argument")
+		}
+		s, err := gaRepr(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewStr(s), nil
+	}))
+	SetTypeDescr(GenericAliasType, "__hash__", NewMethodDescrConv(GenericAliasType, "__hash__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: __hash__() missing self argument")
+		}
+		h, err := gaHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	SetTypeDescr(GenericAliasType, "__origin__", NewGetSetDescr("__origin__", gaGetOrigin, nil))
 	SetTypeDescr(GenericAliasType, "__args__", NewGetSetDescr("__args__", gaGetArgs, nil))
 	SetTypeDescr(GenericAliasType, "__unpacked__", NewGetSetDescr("__unpacked__", gaGetUnpacked, nil))

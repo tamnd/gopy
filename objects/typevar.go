@@ -424,6 +424,12 @@ func init() {
 		Incref(args[2])
 		return args[2], nil
 	}))
+	// TypeVar and ParamSpec implement `|` as typing.Union rather than
+	// types.UnionType, to preserve string forward-reference support.
+	//
+	// CPython: Objects/typevarobject.c:373 make_union (Py_nb_or slot)
+	SetTypeDescr(TypeVarType, "__or__", NewMethodDescr(TypeVarType, "__or__", typevarOr))
+	SetTypeDescr(TypeVarType, "__ror__", NewMethodDescr(TypeVarType, "__ror__", typevarRor))
 
 	SetTypeDescr(ParamSpecType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*ParamSpec).NameStr), nil
@@ -518,6 +524,8 @@ func init() {
 		}
 		return args[2], nil
 	}))
+	SetTypeDescr(ParamSpecType, "__or__", NewMethodDescr(ParamSpecType, "__or__", typevarOr))
+	SetTypeDescr(ParamSpecType, "__ror__", NewMethodDescr(ParamSpecType, "__ror__", typevarRor))
 
 	SetTypeDescr(TypeVarTupleType, "__name__", NewGetSetDescr("__name__", func(o Object) (Object, error) {
 		return NewStr(o.(*TypeVarTuple).NameStr), nil
@@ -656,6 +664,27 @@ func init() {
 	SetTypeDescr(GenericType, "__init_subclass__", NewClassMethod(
 		NewBuiltinFunction("__init_subclass__", genericInitSubclass),
 	))
+}
+
+// typevarOr implements `self | other` for TypeVar and ParamSpec, building
+// a typing.Union (not types.UnionType) so string forward references stay
+// supported.
+//
+// CPython: Objects/typevarobject.c:373 make_union
+func typevarOr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __or__() takes exactly one argument")
+	}
+	return unionFromTuple(NewTuple([]Object{args[0], args[1]}))
+}
+
+// typevarRor implements `other | self`, mirroring typevarOr with the
+// operands swapped back into source order.
+func typevarRor(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ror__() takes exactly one argument")
+	}
+	return unionFromTuple(NewTuple([]Object{args[1], args[0]}))
 }
 
 // genericInitSubclass implements Generic.__init_subclass__(cls). It

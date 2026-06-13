@@ -117,7 +117,16 @@ func unionRepr(o Object) (string, error) {
 func unionHash(o Object) (int64, error) {
 	u := o.(*UnionType)
 	if u.unhashableArgs != nil {
-		return 0, fmt.Errorf("TypeError: union contains %d unhashable elements", u.unhashableArgs.Len())
+		// Re-hash each unhashable arg to surface its own TypeError
+		// ("unhashable type: 'X'") rather than a generic message.
+		n := u.unhashableArgs.Len()
+		for i := 0; i < n; i++ {
+			if _, err := Hash(u.unhashableArgs.Item(i)); err != nil {
+				return 0, err
+			}
+		}
+		// The args somehow became hashable again; still refuse.
+		return 0, fmt.Errorf("TypeError: union contains %d unhashable elements", n)
 	}
 	return Hash(u.hashableArgs)
 }
@@ -243,7 +252,11 @@ func (ub *unionBuilder) addTuple(t *Tuple) error {
 // CPython: Objects/unionobject.c:168 unionbuilder_add_single_unchecked
 func (ub *unionBuilder) addSingleUnchecked(arg Object) error {
 	if _, err := Hash(arg); err != nil {
-		// Unhashable: check against existing unhashables.
+		// Unhashable: clear the pending hash error (CPython calls
+		// PyErr_Clear here) and check against existing unhashables.
+		if ClearCurrentExceptionHook != nil {
+			ClearCurrentExceptionHook()
+		}
 		for _, existing := range ub.unhashableArgs {
 			eq, cerr := RichCmpBool(existing, arg, CompareEQ)
 			if cerr != nil {
