@@ -29,6 +29,35 @@ import (
 
 func init() {
 	FloatType.Format = floatFormat
+	// As with int, _PyFloat_FormatAdvancedWriter is reachable through
+	// instance.__format__(spec) as well as PyObject_Format. Without the
+	// descriptor the MRO inherits objectFormatDescr and rejects every
+	// non-empty spec.
+	//
+	// CPython: Objects/floatobject.c:1832 float_methods __format__
+	SetTypeDescr(FloatType, "__format__", NewMethodDescrConv(FloatType, "__format__", MethO, floatFormatMethod))
+}
+
+// floatFormatMethod is float.__format__(self, format_spec). An empty
+// spec returns str(self); a non-empty spec runs the float renderer.
+//
+// CPython: Python/formatter_unicode.c:1665 _PyFloat_FormatAdvancedWriter
+func floatFormatMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __format__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	spec, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __format__() argument 1 must be str, not %s", typeNameOf(args[1]))
+	}
+	if spec.v == "" {
+		return StrObject(args[0])
+	}
+	out, err := floatFormat(args[0], spec.v)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
 }
 
 // floatFormat ports _PyFloat_FormatAdvancedWriter. Non-empty spec must

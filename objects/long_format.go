@@ -52,6 +52,36 @@ import (
 func init() {
 	IntType.Format = intFormat
 	BoolType.Format = intFormat
+	// _PyLong_FormatAdvancedWriter is reachable both via PyObject_Format
+	// (the slot above) and via instance.__format__(spec). Install the
+	// method descriptor so the attribute path hits the same renderer;
+	// otherwise the MRO inherits objectFormatDescr, which rejects every
+	// non-empty spec. bool inherits this descriptor from int via the MRO.
+	//
+	// CPython: Objects/longobject.c:6480 long_methods __format__
+	SetTypeDescr(IntType, "__format__", NewMethodDescrConv(IntType, "__format__", MethO, intFormatMethod))
+}
+
+// intFormatMethod is int.__format__(self, format_spec). An empty spec
+// returns str(self); a non-empty spec runs the integer renderer.
+//
+// CPython: Python/formatter_unicode.c:1589 _PyLong_FormatAdvancedWriter
+func intFormatMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __format__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	spec, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __format__() argument 1 must be str, not %s", typeNameOf(args[1]))
+	}
+	if spec.v == "" {
+		return StrObject(args[0])
+	}
+	out, err := intFormat(args[0], spec.v)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
 }
 
 // intFormat ports _PyLong_FormatAdvancedWriter: parse the spec, then
