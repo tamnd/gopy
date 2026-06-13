@@ -50,6 +50,22 @@ func init() {
 		return m, nil
 	}
 
+	// module.__new__: surface tp_new so M.__new__(M) allocates a real
+	// *Module rather than inheriting object.__new__ (which would build a
+	// generic *Instance whose Str slot then crashes module_repr).
+	//
+	// CPython: Objects/moduleobject.c module_new (tp_new)
+	SetTypeDescr(ModuleType, "__new__", NewBuiltinFunction("module.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: module.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: module.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return ModuleType.TpNew(cls, args[1:], kwargs)
+	}))
+
 	// module.__init__(name, doc=None): set __name__ and optionally __doc__
 	// in the module's __dict__. Called by typeCallViaTpNew with self as
 	// args[0], matching the MethodDescr calling convention.

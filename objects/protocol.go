@@ -132,7 +132,17 @@ func ReprObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __repr__ directly and return the Object.
 	if o.Type().IsUser {
+		// PyObject_Repr guards tp_repr before dispatch; the user-type branch
+		// dispatches __repr__ here without going through Repr, so it must
+		// enter the same recursion check or a __repr__/__str__ cross-rebind
+		// (Foo.__repr__ = Foo.__str__) overflows the stack.
+		//
+		// CPython: Objects/object.c:777 PyObject_Repr (Py_EnterRecursiveCall)
+		if err := enterRecursiveCall(" while getting the repr of an object"); err != nil {
+			return nil, err
+		}
 		result, ok, err := callDunderNoArgObject(o, "__repr__")
+		leaveRecursiveCall()
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +170,15 @@ func StrObject(o Object) (Object, error) {
 	}
 	// For user-defined types, call __str__ directly and return the Object.
 	if o.Type().IsUser {
+		// As in ReprObject, the user-type branch dispatches __str__ without
+		// going through Str, so it must enter the recursion check itself.
+		//
+		// CPython: Objects/object.c:822 PyObject_Str (Py_EnterRecursiveCall)
+		if err := enterRecursiveCall(" while getting the str of an object"); err != nil {
+			return nil, err
+		}
 		result, ok, err := callDunderNoArgObject(o, "__str__")
+		leaveRecursiveCall()
 		if err != nil {
 			return nil, err
 		}

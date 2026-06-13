@@ -1782,6 +1782,17 @@ func vectorcallMethod(o Object, name string, extra ...Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8174 slot_tp_call
 func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
+	// A __call__ rebound to another callable instance (A.__call__ = A())
+	// recurses through tp_call without ever pushing a Python frame, so the
+	// per-frame recursion limit never sees it. Guard the C-level nesting the
+	// way CPython's call machinery does so the loop raises RecursionError
+	// instead of overflowing the goroutine stack.
+	//
+	// CPython: Objects/call.c:242 _PyObject_MakeTpCall (Py_EnterRecursiveCall)
+	if err := enterRecursiveCall(" while calling a Python object"); err != nil {
+		return nil, err
+	}
+	defer leaveRecursiveCall()
 	fn, unbound, err := lookupMaybeMethod(callable, "__call__")
 	if err != nil {
 		return nil, err
@@ -2292,20 +2303,18 @@ func installSlots(t *Type, ns *Dict) error {
 		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
-	// Keep __slots__ accessible as a class attribute (cls.__slots__ returns
-	// the tuple of slot names). CPython stores a plain tuple in tp_dict so
-	// `type.__dict__['__slots__']` works, and copyreg._reduce_ex inspects
-	// getattr(inst, '__slots__') to decide whether to raise TypeError for
-	// classes without __getstate__. Storing the tuple directly (not wrapped
-	// in a GetSetDescr) makes it a non-data descriptor so instance-level
-	// assignments like `self.__slots__ = None` still land in __dict__.
+	// Keep __slots__ accessible as a class attribute. CPython normalizes
+	// __slots__ into a tuple only for its internal et->ht_slots store; the
+	// value visible from Python (tp_dict['__slots__']) is the user's
+	// ORIGINAL object, copied verbatim from the namespace by PyDict_Copy.
+	// So a list stays a list, a str stays a str, and the names are left
+	// unmangled (the mangling applies only to the member descriptors). This
+	// is what copyreg._reduce_ex inspects via getattr(inst, '__slots__').
+	// Storing the raw value directly (a non-data descriptor) keeps instance
+	// assignments like `self.__slots__ = None` landing in __dict__.
 	//
-	// CPython: Objects/typeobject.c:4401 type_new_descriptors
-	items := make([]Object, len(resolved))
-	for i, n := range resolved {
-		items[i] = NewStr(n)
-	}
-	SetTypeDescr(t, "__slots__", NewTuple(items))
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors / 4618 PyDict_Copy
+	SetTypeDescr(t, "__slots__", raw)
 	_ = ns.DelItem(slotsKey)
 	return nil
 }

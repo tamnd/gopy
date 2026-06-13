@@ -518,6 +518,11 @@ func typeSetDoc(o Object, v Object) error {
 	if !t.IsUser {
 		return fmt.Errorf("TypeError: cannot set '__doc__' attribute of immutable type '%s'", t.Name)
 	}
+	// check_set_special_type_attr rejects deletion (NULL value) with a
+	// message that, by CPython's own wording, still says "immutable type".
+	if v == nil {
+		return fmt.Errorf("TypeError: cannot delete '__doc__' attribute of immutable type '%s'", t.Name)
+	}
 	SetTypeDescr(t, "__doc__", v)
 	return nil
 }
