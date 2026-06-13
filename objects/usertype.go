@@ -343,6 +343,22 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if t.Dealloc == nil {
 		t.Dealloc = instanceDealloc
 	}
+	// type_new warns once if the finished class dict carries a non-string
+	// key (type('MyClass', (), {1: 2}) or a metaclass that injects ns[1]=2).
+	// The namespace is the source of those keys; the special cells were
+	// already stripped above.
+	//
+	// CPython: Objects/typeobject.c:4665 type_new (RuntimeWarning)
+	if RuntimeWarnHook != nil && ns != nil {
+		for _, k := range ns.Keys() {
+			if _, isStr := k.(*Unicode); !isStr {
+				if err := RuntimeWarnHook(fmt.Sprintf("non-string key in the __dict__ of class %s", name)); err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member

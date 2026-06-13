@@ -84,6 +84,11 @@ func init() {
 	//
 	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
 	BuiltinFunctionType.TpFlags |= TpFlagHaveVectorcall
+	// PyCFunction_Type is not subclassable: it omits Py_TPFLAGS_BASETYPE, so
+	// class C(type(len)) raises "is not an acceptable base type".
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
+	BuiltinFunctionType.TpFlags &^= TpFlagBasetype
 	BuiltinFunctionType.Repr = builtinFunctionRepr
 	BuiltinFunctionType.Str = builtinFunctionRepr
 	BuiltinFunctionType.Call = builtinFunctionCall

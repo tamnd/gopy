@@ -26,6 +26,10 @@ func init() {
 		// (the user's call site), which is what C-builtin deprecations want.
 		return WarnUnicode(errors.PyExc_DeprecationWarning, msg, 1, nil)
 	}
+	objects.RuntimeWarnHook = func(msg string) error {
+		// CPython: Objects/typeobject.c:4667 PyErr_WarnFormat(..., 1, ...)
+		return WarnUnicode(errors.PyExc_RuntimeWarning, msg, 1, nil)
+	}
 }
 
 // FlushLexerWarnings posts every SyntaxWarning-class diagnostic the

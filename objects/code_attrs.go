@@ -24,6 +24,14 @@ import (
 // CPython: Objects/codeobject.c:2744 code_getlnotab (PyErr_WarnEx call)
 var DeprecWarnHook func(msg string) error
 
+// RuntimeWarnHook is set by module/_warnings at init time so the objects
+// package can emit a RuntimeWarning (for example the non-string class
+// __dict__ key warning) without a circular import. Returns non-nil if
+// the filter elevates the warning to an error.
+//
+// CPython: Objects/typeobject.c:4667 type_new (PyErr_WarnFormat RuntimeWarning)
+var RuntimeWarnHook func(msg string) error
+
 func init() {
 	SetTypeDescr(CodeType, "co_lines", NewMethodDescr(CodeType, "co_lines", codeCoLinesMethod))
 	SetTypeDescr(CodeType, "co_positions", NewMethodDescr(CodeType, "co_positions", codeCoPositionsMethod))
