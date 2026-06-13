@@ -102,6 +102,14 @@ func init() {
 	SetTypeDescr(BoundMethodType, "__reduce__",
 		NewMethodDescrConv(BoundMethodType, "__reduce__", MethNoArgs, boundMethodReduceMethod))
 	AddCallSlotWrapper(BoundMethodType)
+	// add_operators installs a __get__ wrapper for every type with a
+	// tp_descr_get slot. Without it, a.meth.__get__ would fall through
+	// boundMethodGetattro to the wrapped function's __get__ and rebind
+	// the method to a new self (gh-113157); the wrapper routes to
+	// method_descr_get, which returns the binding unchanged.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	addDescriptorSlotWrappers(BoundMethodType)
 }
 
 // boundMethodGetattro looks for name on the method type first (so

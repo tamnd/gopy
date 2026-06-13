@@ -208,6 +208,18 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
+	// A base listed twice (type('X', (A, A), {})) is rejected up front with a
+	// dedicated message, before the C3 linearization would otherwise report a
+	// generic MRO conflict.
+	//
+	// CPython: Objects/typeobject.c:3168 check_duplicates
+	for i := range bases {
+		for j := i + 1; j < len(bases); j++ {
+			if bases[j] == bases[i] {
+				return nil, fmt.Errorf("TypeError: duplicate base class %s", bases[i].Name)
+			}
+		}
+	}
 	// best_base validates the instance layout before anything else: two
 	// bases whose solid bases differ (int and str each own a distinct C
 	// struct) cannot be combined, so type('A', (int, str), {}) raises a
@@ -757,6 +769,17 @@ func copyNamespaceToType(t *Type, ns *Dict) error {
 		case "__init_subclass__", "__class_getitem__":
 			if _, isFn := v.(*Function); isFn {
 				v = NewClassMethod(v)
+			}
+		case "__new__":
+			// A __new__ defined as a plain function in the class body is
+			// implicitly wrapped in staticmethod, so type.__dict__['__new__']
+			// is a staticmethod and the unbound first parameter stays cls.
+			// Already-wrapped (@staticmethod / @classmethod) and builtin
+			// __new__ are left untouched.
+			//
+			// CPython: Objects/typeobject.c:4345 type_new_staticmethod
+			if _, isFn := v.(*Function); isFn {
+				v = NewStaticMethod(v)
 			}
 		case "__doc__":
 			// type_new_set_doc runs PyUnicode_AsUTF8 on a string __doc__;

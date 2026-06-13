@@ -182,7 +182,7 @@ func superInit(args []Object, kwargs map[string]Object) (Object, error) {
 		}
 		typ, obj = t, rest[1]
 	default:
-		return nil, fmt.Errorf("TypeError: super() takes at most 2 arguments")
+		return nil, fmt.Errorf("TypeError: super expected at most 2 arguments, got %d", len(rest))
 	}
 	if err := initSuper(su, typ, obj); err != nil {
 		return nil, err
