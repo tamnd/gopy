@@ -153,6 +153,14 @@ import (
 	// CPython: Modules/_testlimitedcapi/abstract.c:1 abstract-protocol tests
 	_ "github.com/tamnd/gopy/module/_testlimitedcapi"
 
+	// Built-in module: _testinternalcapi. Registers itself via
+	// module/_testinternalcapi/module.go init(). Ports the internal-API
+	// probes the standard-library test suite drives directly, starting
+	// with the inline-values / split-keys dict introspection test_class.py
+	// imports at module scope.
+	// CPython: Modules/_testinternalcapi.c:1 internal-API test probes
+	_ "github.com/tamnd/gopy/module/_testinternalcapi"
+
 	// Built-in module: _testcapi. Registers itself via
 	// module/_testcapi/module.go init(). Ports the PEP 590 vectorcall and
 	// calling-convention fixtures (meth_*, Meth{Instance,Class,Static})

@@ -516,7 +516,11 @@ func NumberInPlacePower(a, b, mod Object) (Object, error) {
 			return out, nil
 		}
 	}
-	return NumberPower(a, b, mod)
+	// Fall back to the non-inplace nb_power slot, but keep the "**=" op name
+	// so a missing operator reports the in-place form.
+	//
+	// CPython: Objects/abstract.c:1349 PyNumber_InPlacePower (ternary_iop)
+	return ternaryNumberOp(a, b, mod, "**=", func(n *NumberMethods) func(a, b, mod Object) (Object, error) { return n.Power })
 }
 
 // NumberNegative is -o.
@@ -664,6 +668,22 @@ func numberBinaryNoErr(a, b Object, pick func(*NumberMethods) func(a, b Object) 
 // walk comes up empty. Callers that already know the op symbol pass it
 // in; the unnamed wrapper above keeps the old call sites unchanged.
 func numberBinaryNoErrNamed(a, b Object, opName string, pick func(*NumberMethods) func(a, b Object) (Object, error)) (Object, error) {
+	// When b's type is a strict subtype of a's type and overrides the
+	// reflected operator, give b's reverse slot a chance before a's forward
+	// slot. Mirrors binary_op1's subtype-first block; without it 1 + I(2)
+	// for an int subclass I would run int.__add__ and lose I.__radd__.
+	//
+	// CPython: Objects/abstract.c:957 binary_op1 (subtype-first block)
+	if opName != "" && a.Type() != b.Type() && IsSubtype(b.Type(), a.Type()) {
+		if out, ok, err := dunderBinaryReverse(b, a, opName); ok {
+			if err != nil {
+				return nil, err
+			}
+			if !IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if fn := numberSlot(a, pick); fn != nil {
 		out, err := fn(a, b)
 		if err != nil {
@@ -714,6 +734,25 @@ func inPlaceBinaryNoErr(a, b Object,
 //
 // CPython: Objects/abstract.c:1041 ternary_op
 func ternaryNumberOp(a, b, c Object, opName string, pick func(*NumberMethods) func(a, b, mod Object) (Object, error)) (Object, error) {
+	// When b's type is a strict subtype of a's and supplies its own power
+	// slot, run b's slot first so 2 ** I(3) (int subclass I overriding
+	// __rpow__) reaches I.__rpow__ instead of int.__pow__.
+	//
+	// CPython: Objects/abstract.c:1057 ternary_op (subtype-first block)
+	subtypeFirst := a.Type() != b.Type() && IsSubtype(b.Type(), a.Type())
+	if subtypeFirst {
+		if n := b.Type().Number; n != nil {
+			if fn := pick(n); fn != nil {
+				out, err := fn(a, b, c)
+				if err != nil {
+					return nil, err
+				}
+				if !IsNotImplemented(out) {
+					return out, nil
+				}
+			}
+		}
+	}
 	if n := a.Type().Number; n != nil {
 		if fn := pick(n); fn != nil {
 			out, err := fn(a, b, c)
@@ -724,6 +763,10 @@ func ternaryNumberOp(a, b, c Object, opName string, pick func(*NumberMethods) fu
 				return out, nil
 			}
 		}
+	}
+	if subtypeFirst {
+		// Already tried b's slot above; skip the duplicate trailing attempt.
+		return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", opName, a.Type().Name, b.Type().Name)
 	}
 	if n := b.Type().Number; n != nil {
 		if fn := pick(n); fn != nil {

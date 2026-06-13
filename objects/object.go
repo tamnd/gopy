@@ -135,14 +135,22 @@ func objectSetDict(o Object, value Object) error {
 	// NULL to _PyObject_SetManagedDict, clearing the managed dict so the
 	// next attribute access lazily rebuilds an empty one.
 	if value == nil {
+		// Detaching the managed dict drops the inline values, so the
+		// instance is no longer in the WITH_VALUES shape.
+		//
+		// CPython: Objects/dictobject.c:7540 _PyObject_SetManagedDict (NULL)
 		v.dict = NewDict()
+		v.inlineValid = false
 		return nil
 	}
 	d, ok := value.(*Dict)
 	if !ok {
 		return fmt.Errorf("TypeError: __dict__ must be set to a dictionary, not a '%s'", value.Type().Name)
 	}
+	// Binding an explicit dict materializes a combined dict in place of
+	// the inline values.
 	v.dict = d
+	v.inlineValid = false
 	return nil
 }
 

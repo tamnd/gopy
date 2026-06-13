@@ -59,12 +59,21 @@ func asIndex(o objects.Object) (int, error) {
 
 // asStr extracts a C-string argument (the "z#"/"s" formats). gopy passes
 // it as a str object; a non-str is the converter's TypeError.
+// asStr decodes the C "z#"/"s#" argument these probes parse with. That
+// format reads a NUL-terminated char buffer, so it accepts a str or any
+// bytes-like object, not just str.
+//
+// CPython: Modules/_testlimitedcapi/abstract.c PyArg_ParseTuple "Oz#"
 func asStr(name string, o objects.Object) (string, error) {
-	u, ok := o.(*objects.Unicode)
-	if !ok {
-		return "", fmt.Errorf("TypeError: %s() argument must be str, not %s", name, o.Type().Name)
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	case *objects.ByteArray:
+		return string(v.Bytes()), nil
 	}
-	return u.Value(), nil
+	return "", fmt.Errorf("TypeError: %s() argument must be str, not %s", name, o.Type().Name)
 }
 
 // returnInt mirrors the RETURN_INT macro: a non-error C call that

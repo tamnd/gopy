@@ -441,6 +441,26 @@ func typeSetAttr(o Object, name Object, value Object) error {
 	if nameStr == "__annotations__" {
 		return typeSetAnnotations(tp, value)
 	}
+	// Writing __abstractmethods__ toggles Py_TPFLAGS_IS_ABSTRACT off the
+	// truthiness of the value (cleared on delete), so inspect.isabstract
+	// and the instantiation guard see the flag without re-scanning.
+	//
+	// CPython: Objects/typeobject.c:1647 type_set_abstractmethods
+	if nameStr == "__abstractmethods__" {
+		abstract := false
+		if value != nil {
+			t, err := IsTruthy(value)
+			if err != nil {
+				return err
+			}
+			abstract = t
+		}
+		if abstract {
+			tp.TpFlags |= TpFlagAbstract
+		} else {
+			tp.TpFlags &^= TpFlagAbstract
+		}
+	}
 	if value == nil {
 		m, ok := typeDescrTable[tp]
 		if !ok {

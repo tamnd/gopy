@@ -626,47 +626,17 @@ func registerFunctionTypeParamsGetSet() {
 		}))
 }
 
-// registerFunctionDictGetSets installs __isabstractmethod__ and
-// __dict__, both of which read through f.Dict so decorators like
-// abstractmethod can stamp attributes without a dedicated field.
+// registerFunctionDictGetSets installs __dict__, which reads through
+// f.Dict so decorators like abstractmethod can stamp arbitrary
+// attributes without a dedicated field. CPython has no
+// __isabstractmethod__ getset on plain functions: abstractmethod just
+// stores it as an ordinary instance attribute in func.__dict__.
 //
 // CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
-// CPython: Objects/funcobject.c:805 func_get_isabstractmethod
-// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
 func registerFunctionDictGetSets() {
-	SetTypeDescr(FunctionType, "__isabstractmethod__", NewGetSetDescr("__isabstractmethod__",
-		funcGetIsAbstractMethod,
-		funcSetIsAbstractMethod))
 	SetTypeDescr(FunctionType, "__dict__", NewGetSetDescr("__dict__",
 		funcGetDict,
 		funcSetDict))
-}
-
-func funcGetIsAbstractMethod(o Object) (Object, error) {
-	f := o.(*Function)
-	if f.Dict == nil {
-		return False(), nil
-	}
-	v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
-	if err != nil || v == nil {
-		//nolint:nilerr // missing key reads as False, per func_get_isabstractmethod
-		return False(), nil
-	}
-	return v, nil
-}
-
-func funcSetIsAbstractMethod(o Object, v Object) error {
-	f := o.(*Function)
-	if v == nil {
-		if f.Dict == nil {
-			return nil
-		}
-		return f.Dict.DelItem(NewStr("__isabstractmethod__"))
-	}
-	if f.Dict == nil {
-		f.Dict = NewDict()
-	}
-	return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
 }
 
 func funcGetDict(o Object) (Object, error) {

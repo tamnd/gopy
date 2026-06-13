@@ -368,3 +368,10 @@ func isAttributeError(err error) bool {
 	}
 	return strings.HasPrefix(err.Error(), "AttributeError")
 }
+
+// IsAttributeError reports whether err is a Python AttributeError. It is
+// the exported form of isAttributeError for callers outside the objects
+// package (e.g. the _abc module's __isabstractmethod__ probe).
+func IsAttributeError(err error) bool {
+	return isAttributeError(err)
+}

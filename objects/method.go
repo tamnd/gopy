@@ -237,15 +237,12 @@ func boundMethodRichCompare(a, b Object, op CompareOp) (Object, error) {
 		return nil, err
 	}
 	if eq {
-		switch {
-		case ma.imSelf == nil || mb.imSelf == nil:
-			eq = ma.imSelf == mb.imSelf
-		default:
-			eq, err = RichCmpBool(ma.imSelf, mb.imSelf, CompareEQ)
-			if err != nil {
-				return nil, err
-			}
-		}
+		// im_self is compared by identity, never through __eq__: two
+		// methods bound off distinct instances differ even when those
+		// instances compare equal.
+		//
+		// CPython: Objects/classobject.c:226 method_richcompare
+		eq = ma.imSelf == mb.imSelf
 	}
 	if op == CompareNE {
 		eq = !eq

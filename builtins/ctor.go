@@ -695,10 +695,16 @@ func FloatCtor(args []objects.Object, kwargs map[string]objects.Object) (objects
 			if err != nil {
 				return nil, err
 			}
+			// __float__ must return a float; anything else is a TypeError.
+			// CPython: Objects/abstract.c:1602 PyNumber_Float
+			rf0, isFloat := res.(*objects.Float)
+			if !isFloat {
+				return nil, fmt.Errorf("TypeError: %s.__float__ returned non-float (type %s)", args[0].Type().Name, res.Type().Name)
+			}
 			// If __float__ returned a non-exact float subclass, emit
 			// DeprecationWarning and unwrap.
 			// CPython: Objects/abstract.c:1614 PyNumber_Float
-			if rf, ok := res.(*objects.Float); ok && rf.Type() != objects.FloatType {
+			if rf := rf0; rf.Type() != objects.FloatType {
 				msg := fmt.Sprintf("__float__ returned non-float (type %s). "+
 					"The ability to return an instance of a strict subclass of float "+
 					"is deprecated, and may be removed in a future version of Python.",

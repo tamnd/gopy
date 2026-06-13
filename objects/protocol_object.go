@@ -223,9 +223,17 @@ func LengthHint(o Object, defaultVal int64) (int64, error) {
 	} else if !strings.HasPrefix(err.Error(), "TypeError") {
 		return 0, err
 	}
-	hint, hintErr := GetAttr(o, NewStr("__length_hint__"))
+	// _PyObject_LookupSpecial does a TYPE-level MRO lookup that bypasses the
+	// instance __getattribute__, so a per-instance __length_hint__ never
+	// satisfies the slot and a custom __getattribute__ is not invoked.
+	//
+	// CPython: Objects/abstract.c:113 PyObject_LengthHint (_PyObject_LookupSpecial)
+	hint, hintErr := LookupSpecial(o, "__length_hint__")
 	if hintErr != nil {
-		return defaultVal, nil //nolint:nilerr // CPython: missing __length_hint__ → default
+		return 0, hintErr
+	}
+	if hint == nil {
+		return defaultVal, nil
 	}
 	res, callErr := Call(hint, NewTuple(nil), nil)
 	if callErr != nil {

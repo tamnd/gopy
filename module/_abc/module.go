@@ -159,18 +159,20 @@ func clearSet(s *objects.Set) error {
 }
 
 // isAbstract mirrors _PyObject_IsAbstract: read __isabstractmethod__ and
-// return its truthiness, treating absence as false.
+// return its truthiness, treating absence as false. A missing attribute
+// reads as not-abstract; any other error (e.g. a __bool__ that raises
+// inside property.__isabstractmethod__) propagates.
 //
-// CPython: Include/internal/pycore_object.h _PyObject_IsAbstract
-//
-//nolint:unparam // signature mirrors _PyObject_IsAbstract; future hash/error returns plug in here
+// CPython: Modules/_abc.c:430 compute_abstract_methods
 func isAbstract(value objects.Object) (bool, error) {
 	v, err := objects.GetAttr(value, objects.NewStr("__isabstractmethod__"))
 	if err != nil {
-		// AttributeError: not abstract.
-		return false, nil //nolint:nilerr // matches CPython's swallow of AttributeError
+		if objects.IsAttributeError(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	return objects.IsTrue(v), nil
+	return objects.IsTruthy(v)
 }
 
 // computeAbstractMethods walks cls.__dict__ then base classes to build
@@ -238,8 +240,11 @@ func computeAbstractMethods(self objects.Object) error {
 	if err != nil {
 		return err
 	}
-	objects.SetTypeDescr(cls, "__abstractmethods__", fs)
-	return nil
+	// Route through SetAttr so type_set_abstractmethods toggles
+	// Py_TPFLAGS_IS_ABSTRACT, which inspect.isabstract reads.
+	//
+	// CPython: Modules/_abc.c:471 compute_abstract_methods
+	return objects.SetAttr(cls, objects.NewStr("__abstractmethods__"), fs)
 }
 
 // collectionFlags is the mask of TpFlags bits abc propagates through
@@ -510,28 +515,34 @@ func abcSubclasscheck(args []objects.Object, _ map[string]objects.Object) (objec
 		return r, nil
 	}
 
-	// Step 6: walk self.__subclasses__() recursively. Each direct
-	// subclass might have registered subclass as a virtual subclass, so
-	// recursing through _abc_subclasscheck honors those registrations.
-	// The default fallback for non-ABC subclasses is a real subtype check.
-	if selfCls, ok := self.(*objects.Type); ok {
-		for _, sub := range selfCls.Subclasses() {
-			var res objects.Object
-			if impl, _ := objects.LookupDescriptor(sub, "_abc_impl"); impl != nil {
-				r2, err := abcSubclasscheck([]objects.Object{sub, subclass}, nil)
-				if err != nil {
-					return nil, err
-				}
-				res = r2
-			} else {
-				res = objects.NewBool(objects.IsSubtype(subCls, sub))
+	// Step 6: walk self.__subclasses__() recursively. CPython calls the
+	// method off self (honoring any override), requires a list back, then
+	// runs PyObject_IsSubclass for each entry, which re-enters
+	// __subclasscheck__ so registry-of-registry chains resolve.
+	//
+	// CPython: Modules/_abc.c:804 _abc__abc_subclasscheck_impl
+	subMeth, err := objects.GetAttr(self, objects.NewStr("__subclasses__"))
+	if err != nil {
+		return nil, err
+	}
+	subclasses, err := objects.CallNoArgs(subMeth)
+	if err != nil {
+		return nil, err
+	}
+	subList, ok := subclasses.(*objects.List)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __subclasses__() must return a list")
+	}
+	for i := 0; i < subList.Len(); i++ {
+		r, err := objects.ObjectIsSubclassObj(subclass, subList.Item(i))
+		if err != nil {
+			return nil, err
+		}
+		if r {
+			if err := addToWeakSet(d, &d.cache, subclass); err != nil {
+				return nil, err
 			}
-			if objects.IsTrue(res) {
-				if err := addToWeakSet(d, &d.cache, subclass); err != nil {
-					return nil, err
-				}
-				return objects.True(), nil
-			}
+			return objects.True(), nil
 		}
 	}
 
@@ -589,12 +600,19 @@ func checkRegistry(d *abcData, subclass objects.Object) (objects.Object, bool, e
 		if !alive {
 			continue
 		}
-		// Recurse via subclasscheck so registry-of-registry chains
-		// resolve. CPython calls PyObject_IsSubclass here; for gopy a
-		// straight IsSubtype suffices for type targets.
-		subCls, isType := subclass.(*objects.Type)
-		rkeyCls, rIsType := rkey.(*objects.Type)
-		if isType && rIsType && objects.IsSubtype(subCls, rkeyCls) {
+		// Recurse via PyObject_IsSubclass so registry-of-registry chains
+		// resolve: rkey may itself be an ABC whose own registry or real
+		// subclasses make subclass a subclass transitively. A straight
+		// IsSubtype here would only see real (MRO) subclassing and miss
+		// the virtual links.
+		//
+		// CPython: Modules/_abc.c:844 subclasscheck_check_registry
+		// (PyObject_IsSubclass(subclass, rkey))
+		r, err := objects.ObjectIsSubclassObj(subclass, rkey)
+		if err != nil {
+			return nil, false, err
+		}
+		if r {
 			if err := addToWeakSet(d, &d.cache, subclass); err != nil {
 				return nil, false, err
 			}

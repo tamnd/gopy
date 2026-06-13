@@ -14,6 +14,7 @@ package objects
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -140,11 +141,14 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		_, err := callBound(bound, args, kwargs)
+		res, err := callBound(bound, args, kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -169,11 +173,14 @@ func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Objec
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		_, err := callBound(bound, args, kwargs)
+		res, err := callBound(bound, args, kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -200,12 +207,29 @@ func checkNotAbstract(cls *Type) error {
 			names = append(names, u.Value())
 		}
 	}
+	// CPython joins "', '".join(sorted(__abstractmethods__)) and wraps
+	// the result in a single pair of quotes.
+	//
+	// CPython: Objects/typeobject.c:6857 object_new
+	sort.Strings(names)
 	word := "method"
 	if len(names) != 1 {
 		word = "methods"
 	}
 	return fmt.Errorf("TypeError: Can't instantiate abstract class %s without an implementation for abstract %s '%s'",
-		cls.Name, word, strings.Join(names, ", "))
+		cls.Name, word, strings.Join(names, "', '"))
+}
+
+// checkInitResult enforces slot_tp_init's rule that a Python-level
+// __init__ must return None. A non-None return (e.g. `def __init__:
+// return 10`) raises TypeError, matching CPython.
+//
+// CPython: Objects/typeobject.c:10493 slot_tp_init
+func checkInitResult(res Object) error {
+	if res == nil || IsNone(res) {
+		return nil
+	}
+	return fmt.Errorf("TypeError: __init__() should return None, not '%.200s'", res.Type().Name)
 }
 
 // typeMetaclassCall handles calling a user-defined metaclass (a subclass
@@ -252,7 +276,11 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 			bound := bindDescr(init, result, cls)
-			if _, err := callBound(bound, args, kwargs); err != nil {
+			res, err := callBound(bound, args, kwargs)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkInitResult(res); err != nil {
 				return nil, err
 			}
 		}
@@ -441,7 +469,7 @@ func typeVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple)
 	if kwnames != nil && kwnames.Len() > 0 {
 		nkw := kwnames.Len()
 		kwd = NewDict()
-		for i := 0; i < nkw; i++ {
+		for i := range nkw {
 			if err := kwd.SetItem(kwnames.Item(i), args[npos+i]); err != nil {
 				return nil, err
 			}
@@ -489,11 +517,14 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		_, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		res, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -536,12 +567,15 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		_, callErr := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		res, callErr := VectorcallDict(bound, args, uint(len(args)), kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if callErr != nil {
 			return nil, callErr
+		}
+		if err := checkInitResult(res); err != nil {
+			return nil, err
 		}
 	}
 	return inst, nil
@@ -585,7 +619,11 @@ func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, 
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 			bound := bindDescr(init, result, cls)
-			if _, err := VectorcallDict(bound, args, uint(len(args)), kwargs); err != nil {
+			res, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkInitResult(res); err != nil {
 				return nil, err
 			}
 		}

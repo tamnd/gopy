@@ -418,9 +418,21 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 	}
 	if inst.dict == nil {
 		if !tp.HasDict {
-			// __slots__ class without __dict__: any name not covered by
-			// a type-level descriptor is rejected, mirroring CPython's
-			// PyObject_GenericSetAttr when tp_dictoffset == 0.
+			// __slots__ class without __dict__: the computed dict pointer
+			// is NULL, so any name not covered by a type-level descriptor
+			// is rejected. A type-level descriptor with no setter reads as
+			// read-only; a missing name reports the longer "no __dict__"
+			// message when tp_setattro is still the generic slot, and the
+			// short message when a Python __setattr__ override forwarded
+			// here through super().
+			//
+			// CPython: Objects/object.c:1990 _PyObject_GenericSetAttrWithDict
+			if descr != nil {
+				return fmt.Errorf("AttributeError: '%s' object attribute '%s' is read-only", tp.Name, attrNameStr(name))
+			}
+			if _, saOwner := LookupDescriptor(tp, "__setattr__"); saOwner == nil || saOwner == objectType {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, attrNameStr(name))
+			}
 			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
 		if value == nil {
@@ -460,5 +472,24 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 	if u, ok := name.(*Unicode); ok {
 		tp.AddCachedKey(u.v)
 	}
+	// The inline values / shared-keys table holds at most
+	// SHARED_KEYS_MAX_SIZE distinct attribute names. Storing a new name
+	// once the instance already carries that many leaves no usable slot,
+	// so CPython falls back to a combined dict and clears the values'
+	// valid flag. gopy keeps one real dict either way, so it only has to
+	// flip inlineValid to drop out of the WITH_VALUES specialization.
+	//
+	// CPython: Objects/dictobject.c:1900 insertdict (no space in shared keys)
+	if inst.inlineValid {
+		if _, err := inst.dict.GetItem(name); err != nil && inst.dict.Len() >= sharedKeysMaxSize {
+			inst.inlineValid = false
+		}
+	}
 	return inst.dict.SetItem(name, value)
 }
+
+// sharedKeysMaxSize caps the number of attribute names a type's shared
+// keys table (and thus an instance's inline values array) can hold.
+//
+// CPython: Include/internal/pycore_dict.h:226 SHARED_KEYS_MAX_SIZE
+const sharedKeysMaxSize = 30
