@@ -364,6 +364,17 @@ func typeUserDealloc(o Object) {
 			}
 		}
 	}
+	// Release the metatype reference stampMetaclass took, mirroring
+	// type_dealloc's Py_DECREF(Py_TYPE(type)). The latch keeps this paired
+	// one-to-one with the single incref even if dealloc re-enters on a type
+	// whose refcount oscillated through zero. typeType is immortal, so a
+	// type whose metatype is the default decrefs harmlessly here.
+	//
+	// CPython: Objects/typeobject.c:6434 type_dealloc (Py_DECREF(Py_TYPE(type)))
+	if !t.metatypeReleased {
+		t.metatypeReleased = true
+		Decref(t.Type())
+	}
 }
 
 // stampMetaclass writes meta onto t so PEP 487 hooks see Py_TYPE(t) ==
@@ -374,6 +385,19 @@ func typeUserDealloc(o Object) {
 func stampMetaclass(t *Type, meta *Type) {
 	if meta != nil && meta != typeType {
 		t.Init(meta)
+		// A type holds a strong reference to its metatype, exactly as
+		// every object holds one to ob_type. CPython allocates the new
+		// type through metatype->tp_alloc, which routes through
+		// _PyObject_Init and increfs the (heap) metatype; type_dealloc
+		// balances it with Py_DECREF(Py_TYPE(type)). Without this incref a
+		// metaclass defined in a temporary scope (six.with_metaclass) is
+		// freed the moment its defining frame returns even though a class
+		// built from it still names it as ob_type, so its tp_dict is
+		// cleared out from under the next construction.
+		//
+		// CPython: Objects/typeobject.c:6434 type_dealloc
+		//          (Py_DECREF(Py_TYPE(type)))
+		Incref(meta)
 	}
 }
 
@@ -1461,7 +1485,16 @@ func fixupNumberSlots(t *Type) {
 		{"__ior__", "__or__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceOr = f }},
 	}
 	for _, e := range entries {
-		if !isOwnDescriptor(t, e.dunder) {
+		// A binary number slot (nb_add, nb_pow, ...) is shared by its forward
+		// and reflected dunders, so update_one_slot installs it when EITHER is
+		// defined: a class that supplies only __radd__ still gets nb_add. The
+		// in-place slots (nb_inplace_*) map to the single __i*__ dunder only;
+		// their rdunder field names the non-inplace fallback used inside the
+		// dispatch, not a second trigger.
+		//
+		// CPython: Objects/typeobject.c:11291 update_one_slot
+		inplace := strings.HasPrefix(e.dunder, "__i")
+		if !isOwnDescriptor(t, e.dunder) && (inplace || !isOwnDescriptor(t, e.rdunder)) {
 			continue
 		}
 		dunder := e.dunder
@@ -1473,9 +1506,9 @@ func fixupNumberSlots(t *Type) {
 	// Wrap slot1BinFull ignoring the mod argument for the 2-arg bytecode form.
 	//
 	// CPython: Objects/typeobject.c:10129 SLOT1BINFULL(slot_nb_power_binary, ...)
-	if isOwnDescriptor(t, "__pow__") {
-		ensureNumberMethods(t).Power = func(a, b, _ Object) (Object, error) {
-			return slot1BinFull(a, b, "__pow__", "__rpow__")
+	if isOwnDescriptor(t, "__pow__") || isOwnDescriptor(t, "__rpow__") {
+		ensureNumberMethods(t).Power = func(a, b, mod Object) (Object, error) {
+			return slotPowerFull(a, b, mod)
 		}
 	}
 	if isOwnDescriptor(t, "__ipow__") {
@@ -1612,6 +1645,72 @@ func callBinaryDunder(self, other Object, dunder string) (Object, error) {
 		bound = descr
 	}
 	return Call(bound, NewTuple([]Object{other}), nil)
+}
+
+// callDunderArgs is callBinaryDunder generalized to any positional arg
+// count, so the three-argument power slot can pass the modulus through.
+func callDunderArgs(self Object, dunder string, args ...Object) (Object, error) {
+	descr, _ := LookupDescriptor(self.Type(), dunder)
+	if descr == nil {
+		return nil, nil
+	}
+	if IsNone(descr) {
+		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
+	}
+	bound := descr
+	if dg := descr.Type().DescrGet; dg != nil {
+		b, err := dg(descr, self, self.Type())
+		if err != nil {
+			return nil, err
+		}
+		bound = b
+	}
+	return Call(bound, NewTuple(args), nil)
+}
+
+// slotPowerFull implements slot_nb_power: the two-argument form delegates
+// to slot1BinFull, while the three-argument form (pow(a, b, mod) with a
+// non-None modulus) threads the modulus into __pow__ / __rpow__ rather
+// than dropping it.
+//
+// CPython: Objects/typeobject.c:10131 slot_nb_power
+func slotPowerFull(a, b, mod Object) (Object, error) {
+	if mod == nil || IsNone(mod) {
+		return slot1BinFull(a, b, "__pow__", "__rpow__")
+	}
+	aType := a.Type()
+	bType := b.Type()
+	doOther := aType != bType
+	if doOther && IsSubtype(bType, aType) && methodIsOverloaded(a, b, "__rpow__") {
+		r, err := callDunderArgs(b, "__rpow__", a, mod)
+		if err != nil {
+			return nil, err
+		}
+		if r != nil && !IsNotImplemented(r) {
+			return r, nil
+		}
+		doOther = false
+	}
+	r, err := callDunderArgs(a, "__pow__", b, mod)
+	if err != nil {
+		return nil, err
+	}
+	if r != nil && !IsNotImplemented(r) {
+		return r, nil
+	}
+	if aType == bType {
+		return notImplemented(), nil
+	}
+	if doOther {
+		rr, err := callDunderArgs(b, "__rpow__", a, mod)
+		if err != nil {
+			return nil, err
+		}
+		if rr != nil {
+			return rr, nil
+		}
+	}
+	return notImplemented(), nil
 }
 
 // makeSlotNbUnary returns a unary Number slot function that looks up the
@@ -1977,14 +2076,34 @@ func slotTpFinalize(o Object) {
 // CPython: Objects/typeobject.c:3037 vectorcall_maybe (None raises TypeError)
 func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	name := richCompareDunderName(op)
-	d, _ := LookupDescriptor(a.Type(), name)
-	if d == nil {
-		return notImplemented(), nil
+	fn, unbound, err := lookupMaybeMethod(a, name)
+	if err != nil {
+		// A missing special method, or one whose descriptor __get__ raises
+		// AttributeError, both read as "no such comparison" and fall back
+		// to NotImplemented; only descr_get's AttributeError is cleared,
+		// any other error propagates.
+		//
+		// CPython: Objects/typeobject.c:2914 lookup_method_ex (AttributeError cleared)
+		// CPython: Objects/typeobject.c:10454 slot_tp_richcompare
+		if isAttributeError(err) {
+			return notImplemented(), nil
+		}
+		return nil, err
 	}
-	if IsNone(d) {
+	if IsNone(fn) {
 		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
 	}
-	return vectorcallMethod(a, name, b)
+	callArgs := []Object{b}
+	if unbound {
+		callArgs = []Object{a, b}
+	}
+	args := NewTuple(callArgs)
+	res, callErr := Call(fn, args, nil)
+	Decref(args)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // richCompareDunderName maps CompareOp to the dunder method name.
@@ -2330,8 +2449,15 @@ func installSlots(t *Type, ns *Dict) error {
 		// Conflict with a class body assignment of the same name. The
 		// __slots__ entry itself lives under the "__slots__" key so it
 		// does not appear in this check.
-		if has, _ := ns.Contains(NewStr(n)); has {
-			return fmt.Errorf("ValueError: %q in __slots__ conflicts with class variable", n)
+		// __qualname__ and __classcell__ are inserted into the namespace by
+		// the class-creation machinery and deleted before the type's dict is
+		// finalized, so they never act as class variables. Exempt them from
+		// the conflict check (a bad type for either still raises TypeError
+		// later, during qualname/classcell validation).
+		//
+		// CPython: Objects/typeobject.c:4015 type_new_slots_impl
+		if has, _ := ns.Contains(NewStr(n)); has && n != "__qualname__" && n != "__classcell__" {
+			return fmt.Errorf("ValueError: '%s' in __slots__ conflicts with class variable", n)
 		}
 		resolved = append(resolved, n)
 	}

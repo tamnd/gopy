@@ -66,6 +66,12 @@ type Type struct {
 	// an ancestor that the type still depends on.
 	basesReleased bool
 
+	// metatypeReleased latches the single metatype-reference release that
+	// typeUserDealloc performs, pairing with the Incref stampMetaclass took
+	// on Py_TYPE(t). Like basesReleased, it guards against gopy re-entering
+	// dealloc on a type whose refcount oscillated through zero.
+	metatypeReleased bool
+
 	Repr    func(o Object) (string, error)
 	Str     func(o Object) (string, error)
 	Hash    func(o Object) (int64, error)
@@ -456,6 +462,13 @@ const (
 	//
 	// CPython: Include/object.h:332 Py_TPFLAGS_HAVE_GC
 	TpFlagHaveGC uint64 = 1 << 14
+	// TpFlagAbstract mirrors Py_TPFLAGS_IS_ABSTRACT: set when a type's
+	// __abstractmethods__ is a non-empty collection, cleared otherwise.
+	// type_set_abstractmethods toggles it; inspect.isabstract and the
+	// instantiation guard read it.
+	//
+	// CPython: Include/object.h:Py_TPFLAGS_IS_ABSTRACT
+	TpFlagAbstract uint64 = 1 << 20
 )
 
 // HasGC reports _PyType_IS_GC(t): the type carries Py_TPFLAGS_HAVE_GC, or
