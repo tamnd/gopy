@@ -874,7 +874,14 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
 	}
-	d := args[0].(*Dict)
+	// dict.clear is inherited by dict subclasses whose storage is a separate
+	// backing *Dict (collections.defaultdict). Resolve through DictBacking so
+	// the bound method operates on that storage instead of assuming the
+	// receiver is a plain *Dict.
+	d, ok := asDictBacking(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'clear' requires a 'dict' object but received a '%s'", typeNameOf(args[0]))
+	}
 	// CPython's PyDict_Clear atomically swaps in a fresh empty keys
 	// table without touching __eq__ or __hash__. The iter-then-DelItem
 	// approach previously used here triggered __eq__ on each probe,

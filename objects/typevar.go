@@ -704,15 +704,18 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 			gvars = ga.parameters
 			continue
 		}
-		// Python-level _GenericAlias: check __origin__ is Generic.
-		origin, err := GetAttr(base, NewStr("__origin__"))
+		// Python-level _GenericAlias: check __origin__ is Generic. Use the
+		// optional-lookup form so a base without __origin__ (or whose
+		// __getattr__ raises AttributeError) does not leave a pending
+		// exception on the thread state.
+		origin, err := LookupAttr(base, NewStr("__origin__"))
 		if err != nil || origin != Object(GenericType) {
 			continue
 		}
 		if gvars != nil {
 			return nil, fmt.Errorf("TypeError: Cannot inherit from Generic[...] multiple times.")
 		}
-		if p, err2 := GetAttr(base, NewStr("__parameters__")); err2 == nil {
+		if p, err2 := LookupAttr(base, NewStr("__parameters__")); err2 == nil {
 			if tup, ok2 := p.(*Tuple); ok2 {
 				gvars = tup
 			}

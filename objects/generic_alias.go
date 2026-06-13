@@ -519,11 +519,16 @@ func collectTypeParams(arg Object, seen map[Object]bool, params *[]Object) {
 		return
 	}
 	// Python-level generic aliases (_GenericAlias, _UnionGenericAlias, etc.)
-	// expose __parameters__ as a tuple; collect its elements.
+	// expose __parameters__ as a tuple; collect its elements. Use the
+	// optional-lookup form: a _SpecialGenericAlias (typing.List, ByteString)
+	// has no __parameters__ and its __getattr__ raises AttributeError, which
+	// collect_parameters swallows via _PyObject_LookupAttr. GetAttr would
+	// leave that AttributeError pending on the thread state and leak it into
+	// the next operation.
 	//
 	// CPython: Objects/genericaliasobject.c:147 collect_parameters
 	// (the Py_GenericAlias branch then the __parameters__ fallback)
-	if p, err := GetAttr(arg, NewStr("__parameters__")); err == nil && p != nil {
+	if p, err := LookupAttr(arg, NewStr("__parameters__")); err == nil && p != nil {
 		if tup, ok := p.(*Tuple); ok {
 			for i := 0; i < tup.Len(); i++ {
 				collectTypeParams(tup.Item(i), seen, params)

@@ -627,8 +627,12 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 	self := args[0]
 	names := map[string]struct{}{}
 	// Instance __dict__ keys. A __dict__ that is not a real dict is
-	// treated as empty, matching object___dir___impl.
-	if d, err := GetAttr(self, NewStr("__dict__")); err == nil {
+	// treated as empty, matching object___dir___impl. The optional-lookup
+	// form mirrors _PyObject_LookupAttr: a __slots__ object (e.g. a typing
+	// _SpecialForm) has no __dict__ and its __getattr__ raises
+	// AttributeError, which object___dir___impl swallows rather than
+	// leaving pending on the thread state.
+	if d, err := LookupAttr(self, NewStr("__dict__")); err == nil {
 		if dict, ok := d.(*Dict); ok {
 			for _, k := range dict.Keys() {
 				if u, ok := k.(*Unicode); ok {
@@ -643,7 +647,7 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 	// then reports only the instance dict.
 	//
 	// CPython: Objects/typeobject.c:7906 object___dir___impl
-	if cls, err := GetAttr(self, NewStr("__class__")); err == nil {
+	if cls, err := LookupAttr(self, NewStr("__class__")); err == nil {
 		if t, ok := cls.(*Type); ok {
 			for _, base := range t.MRO {
 				for _, n := range descriptorNames(base) {
@@ -689,7 +693,10 @@ func objectGetstateDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __getstate__() takes no arguments (%d given)", len(args)-1)
 	}
-	if d, err := GetAttr(args[0], NewStr("__dict__")); err == nil {
+	// Optional-lookup form (_PyObject_LookupAttr): a __slots__ object has no
+	// __dict__ and its __getattr__ raises AttributeError, which
+	// object_getstate_default swallows instead of leaving it pending.
+	if d, err := LookupAttr(args[0], NewStr("__dict__")); err == nil {
 		if dict, ok := d.(*Dict); ok && dict.Len() > 0 {
 			return dict, nil
 		}
