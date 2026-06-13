@@ -34,6 +34,7 @@ func init() {
 	bindNoArgs("__trunc__", intIndexMethod)
 	bindNoArgs("__floor__", intIndexMethod)
 	bindNoArgs("__ceil__", intIndexMethod)
+	bind("__round__", intRoundMethod)
 	bindNoArgs("conjugate", intIndexMethod)
 	bind("to_bytes", intToBytesMethod)
 	bindNoArgs("as_integer_ratio", intAsIntegerRatioMethod)
@@ -53,6 +54,62 @@ func init() {
 	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
 		NewBuiltinFunction("from_bytes", intFromBytesMethod),
 	))
+}
+
+// intRoundMethod implements int.__round__(ndigits=None). Rounding an
+// integer with no argument, None, or a non-negative ndigits returns the
+// value unchanged (as a plain int). A negative ndigits rounds to the
+// nearest multiple of 10**-ndigits using round-half-to-even, computed as
+// self - divmod_near(self, 10**-ndigits)[1].
+//
+// CPython: Objects/longobject.c:6111 int___round___impl
+func intRoundMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: __round__() takes at most 1 argument (%d given)", len(args)-1)
+	}
+	self, ok := asInt(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__round__' requires a 'int' object")
+	}
+	val := self.BigInt()
+	if len(args) == 1 || args[1] == None() {
+		return NewIntFromBig(val), nil
+	}
+	nd, err := NumberIndex(args[1])
+	if err != nil {
+		return nil, err
+	}
+	ndigits := nd.(*Int).BigInt()
+	// ndigits >= 0: no rounding necessary, return self unchanged.
+	if ndigits.Sign() >= 0 {
+		return NewIntFromBig(val), nil
+	}
+	// b = 10 ** -ndigits.
+	negNd := new(big.Int).Neg(ndigits)
+	b := new(big.Int).Exp(big.NewInt(10), negNd, nil)
+	_, r := divmodNear(val, b)
+	// result = self - r.
+	return NewIntFromBig(new(big.Int).Sub(val, r)), nil
+}
+
+// divmodNear returns (q, r) where q is the nearest integer to a/b using
+// round-half-to-even and r == a - q*b. b is assumed positive here (it is
+// always 10**n for n > 0), so floor division matches Python's divmod.
+//
+// CPython: Objects/longobject.c:6013 _PyLong_DivmodNear
+func divmodNear(a, b *big.Int) (*big.Int, *big.Int) {
+	q := new(big.Int)
+	r := new(big.Int)
+	q.DivMod(a, b, r) // Euclidean: r in [0, b) since b > 0.
+	// greater_than_half = 2*r > b (b > 0); exactly_half = 2*r == b.
+	twiceR := new(big.Int).Lsh(r, 1)
+	cmp := twiceR.Cmp(b)
+	quoIsOdd := q.Bit(0) == 1
+	if cmp > 0 || (cmp == 0 && quoIsOdd) {
+		q.Add(q, big.NewInt(1))
+		r.Sub(r, b)
+	}
+	return q, r
 }
 
 // intGetNewArgsMethod implements int.__getnewargs__. It returns a
