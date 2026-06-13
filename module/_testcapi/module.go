@@ -14,6 +14,7 @@ package testcapi
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -243,6 +244,21 @@ func buildModule() (*objects.Module, error) {
 	//
 	// CPython: Modules/_testcapimodule.c:3352 PyModule_AddIntMacro
 	if err := d.SetItem(objects.NewStr("_Py_STACK_GROWS_DOWN"), objects.NewInt(1)); err != nil {
+		return nil, err
+	}
+
+	// FLT_MAX / FLT_MIN: the C <float.h> single-precision bounds, exposed
+	// as Python floats (doubles holding the float32 extremes) so
+	// test_float can compare struct.pack("<f", ...) round-trips.
+	//
+	// CPython: Modules/_testcapimodule.c:3326 PyModule_AddObject FLT_MAX/FLT_MIN
+	if err := d.SetItem(objects.NewStr("FLT_MAX"), objects.NewFloat(math.MaxFloat32)); err != nil {
+		return nil, err
+	}
+	// FLT_MIN is the smallest positive *normalized* float32 (2**-126),
+	// which Go has no named constant for (SmallestNonzeroFloat32 is the
+	// subnormal minimum).
+	if err := d.SetItem(objects.NewStr("FLT_MIN"), objects.NewFloat(math.Ldexp(1, -126))); err != nil {
 		return nil, err
 	}
 

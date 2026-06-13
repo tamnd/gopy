@@ -12,9 +12,7 @@ package builtins
 
 import (
 	"fmt"
-	"math"
 	"math/big"
-	"strconv"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -169,88 +167,5 @@ func divmodNear(a, b *big.Int) (q, r *big.Int) {
 //
 // CPython: Objects/floatobject.c:1034 float___round___impl
 func roundFloat(x float64, ndigits objects.Object) (objects.Object, error) {
-	if objects.IsNone(ndigits) {
-		// CPython: Objects/longobject.c:458 PyLong_FromDouble
-		if math.IsInf(x, 0) {
-			return nil, fmt.Errorf("OverflowError: cannot convert float infinity to integer")
-		}
-		if math.IsNaN(x) {
-			return nil, fmt.Errorf("ValueError: cannot convert float NaN to integer")
-		}
-		rounded := math.Round(x)
-		if math.Abs(x-rounded) == 0.5 {
-			rounded = 2 * math.Round(x/2)
-		}
-		bi, _ := big.NewFloat(rounded).Int(nil)
-		return objects.NewIntFromBig(bi), nil
-	}
-	n, err := indexAsInt(ndigits)
-	if err != nil {
-		return nil, err
-	}
-	nv, fits := n.Int64()
-	if !fits {
-		// Same clamp as float___round___impl's NDIGITS_MAX/_MIN: way
-		// outside the meaningful precision range, so x rounds to
-		// itself or to a signed zero.
-		if n.BigInt().Sign() > 0 {
-			return objects.NewFloat(x), nil
-		}
-		return objects.NewFloat(0.0 * x), nil
-	}
-	if !isFinite(x) {
-		return objects.NewFloat(x), nil
-	}
-	const (
-		ndigitsMax = 323
-		ndigitsMin = -308
-	)
-	if nv > ndigitsMax {
-		return objects.NewFloat(x), nil
-	}
-	if nv < ndigitsMin {
-		return objects.NewFloat(0.0 * x), nil
-	}
-	z, ok := doubleRound(x, int(nv))
-	if !ok {
-		return nil, fmt.Errorf("OverflowError: overflow occurred during round")
-	}
-	return objects.NewFloat(z), nil
-}
-
-// doubleRound mirrors CPython's double_round_double (the dtoa path).
-// It formats x to ndigits decimal places using the same dtoa-based
-// conversion that CPython uses, then parses the result back to float64.
-// This avoids the floating-point precision loss of the fallback
-// multiplication approach.
-//
-// CPython: Objects/floatobject.c:874 double_round_double
-func doubleRound(x float64, ndigits int) (float64, bool) {
-	if ndigits < 0 {
-		// Negative ndigits: round to a power of 10.
-		// Equivalent to round(x * 10^ndigits) * 10^(-ndigits) in decimal.
-		pow1 := math.Pow(10, float64(-ndigits))
-		y := x / pow1
-		z := math.Round(y)
-		if math.Abs(y-z) == 0.5 {
-			z = 2 * math.Round(y/2)
-		}
-		result := z * pow1
-		if !isFinite(result) {
-			return 0, false
-		}
-		return result, true
-	}
-	// Non-negative ndigits: use strconv for correct decimal rounding,
-	// matching CPython's _Py_dg_dtoa-based conversion.
-	s := strconv.FormatFloat(x, 'f', ndigits, 64)
-	z, err := strconv.ParseFloat(s, 64)
-	if err != nil || !isFinite(z) {
-		return 0, false
-	}
-	return z, true
-}
-
-func isFinite(x float64) bool {
-	return !math.IsInf(x, 0) && !math.IsNaN(x)
+	return objects.FloatRoundImpl(x, ndigits)
 }

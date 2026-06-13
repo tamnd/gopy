@@ -48,6 +48,122 @@ func init() {
 		}))
 	// CPython: Objects/floatobject.c:1561 float___getnewargs___impl
 	SetTypeDescr(FloatType, "__getnewargs__", NewMethodDescrConv(FloatType, "__getnewargs__", MethNoArgs, floatGetNewArgs))
+	// CPython: Objects/floatobject.c:1034 float___round___impl
+	SetTypeDescr(FloatType, "__round__", NewMethodDescr(FloatType, "__round__", floatRoundMethod))
+}
+
+// floatRoundMethod implements float.__round__(ndigits=None). The
+// no-argument / None form returns an int; the two-argument form returns
+// a float. Both round halfway cases to even.
+//
+// CPython: Objects/floatobject.c:1034 float___round___impl
+func floatRoundMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: __round__() takes at most 1 argument (%d given)", len(args)-1)
+	}
+	self, ok := args[0].(*Float)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__round__' for 'float' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
+	}
+	ndigits := None()
+	if len(args) == 2 {
+		ndigits = args[1]
+	}
+	return FloatRoundImpl(self.Float64(), ndigits)
+}
+
+// FloatRoundImpl is the shared float-rounding kernel behind both
+// float.__round__ and the round() builtin. With None ndigits it rounds
+// to the nearest integer (round-half-to-even) and returns an int; with
+// an integer ndigits it returns a float rounded to that many decimal
+// places using the dtoa path.
+//
+// CPython: Objects/floatobject.c:1034 float___round___impl
+func FloatRoundImpl(x float64, ndigits Object) (Object, error) {
+	if IsNone(ndigits) {
+		// CPython: Objects/longobject.c:458 PyLong_FromDouble
+		if math.IsInf(x, 0) {
+			return nil, errors.New("OverflowError: cannot convert float infinity to integer")
+		}
+		if math.IsNaN(x) {
+			return nil, errors.New("ValueError: cannot convert float NaN to integer")
+		}
+		rounded := math.Round(x)
+		if math.Abs(x-rounded) == 0.5 {
+			rounded = 2 * math.Round(x/2)
+		}
+		bi, _ := big.NewFloat(rounded).Int(nil)
+		return NewIntFromBig(bi), nil
+	}
+	n, err := NumberIndex(ndigits)
+	if err != nil {
+		return nil, err
+	}
+	nb := n.(*Int).BigInt()
+	nv, fits := intExactInt64(nb)
+	if !fits {
+		// Same clamp as float___round___impl's NDIGITS_MAX/_MIN: way
+		// outside the meaningful precision range, so x rounds to itself
+		// or to a signed zero.
+		if nb.Sign() > 0 {
+			return NewFloat(x), nil
+		}
+		return NewFloat(0.0 * x), nil
+	}
+	if math.IsInf(x, 0) || math.IsNaN(x) {
+		return NewFloat(x), nil
+	}
+	const (
+		ndigitsMax = 323
+		ndigitsMin = -308
+	)
+	if nv > ndigitsMax {
+		return NewFloat(x), nil
+	}
+	if nv < ndigitsMin {
+		return NewFloat(0.0 * x), nil
+	}
+	z, ok := floatDoubleRound(x, int(nv))
+	if !ok {
+		return nil, errors.New("OverflowError: overflow occurred during round")
+	}
+	return NewFloat(z), nil
+}
+
+// floatDoubleRound mirrors CPython's double_round_double: it rounds x to
+// ndigits decimal places using a dtoa-based conversion so the result is
+// correctly rounded rather than suffering the precision loss of a naive
+// multiply-round-divide.
+//
+// CPython: Objects/floatobject.c:874 double_round_double
+func floatDoubleRound(x float64, ndigits int) (float64, bool) {
+	if ndigits < 0 {
+		pow1 := math.Pow(10, float64(-ndigits))
+		y := x / pow1
+		z := math.Round(y)
+		if math.Abs(y-z) == 0.5 {
+			z = 2 * math.Round(y/2)
+		}
+		result := z * pow1
+		if math.IsInf(result, 0) {
+			return 0, false
+		}
+		return result, true
+	}
+	s := strconv.FormatFloat(x, 'f', ndigits, 64)
+	z, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(z, 0) {
+		return 0, false
+	}
+	return z, true
+}
+
+// intExactInt64 reports whether b fits in an int64 and returns the value.
+func intExactInt64(b *big.Int) (int64, bool) {
+	if b.IsInt64() {
+		return b.Int64(), true
+	}
+	return 0, false
 }
 
 // floatGetNewArgs implements float.__getnewargs__. It returns a 1-tuple
