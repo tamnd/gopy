@@ -62,16 +62,6 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	// the metaclass-winner calculation and fall back to the resolved
 	// slice (basesTuple) for the actual call to meta(...).
 	basesTuple := objects.NewTuple(resolved)
-	bases := make([]*objects.Type, 0, len(resolved))
-	allTypes := true
-	for _, b := range resolved {
-		t, ok := b.(*objects.Type)
-		if !ok {
-			allTypes = false
-			continue
-		}
-		bases = append(bases, t)
-	}
 
 	// kwargs may carry metaclass. Pull it out before forwarding the
 	// rest to the metaclass call (CPython removes it from mkw before
@@ -88,8 +78,15 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		delete(kwargs, "metaclass")
 	}
 	if meta == nil {
-		if len(bases) > 0 {
-			meta = bases[0].Type()
+		// No explicit metaclass: use the type of the first base. With no
+		// bases this is `type`. A non-type base contributes its own type
+		// as the metaclass candidate, so a base that is an instance of a
+		// Python metaclass (one that does not subclass type) drives the
+		// whole class statement through that metaclass.
+		//
+		// CPython: Python/bltinmodule.c:159 builtin___build_class__
+		if len(resolved) > 0 {
+			meta = resolved[0].Type()
 		} else {
 			meta = objects.TypeType()
 		}
@@ -99,8 +96,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	// metaclass. Skipped when meta is not a class.
 	//
 	// CPython: Python/bltinmodule.c:172 _PyType_CalculateMetaclass
-	if isclass && allTypes {
-		winner, err := calculateMetaclass(meta.(*objects.Type), bases)
+	if isclass {
+		winner, err := calculateMetaclass(meta.(*objects.Type), resolved)
 		if err != nil {
 			return nil, err
 		}
@@ -275,7 +272,7 @@ func runClassBody(fn *objects.Function, ns objects.Object) (objects.Object, erro
 // it; if neither is a subtype of the other, raise TypeError.
 //
 // CPython: Objects/typeobject.c:3136 _Py_CalculateMetaclass
-func calculateMetaclass(winner *objects.Type, bases []*objects.Type) (*objects.Type, error) {
+func calculateMetaclass(winner *objects.Type, bases []objects.Object) (*objects.Type, error) {
 	for _, base := range bases {
 		baseMeta := base.Type()
 		if objects.IsSubtype(winner, baseMeta) {

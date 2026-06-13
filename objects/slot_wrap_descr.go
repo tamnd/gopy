@@ -60,11 +60,17 @@ func makeWrapDescrGet(t *Type) func(args []Object, kwargs map[string]Object) (Ob
 		if IsNone(obj) {
 			obj = nil
 		}
+		// wrap_descr_get passes the type argument straight through to the
+		// descr_get slot without checking that it is a real type: a
+		// metaclass written in Python can call fn.__get__(obj, cls) with
+		// cls being an ordinary instance, and func_descr_get ignores the
+		// type entirely. gopy's DescrGet takes a *Type, so a non-type
+		// (other than None) maps to nil rather than raising.
+		//
+		// CPython: Objects/typeobject.c:9685 wrap_descr_get
 		if len(args) == 3 {
 			if tp, ok := args[2].(*Type); ok {
 				typ = tp
-			} else if !IsNone(args[2]) {
-				return nil, fmt.Errorf("TypeError: __get__: type must be a type, not %s", typeNameOf(args[2]))
 			}
 		}
 		if obj == nil && typ == nil {
