@@ -14,6 +14,12 @@ package objects
 // carry no fixed C payload of their own); every variable- or fixed-layout
 // built-in below differs from that, which is all solid_base needs.
 func init() {
+	// object is the root layout: every instance carries at least the
+	// PyObject header (refcount + type pointer), so tp_basicsize is
+	// nonzero. User classes inherit this through type_new_alloc.
+	//
+	// CPython: Objects/typeobject.c PyBaseObject_Type.tp_basicsize (sizeof(PyObject))
+	objectType.BaseSize = 16
 	// CPython: Objects/floatobject.c PyFloat_Type.tp_basicsize
 	FloatType.BaseSize = 24
 	// CPython: Objects/complexobject.c PyComplex_Type.tp_basicsize

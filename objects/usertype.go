@@ -202,12 +202,25 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// lay-out conflict here rather than producing a broken type.
 	//
 	// CPython: Objects/typeobject.c:2998 best_base
-	if _, err := bestBase(bases); err != nil {
+	solidWinner, err := bestBase(bases)
+	if err != nil {
 		return nil, err
 	}
 	t, err := newTypeE(name, bases)
 	if err != nil {
 		return nil, err
+	}
+	// type_new_alloc seeds the new type's layout from its best base, so a
+	// plain user class inherits object's tp_basicsize (16) rather than
+	// reporting 0. gopy does not model the dict/weakref/slot growth on top,
+	// but inheriting the base size keeps shape_differs false for a plain
+	// subclass, so solid_base still resolves to the base (no spurious
+	// instance-layout conflicts) while object.__basicsize__ stays nonzero.
+	//
+	// CPython: Objects/typeobject.c:4438 type_new_alloc (tp_basicsize = base->tp_basicsize)
+	if solidWinner != nil {
+		t.BaseSize = solidWinner.BaseSize
+		t.ItemSize = solidWinner.ItemSize
 	}
 	t.IsUser = true
 	// Heap (user) types are mutable: drop the IMMUTABLETYPE flag that
