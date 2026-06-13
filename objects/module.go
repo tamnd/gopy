@@ -162,8 +162,19 @@ func (m *Module) StampBuiltinModule() {
 		if err != nil || v == nil {
 			continue
 		}
-		if bf, ok := v.(*BuiltinFunction); ok && bf.Module == "" {
-			bf.Module = name
+		if bf, ok := v.(*BuiltinFunction); ok {
+			if bf.Module == "" {
+				bf.Module = name
+			}
+			// PyCFunction_NewEx is handed the owning module as m_self;
+			// meth_get__self__ returns it, so time.sleep.__self__ is
+			// the time module. Skip classmethods/static (already bound
+			// to a type or unbound) by only filling an empty Self.
+			//
+			// CPython: Objects/moduleobject.c:606 PyModule_AddFunctions (PyCFunction_NewEx self=module)
+			if bf.Self == nil && bf.Conv&MethStatic == 0 {
+				bf.Self = m
+			}
 		}
 	}
 }

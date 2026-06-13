@@ -48,7 +48,9 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	// os.Stdout, clobbering anything callers wired via defaultFile.
 	//
 	// CPython: Python/pylifecycle.c:1413 init_interp_main (builtins registration)
-	imp.AddModule("builtins", objects.NewModuleWithDict("builtins", dict))
+	builtinsModule := objects.NewModuleWithDict("builtins", dict)
+	setBuiltinSelf = builtinsModule
+	imp.AddModule("builtins", builtinsModule)
 
 	if err := setBuiltin(dict, "None", objects.None()); err != nil {
 		return nil, err
@@ -581,13 +583,28 @@ func iterationPanel() []builtinRow {
 	}
 }
 
+// setBuiltinSelf is the builtins module object, captured at Init so
+// setBuiltin can stamp it as m_self on every module-level builtin (len,
+// print, ...) exactly as PyModule_AddFunctions binds m_self to the
+// owning module. It backs the len.__self__ is builtins invariant.
+var setBuiltinSelf objects.Object
+
 // setBuiltin is the SETBUILTIN macro from _PyBuiltin_Init: stash
 // value under name in dict and propagate the dict-set error.
 //
 // CPython: Python/bltinmodule.c:3451 SETBUILTIN
 func setBuiltin(dict *objects.Dict, name string, value objects.Object) error {
-	if bf, ok := value.(*objects.BuiltinFunction); ok && bf.Module == "" {
-		bf.Module = "builtins"
+	if bf, ok := value.(*objects.BuiltinFunction); ok {
+		if bf.Module == "" {
+			bf.Module = "builtins"
+		}
+		// PyCFunction objects registered through a module's method table
+		// carry m_self == module, so meth_get__self__ returns the module.
+		//
+		// CPython: Objects/moduleobject.c:_add_methods_to_object (m_self = module)
+		if bf.Self == nil && setBuiltinSelf != nil {
+			bf.Self = setBuiltinSelf
+		}
 	}
 	return dict.SetItem(objects.NewStr(name), value)
 }

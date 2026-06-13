@@ -529,7 +529,11 @@ func bootstrapBuiltins(stdout, stderr *os.File) (*objects.Dict, error) {
 	if err != nil {
 		return nil, err
 	}
-	registerBuiltinsModule(g)
+	// builtins.Init already stamps the canonical builtins module into
+	// sys.modules and records it as the m_self of every module-level
+	// builtin. Re-wrapping the dict here would register a second module
+	// object sharing the same dict, which makes `len.__self__ is
+	// builtins` false. So we leave Init's registration in place.
 	// Plumb the CLI's stdout/stderr into sys before sys is built so
 	// callers that redirect via *os.File pipes (tests, the harness) see
 	// print() output land in the redirected target.
@@ -568,15 +572,4 @@ func newMainGlobals(builtinsDict *objects.Dict, name string) *objects.Dict {
 		}
 	}
 	return mainDict
-}
-
-// registerBuiltinsModule registers the builtins module in sys.modules
-// so `import builtins` resolves to the same dict that frames use as
-// their __builtins__. Mirrors CPython's Py_InitializeConfig which
-// places builtins in interp->modules at startup.
-//
-// CPython: Python/pylifecycle.c:1413 init_interp_main (builtins registration)
-func registerBuiltinsModule(d *objects.Dict) {
-	m := objects.NewModuleWithDict("builtins", d)
-	imp.AddModule("builtins", m)
 }

@@ -139,7 +139,18 @@ func BinarySetFunctionTypeParams(ts *state.Thread, fn, params objects.Object) (o
 	if !ok {
 		return nil, errors.New("TypeError: __type_params__ must be a tuple")
 	}
+	// Py_XSETREF(f->func_typeparams, Py_NewRef(type_params)): the function
+	// owns a counted reference to the tuple. Without the incref the
+	// CALL_INTRINSIC_2 DECREF_INPUTS that follows drops the only reference,
+	// deallocating the tuple (and niling its items) out from under the
+	// function so generic.__type_params__ later reads back empty. The
+	// returned func is likewise Py_NewRef'd because the same DECREF_INPUTS
+	// releases the operand the arm popped.
+	//
+	// CPython: Python/intrinsics.c set_function_type_params (Py_NewRef x2)
+	objects.Incref(tup)
 	f.Typeparams = tup
+	objects.Incref(fn)
 	return fn, nil
 }
 
