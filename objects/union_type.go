@@ -427,14 +427,11 @@ func unionGetitem(o, item Object) (Object, error) {
 	if u.parameters == nil {
 		u.parameters = makeParameters(u.args)
 	}
-	if u.parameters.Len() == 0 {
-		repr, err := Repr(o)
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("TypeError: %s is not a generic class", repr)
+	newargs, err := subsParameters(o, u.args, u.parameters, item)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("TypeError: parameterized generic substitution is not supported")
+	return unionFromTuple(newargs)
 }
 
 // unionClsAttrs is the set of names union_getattro proxies back to
@@ -468,13 +465,20 @@ func unionGetattro(o Object, name Object) (Object, error) {
 //	384 union_properties
 func init() {
 	SetTypeDescr(UnionTypeType, "__args__", NewGetSetDescr("__args__", func(o Object) (Object, error) {
-		return o.(*UnionType).args, nil
+		// Return a new reference to the stored tuple, matching CPython's
+		// Py_NewRef. Without the Incref the caller's arg-drop decrefs the
+		// args tuple to zero; tupleDealloc then clears its items, so a
+		// later __parameters__ access sees emptied args and returns ().
+		args := o.(*UnionType).args
+		Incref(args)
+		return args, nil
 	}, nil))
 	SetTypeDescr(UnionTypeType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
 		u := o.(*UnionType)
 		if u.parameters == nil {
 			u.parameters = makeParameters(u.args)
 		}
+		Incref(u.parameters)
 		return u.parameters, nil
 	}, nil))
 	SetTypeDescr(UnionTypeType, "__name__", NewGetSetDescr("__name__", func(_ Object) (Object, error) {

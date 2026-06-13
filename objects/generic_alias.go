@@ -60,6 +60,9 @@ func init() {
 //
 // CPython: Objects/genericaliasobject.c:1040 Py_GenericAlias
 func NewGenericAlias(origin Object, args Object) *GenericAlias {
+	// setup_ga keeps a counted reference to origin (Py_NewRef) so the alias
+	// owns it independently of the caller's transient reference.
+	Incref(origin)
 	ga := &GenericAlias{origin: origin}
 	ga.init(GenericAliasType)
 	gaSetupArgs(ga, args)
@@ -68,11 +71,13 @@ func NewGenericAlias(origin Object, args Object) *GenericAlias {
 
 // gaSetupArgs normalizes args into a tuple. CPython's setup_ga packs a
 // non-tuple value in a one-tuple so callers that pass list[int] (not
-// list[(int,)]) get the same shape.
+// list[(int,)]) get the same shape, and increfs an already-tuple args so
+// the alias keeps it alive past the caller's reference.
 //
 // CPython: Objects/genericaliasobject.c:868 setup_ga
 func gaSetupArgs(ga *GenericAlias, args Object) {
 	if t, ok := args.(*Tuple); ok {
+		Incref(t)
 		ga.args = t
 		return
 	}
@@ -123,19 +128,45 @@ func typingTypeRepr(p Object) (string, error) {
 	if p == Ellipsis() {
 		return "...", nil
 	}
-	if t, ok := p.(*Type); ok {
-		// NoneType prints as "None" (not the bare type repr) so that
-		// list[None] / int | None reads naturally.
-		if t == None().Type() {
-			return "None", nil
-		}
-		mod := t.Module
-		if mod == "" || mod == "builtins" {
-			return t.Name, nil
-		}
-		return mod + "." + t.Name, nil
+	if p == None().Type() {
+		return "None", nil
 	}
-	return Repr(p)
+	// Anything that looks like a GenericAlias (has both __origin__ and
+	// __args__) prints via its own repr rather than as a class.
+	if origin, _ := LookupAttr(p, NewStr("__origin__")); origin != nil {
+		if argsAttr, _ := LookupAttr(p, NewStr("__args__")); argsAttr != nil {
+			return Repr(p)
+		}
+	}
+	// A class is rendered from its __qualname__ (so nested/local classes
+	// keep their dotted path) prefixed by __module__ unless that is
+	// "builtins". Anything without both falls back to repr.
+	qualname, err := LookupAttr(p, NewStr("__qualname__"))
+	if err != nil {
+		return "", err
+	}
+	if qualname == nil {
+		return Repr(p)
+	}
+	qn, err := Str(qualname)
+	if err != nil {
+		return "", err
+	}
+	module, err := LookupAttr(p, NewStr("__module__"))
+	if err != nil {
+		return "", err
+	}
+	if module == nil || IsNone(module) {
+		return Repr(p)
+	}
+	if m, ok := module.(*Unicode); ok && m.Value() == "builtins" {
+		return qn, nil
+	}
+	ms, err := Str(module)
+	if err != nil {
+		return "", err
+	}
+	return ms + "." + qn, nil
 }
 
 // gaRepr formats list[int] as "list[int]", tuple[()] as "tuple[()]",
@@ -190,11 +221,18 @@ func gaRepr(o Object) (string, error) {
 func gaReprItemsList(l *List) (string, error) {
 	var b strings.Builder
 	b.WriteByte('[')
-	for i, item := range l.items {
+	// Capture the length up front but read each element through a live
+	// bounds check: a member's __repr__ can mutate (shrink) the list, in
+	// which case CPython's PyList_GetItemRef raises IndexError.
+	length := len(l.items)
+	for i := 0; i < length; i++ {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		s, err := typingTypeRepr(item)
+		if i >= len(l.items) {
+			return "", fmt.Errorf("IndexError: list index out of range")
+		}
+		s, err := typingTypeRepr(l.items[i])
 		if err != nil {
 			return "", err
 		}
@@ -348,6 +386,22 @@ var gaAttrOwn = map[string]struct{}{
 	"__reduce__":                     {},
 }
 
+// gaAttrOwnOrder is the same set as gaAttrOwn but in CPython's declaration
+// order, used by __dir__ to append the alias-owned names to dir(origin).
+//
+// CPython: Objects/genericaliasobject.c:653 attr_exceptions
+var gaAttrOwnOrder = []string{
+	"__class__",
+	"__origin__",
+	"__args__",
+	"__unpacked__",
+	"__parameters__",
+	"__typing_unpacked_tuple_args__",
+	"__mro_entries__",
+	"__reduce_ex__",
+	"__reduce__",
+}
+
 // gaGetattro fulfills the attr-exceptions / attr-blocked dispatch: own
 // attrs and blocked names go through GenericGetAttr (which finds the
 // member / getset / method descriptors registered below), everything
@@ -369,13 +423,9 @@ func gaGetattro(o Object, name Object) (Object, error) {
 	return GenericGetAttr(o, name)
 }
 
-// gaSubscript implements alias[args]: it propagates parameter
-// substitution from the alias's typevars into args, then rebuilds a
-// new GenericAlias around origin. The typevar machinery (TypeVar,
-// ParamSpec) is not ported in this slice, so the v0.12.1 cut accepts
-// substitution only when the alias has no parameters left to bind
-// (the no-op case) and otherwise raises a TypeError matching
-// _Py_subs_parameters' "is not a generic class" branch.
+// gaSubscript implements alias[args]: it substitutes the alias's
+// type parameters with the supplied arguments, then rebuilds a new
+// GenericAlias around origin carrying the substituted args.
 //
 // CPython: Objects/genericaliasobject.c:572 ga_getitem
 func gaSubscript(o, item Object) (Object, error) {
@@ -383,10 +433,11 @@ func gaSubscript(o, item Object) (Object, error) {
 	if ga.parameters == nil {
 		ga.parameters = makeParameters(ga.args)
 	}
-	if err := subsParameters(o, ga.parameters); err != nil {
+	newargs, err := subsParameters(o, ga.args, ga.parameters, item)
+	if err != nil {
 		return nil, err
 	}
-	res := NewGenericAlias(ga.origin, ga.args)
+	res := NewGenericAlias(ga.origin, newargs)
 	res.starred = ga.starred
 	return res, nil
 }
@@ -464,98 +515,355 @@ func gaIter(o Object) (Object, error) {
 	return gi, nil
 }
 
-// makeParameters walks args collecting type-parameter-like entries.
-// An entry qualifies if it has a __typing_subst__ attribute (TypeVar,
-// ParamSpec, TypeVarTuple) or itself carries a non-empty __parameters__
-// tuple (a nested generic alias). Deduplication preserves first-appearance
-// order, matching CPython's _Py_make_parameters.
+// seqItems returns the elements of a tuple or list and whether arg was a
+// list. Used by the parameter-collection and substitution helpers, which
+// treat tuples and lists (ParamSpec arg lists) the same way.
+func seqItems(arg Object) (items []Object, isList, ok bool) {
+	switch v := arg.(type) {
+	case *Tuple:
+		out := make([]Object, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out[i] = v.Item(i)
+		}
+		return out, false, true
+	case *List:
+		out := make([]Object, len(v.items))
+		copy(out, v.items)
+		return out, true, true
+	}
+	return nil, false, false
+}
+
+// hasTypingSubst reports whether obj exposes a __typing_subst__ attribute,
+// the marker CPython uses to recognize a type parameter (TypeVar, ParamSpec,
+// TypeVarTuple) as opposed to an ordinary nested generic.
+//
+// CPython: Objects/genericaliasobject.c:210 PyObject_HasAttrWithError
+func hasTypingSubst(obj Object) bool {
+	m, err := LookupAttr(obj, NewStr("__typing_subst__"))
+	return err == nil && m != nil
+}
+
+// tupleIndex returns the index of item in params[:len] by identity, or -1.
+//
+// CPython: Objects/genericaliasobject.c:148 tuple_index
+func tupleIndex(params *Tuple, length int, item Object) int {
+	for i := 0; i < length; i++ {
+		if params.Item(i) == item {
+			return i
+		}
+	}
+	return -1
+}
+
+// makeParameters walks args collecting type-parameter-like entries. An
+// entry qualifies if it has a __typing_subst__ attribute (TypeVar,
+// ParamSpec, TypeVarTuple); otherwise its own __parameters__ tuple (a
+// nested generic alias), or, for a bare tuple/list, the parameters of its
+// members, are folded in. Deduplication preserves first-appearance order.
 //
 // CPython: Objects/genericaliasobject.c:186 _Py_make_parameters
 func makeParameters(args *Tuple) *Tuple {
-	seen := map[Object]bool{}
+	items, _, _ := seqItems(args)
 	var params []Object
-	for i := 0; i < args.Len(); i++ {
-		arg := args.Item(i)
-		collectTypeParams(arg, seen, &params)
+	add := func(t Object) {
+		for _, p := range params {
+			if p == t {
+				return
+			}
+		}
+		params = append(params, t)
+	}
+	for _, t := range items {
+		// We don't want the __parameters__ descriptor of a bare class.
+		if _, ok := t.(*Type); ok {
+			continue
+		}
+		if hasTypingSubst(t) {
+			add(t)
+			continue
+		}
+		var subparams *Tuple
+		if p, err := LookupAttr(t, NewStr("__parameters__")); err == nil && p != nil {
+			if tup, ok := p.(*Tuple); ok {
+				subparams = tup
+			}
+		} else if _, _, isSeq := seqItems(t); isSeq {
+			// Recurse into bare tuples/lists (ParamSpec arg lists).
+			subparams = makeParameters(toTuple(t))
+		}
+		if subparams != nil {
+			for j := 0; j < subparams.Len(); j++ {
+				add(subparams.Item(j))
+			}
+		}
 	}
 	return NewTuple(params)
 }
 
-// collectTypeParams adds type-parameter-like objects from arg into params,
-// deduplicating by pointer identity.
-//
-// CPython: Objects/genericaliasobject.c:147 collect_parameters
-func collectTypeParams(arg Object, seen map[Object]bool, params *[]Object) {
-	// TypeVar / ParamSpec / TypeVarTuple: has __typing_subst__
-	if _, ok := arg.(*TypeVar); ok {
-		if !seen[arg] {
-			seen[arg] = true
-			*params = append(*params, arg)
-		}
-		return
+// toTuple coerces a tuple or list to a *Tuple for the recursive helpers.
+func toTuple(arg Object) *Tuple {
+	if t, ok := arg.(*Tuple); ok {
+		return t
 	}
-	if _, ok := arg.(*ParamSpec); ok {
-		if !seen[arg] {
-			seen[arg] = true
-			*params = append(*params, arg)
-		}
-		return
-	}
-	if _, ok := arg.(*TypeVarTuple); ok {
-		if !seen[arg] {
-			seen[arg] = true
-			*params = append(*params, arg)
-		}
-		return
-	}
-	// Nested generic alias: recurse into its __parameters__.
-	if ga, ok := arg.(*GenericAlias); ok {
-		if ga.parameters == nil {
-			ga.parameters = makeParameters(ga.args)
-		}
-		for i := 0; i < ga.parameters.Len(); i++ {
-			collectTypeParams(ga.parameters.Item(i), seen, params)
-		}
-		return
-	}
-	// Python-level generic aliases (_GenericAlias, _UnionGenericAlias, etc.)
-	// expose __parameters__ as a tuple; collect its elements. Use the
-	// optional-lookup form: a _SpecialGenericAlias (typing.List, ByteString)
-	// has no __parameters__ and its __getattr__ raises AttributeError, which
-	// collect_parameters swallows via _PyObject_LookupAttr. GetAttr would
-	// leave that AttributeError pending on the thread state and leak it into
-	// the next operation.
-	//
-	// CPython: Objects/genericaliasobject.c:147 collect_parameters
-	// (the Py_GenericAlias branch then the __parameters__ fallback)
-	if p, err := LookupAttr(arg, NewStr("__parameters__")); err == nil && p != nil {
-		if tup, ok := p.(*Tuple); ok {
-			for i := 0; i < tup.Len(); i++ {
-				collectTypeParams(tup.Item(i), seen, params)
-			}
-		}
-	}
+	items, _, _ := seqItems(arg)
+	return NewTuple(items)
 }
 
-// subsParameters substitutes typevars in args with the values in item.
-// gopy does not implement typevars; the only callable case is "no
-// parameters left to bind", which matches the empty-parameters branch
-// of _Py_subs_parameters and raises the same TypeError CPython does.
+// subsTvars handles a nested generic alias inside the args being
+// substituted: list[dict[T, S]][int, str] rebuilds the inner dict with the
+// outer substitutions threaded through its own __parameters__.
+//
+// CPython: Objects/genericaliasobject.c:274 subs_tvars
+func subsTvars(obj Object, params *Tuple, argitems []Object) (Object, error) {
+	var subparams *Tuple
+	if p, err := LookupAttr(obj, NewStr("__parameters__")); err != nil {
+		return nil, err
+	} else if p != nil {
+		if tup, ok := p.(*Tuple); ok {
+			subparams = tup
+		}
+	}
+	if subparams == nil || subparams.Len() == 0 {
+		return obj, nil
+	}
+	nparams := params.Len()
+	var subargs []Object
+	for i := 0; i < subparams.Len(); i++ {
+		arg := subparams.Item(i)
+		iparam := tupleIndex(params, nparams, arg)
+		if iparam >= 0 {
+			param := params.Item(iparam)
+			arg = argitems[iparam]
+			// TypeVarTuple slot: splice its tuple of replacements in.
+			if _, ok := param.(*TypeVarTuple); ok {
+				if argTup, ok2 := arg.(*Tuple); ok2 {
+					for k := 0; k < argTup.Len(); k++ {
+						subargs = append(subargs, argTup.Item(k))
+					}
+					continue
+				}
+			}
+		}
+		subargs = append(subargs, arg)
+	}
+	return GetItem(obj, NewTuple(subargs))
+}
+
+// isUnpackedTypevartuple reports whether arg is an *Ts / Unpack[Ts] form,
+// which expands in place during substitution.
+//
+// CPython: Objects/genericaliasobject.c:321 _is_unpacked_typevartuple
+func isUnpackedTypevartuple(arg Object) (bool, error) {
+	if _, ok := arg.(*Type); ok {
+		return false, nil
+	}
+	tmp, err := LookupAttr(arg, NewStr("__typing_is_unpacked_typevartuple__"))
+	if err != nil {
+		return false, err
+	}
+	if tmp == nil {
+		return false, nil
+	}
+	return IsTruthy(tmp)
+}
+
+// unpackedTupleArgs returns the args of a starred tuple alias (*tuple[int,
+// str]) so they can be spliced into the surrounding subscript, or nil.
+//
+// CPython: Objects/genericaliasobject.c:336 _unpacked_tuple_args
+func unpackedTupleArgs(arg Object) (*Tuple, error) {
+	if ga, ok := arg.(*GenericAlias); ok && ga.starred && ga.origin == Object(TupleType) {
+		return ga.args, nil
+	}
+	res, err := LookupAttr(arg, NewStr("__typing_unpacked_tuple_args__"))
+	if err != nil {
+		return nil, err
+	}
+	if res != nil && !IsNone(res) {
+		if tup, ok := res.(*Tuple); ok {
+			return tup, nil
+		}
+	}
+	return nil, nil
+}
+
+// unpackArgs flattens any starred tuple aliases in item into a flat tuple of
+// arguments, matching CPython's _unpack_args. A trailing Ellipsis (tuple[int,
+// ...]) blocks flattening so the variadic shape is preserved.
+//
+// CPython: Objects/genericaliasobject.c:358 _unpack_args
+func unpackArgs(item Object) (*Tuple, error) {
+	var items []Object
+	if t, ok := item.(*Tuple); ok {
+		for i := 0; i < t.Len(); i++ {
+			items = append(items, t.Item(i))
+		}
+	} else {
+		items = []Object{item}
+	}
+	var newargs []Object
+	for _, it := range items {
+		if _, isType := it.(*Type); !isType {
+			subargs, err := unpackedTupleArgs(it)
+			if err != nil {
+				return nil, err
+			}
+			if subargs != nil {
+				n := subargs.Len()
+				if n == 0 || subargs.Item(n-1) != Ellipsis() {
+					for k := 0; k < n; k++ {
+						newargs = append(newargs, subargs.Item(k))
+					}
+					continue
+				}
+			}
+		}
+		newargs = append(newargs, it)
+	}
+	return NewTuple(newargs), nil
+}
+
+// subsParameters substitutes the type parameters in args with the values in
+// item, returning the new args tuple for the rebuilt alias. This is the full
+// port of _Py_subs_parameters: it unpacks starred arguments, runs each
+// parameter's __typing_prepare_subst__ hook, checks arity, then walks args
+// replacing TypeVars via __typing_subst__ and recursing into nested
+// generics, tuples and lists.
 //
 // CPython: Objects/genericaliasobject.c:404 _Py_subs_parameters
-func subsParameters(self Object, parameters *Tuple) error {
-	if parameters.Len() == 0 {
+func subsParameters(self Object, args Object, parameters *Tuple, item Object) (*Tuple, error) {
+	nparams := parameters.Len()
+	if nparams == 0 {
 		repr, err := Repr(self)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return fmt.Errorf("TypeError: %s is not a generic class", repr)
+		return nil, fmt.Errorf("TypeError: %s is not a generic class", repr)
 	}
-	// Typevar substitution path is not implemented in this slice. We
-	// keep the function so the dispatcher's shape matches CPython and
-	// later TypeVar work can fill it in without touching the call
-	// sites.
-	return fmt.Errorf("TypeError: parameterized generic substitution is not supported")
+	preparedItem, argitems, err := prepareSubstItems(self, parameters, item)
+	if err != nil {
+		return nil, err
+	}
+
+	srcItems, _, _ := seqItems(args)
+	var newargs []Object
+	for _, arg := range srcItems {
+		out, serr := substArg(self, arg, parameters, argitems, preparedItem)
+		if serr != nil {
+			return nil, serr
+		}
+		newargs = append(newargs, out...)
+	}
+	return NewTuple(newargs), nil
+}
+
+// prepareSubstItems runs each parameter's __typing_prepare_subst__ hook over
+// the (unpacked) substitution item, then flattens the result into argitems
+// and validates the arity against nparams. Returns the prepared item (used
+// when recursing into nested sequences) and the per-parameter argitems.
+//
+// CPython: Objects/genericaliasobject.c:404 _Py_subs_parameters (prepare loop)
+func prepareSubstItems(self Object, parameters *Tuple, item Object) (Object, []Object, error) {
+	nparams := parameters.Len()
+	prepared, err := unpackArgs(item)
+	if err != nil {
+		return nil, nil, err
+	}
+	var preparedItem Object = prepared
+	for i := 0; i < nparams; i++ {
+		prepare, lerr := LookupAttr(parameters.Item(i), NewStr("__typing_prepare_subst__"))
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		if prepare != nil && !IsNone(prepare) {
+			tmp, cerr := Call(prepare, NewTuple([]Object{self, preparedItem}), nil)
+			if cerr != nil {
+				return nil, nil, cerr
+			}
+			preparedItem = tmp
+		}
+	}
+	var argitems []Object
+	if t, ok := preparedItem.(*Tuple); ok {
+		argitems = make([]Object, t.Len())
+		for i := 0; i < t.Len(); i++ {
+			argitems[i] = t.Item(i)
+		}
+	} else {
+		argitems = []Object{preparedItem}
+	}
+	if len(argitems) != nparams {
+		repr, rerr := Repr(self)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		kind := "few"
+		if len(argitems) > nparams {
+			kind = "many"
+		}
+		return nil, nil, fmt.Errorf("TypeError: Too %s arguments for %s; actual %d, expected %d",
+			kind, repr, len(argitems), nparams)
+	}
+	return preparedItem, argitems, nil
+}
+
+// substArg substitutes the parameters of a single arg, returning the values
+// it contributes to the rebuilt args tuple. A bare class passes through; a
+// nested list/tuple recurses; a TypeVar is replaced via __typing_subst__ and
+// an unpacked TypeVarTuple splices its tuple result inline.
+//
+// CPython: Objects/genericaliasobject.c:404 _Py_subs_parameters (arg loop)
+func substArg(self, arg Object, parameters *Tuple, argitems []Object, preparedItem Object) ([]Object, error) {
+	if _, ok := arg.(*Type); ok {
+		return []Object{arg}, nil
+	}
+	// Recursively substitute params in lists/tuples.
+	if subItems, isList, isSeq := seqItems(arg); isSeq {
+		subres, serr := subsParameters(self, NewTuple(subItems), parameters, preparedItem)
+		if serr != nil {
+			return nil, serr
+		}
+		if isList {
+			lst := make([]Object, subres.Len())
+			for i := 0; i < subres.Len(); i++ {
+				lst[i] = subres.Item(i)
+			}
+			return []Object{NewList(lst)}, nil
+		}
+		return []Object{subres}, nil
+	}
+	unpack, uerr := isUnpackedTypevartuple(arg)
+	if uerr != nil {
+		return nil, uerr
+	}
+	subst, lerr := LookupAttr(arg, NewStr("__typing_subst__"))
+	if lerr != nil {
+		return nil, lerr
+	}
+	var repl Object
+	var err error
+	if subst != nil && !IsNone(subst) {
+		iparam := tupleIndex(parameters, parameters.Len(), arg)
+		repl, err = Call(subst, NewTuple([]Object{argitems[iparam]}), nil)
+	} else {
+		repl, err = subsTvars(arg, parameters, argitems)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if unpack {
+		tup, ok := repl.(*Tuple)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: expected __typing_subst__ to return a tuple, not %s", typeNameOf(repl))
+		}
+		out := make([]Object, tup.Len())
+		for k := 0; k < tup.Len(); k++ {
+			out[k] = tup.Item(k)
+		}
+		return out, nil
+	}
+	return []Object{repl}, nil
 }
 
 // gaMroEntries returns (origin,) so a class statement that subclasses
@@ -603,72 +911,162 @@ func gaMroEntries(ga *GenericAlias, bases *Tuple) *Tuple {
 //
 //	ga_properties
 func init() {
-	SetTypeDescr(GenericAliasType, "__origin__", NewGetSetDescr("__origin__", func(o Object) (Object, error) {
-		return o.(*GenericAlias).origin, nil
-	}, nil))
-	SetTypeDescr(GenericAliasType, "__args__", NewGetSetDescr("__args__", func(o Object) (Object, error) {
-		return o.(*GenericAlias).args, nil
-	}, nil))
-	SetTypeDescr(GenericAliasType, "__unpacked__", NewGetSetDescr("__unpacked__", func(o Object) (Object, error) {
-		return NewBool(o.(*GenericAlias).starred), nil
-	}, nil))
-	SetTypeDescr(GenericAliasType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
-		ga := o.(*GenericAlias)
-		if ga.parameters == nil {
-			ga.parameters = makeParameters(ga.args)
+	// __origin__/__args__/__parameters__ hand back stored references, so they
+	// must return an owned reference (Py_NewRef) the way CPython's getset
+	// getters do. Without the Incref the caller's arg-drop decrefs the stored
+	// tuple to zero and tupleDealloc empties it under the alias's feet.
+	//
+	// CPython: Objects/genericaliasobject.c:790 ga_members (Py_NewRef contract)
+	SetTypeDescr(GenericAliasType, "__origin__", NewGetSetDescr("__origin__", gaGetOrigin, nil))
+	SetTypeDescr(GenericAliasType, "__args__", NewGetSetDescr("__args__", gaGetArgs, nil))
+	SetTypeDescr(GenericAliasType, "__unpacked__", NewGetSetDescr("__unpacked__", gaGetUnpacked, nil))
+	SetTypeDescr(GenericAliasType, "__parameters__", NewGetSetDescr("__parameters__", gaGetParameters, nil))
+	SetTypeDescr(GenericAliasType, "__typing_unpacked_tuple_args__", NewGetSetDescr("__typing_unpacked_tuple_args__", gaGetUnpackedTupleArgs, nil))
+	SetTypeDescr(GenericAliasType, "__mro_entries__", NewMethodDescr(GenericAliasType, "__mro_entries__", gaMroEntriesMethod))
+	SetTypeDescr(GenericAliasType, "__instancecheck__", NewMethodDescr(GenericAliasType, "__instancecheck__", gaInstanceCheck))
+	SetTypeDescr(GenericAliasType, "__subclasscheck__", NewMethodDescr(GenericAliasType, "__subclasscheck__", gaSubclassCheck))
+	SetTypeDescr(GenericAliasType, "__reduce__", NewMethodDescrConv(GenericAliasType, "__reduce__", MethNoArgs, gaReduce))
+	SetTypeDescr(GenericAliasType, "__dir__", NewMethodDescr(GenericAliasType, "__dir__", gaDir))
+	SetTypeDescr(GenericAliasType, "__or__", NewMethodDescr(GenericAliasType, "__or__", gaOr))
+	SetTypeDescr(GenericAliasType, "__ror__", NewMethodDescr(GenericAliasType, "__ror__", gaRor))
+}
+
+// __origin__/__args__/__parameters__ hand back stored references, so they
+// must return an owned reference (Py_NewRef) the way CPython's getset getters
+// do. Without the Incref the caller's arg-drop decrefs the stored tuple to
+// zero and tupleDealloc empties it under the alias's feet.
+//
+// CPython: Objects/genericaliasobject.c:790 ga_members (Py_NewRef contract)
+func gaGetOrigin(o Object) (Object, error) {
+	origin := o.(*GenericAlias).origin
+	Incref(origin)
+	return origin, nil
+}
+
+func gaGetArgs(o Object) (Object, error) {
+	args := o.(*GenericAlias).args
+	Incref(args)
+	return args, nil
+}
+
+func gaGetUnpacked(o Object) (Object, error) {
+	return NewBool(o.(*GenericAlias).starred), nil
+}
+
+func gaGetParameters(o Object) (Object, error) {
+	ga := o.(*GenericAlias)
+	if ga.parameters == nil {
+		ga.parameters = makeParameters(ga.args)
+	}
+	Incref(ga.parameters)
+	return ga.parameters, nil
+}
+
+func gaGetUnpackedTupleArgs(o Object) (Object, error) {
+	ga := o.(*GenericAlias)
+	if ga.starred && ga.origin == Object(TupleType) {
+		Incref(ga.args)
+		return ga.args, nil
+	}
+	return None(), nil
+}
+
+func gaMroEntriesMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __mro_entries__() missing self argument")
+	}
+	ga, ok := args[0].(*GenericAlias)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __mro_entries__ requires a GenericAlias, not %s", typeNameOf(args[0]))
+	}
+	var bases *Tuple
+	if len(args) >= 2 {
+		bases, _ = args[1].(*Tuple)
+	}
+	return gaMroEntries(ga, bases), nil
+}
+
+func gaInstanceCheck(_ []Object, _ map[string]Object) (Object, error) {
+	return nil, fmt.Errorf("TypeError: isinstance() argument 2 cannot be a parameterized generic")
+}
+
+func gaSubclassCheck(_ []Object, _ map[string]Object) (Object, error) {
+	return nil, fmt.Errorf("TypeError: issubclass() argument 2 cannot be a parameterized generic")
+}
+
+func gaReduce(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __reduce__() missing self argument")
+	}
+	ga, ok := args[0].(*GenericAlias)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __reduce__ requires a GenericAlias, not %s", typeNameOf(args[0]))
+	}
+	// A starred alias (*tuple[int]) reduces to next(iter(unstarred)),
+	// because iterating a generic alias yields one starred copy. That
+	// is how CPython round-trips the starred flag through pickle.
+	//
+	// CPython: Objects/genericaliasobject.c:765 ga_reduce
+	if ga.starred {
+		if BuiltinLookup == nil {
+			return nil, fmt.Errorf("PicklingError: builtins not loaded")
 		}
-		return ga.parameters, nil
-	}, nil))
-	SetTypeDescr(GenericAliasType, "__typing_unpacked_tuple_args__", NewGetSetDescr("__typing_unpacked_tuple_args__", func(o Object) (Object, error) {
-		ga := o.(*GenericAlias)
-		if ga.starred && ga.origin == Object(TupleType) {
-			return ga.args, nil
+		nextFn, err := BuiltinLookup("next")
+		if err != nil {
+			return nil, err
 		}
-		return None(), nil
-	}, nil))
-	SetTypeDescr(GenericAliasType, "__mro_entries__", NewMethodDescr(GenericAliasType, "__mro_entries__", func(args []Object, _ map[string]Object) (Object, error) {
-		if len(args) < 1 {
-			return nil, fmt.Errorf("TypeError: __mro_entries__() missing self argument")
+		it, err := gaIter(NewGenericAlias(ga.origin, ga.args))
+		if err != nil {
+			return nil, err
 		}
-		ga, ok := args[0].(*GenericAlias)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: __mro_entries__ requires a GenericAlias, not %s", typeNameOf(args[0]))
+		return NewTuple([]Object{nextFn, NewTuple([]Object{it})}), nil
+	}
+	return NewTuple([]Object{
+		GenericAliasType,
+		NewTuple([]Object{ga.origin, ga.args}),
+	}), nil
+}
+
+func gaDir(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __dir__() missing self argument")
+	}
+	ga, ok := args[0].(*GenericAlias)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __dir__ requires a GenericAlias, not %s", typeNameOf(args[0]))
+	}
+	// dir(alias) is dir(origin) plus the alias-owned attributes not
+	// already present, in CPython's declaration order.
+	//
+	// CPython: Objects/genericaliasobject.c:836 ga_dir
+	dir, err := Dir(ga.origin)
+	if err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	for _, it := range dir.items {
+		if s, ok := it.(*Unicode); ok {
+			present[s.Value()] = true
 		}
-		var bases *Tuple
-		if len(args) >= 2 {
-			bases, _ = args[1].(*Tuple)
+	}
+	for _, name := range gaAttrOwnOrder {
+		if !present[name] {
+			dir.items = append(dir.items, NewStr(name))
 		}
-		return gaMroEntries(ga, bases), nil
-	}))
-	SetTypeDescr(GenericAliasType, "__instancecheck__", NewMethodDescr(GenericAliasType, "__instancecheck__", func(_ []Object, _ map[string]Object) (Object, error) {
-		return nil, fmt.Errorf("TypeError: isinstance() argument 2 cannot be a parameterized generic")
-	}))
-	SetTypeDescr(GenericAliasType, "__subclasscheck__", NewMethodDescr(GenericAliasType, "__subclasscheck__", func(_ []Object, _ map[string]Object) (Object, error) {
-		return nil, fmt.Errorf("TypeError: issubclass() argument 2 cannot be a parameterized generic")
-	}))
-	SetTypeDescr(GenericAliasType, "__reduce__", NewMethodDescrConv(GenericAliasType, "__reduce__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
-		if len(args) < 1 {
-			return nil, fmt.Errorf("TypeError: __reduce__() missing self argument")
-		}
-		ga, ok := args[0].(*GenericAlias)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: __reduce__ requires a GenericAlias, not %s", typeNameOf(args[0]))
-		}
-		return NewTuple([]Object{
-			GenericAliasType,
-			NewTuple([]Object{ga.origin, ga.args}),
-		}), nil
-	}))
-	SetTypeDescr(GenericAliasType, "__or__", NewMethodDescr(GenericAliasType, "__or__", func(args []Object, _ map[string]Object) (Object, error) {
-		if len(args) != 2 {
-			return nil, fmt.Errorf("TypeError: __or__() takes exactly one argument")
-		}
-		return unionTypeOr(args[0], args[1])
-	}))
-	SetTypeDescr(GenericAliasType, "__ror__", NewMethodDescr(GenericAliasType, "__ror__", func(args []Object, _ map[string]Object) (Object, error) {
-		if len(args) != 2 {
-			return nil, fmt.Errorf("TypeError: __ror__() takes exactly one argument")
-		}
-		return unionTypeOr(args[1], args[0])
-	}))
+	}
+	return dir, nil
+}
+
+func gaOr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __or__() takes exactly one argument")
+	}
+	return unionTypeOr(args[0], args[1])
+}
+
+func gaRor(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __ror__() takes exactly one argument")
+	}
+	return unionTypeOr(args[1], args[0])
 }

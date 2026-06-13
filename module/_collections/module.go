@@ -173,11 +173,12 @@ func dequeNew(cls *objects.Type, args []objects.Object, kwargs map[string]object
 		maxlen: -1,
 	}
 	d.Init(cls)
-	if len(args) > 0 || len(kwargs) > 0 {
-		if err := dequeInit(d, args, kwargs); err != nil {
-			return nil, err
-		}
-	}
+	// deque_new only allocates the empty deque; the iterable and maxlen
+	// are consumed by deque_init_impl (wired as __init__). Filling here
+	// would double-consume an iterator argument: __init__ then clears and
+	// re-iterates the already-exhausted iterator, yielding an empty deque.
+	//
+	// CPython: Modules/_collectionsmodule.c:1593 deque_new
 	return d, nil
 }
 

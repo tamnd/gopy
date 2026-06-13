@@ -1030,7 +1030,28 @@ var TypeAliasObjType = NewType("typing.TypeAliasType", []*Type{objectType})
 //
 // CPython: Objects/typevarobject.c:2181 _Py_make_typealias
 func NewTypeAlias(name string, typeParams, compute Object) *TypeAliasObj {
+	// typelias_convert_type_params normalizes None or an empty tuple to a
+	// nil slot. The 3-tuple passed to INTRINSIC_TYPEALIAS owns the only
+	// reference to type_params/compute_value; without the Incref here the
+	// caller's decref of that 3-tuple frees them, leaving __type_params__
+	// reading a cleared (emptied) tuple.
+	//
+	// CPython: Objects/typevarobject.c:2003 typelias_convert_type_params
+	// CPython: Objects/typevarobject.c:2018 typealias_alloc (Py_XNewRef)
+	if typeParams != nil {
+		if IsNone(typeParams) {
+			typeParams = nil
+		} else if t, ok := typeParams.(*Tuple); ok && t.Len() == 0 {
+			typeParams = nil
+		}
+	}
 	a := &TypeAliasObj{NameStr: name, TypeParamsObj: typeParams, ComputeValue: compute}
+	if typeParams != nil {
+		Incref(typeParams)
+	}
+	if compute != nil {
+		Incref(compute)
+	}
 	a.Init(TypeAliasObjType)
 	return a
 }
@@ -1057,6 +1078,11 @@ func init() {
 		if a.TypeParamsObj == None() {
 			return NewTuple(nil), nil
 		}
+		// Return a new reference to the stored tuple (Py_NewRef). Without
+		// the Incref the caller's arg-drop decrefs it to zero; a later
+		// subscript then sees emptied type params and raises "not
+		// subscriptable".
+		Incref(a.TypeParamsObj)
 		return a.TypeParamsObj, nil
 	}, nil))
 	SetTypeDescr(TypeAliasObjType, "__value__", NewGetSetDescr("__value__", func(o Object) (Object, error) {
