@@ -28,6 +28,13 @@ func init() {
 	objects.SetTypeDescr(t, "with_traceback", objects.NewMethodDescr(t, "with_traceback", baseExceptionWithTraceback))
 	objects.SetTypeDescr(t, "__setstate__", objects.NewMethodDescrConv(t, "__setstate__", objects.MethO, baseExceptionSetState))
 	objects.SetTypeDescr(t, "__reduce__", objects.NewMethodDescrConv(t, "__reduce__", objects.MethNoArgs, baseExceptionReduce))
+	// BaseException carries tp_dictoffset, so it introduces the read/write
+	// __dict__ getset that every exception subclass inherits through the MRO.
+	// Without it `exc.__dict__ = d` would store a plain attribute named
+	// "__dict__" instead of rebinding the managed dict.
+	//
+	// CPython: Objects/typeobject.c subtype_dict (added when tp_dictoffset != 0)
+	objects.InstallInstanceDictDescr(t)
 }
 
 // baseExceptionWithTraceback writes tb into self.__traceback__ and

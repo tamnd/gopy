@@ -33,6 +33,11 @@ func (f *Float) EnsureAttrDict() *Dict {
 	return f.attrs
 }
 
+// SetAttrDict rebinds the managed __dict__ for `obj.__dict__ = d`.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (f *Float) SetAttrDict(d *Dict) { f.attrs = d }
+
 // FloatType is the type singleton for float. Mirrors PyFloat_Type.
 // Slots are wired in init() because floatHash transitively constructs
 // Ints which would otherwise close the dep cycle.

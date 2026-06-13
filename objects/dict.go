@@ -603,6 +603,13 @@ func (d *Dict) EnsureAttrDict() *Dict {
 	return d.attrs
 }
 
+// SetAttrDict rebinds the managed __dict__ for `obj.__dict__ = d`. A dict
+// subclass that does `self.__dict__ = self` routes its attribute store
+// straight into its own items, matching CPython's bug #1469629 case.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (d *Dict) SetAttrDict(nd *Dict) { d.attrs = nd }
+
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in
 // d.attrs for per-instance attributes before walking the type MRO.

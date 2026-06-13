@@ -36,6 +36,19 @@ type AttrDictHolder interface {
 	EnsureAttrDict() *Dict
 }
 
+// AttrDictSetter is the optional companion to AttrDictHolder for built-in
+// subclass instances whose managed __dict__ can be rebound wholesale via
+// `obj.__dict__ = d`. subtype_setdict reaches it from objectSetDict so an
+// Exception or numeric subclass honors the assignment the same way a plain
+// *Instance does. CPython lets any tp_dictoffset-bearing type take a new
+// dict here; a holder that omits this interface keeps the old read-only
+// behavior.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+type AttrDictSetter interface {
+	SetAttrDict(*Dict)
+}
+
 // visitAttrDict feeds an AttrDictHolder's managed __dict__ to a cycle
 // collector visitor. Every Dict is itself gc-tracked and traverses its
 // own entries, so visiting the dict object (rather than walking its

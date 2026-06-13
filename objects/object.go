@@ -128,7 +128,27 @@ func init() {
 // Objects/object.c:_PyObject_SetDict
 func objectSetDict(o Object, value Object) error {
 	v, ok := o.(*Instance)
-	if !ok || !v.Type().HasDict {
+	if !ok {
+		// Built-in subclass instances (Exception, numeric, dict subclasses)
+		// carry their managed __dict__ behind AttrDictHolder rather than the
+		// *Instance shape. Rebind it in place when the holder supports it.
+		//
+		// CPython: Objects/typeobject.c:3795 subtype_setdict
+		if s, ok := o.(AttrDictSetter); ok && o.Type().HasDict {
+			if value == nil {
+				s.SetAttrDict(NewDict())
+				return nil
+			}
+			d, ok := value.(*Dict)
+			if !ok {
+				return fmt.Errorf("TypeError: __dict__ must be set to a dictionary, not a '%s'", value.Type().Name)
+			}
+			s.SetAttrDict(d)
+			return nil
+		}
+		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
+	}
+	if !v.Type().HasDict {
 		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
 	}
 	// A nil value is `del obj.__dict__`: CPython's subtype_setdict passes
@@ -922,6 +942,15 @@ func sameSlotsAdded(a, b *Type) bool {
 func installInstanceDictDescr(t *Type) {
 	SetTypeDescr(t, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
 }
+
+// InstallInstanceDictDescr is the exported entry to installInstanceDictDescr
+// for built-in types defined outside this package (BaseException) that carry
+// a tp_dictoffset and so must expose the read/write __dict__ getset. Without
+// it `exc.__dict__ = d` would be stored as a plain attribute named
+// "__dict__" rather than rebinding the managed dict.
+//
+// CPython: Objects/typeobject.c subtype_dict
+func InstallInstanceDictDescr(t *Type) { installInstanceDictDescr(t) }
 
 // installInstanceWeakrefDescr stamps the read-only __weakref__ getset on
 // the class that first introduces weak-reference support, mirroring the
