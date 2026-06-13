@@ -14,6 +14,8 @@ package testcapi
 
 import (
 	"fmt"
+	"math"
+	"math/big"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -244,6 +246,61 @@ func buildModule() (*objects.Module, error) {
 	// CPython: Modules/_testcapimodule.c:3352 PyModule_AddIntMacro
 	if err := d.SetItem(objects.NewStr("_Py_STACK_GROWS_DOWN"), objects.NewInt(1)); err != nil {
 		return nil, err
+	}
+
+	// The C <limits.h>/<float.h> bounds the module exposes for the
+	// string-formatting overflow tests (a huge width/precision forces the
+	// MemoryError and OverflowError paths) and the struct round-trip tests.
+	// gopy targets 64-bit LP64, so long is 8 bytes; the unsigned 64-bit and
+	// signed-63-bit maxima exceed int64 and go through big.Int.
+	//
+	// CPython: Modules/_testcapimodule.c:3315 PyModule_AddObject (limit block)
+	maxUint64 := new(big.Int).SetUint64(math.MaxUint64)
+	intConsts := []struct {
+		name string
+		val  *big.Int
+	}{
+		{"SHRT_MAX", big.NewInt(math.MaxInt16)},
+		{"SHRT_MIN", big.NewInt(math.MinInt16)},
+		{"USHRT_MAX", big.NewInt(math.MaxUint16)},
+		{"INT_MAX", big.NewInt(math.MaxInt32)},
+		{"INT_MIN", big.NewInt(math.MinInt32)},
+		{"UINT_MAX", big.NewInt(math.MaxUint32)},
+		{"LONG_MAX", big.NewInt(math.MaxInt64)},
+		{"LONG_MIN", big.NewInt(math.MinInt64)},
+		{"ULONG_MAX", maxUint64},
+		{"LLONG_MAX", big.NewInt(math.MaxInt64)},
+		{"LLONG_MIN", big.NewInt(math.MinInt64)},
+		{"ULLONG_MAX", maxUint64},
+		{"PY_SSIZE_T_MAX", big.NewInt(math.MaxInt64)},
+		{"PY_SSIZE_T_MIN", big.NewInt(math.MinInt64)},
+		{"SIZE_MAX", maxUint64},
+	}
+	for _, c := range intConsts {
+		if err := d.SetItem(objects.NewStr(c.name), objects.NewIntFromBig(c.val)); err != nil {
+			return nil, err
+		}
+	}
+
+	// FLT_MAX / FLT_MIN: the C <float.h> single-precision bounds, exposed
+	// as Python floats (doubles holding the float32 extremes) so
+	// test_float can compare struct.pack("<f", ...) round-trips. FLT_MIN
+	// is the smallest positive *normalized* float32 (2**-126), which Go
+	// has no named constant for (SmallestNonzeroFloat32 is the subnormal
+	// minimum). DBL_MAX/DBL_MIN are the double bounds.
+	floatConsts := []struct {
+		name string
+		val  float64
+	}{
+		{"FLT_MAX", math.MaxFloat32},
+		{"FLT_MIN", math.Ldexp(1, -126)},
+		{"DBL_MAX", math.MaxFloat64},
+		{"DBL_MIN", math.Ldexp(1, -1022)},
+	}
+	for _, c := range floatConsts {
+		if err := d.SetItem(objects.NewStr(c.name), objects.NewFloat(c.val)); err != nil {
+			return nil, err
+		}
 	}
 
 	return m, nil

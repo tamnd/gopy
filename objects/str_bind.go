@@ -529,7 +529,33 @@ func strReplaceMethod(args []Object, kwargs map[string]Object) (Object, error) {
 			count = int(n)
 		}
 	}
+	// CPython's replace() short-circuits to unicode_result_unchanged (a new
+	// reference to self, not a fresh copy) for the cases that can produce no
+	// change: the source shorter than the pattern, a zero maxcount, the
+	// pattern and replacement being the same object, or the pattern not
+	// occurring. text.replace(p, p) is the str1 == str2 case, so it returns
+	// the original object and `text.replace(p, p) is text` holds.
+	//
+	// CPython: Objects/unicodeobject.c:10809 replace (the `goto nothing` set)
+	if len(s) < len(old) || count == 0 || args[1] == args[2] || !strings.Contains(s, old) {
+		return unicodeResultUnchanged(args[0]), nil
+	}
 	return NewStr(StrReplace(s, old, newS, count)), nil
+}
+
+// unicodeResultUnchanged returns self unchanged: a new reference to the
+// same object when it is an exact str, or a genuine str copy when it is a
+// subtype (so a str subclass instance is never handed back where a base
+// str is expected).
+//
+// CPython: Objects/unicodeobject.c:836 unicode_result_unchanged
+func unicodeResultUnchanged(self Object) Object {
+	if u, ok := self.(*Unicode); ok && u.Type() == StrType() {
+		Incref(self)
+		return self
+	}
+	s, _ := asUnicode(self)
+	return NewStr(s)
 }
 
 func strJoinMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -1404,6 +1430,14 @@ func strExpandTabsMethod(args []Object, kwargs map[string]Object) (Object, error
 			n, _ := i.Int64()
 			tabsize = int(n)
 		}
+	}
+	// CPython only builds a new string when a tab is actually present; with
+	// no tab it returns unicode_result_unchanged(self), so 'abc'.expandtabs()
+	// is 'abc'. Other line characters never set `found`.
+	//
+	// CPython: Objects/unicodeobject.c:11157 unicode_expandtabs_impl (!found)
+	if !strings.ContainsRune(s, '\t') {
+		return unicodeResultUnchanged(args[0]), nil
 	}
 	var b strings.Builder
 	col := 0

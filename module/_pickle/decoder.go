@@ -540,8 +540,11 @@ func (u *unpickler) loadReduce() error {
 	return nil
 }
 
-// loadBuild applies state to the top of the stack via __setstate__
-// or dict-update.
+// loadBuild applies state to the top of the stack. When the instance
+// defines __setstate__ that method takes full responsibility; otherwise
+// the default protocol applies: a proto-2 state may be a (dict, slots)
+// pair, the dict half updates the instance __dict__, and the slots half
+// is restored attribute-by-attribute via setattr.
 //
 // CPython: Modules/_pickle.c:5752 load_build
 func (u *unpickler) loadBuild() error {
@@ -553,14 +556,67 @@ func (u *unpickler) loadBuild() error {
 		return errors.New("UnpicklingError: BUILD on empty stack")
 	}
 	obj := u.stack[len(u.stack)-1]
-	setstate, err := objects.GetAttr(obj, objects.NewStr("__setstate__"))
-	if err == nil {
+
+	// An explicit __setstate__ owns the whole restore.
+	// CPython: Modules/_pickle.c:5772 load_build (setstate branch)
+	setstate, err := objects.LookupAttrString(obj, "__setstate__")
+	if err != nil {
+		return err
+	}
+	if setstate != nil {
 		_, err = objects.CallOneArg(setstate, state)
 		return err
 	}
-	if d, ok := state.(*objects.Dict); ok {
+
+	// A default __setstate__: state may carry a slot-state dict too (a
+	// protocol 2 addition), as the 2-tuple (state, slotstate).
+	// CPython: Modules/_pickle.c:5789 load_build (tuple split)
+	var slotstate objects.Object
+	if t, ok := state.(*objects.Tuple); ok && t.Len() == 2 {
+		state = t.Item(0)
+		slotstate = t.Item(1)
+	}
+
+	// Set inst.__dict__ from the state dict (if any).
+	// CPython: Modules/_pickle.c:5804 load_build (state dict branch)
+	if state != nil && state != objects.None() {
+		d, ok := state.(*objects.Dict)
+		if !ok {
+			return errors.New("UnpicklingError: state is not a dictionary")
+		}
+		instDict, err := objects.GetAttr(obj, objects.NewStr("__dict__"))
+		if err != nil {
+			return err
+		}
+		dict, ok := instDict.(*objects.Dict)
+		if !ok {
+			return errors.New("UnpicklingError: instance __dict__ is not a dictionary")
+		}
 		for _, k := range d.Keys() {
 			v, err := d.GetItem(k)
+			if err != nil || v == nil {
+				continue
+			}
+			// Instance-attribute keys are normally interned; mirror that.
+			// CPython: Modules/_pickle.c:5826 PyUnicode_InternInPlace
+			if _, ok := k.(*objects.Unicode); ok {
+				objects.InternInPlace(&k)
+			}
+			if err := dict.SetItem(k, v); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Restore instance attributes from the slot-state dict (if any).
+	// CPython: Modules/_pickle.c:5841 load_build (slotstate branch)
+	if slotstate != nil && slotstate != objects.None() {
+		sd, ok := slotstate.(*objects.Dict)
+		if !ok {
+			return errors.New("UnpicklingError: slot state is not a dictionary")
+		}
+		for _, k := range sd.Keys() {
+			v, err := sd.GetItem(k)
 			if err != nil || v == nil {
 				continue
 			}

@@ -190,7 +190,7 @@ func formatOneArg(ctx *fmtCtx, out *UnicodeWriter) error {
 	}
 widthParse:
 
-	if err := readNumOrStar(ctx, &arg.width); err != nil {
+	if err := readNumOrStar(ctx, &arg.width, false); err != nil {
 		return err
 	}
 	if arg.width < 0 && arg.width != -1 {
@@ -201,7 +201,7 @@ widthParse:
 	if ctx.pos < len(ctx.fmt) && ctx.fmt[ctx.pos] == '.' {
 		ctx.pos++
 		arg.prec = 0
-		if err := readNumOrStar(ctx, &arg.prec); err != nil {
+		if err := readNumOrStar(ctx, &arg.prec, true); err != nil {
 			return err
 		}
 		if arg.prec < 0 {
@@ -245,7 +245,16 @@ widthParse:
 // readNumOrStar parses a width/precision token. "*" pulls the next arg
 // out of ctx and converts it to int; a literal digit run reads as a
 // decimal number; anything else leaves *dst untouched.
-func readNumOrStar(ctx *fmtCtx, dst *int) error {
+//
+// asInt selects the C type the "*" argument is coerced into: width goes
+// through PyLong_AsSsize_t and precision through PyLong_AsInt, so a
+// precision above INT_MAX overflows even though it fits a ssize_t. The
+// two paths raise the matching OverflowError messages.
+//
+// CPython: Objects/unicodeobject.c:15098 (width PyLong_AsSsize_t),
+//
+//	Objects/unicodeobject.c:15145 (prec PyLong_AsInt)
+func readNumOrStar(ctx *fmtCtx, dst *int, asInt bool) error {
 	if ctx.pos >= len(ctx.fmt) {
 		return nil
 	}
@@ -261,7 +270,10 @@ func readNumOrStar(ctx *fmtCtx, dst *int) error {
 		}
 		n, fits := i.Int64()
 		if !fits {
-			return fmt.Errorf("OverflowError: width too big")
+			return fmt.Errorf("OverflowError: Python int too large to convert to C ssize_t")
+		}
+		if asInt && (n > math.MaxInt32 || n < math.MinInt32) {
+			return fmt.Errorf("OverflowError: Python int too large to convert to C int")
 		}
 		*dst = int(n)
 		return nil

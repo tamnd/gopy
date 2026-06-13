@@ -115,17 +115,29 @@ func (v *VarHeader) Size() int64 {
 	return v.size
 }
 
-// ImmortalRefcnt is the sentinel refcount value that marks an object
-// as immortal: Incref and Decref are no-ops, and the object never
-// hits dealloc. CPython 3.14 uses a high-bit split refcount where
-// any value at or above 1<<31 is treated as immortal; gopy uses a
-// plain int64 threshold of 1<<30 (one billion, well above any real
-// program's actual refcount) so the immortal check is a single
-// compare-and-branch.
+// ImmortalMinimumRefcnt is the threshold at or above which an object is
+// treated as immortal: Incref and Decref are no-ops, and the object never
+// hits dealloc. CPython 3.14 uses a 64-bit value of 1<<31; any refcount at
+// or above it reads as immortal. gopy uses the same int64 threshold so the
+// immortal check is a single compare-and-branch, and so sys.getrefcount on a
+// stamped object returns a value above the test suite's 1<<31 minimum.
 //
-// CPython: Include/object.h:L94 _Py_IMMORTAL_MINIMUM_REFCNT,
+// CPython: Include/refcount.h:50 _Py_IMMORTAL_MINIMUM_REFCNT (1ULL << 31),
 // Include/internal/pycore_object.h _Py_IsImmortal
-const ImmortalRefcnt int64 = 1 << 30
+const ImmortalMinimumRefcnt int64 = 1 << 31
+
+// ImmortalInitialRefcnt is the value MakeImmortal stamps. CPython seeds an
+// immortal object's refcount to 3<<30 (above the 1<<31 minimum, with headroom
+// so the slow drift of a borrowed reference cannot underflow it back into the
+// mortal range). gopy mirrors that constant so getrefcount returns 3<<30 for
+// None / True / small ints, matching CPython's reported value.
+//
+// CPython: Include/refcount.h:49 _Py_IMMORTAL_INITIAL_REFCNT (3ULL << 30)
+const ImmortalInitialRefcnt int64 = 3 << 30
+
+// ImmortalRefcnt is retained as an alias for ImmortalMinimumRefcnt: existing
+// callers that compare against the immortal threshold keep working.
+const ImmortalRefcnt int64 = ImmortalMinimumRefcnt
 
 // MakeImmortal stamps the header with the immortal sentinel so all
 // subsequent Incref / Decref calls short-circuit. Called from the
@@ -134,14 +146,14 @@ const ImmortalRefcnt int64 = 1 << 30
 //
 // CPython: Include/internal/pycore_object.h _Py_SetImmortal
 func (h *Header) MakeImmortal() {
-	atomic.StoreInt64(&h.refcnt, ImmortalRefcnt)
+	atomic.StoreInt64(&h.refcnt, ImmortalInitialRefcnt)
 }
 
 // IsImmortal reports whether the header has been stamped immortal.
 //
 // CPython: Include/internal/pycore_object.h _Py_IsImmortal
 func (h *Header) IsImmortal() bool {
-	return atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt
+	return atomic.LoadInt64(&h.refcnt) >= ImmortalMinimumRefcnt
 }
 
 // Finalized reports whether tp_finalize has already run on this object.

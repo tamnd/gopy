@@ -19,6 +19,11 @@ var ellipsisType = NewType("ellipsis", []*Type{objectType})
 var ellipsisSingleton = func() *ellipsisObject {
 	o := &ellipsisObject{}
 	o.init(ellipsisType)
+	// _Py_EllipsisObject is a statically allocated immortal object in
+	// CPython, so sys.getrefcount reports it above the immortal minimum.
+	//
+	// CPython: Objects/object.c:1980 _Py_EllipsisObject
+	o.MakeImmortal()
 	return o
 }()
 

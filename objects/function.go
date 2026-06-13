@@ -272,6 +272,16 @@ func registerFunctionReadOnlyGetSets() {
 			if f.Closure == nil {
 				return None(), nil
 			}
+			// func_closure is a T_OBJECT_EX member; member access
+			// returns a new reference via Py_XNewRef. Without the
+			// Incref the borrowed tuple is decref'd to zero by the
+			// consuming call (e.g. exec(closure=f.__closure__) or
+			// sys.getrefcount), which deallocs the shared closure
+			// tuple out from under the original function.
+			//
+			// CPython: Objects/funcobject.c:633 func_memberlist (T_OBJECT_EX),
+			// Python/structmember.c PyMember_GetOne (Py_XNewRef)
+			Incref(f.Closure)
 			return f.Closure, nil
 		},
 		nil))
@@ -586,6 +596,13 @@ func registerFunctionTypeParamsGetSet() {
 			if t == nil {
 				return NewTuple(nil), nil
 			}
+			// func_get_type_params returns a new reference via Py_NewRef;
+			// the consuming CALL's DECREF_INPUTS would otherwise drop the
+			// only counted reference and dealloc the shared tuple (niling
+			// its items) so a second read returns empty.
+			//
+			// CPython: Objects/funcobject.c:948 func_get_type_params (Py_NewRef)
+			Incref(t)
 			return t, nil
 		},
 		// Deletion is rejected and the value must be a tuple; CPython
@@ -597,6 +614,13 @@ func registerFunctionTypeParamsGetSet() {
 			if !ok {
 				return fmt.Errorf("TypeError: __type_params__ must be set to a tuple")
 			}
+			// Py_XSETREF(func_typeparams, Py_NewRef(value)): take a
+			// counted reference, otherwise the STORE_ATTR DECREF_INPUTS
+			// that follows drops the only reference and deallocates the
+			// tuple out from under the function.
+			//
+			// CPython: Objects/funcobject.c:962 function___type_params___set_impl (Py_NewRef)
+			Incref(t)
 			o.(*Function).Typeparams = t
 			return nil
 		}))

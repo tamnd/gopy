@@ -120,8 +120,21 @@ func init() {
 		builtinFunctionQualname,
 		nil,
 	))
+	// meth_get__self__ returns PyCFunction_GET_SELF(m): m_self unless the
+	// method is METH_STATIC, in which case (and when m_self is NULL) it
+	// returns None. For a module-level builtin like len, m_self is the
+	// owning module, so len.__self__ is the builtins module.
+	//
+	// CPython: Objects/methodobject.c:174 meth_get__self__
 	SetTypeDescr(BuiltinFunctionType, "__self__", NewGetSetDescr("__self__",
-		func(o Object) (Object, error) { return None(), nil },
+		func(o Object) (Object, error) {
+			bf, ok := o.(*BuiltinFunction)
+			if !ok || bf.Self == nil || bf.Conv&MethStatic != 0 {
+				return None(), nil
+			}
+			Incref(bf.Self)
+			return bf.Self, nil
+		},
 		nil,
 	))
 	// __module__ returns the owning module's name (m_module) when one

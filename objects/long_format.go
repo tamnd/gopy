@@ -146,6 +146,26 @@ func IntToFloat64(i *Int) (float64, error) {
 	return bigIntToFloat64(&i.v)
 }
 
+// LongAsDouble converts o to a double when o is any int instance (the
+// subclass-inclusive PyLong_Check, which also matches bool). The second
+// result reports whether o was an int at all; callers that need the
+// PyLong_Check && PyLong_AsDouble pair in sum()'s fast paths use it to
+// decide between the typed fast path and the general PyNumber_Add route.
+//
+// CPython: Include/cpython/longobject.h PyLong_Check,
+// Objects/longobject.c:3038 PyLong_AsDouble
+func LongAsDouble(o Object) (float64, bool, error) {
+	if !IsSubtype(o.Type(), IntType) {
+		return 0, false, nil
+	}
+	i, ok := asInt(o)
+	if !ok {
+		return 0, false, nil
+	}
+	d, err := bigIntToFloat64(&i.v)
+	return d, true, err
+}
+
 // IntFrexp mirrors _PyLong_Frexp: split a non-zero int into a normalised
 // double mantissa and integer exponent so callers can compute log(v) as
 // log(m) + log(2) * e even when v is too large for float64. The mantissa

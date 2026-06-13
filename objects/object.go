@@ -273,6 +273,24 @@ func objectNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: object.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
 	}
+	// Walk to the most-derived static (non-heap) base. If that base
+	// disallows instantiation its tp_new is NULL; CPython then refuses
+	// object.__new__(cls). gopy models Py_TPFLAGS_DISALLOW_INSTANTIATION
+	// by leaving TpNew / TpNewWithDict / Call all unset on the static
+	// type (e.g. unicodedata.UCD, _hashlib.HMAC).
+	//
+	// CPython: Objects/typeobject.c:9843 tp_new_wrapper (staticbase walk)
+	var staticbase *Type
+	for _, b := range cls.MRO {
+		if !b.IsUser {
+			staticbase = b
+			break
+		}
+	}
+	if staticbase != nil && staticbase != objectType &&
+		staticbase.TpNew == nil && staticbase.TpNewWithDict == nil && staticbase.Call == nil {
+		return nil, fmt.Errorf("TypeError: cannot create '%s' instances", cls.Name)
+	}
 	return objectNew(cls, args[1:], kwargs)
 }
 

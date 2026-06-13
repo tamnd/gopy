@@ -39,6 +39,11 @@ def _init_config_vars():
         'srcdir': sys.prefix,
         'projectbase': sys.prefix,
         'abiflags': '',
+        # gopy compiles docstrings into its built-in types and functions,
+        # so it matches a CPython built with --with-doc-strings (the
+        # default). test.support keys MISSING_C_DOCSTRINGS off this, so
+        # reporting it truthfully lets the requires_docstrings tests run.
+        'WITH_DOC_STRINGS': 1,
     }
 
 

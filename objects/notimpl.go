@@ -16,6 +16,11 @@ var notImplementedType = NewType("NotImplementedType", []*Type{objectType})
 var notImplementedSingleton = func() *notImplementedObject {
 	o := &notImplementedObject{}
 	o.init(notImplementedType)
+	// _Py_NotImplementedStruct is a statically allocated immortal object in
+	// CPython, so sys.getrefcount reports it above the immortal minimum.
+	//
+	// CPython: Objects/object.c:1953 _Py_NotImplementedStruct
+	o.MakeImmortal()
 	return o
 }()
 

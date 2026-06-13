@@ -44,7 +44,7 @@ var TupleType = NewType("tuple", []*Type{objectType})
 var emptyTuple *Tuple
 
 func init() {
-	TupleType.TpFlags |= TpFlagSequence | TpFlagMatchSelf
+	TupleType.TpFlags |= TpFlagSequence | TpFlagMatchSelf | TpFlagHaveGC
 	TupleType.Repr = tupleRepr
 	TupleType.Str = tupleRepr
 	TupleType.Hash = tupleHash
@@ -173,6 +173,12 @@ func init() {
 		t := &Tuple{items: items}
 		t.init(cls)
 		t.size = int64(len(items))
+		// PyObject_GC_Track tail of tuple_new_impl: subtypes are heap GC
+		// types (always tracked), exact tuples track only when an item's
+		// type participates in GC (gh-139951).
+		//
+		// CPython: Objects/tupleobject.c:784 tuple_new_impl (GC_Track)
+		gcTrackTupleOnCreate(t, cls)
 		return t, nil
 	}
 	emptyTuple = &Tuple{}
@@ -233,6 +239,35 @@ func tupleDealloc(o Object) {
 	t.items = nil
 }
 
+// gcTrackTupleOnCreate decides whether a freshly built tuple is handed to
+// the cyclic collector at creation time, mirroring gh-139951: an exact
+// tuple is tracked iff at least one item's type participates in GC
+// (_PyType_IS_GC), so atom-only tuples like (1, 2) are never tracked and
+// gc.is_tracked reports False immediately. A tuple subtype is a heap type
+// and is always tracked, matching tp_alloc's unconditional track for GC
+// types.
+//
+// CPython: Objects/tupleobject.c PyTuple_New (gh-139951 conditional track),
+// Objects/typeobject.c type_new (heap subtypes are GC-tracked)
+func gcTrackTupleOnCreate(t *Tuple, cls *Type) {
+	h := GCTrackHook
+	if h == nil {
+		return
+	}
+	track := cls != TupleType
+	if !track {
+		for _, it := range t.items {
+			if it != nil && it.Type().HasGC() {
+				track = true
+				break
+			}
+		}
+	}
+	if track {
+		h(t)
+	}
+}
+
 // NewTuple builds a tuple from items. The empty tuple returns the
 // cached singleton.
 //
@@ -258,9 +293,7 @@ func NewTuple(items []Object) *Tuple {
 		}
 	}
 	// CPython: Objects/tupleobject.c:170 PyTuple_New (PyObject_GC_Track tail)
-	if h := GCTrackHook; h != nil {
-		h(t)
-	}
+	gcTrackTupleOnCreate(t, TupleType)
 	return t
 }
 

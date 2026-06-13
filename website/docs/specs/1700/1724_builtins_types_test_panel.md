@@ -10,6 +10,11 @@ description: "Full audit and port of the 28 Builtins/types test files from spec 
 
 Active. Branch `feat/v0.13.0-spec-1724-builtins-types-panel`.
 
+Re-audited under the [[1726]] bridge on 2026-06-13 (see the re-audit section
+below). Twenty-six of 29 files are fully green; the three with residuals
+(`test_int`, `test_bytes`, `test_dict`) carry only implementation-detail or
+unported-C-subsystem divergences, each documented with a CPython citation.
+
 ## Goal
 
 Drive every test in the spec 1700 Builtins/types panel (28 files) to zero
@@ -22,7 +27,86 @@ that tree before porting.
 
 ---
 
-## Current test status (audit date: 2026-06-06)
+## Zero-skip re-audit under the spec 1726 bridge (audit date: 2026-06-13)
+
+The table below was written before the [[1726]] bridge, which makes
+`check_impl_detail()` report `cpython=True` so every `@cpython_only` test runs
+on gopy instead of being skipped. Re-running the whole panel under the bridge
+surfaced a handful of `@cpython_only` and missing-module cases the earlier
+all-green pass never executed. Two were genuine gopy bugs and are fixed in this
+branch; the rest are behaviour that depends on a CPython implementation detail
+gopy does not have, or a C subsystem gopy has never carried.
+
+Reference interpreter for the skip/run decisions: brew `python@3.14` 3.14.5.
+
+Panel result after the re-audit (run from `test/cpython/`):
+
+- 26 of 29 files fully green.
+- `test_int`: 2 errors, 7 skips.
+- `test_bytes`: 1 error, 9 skips.
+- `test_dict`: 2 failures, 1 skip.
+
+### Fixed in this branch
+
+- **`unicodedata.UCD.__new__(UCD)` did not refuse instantiation.** A type that
+  carries `Py_TPFLAGS_DISALLOW_INSTANTIATION` leaves `tp_new` NULL, and
+  `tp_new_wrapper` (`Objects/typeobject.c:9843`) walks to the most-derived
+  static base and raises `cannot create '...' instances` when that base's
+  `tp_new` is NULL. gopy's `object.__new__` skipped the staticbase walk, so
+  `support.check_disallow_instantiation` (which also probes `tp.__new__(tp)`)
+  failed. Ported the walk into `objectNewBuiltin`. Fixes
+  `test_unicodedata.test_disallow_instantiation`.
+- **Pickling an object with both `__dict__` and `__slots__` dropped its
+  state.** The `_pickle` decoder's `load_build` (`Modules/_pickle.c:5752`) was a
+  partial port: it never split the protocol 2 `(state, slots)` tuple, so a
+  `bytearray` subclass that declares `__slots__` alongside `__dict__` came back
+  from a dump/load round trip with none of its attributes. Ported the rest of
+  `load_build`. Fixes `test_bytes.ByteArraySubclassWithSlotsTest.test_pickle`.
+- **`requires_docstrings` tests were skipped.** `support.MISSING_C_DOCSTRINGS`
+  is derived from `sysconfig.get_config_var('WITH_DOC_STRINGS')`, which gopy
+  left unset (None). gopy compiles docstrings into its built-ins, matching a
+  `--with-doc-strings` build, so `sysconfig` now reports `1` and the
+  docstring-gated tests run. Fixes the extra skip in `test_property`.
+
+### Remaining residuals: implementation-detail and unported-subsystem divergences
+
+These are not "skips gopy chose"; they are cases where matching CPython would
+mean either reversing gopy's native implementation or porting a C subsystem the
+project has never carried. They run under the bridge and surface as
+errors/failures rather than skips.
+
+- **`test_int` — subinterpreters (2 errors).**
+  `test_int_max_str_digits_is_per_interpreter` calls
+  `_testcapi.run_in_subinterp`. gopy has no subinterpreter runtime (PEP 684 /
+  per-interpreter GIL). Out of scope for a builtins/types panel.
+- **`test_int` — `_pylong` / C `_decimal` whitebox (7 skips).** These
+  `@cpython_only` tests assert that huge-int `int`↔`str` and `divmod` delegate
+  to the pure-Python `_pylong` module, and several also require the C `_decimal`
+  module. gopy implements int arithmetic and base conversion natively in Go
+  (`math/big`), so the `_pylong` delegation hook simply does not exist; vendoring
+  `_pylong.py` would not make `int()` call it without reversing the native
+  implementation, and the C `_decimal`/libmpdec subsystem is unported. The
+  observable `int` behaviour (results, error messages, `int_max_str_digits`
+  limit) is already covered and green; only the delegation mechanism differs.
+- **`test_bytes` — `getbuffer_with_null_view` (1 error).**
+  `test_obsolete_write_lock` calls a `_testcapi` helper that invokes
+  `PyObject_GetBuffer` with a NULL `Py_buffer*` to force `BufferError`. gopy's
+  buffer protocol is modeled with Go interfaces and has no "NULL view pointer"
+  C-API contract to exercise.
+- **`test_dict` — split-table layout + `__del__` timing (2 failures).**
+  `test_splittable_popitem` is `@cpython_only` and inspects the PEP 412
+  split-table dict layout through `sys.getsizeof`; gopy uses a single combined
+  dict representation. `test_oob_indexing_dictiter_iternextitem` depends on the
+  exact refcount drop that fires `__del__` mid-iteration; gopy's iterator holds
+  the value so the finalizer fires later. Both are interpreter-internal memory
+  layout / refcount-timing details, not Python-visible behaviour.
+- **Environment-gated skips that match CPython under the CI locale/feature
+  set:** `test_float.test_float_with_comma` (locale `decimal_point`, skipped
+  under `LC_ALL=C` on both interpreters), `test_memoryview` ctypes cast (no
+  ctypes C-FFI), `test_builtin` PtyTests (no pty+signal on the gopy build).
+  These skip on both interpreters in the CI environment.
+
+## Current test status (audit date: 2026-06-06, pre-bridge)
 
 Run via `/tmp/gopy -m unittest <name>` from `test/cpython/`.
 
@@ -526,3 +610,9 @@ alone), CI green before moving on:
 - [x] P7 os.supports_unicode_filenames + unicode path surface (test_unicode_file, test_unicode_file_functions)
 - [x] P8.a dict / mappingproxy nb_or + nb_inplace_or: `dict |= mapping` keeps dict identity, `UserDict | mappingproxy` -> UserDict; test_fromkeys now green (test_userdict OK; test_mixed_or, test_mixed_ior)
 - [x] P8.b free-after-iterating reclaim: shipped via GC chain fix (same batch as P4.b). test_userlist now OK (54).
+- [x] P9.a spec 1726 bridge re-audit: object.__new__ staticbase disallow-instantiation walk (test_unicodedata.test_disallow_instantiation)
+- [x] P9.b spec 1726 bridge re-audit: _pickle load_build slot+dict state restore (test_bytes.ByteArraySubclassWithSlotsTest.test_pickle)
+- [x] P9.c spec 1726 bridge re-audit: sysconfig WITH_DOC_STRINGS so requires_docstrings tests run (test_property)
+- [ ] P9.d documented divergence (no port): test_int subinterpreters (PEP 684) + _pylong/_decimal whitebox delegation (gopy int is native Go big.Int)
+- [ ] P9.e documented divergence (no port): test_bytes getbuffer_with_null_view (C-API NULL Py_buffer contract)
+- [ ] P9.f documented divergence (no port): test_dict PEP 412 split-table layout + __del__ refcount-drop timing

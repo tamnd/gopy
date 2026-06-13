@@ -105,7 +105,7 @@ var DictType = NewType("dict", []*Type{objectType})
 const dictMinSize = 8
 
 func init() {
-	DictType.TpFlags |= TpFlagMapping | TpFlagMatchSelf
+	DictType.TpFlags |= TpFlagMapping | TpFlagMatchSelf | TpFlagHaveGC
 	DictType.Repr = dictRepr
 	DictType.Str = dictRepr
 	DictType.Iter = dictIter

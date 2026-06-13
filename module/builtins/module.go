@@ -9,6 +9,7 @@
 package builtins
 
 import (
+	"errors"
 	"os"
 
 	"github.com/tamnd/gopy/builtins"
@@ -21,14 +22,19 @@ func init() {
 }
 
 // buildModule creates the builtins module by calling builtins.Init with
-// os.Stdout as the print target, then wrapping the resulting dict in a
-// module object.
+// os.Stdout as the print target. Init stamps the canonical module into
+// sys.modules (interp->modules) and records it as the m_self of every
+// module-level builtin, so this returns that exact object rather than
+// wrapping the dict in a fresh module. A second wrapper would make
+// `len.__self__ is builtins` false even though both share one dict.
 //
 // CPython: Modules/builtinsmodule.c:3116 builtin_init
 func buildModule() (*objects.Module, error) {
-	d, err := builtins.Init(os.Stdout)
-	if err != nil {
+	if _, err := builtins.Init(os.Stdout); err != nil {
 		return nil, err
 	}
-	return objects.NewModuleWithDict("builtins", d), nil
+	if m, ok := imp.GetModule("builtins"); ok {
+		return m, nil
+	}
+	return nil, errors.New("builtins: Init did not register the builtins module")
 }
