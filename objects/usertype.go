@@ -225,13 +225,20 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// refcount 1 from PyObject_GC_NewVar)
 	atomic.StoreInt64(&t.Hdr().refcnt, 1)
 	stampMetaclass(t, meta)
-	if err := applyMetaclassMRO(t, meta); err != nil {
-		return nil, err
-	}
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
 	configureManagedDict(t, bases, noSlotsDeclared)
+	// type_new_set_attrs copies the namespace into tp_dict (slots, classcell,
+	// plain attributes) BEFORE type_ready -> mro_internal invokes the
+	// metaclass mro(). A metaclass that overrides mro() can therefore read
+	// self.__dict__["f"] during MRO computation (test___class___mro), so the
+	// dict must be populated first; applyMetaclassMRO runs last.
+	//
+	// CPython: Objects/typeobject.c:4526 type_new_set_attrs (before type_ready)
 	if err := processClassNamespace(t, ns); err != nil {
+		return nil, err
+	}
+	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
 	}
 	// When the namespace did not carry __module__, inherit it from the
@@ -536,15 +543,32 @@ func processClassNamespace(t *Type, ns *Dict) error {
 	if ns == nil {
 		return nil
 	}
+	// type_new operates on dict = PyDict_Copy(orig_dict), never mutating
+	// the caller's namespace. The DelItem calls below (__classcell__,
+	// __classdictcell__) must therefore land on a copy, so a metaclass that
+	// reuses the same namespace dict for a second type() call still sees
+	// those keys (test___classcell___wrong_cell).
+	//
+	// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
+	ns = copyClassNamespace(ns)
 	// __classcell__ is the cell __build_class__ left in the namespace so
 	// we can patch it with the new class. It is not a real attribute,
 	// so install it before walking the rest of the namespace and skip
 	// it during the descriptor copy.
 	classCellKey := NewStr("__classcell__")
 	if cellObj, err := ns.GetItem(classCellKey); err == nil {
-		if cell, ok := cellObj.(*Cell); ok {
-			cell.Contents = t
+		// At least one method requires a reference to its defining class.
+		// A non-cell __classcell__ is rejected outright.
+		// CPython: Objects/typeobject.c:4485 type_new_set_classcell
+		cell, ok := cellObj.(*Cell)
+		if !ok {
+			r, rerr := Repr(cellObj.Type())
+			if rerr != nil {
+				return rerr
+			}
+			return fmt.Errorf("TypeError: __classcell__ must be a nonlocal cell, not %s", r)
 		}
+		cell.Contents = t
 		_ = ns.DelItem(classCellKey)
 	}
 	// __classdictcell__ is the closure cell that PEP 695 type-alias
@@ -575,6 +599,26 @@ func processClassNamespace(t *Type, ns *Dict) error {
 		return err
 	}
 	return copyNamespaceToType(t, ns)
+}
+
+// copyClassNamespace returns a plain-dict copy of ns in the order
+// type_new copies entries into tp_dict, mirroring PyDict_Copy(orig_dict).
+// The copy keeps the caller's namespace dict unmutated when type_new
+// strips __classcell__ / __classdictcell__.
+//
+// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
+func copyClassNamespace(ns *Dict) *Dict {
+	out := NewDict()
+	for _, k := range namespaceKeyOrder(ns) {
+		v, err := ns.GetItem(k)
+		if err != nil || v == nil {
+			continue
+		}
+		if err := out.SetItem(k, v); err != nil {
+			continue
+		}
+	}
+	return out
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type

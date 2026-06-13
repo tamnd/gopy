@@ -33,8 +33,8 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/imp"
-	"github.com/tamnd/gopy/objects"
 	sys "github.com/tamnd/gopy/module/sys"
+	"github.com/tamnd/gopy/objects"
 )
 
 // pickler holds the in-progress write buffer for a single dump cycle.
@@ -553,9 +553,61 @@ func (p *pickler) save(obj objects.Object) error {
 		return p.saveTypeGlobal(v)
 	}
 
+	// Before __reduce_ex__, consult copyreg.dispatch_table keyed on the
+	// object's exact type, the way CPython's save() does. This is how a
+	// super object reaches copyreg.pickle_super (registered via
+	// copyreg.pickle(super, ...)) instead of falling through to
+	// object.__reduce_ex__.
+	//
+	// CPython: Modules/_pickle.c:4490 save (get_dispatch_table_entry)
+	if reductor := dispatchReductor(obj.Type()); reductor != nil {
+		reduceValue, err := objects.Call(reductor, objects.NewTuple([]objects.Object{obj}), nil)
+		if err != nil {
+			return err
+		}
+		rv, ok := reduceValue.(*objects.Tuple)
+		if !ok {
+			return fmt.Errorf("PicklingError: dispatch_table reductor must return a tuple, got %s", reduceValue.Type().Name)
+		}
+		return p.saveReduceTuple(rv, obj)
+	}
+
 	// Fall back to __reduce__ for objects that define it.
 	// CPython: Modules/_pickle.c:4425 save -> __reduce_ex__ fallback
 	return p.saveViaReduce(obj)
+}
+
+// dispatchReductor returns copyreg.dispatch_table[t], or nil when copyreg
+// is not imported or holds no entry for t. This is the global table; the
+// per-Pickler dispatch_table override is not modeled here.
+//
+// CPython: Modules/_pickle.c:585 get_dispatch_table_entry
+func dispatchReductor(t *objects.Type) objects.Object {
+	sysmod := imp.SysModules()
+	if sysmod == nil {
+		return nil
+	}
+	modObj, err := sysmod.GetItem(objects.NewStr("copyreg"))
+	if err != nil || modObj == nil {
+		return nil
+	}
+	mod, ok := modObj.(*objects.Module)
+	if !ok {
+		return nil
+	}
+	tableObj, err := mod.Dict().GetItem(objects.NewStr("dispatch_table"))
+	if err != nil || tableObj == nil {
+		return nil
+	}
+	table, ok := tableObj.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	reductor, err := table.GetItem(t)
+	if err != nil || reductor == nil {
+		return nil
+	}
+	return reductor
 }
 
 var errUnsupportedType = errors.New("PicklingError: unsupported type in encoder")

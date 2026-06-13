@@ -39,6 +39,43 @@ func init() {
 	SuperType.DescrGet = superDescrGet
 	SuperType.Call = superCall
 	addDescriptorSlotWrappers(SuperType)
+
+	// Read-only members exposing the three slots. A nil slot reads as None,
+	// matching a T_OBJECT member over a NULL pointer.
+	// CPython: Objects/typeobject.c:11780 super_members
+	SetTypeDescr(SuperType, "__thisclass__", NewGetSetDescr("__thisclass__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__thisclass__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.typ == nil {
+				return None(), nil
+			}
+			return su.typ, nil
+		}, nil))
+	SetTypeDescr(SuperType, "__self__", NewGetSetDescr("__self__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__self__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.obj == nil {
+				return None(), nil
+			}
+			return su.obj, nil
+		}, nil))
+	SetTypeDescr(SuperType, "__self_class__", NewGetSetDescr("__self_class__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__self_class__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.objType == nil {
+				return None(), nil
+			}
+			return su.objType, nil
+		}, nil))
 }
 
 // NewSuper builds a Super tied to (typ, obj). obj==nil produces an
@@ -81,6 +118,16 @@ func supercheck(typ *Type, obj Object) (*Type, error) {
 	if IsSubtype(ot, typ) {
 		return ot, nil
 	}
+	// Slow path: allow super() with a proxy for obj, where Py_TYPE(obj) is
+	// not a subtype of type but obj.__class__ is.
+	// CPython: Objects/typeobject.c:11964 supercheck
+	classAttr, err := LookupAttrString(obj, "__class__")
+	if err != nil {
+		return nil, err
+	}
+	if ct, ok := classAttr.(*Type); ok && ct != ot && IsSubtype(ct, typ) {
+		return ct, nil
+	}
 	kind := "instance of"
 	name := ot.Name
 	if t, ok := obj.(*Type); ok {
@@ -88,7 +135,7 @@ func supercheck(typ *Type, obj Object) (*Type, error) {
 		name = t.Name
 	}
 	return nil, fmt.Errorf(
-		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s)",
+		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s).",
 		kind, name, typ.Name,
 	)
 }
@@ -137,7 +184,11 @@ func superGetAttr(o Object, name Object) (Object, error) {
 			return res, nil
 		}
 	}
-	return nil, fmt.Errorf("AttributeError: 'super' object has no attribute '%s'", n)
+	// Nothing found walking the bound MRO: fall back to a generic lookup on
+	// the super object itself, which resolves the members (__self__,
+	// __thisclass__, __self_class__) and any methods on the super type.
+	// CPython: Objects/typeobject.c:11915 do_super_lookup (skip branch)
+	return GenericGetAttr(o, name)
 }
 
 // lookupSuperDescr returns the attribute named `name` from the first
@@ -249,13 +300,17 @@ func superInitNoArgs() (*Type, Object, error) {
 	if self == nil {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
 	}
-	// When self is captured by a nested function (lambda/comprehension), slot 0
-	// holds the *Cell wrapper rather than the value itself. Unwrap it.
+	// Slot 0 holds a *Cell wrapper only when self is itself a cell
+	// variable, i.e. captured by a nested function. CPython gates the
+	// unwrap on _PyLocals_GetKind(kinds, 0) & CO_FAST_CELL; without that
+	// gate a method whose first argument happens to be a cell object
+	// passed in by the caller would be wrongly dereferenced (test_cell_as_self).
 	//
-	// CPython: Objects/typeobject.c:12054 super_init_without_args
-	// reads PyUnstable_InterpreterFrame_GetLocals which dereferences cells.
-	if cell, ok := self.(*Cell); ok {
-		self = cell.Contents
+	// CPython: Objects/typeobject.c:12069 super_init_without_args
+	if len(code.LocalsplusKinds) > 0 && code.LocalsplusKinds[0]&CoFastCell != 0 {
+		if cell, ok := self.(*Cell); ok {
+			self = cell.Contents
+		}
 	}
 	if self == nil {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
@@ -309,16 +364,17 @@ func superCall(callable Object, args []Object, kwargs map[string]Object) (Object
 	case 1:
 		t, ok := args[0].(*Type)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: super() argument 1 must be type, not %s", typeNameOf(args[0]))
+			return nil, fmt.Errorf("TypeError: super() argument 1 must be a type, not %s", typeNameOf(args[0]))
 		}
 		return NewSuper(t, nil)
 	case 2:
 		t, ok := args[0].(*Type)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: super() argument 1 must be type, not %s", typeNameOf(args[0]))
+			return nil, fmt.Errorf("TypeError: super() argument 1 must be a type, not %s", typeNameOf(args[0]))
 		}
 		return NewSuper(t, args[1])
 	default:
-		return nil, fmt.Errorf("TypeError: super() takes at most 2 arguments (%d given)", len(args))
+		// CPython: Python/getargs.c:2718 _PyArg_CheckPositional via super_vectorcall
+		return nil, fmt.Errorf("TypeError: super() expected at most 2 arguments, got %d", len(args))
 	}
 }

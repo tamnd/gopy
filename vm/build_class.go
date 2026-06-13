@@ -149,7 +149,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	//
 	// CPython: Python/bltinmodule.c:131 builtin___build_class__
 
-	if err := runClassBody(fn, ns); err != nil {
+	cell, err := runClassBody(fn, ns)
+	if err != nil {
 		return nil, err
 	}
 
@@ -178,6 +179,30 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}
 	result, err := objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
+
+	// Verify the __class__ cell the body returned was filled with the
+	// freshly created class. A metaclass that drops __classcell__ from the
+	// namespace, or points it at a different class, is reported here.
+	//
+	// CPython: Python/bltinmodule.c:215 builtin___build_class__
+	if err == nil && result != nil {
+		if cellObj, ok := cell.(*objects.Cell); ok {
+			if resType, isType := result.(*objects.Type); isType && cellObj.Contents != resType {
+				nameRepr, rerr := objects.Repr(nameObj)
+				if rerr == nil {
+					clsRepr, crerr := objects.Repr(result)
+					if crerr == nil {
+						if cellObj.Contents == nil {
+							err = fmt.Errorf("RuntimeError: __class__ not set defining %s as %s. Was __classcell__ propagated to type.__new__?", nameRepr, clsRepr)
+						} else if setRepr, srerr := objects.Repr(cellObj.Contents); srerr == nil {
+							err = fmt.Errorf("TypeError: __class__ set to %s defining %s as %s", setRepr, nameRepr, clsRepr)
+						}
+						result = nil
+					}
+				}
+			}
+		}
+	}
 	// Release the initial NewDict ref. NewTuple copies raw pointers without
 	// Incref-ing ns, so the only owner remaining after the metaclass call is
 	// this reference. The metaclass copied every namespace entry into the
@@ -206,10 +231,10 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 //
 // CPython: Python/bltinmodule.c builtin___build_class__ (the
 // PyObject_Call(func, ()) call after LOCALS = PyObject_Call(prep, ...))
-func runClassBody(fn *objects.Function, ns objects.Object) error {
+func runClassBody(fn *objects.Function, ns objects.Object) (objects.Object, error) {
 	co := fn.Code
 	if co == nil {
-		return fmt.Errorf("TypeError: __build_class__: function has no code")
+		return nil, fmt.Errorf("TypeError: __build_class__: function has no code")
 	}
 	ts := currentThread()
 	if ts == nil {
@@ -236,8 +261,13 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 		}
 	}
 
-	_, err := Eval(ts, f)
-	return err
+	// The body returns its __class__ cell (when the class body references
+	// __class__ or uses zero-arg super), otherwise None. __build_class__
+	// uses it to verify the cell was filled with the freshly created class.
+	//
+	// CPython: Python/bltinmodule.c:206 builtin___build_class__ (cell = _PyEval_Vector)
+	cell, err := Eval(ts, f)
+	return cell, err
 }
 
 // calculateMetaclass ports _Py_CalculateMetaclass: for each base, if

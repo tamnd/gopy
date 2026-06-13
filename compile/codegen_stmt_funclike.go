@@ -458,6 +458,23 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 		return 0, nil
 	}
 	for _, name := range freeNames {
+		// Implicit class-scope cells (__class__, __classdict__): a method
+		// captures the class's implicit closure cell, which is a separate
+		// compiler cellvar registered via NeedsClassClosure. The class body
+		// may ALSO reference the same name as a freevar (reading an enclosing
+		// binding, e.g. zero-arg super()'s __class__) or bind it as a
+		// namespace LOCAL, so the symbol scope is not necessarily Cell. The
+		// method's cell is always the cellvar, so resolve it from the cellvar
+		// pool before consulting the (possibly Free) symbol scope.
+		//
+		// CPython: Python/symtable.c:958 drop_class_free (needs_class_closure)
+		if c.scope.Type == symtable.ClassBlock &&
+			((name == "__class__" && c.scope.NeedsClassClosure) ||
+				(name == "__classdict__" && c.scope.NeedsClassDict)) {
+			pool := poolCellVars
+			c.addOpName(LOAD_CLOSURE, &pool, name, l)
+			continue
+		}
 		// Each free var is a cell or free in the outer scope. Push the
 		// outer's cell (not its contents) onto the stack so BUILD_TUPLE
 		// collects it into the closure. LOAD_CLOSURE reads

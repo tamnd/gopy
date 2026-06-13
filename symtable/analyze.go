@@ -335,6 +335,21 @@ func dropClassFree(ste *Entry, scopes map[string]Scope, free nameSet) {
 //
 // CPython: Python/compile.c:L610 needs_class_closure cellvars handling
 func stampImplicitCell(ste *Entry, scopes map[string]Scope, name string) {
+	// When the class body itself references the name, analyze_name already
+	// classified it: FREE if it reads an enclosing binding (zero-arg super()'s
+	// __class__ resolving to the surrounding method), GLOBAL if no enclosing
+	// binding exists, or LOCAL if the body binds it (`__class__ = 413`).
+	// CPython never runs analyze_cells on a class scope, so that
+	// classification stands; the body keeps reading its freevar/global/local
+	// while methods capture a SEPARATE implicit closure cell (a distinct
+	// compiler cellvar registered via NeedsClassClosure). Only synthesize a
+	// Cell symbol when the body never mentions the name, so the common
+	// `def f(): __class__` case still records the cell the method derefs.
+	//
+	// CPython: Python/symtable.c:1300 analyze_block (class skips analyze_cells)
+	if _, ok := scopes[name]; ok {
+		return
+	}
 	flags := ste.Symbols[name]
 	flags |= DefLocal
 	flags &^= ScopeMask << ScopeOffset
