@@ -29,6 +29,9 @@ func init() {
 	notImplementedType.Str = notImplementedType.Repr
 	notImplementedType.Getattro = GenericGetAttr
 	notImplementedType.Setattro = GenericSetAttr
+	// NotImplementedType is not subclassable. CPython: Objects/object.c
+	// _PyNotImplemented_Type does not set Py_TPFLAGS_BASETYPE.
+	notImplementedType.TpFlags &^= TpFlagBasetype
 	// NotImplemented must never be evaluated in a boolean context; the
 	// nb_bool slot raises rather than returning a truth value.
 	//
