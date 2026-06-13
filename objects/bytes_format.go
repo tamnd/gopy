@@ -10,6 +10,7 @@
 package objects
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 )
@@ -180,7 +181,10 @@ func bytesFormat(format []byte, args Object, useByteArray bool) (Object, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = bytesWritePadded(out, &arg, body)
+		out, err = bytesWritePadded(out, &arg, body)
+		if err != nil {
+			return nil, err
+		}
 
 		if dict != nil && argIdx < argLen {
 			return nil, fmt.Errorf("TypeError: not all arguments converted during bytes formatting")
@@ -350,16 +354,17 @@ func bytesByteConverter(v Object) (byte, error) {
 // bytesWritePadded applies width and the F_LJUST/F_ZERO flags to body and
 // appends the result to out. Width is measured in bytes. For numeric specs
 // (signable) with F_ZERO the zero padding lives between the sign/prefix and
-// the digits.
+// the digits. A width that demands more padding than can be allocated
+// surfaces as MemoryError, the way _PyBytesWriter reports a failed malloc.
 //
 // CPython: Objects/bytesobject.c:980 _PyBytes_FormatEx (the padding tail)
-func bytesWritePadded(out []byte, arg *fmtArg, body []byte) []byte {
+func bytesWritePadded(out []byte, arg *fmtArg, body []byte) ([]byte, error) {
 	width := arg.width
 	if width < 0 {
 		width = 0
 	}
 	if len(body) >= width {
-		return append(out, body...)
+		return append(out, body...), nil
 	}
 	pad := width - len(body)
 	switch {
@@ -377,11 +382,17 @@ func bytesWritePadded(out []byte, arg *fmtArg, body []byte) []byte {
 			prefixEnd = signEnd + 2
 		}
 		out = append(out, body[:prefixEnd]...)
-		out = appendRepeatByte(out, '0', pad)
-		return append(out, body[prefixEnd:]...)
+		out, err := appendRepeatByte(out, '0', pad)
+		if err != nil {
+			return nil, err
+		}
+		return append(out, body[prefixEnd:]...), nil
 	default:
-		out = appendRepeatByte(out, ' ', pad)
-		return append(out, body...)
+		out, err := appendRepeatByte(out, ' ', pad)
+		if err != nil {
+			return nil, err
+		}
+		return append(out, body...), nil
 	}
 }
 
@@ -455,10 +466,21 @@ func bytesIndexByte(buf []byte, c byte) int {
 	return -1
 }
 
-// appendRepeatByte appends n copies of c to out.
-func appendRepeatByte(out []byte, c byte, n int) []byte {
-	for i := 0; i < n; i++ {
-		out = append(out, c)
+// appendRepeatByte appends n copies of c to out in a single allocation.
+// A width large enough that the padding cannot be allocated (e.g. a "*"
+// width of PY_SSIZE_T_MAX) makes the runtime reject the make; the recover
+// turns that into MemoryError, matching CPython where _PyBytesWriter's
+// failed realloc raises MemoryError rather than spinning.
+//
+// CPython: Objects/bytesobject.c _PyBytesWriter_Prepare (PyErr_NoMemory)
+func appendRepeatByte(out []byte, c byte, n int) (result []byte, err error) {
+	if n <= 0 {
+		return out, nil
 	}
-	return out
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = nil, fmt.Errorf("MemoryError")
+		}
+	}()
+	return append(out, bytes.Repeat([]byte{c}, n)...), nil
 }
