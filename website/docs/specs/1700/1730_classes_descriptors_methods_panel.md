@@ -39,7 +39,7 @@ tree before porting.
 | `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
 | `test_descr` | 21 failures, 14 errors |
 | `test_types` | 11 failures, 20 errors |
-| `test_typing` | runner abort (`__parameters__`) in CollectionsAbcTests |
+| `test_typing` | 709 run, 141 failures / 293 errors (no abort) |
 | `test_genericalias` | error (missing `concurrent.futures.thread`) |
 | `test_enum` | error (missing `pydoc`) |
 
@@ -108,6 +108,32 @@ Ported `_PyObject_MaybeCallSpecialNoArgs` so `math.ceil/floor/trunc` consult
 instance `__getattribute__`), and dropped `trunc`'s float fallback so a type
 without `__trunc__` raises.
 
+### Optional dunder probes no longer leak AttributeError
+
+`test_typing` aborted mid-run, not at import: `collect_parameters` and
+`_generic_init_subclass` probe `__parameters__`/`__origin__` on bases that may
+lack them. A typing `_SpecialGenericAlias` (`List`, `Mapping`, `ByteString`)
+and `_SpecialForm` (`Concatenate`) raise `AttributeError` from their
+`__getattr__`. The ports used `GetAttr` and ignored the error, but that left
+the `AttributeError` pending on the thread state, so it surfaced spuriously on
+the next operation. `iter(test)` inside the unittest suite's `_isnotsuite`
+re-read that stale exception, which is why the abort pointed at
+`__parameters__` raised through `__getattr__`. The original diagnosis (a
+generic alias landing in `_tests`) was wrong: the suite was well-formed; the
+exception state was not.
+
+Switched these probes to `LookupAttr` (the `_PyObject_LookupAttr` port that
+clears the suppressed `AttributeError`), matching CPython's own
+`collect_parameters`/`_generic_init_subclass`. Same fix for `object.__dir__`
+and `object.__getstate__`, which probe `__dict__` on `__slots__` objects.
+`dict.clear()` now resolves its receiver through `DictBacking` so it operates
+on a `defaultdict`'s backing storage instead of crashing on the type
+assertion. test_typing now runs to completion (709 tests).
+
+The residual 141 failures / 293 errors are dominated (~236) by PEP 646
+`TypeVarTuple` and PEP 612 `ParamSpec` substitution, which gopy's
+`subsParameters` does not yet implement. That is a separate subsystem port.
+
 ---
 
 ## Checklist
@@ -121,7 +147,8 @@ without `__trunc__` raises.
 - [x] test_abc, test_super, test_property, test_descrtut, test_dynamicclassattribute green
 - [ ] test_descr: clear the remaining 21 failures / 14 errors
 - [ ] test_types: clear UnionTests / MappingProxy / float-int `__format__` clusters
-- [ ] test_typing: runner aborts in `CollectionsAbcTests` (right after `test_bytestring`) with `AttributeError: __parameters__`. The unittest suite's `_isnotsuite` calls `iter(test)` on what should be a `TestCase`, but the object is a typing `_BaseGenericAlias`; iterating it yields `Unpack[self]`, whose evaluation reaches `__getattr__('__parameters__')` and raises. `__parameters__` resolves correctly on a standalone `List[int]`/`List[T]`, so the divergence is in how that test class's suite is built (a generic alias landing in `_tests` where a TestCase belongs), not in the alias machinery itself. Next: find which `CollectionsAbcTests` member injects the alias into the suite.
+- [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite. Now runs all 709 tests.
+- [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — accounts for ~236 of the remaining errors
 - [ ] test_genericalias: vendor `concurrent.futures` as a package (`_base`/`thread`/`process`)
 - [ ] test_enum: vendor `pydoc`
 - [ ] test_class: `test_detach_materialized_dict_no_memory` needs `_testcapi.set_nomemory` (allocator fault injection, infeasible on the Go runtime; deferred)
