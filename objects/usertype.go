@@ -885,6 +885,7 @@ func fixupSlotDispatchers(t *Type) {
 			inheritDirectBaseScalars(t, base)
 		}
 	}
+	inheritTpNewFromBestBase(t)
 	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
@@ -1095,6 +1096,28 @@ func bindAttrCallable(attr Object, o Object, tp *Type) (Object, error) {
 	return attr, nil
 }
 
+// inheritTpNewFromBestBase fixes tp_new to come from best_base rather than
+// whichever base happens to be first in the bases list. CPython's
+// inherit_special copies tp_new (and the instance layout) from tp_base, the
+// solid base chosen by best_base. inheritDirectBaseScalars runs per base in
+// list order, so a multiple-inheritance class whose layout-fixing base is not
+// first (class C(PyMixin, CStruct) where CStruct carries the instance struct)
+// would otherwise inherit the first base's generic object tp_new and allocate
+// the wrong struct. Override with the best base's tp_new so the right
+// allocator runs; fixupTpNew still routes to slotTpNew when a Python __new__
+// is in play.
+//
+// CPython: Objects/typeobject.c:7019 inherit_special (tp_new from tp_base)
+func inheritTpNewFromBestBase(t *Type) {
+	base, err := bestBase(t.Bases)
+	if err != nil || base == nil {
+		return
+	}
+	if base.TpNew != nil {
+		t.TpNew = base.TpNew
+	}
+}
+
 // fixupTpNew installs slotTpNew when the class body defines its own
 // __new__. Without this, typeCallViaTpNew would call the inherited
 // C-level tp_new (e.g. int's intTpNew) directly and skip the user's
@@ -1138,9 +1161,25 @@ func fixupTpNew(t *Type) {
 
 // fixupCallReprStr wires tp_call, tp_repr, and tp_str.
 func fixupCallReprStr(t *Type) {
-	if lookupDunderCallable(t, "__call__") {
+	if callOverridesVectorcall(t) {
 		t.Call = slotTpCall
 		t.Vectorcall = nil
+		// A generic __call__ is incompatible with vectorcall, so a heap
+		// type that defines its own __call__ does not advertise the flag.
+		//
+		// CPython: Objects/typeobject.c:11392 update_one_slot
+		t.TpFlags &^= TpFlagHaveVectorcall
+	} else {
+		// Inherit Py_TPFLAGS_HAVE_VECTORCALL from the nearest base in the
+		// MRO that advertises it, since tp_call was not overridden.
+		//
+		// CPython: Objects/typeobject.c:8354 inherit_slots
+		for _, b := range t.MRO {
+			if b != t && b.TpFlags&TpFlagHaveVectorcall != 0 {
+				t.TpFlags |= TpFlagHaveVectorcall
+				break
+			}
+		}
 	}
 	if lookupDunderCallable(t, "__repr__") {
 		t.Repr = slotTpRepr
@@ -1557,6 +1596,29 @@ func ensureSequenceMethods(t *Type) *SequenceMethods {
 // MRO via a real descriptor (Function, BuiltinFunction, etc.). Plain
 // data attributes are ignored: `__hash__ = None` on the class means
 // the type is explicitly unhashable.
+// callOverridesVectorcall reports whether t resolves __call__ to a real
+// override (a Python __call__ or any non-slot-wrapper callable) rather than
+// the auto-generated tp_call slot wrapper that a HAVE_VECTORCALL base
+// installs. Only a real override forces the generic slot_tp_call path and
+// clears Py_TPFLAGS_HAVE_VECTORCALL; inheriting the base's vectorcall wrapper
+// keeps the fast path, so MethodDescriptorHeap(Base) and DerivedType(Super)
+// stay vectorcall-capable.
+//
+// CPython: Objects/typeobject.c:11392 update_one_slot (tp_call / vectorcall)
+func callOverridesVectorcall(t *Type) bool {
+	d, _ := LookupDescriptor(t, "__call__")
+	if d == nil || d == None() {
+		return false
+	}
+	// The wrapper AddCallSlotWrapper installs is a method_descriptor named
+	// "__call__"; it routes through the owning type's tp_call/vectorcall and
+	// is therefore vectorcall-compatible.
+	if md, ok := d.(*MethodDescr); ok && md.Name() == "__call__" {
+		return false
+	}
+	return true
+}
+
 func lookupDunderCallable(t *Type, name string) bool {
 	d, _ := LookupDescriptor(t, name)
 	if d == nil {

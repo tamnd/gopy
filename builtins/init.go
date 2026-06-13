@@ -78,7 +78,8 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		}
 	}
 
-	printFn := objects.NewBuiltinFunction("print", Print)
+	printFn := objects.NewBuiltinFunction("print", Print).
+		WithKwParams("print", []string{"sep", "end", "file", "flush"})
 	if err := setBuiltin(dict, "print", printFn); err != nil {
 		return nil, err
 	}

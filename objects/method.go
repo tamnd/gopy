@@ -33,6 +33,11 @@ type BoundMethod struct {
 var BoundMethodType = NewType("method", []*Type{objectType})
 
 func init() {
+	// PyMethod_Type advertises Py_TPFLAGS_HAVE_VECTORCALL
+	// (tp_vectorcall_offset = vectorcall).
+	//
+	// CPython: Objects/classobject.c:330 PyMethod_Type tp_flags
+	BoundMethodType.TpFlags |= TpFlagHaveVectorcall
 	BoundMethodType.Repr = boundMethodRepr
 	BoundMethodType.Str = boundMethodRepr
 	BoundMethodType.Vectorcall = boundMethodVectorcall

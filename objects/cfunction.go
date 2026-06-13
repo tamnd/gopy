@@ -83,6 +83,11 @@ type CFunction struct {
 var CFunctionType = NewType("builtin_function_or_method", []*Type{objectType})
 
 func init() {
+	// PyCFunction_Type advertises Py_TPFLAGS_HAVE_VECTORCALL
+	// (tp_vectorcall_offset = vectorcall) but NOT METHOD_DESCRIPTOR.
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
+	CFunctionType.TpFlags |= TpFlagHaveVectorcall
 	CFunctionType.Repr = cfunctionRepr
 	CFunctionType.Str = cfunctionRepr
 	CFunctionType.Vectorcall = cfunctionVectorcall

@@ -186,23 +186,36 @@ func AddCallSlotWrapper(t *Type) {
 	if _, exists := typeDescrTable[t]["__call__"]; exists {
 		return
 	}
-	SetTypeDescr(t, "__call__", NewMethodDescr(t, "__call__", makeWrapCall()))
+	SetTypeDescr(t, "__call__", NewMethodDescr(t, "__call__", makeWrapCall(t)))
 }
 
-// makeWrapCall returns the (self, *args, **kwargs) wrapper for the
-// callable slot. The receiver is the first positional argument
-// (CPython's wrap_call receives self via the descriptor binding); the
-// remaining positionals and the kwargs dict feed through the standard
-// Call helper so vectorcall-only types route the same as tp_call types.
+// makeWrapCall returns the (self, *args, **kwargs) wrapper for the callable
+// slot of type owner. The receiver is the first positional argument
+// (CPython's wrap_call receives self via the descriptor binding). Like
+// CPython's wrap_call, it invokes the SPECIFIC slot of the type that owns the
+// descriptor (d_wrapped) rather than re-dispatching through self's own type;
+// otherwise super().__call__() on a subclass that defines __call__ would loop
+// straight back into the subclass slot instead of reaching the base's slot.
 //
 // CPython: Objects/typeobject.c wrap_call
-func makeWrapCall() func(args []Object, kwargs map[string]Object) (Object, error) {
+func makeWrapCall(owner *Type) func(args []Object, kwargs map[string]Object) (Object, error) {
 	return func(args []Object, kwargs map[string]Object) (Object, error) {
 		if len(args) < 1 {
 			return nil, fmt.Errorf("TypeError: __call__() missing self argument")
 		}
 		self := args[0]
-		rest := NewTuple(args[1:])
+		rest := args[1:]
+		// Invoke owner's tp_call directly. owner.Call dispatches whatever
+		// the owning type advertises (vectorcall-only types carry a
+		// PyVectorcall_Call-equivalent here), so the call lands on the
+		// base slot without bouncing through self.Type().
+		if owner.Call != nil {
+			return owner.Call(self, rest, kwargs)
+		}
+		// owner exposes only a vectorcall slot: route through the shared
+		// Call helper, which builds the (tuple, dict) shape and takes the
+		// vectorcall fast path off self.
+		restTuple := NewTuple(rest)
 		var kw *Dict
 		if len(kwargs) > 0 {
 			kw = NewDict()
@@ -212,6 +225,6 @@ func makeWrapCall() func(args []Object, kwargs map[string]Object) (Object, error
 				}
 			}
 		}
-		return Call(self, rest, kw)
+		return Call(self, restTuple, kw)
 	}
 }

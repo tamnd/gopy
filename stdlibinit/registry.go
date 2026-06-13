@@ -153,6 +153,13 @@ import (
 	// CPython: Modules/_testlimitedcapi/abstract.c:1 abstract-protocol tests
 	_ "github.com/tamnd/gopy/module/_testlimitedcapi"
 
+	// Built-in module: _testcapi. Registers itself via
+	// module/_testcapi/module.go init(). Ports the PEP 590 vectorcall and
+	// calling-convention fixtures (meth_*, Meth{Instance,Class,Static})
+	// the standard-library test suite drives directly.
+	// CPython: Modules/_testcapi/vectorcall.c:1 vectorcall fixtures
+	_ "github.com/tamnd/gopy/module/_testcapi"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.

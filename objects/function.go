@@ -62,6 +62,37 @@ type Function struct {
 	//
 	// CPython: Include/cpython/funcobject.h:55 func_version
 	Version uint32
+
+	// vectorcall is the per-instance vectorcall pointer
+	// (func_vectorcall). It is nil for an ordinary function, which falls
+	// back to the type-level eval-loop slot; PyFunction_SetVectorcall
+	// installs a custom one (the _testcapi override_vectorcall fixture
+	// uses this to make every call return "overridden").
+	//
+	// CPython: Include/cpython/funcobject.h:34 vectorcall
+	vectorcall func(Object, []Object, uint, *Tuple) (Object, error)
+}
+
+// SetVectorcall installs a per-instance vectorcall function, mirroring
+// PyFunction_SetVectorcall. Passing nil restores the default eval-loop
+// slot. Resets the specializer version so any cached CALL guard refreshes.
+//
+// CPython: Objects/funcobject.c:_PyFunction_SetVectorcall
+func (f *Function) SetVectorcall(fn func(Object, []Object, uint, *Tuple) (Object, error)) {
+	f.vectorcall = fn
+	f.Version = 0
+}
+
+// InstanceVectorcall implements InstanceVectorcaller: it returns the custom
+// per-instance vectorcall when one was installed, otherwise the type-level
+// slot (the eval-loop entry the vm package wires onto FunctionType).
+//
+// CPython: Include/cpython/object.h tp_vectorcall_offset (func_vectorcall)
+func (f *Function) InstanceVectorcall() func(Object, []Object, uint, *Tuple) (Object, error) {
+	if f.vectorcall != nil {
+		return f.vectorcall
+	}
+	return FunctionType.Vectorcall
 }
 
 // FunctionType is the type singleton for Python-defined functions.
@@ -70,6 +101,12 @@ type Function struct {
 var FunctionType = NewType("function", []*Type{objectType})
 
 func init() {
+	// PyFunction_Type carries Py_TPFLAGS_METHOD_DESCRIPTOR (so a function
+	// stored as a class attribute binds self) and Py_TPFLAGS_HAVE_VECTORCALL
+	// (its tp_vectorcall_offset feeds the fast-call path).
+	//
+	// CPython: Objects/funcobject.c:1232 PyFunction_Type tp_flags
+	FunctionType.TpFlags |= TpFlagMethodDescriptor | TpFlagHaveVectorcall
 	FunctionType.Repr = functionRepr
 	FunctionType.Str = functionRepr
 	// Functions are descriptors: fetched off an instance they bind

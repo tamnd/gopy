@@ -974,6 +974,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		argsObj := e.popObject()
 		selfOrNull := e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
+		// When the unpacked object is already an exact tuple, CALL_FUNCTION_EX
+		// forwards it unchanged; only non-tuple iterables get re-tupled. This
+		// keeps `f(*args)` passing the very same tuple to a ternaryfunc tp_call,
+		// so a slot that returns its args tuple stays identity-preserving.
+		//
+		// CPython: Python/bytecodes.c CALL_FUNCTION_EX (PyTuple_CheckExact gate)
+		if exact, ok := argsObj.(*objects.Tuple); ok {
+			out, cerr := objects.Call(callable, exact, kwargs)
+			objects.Decref(callable)
+			if selfOrNull != nil {
+				objects.Decref(selfOrNull)
+			}
+			objects.Decref(argsObj)
+			if kwargs != nil {
+				objects.DecrefThrowawayKwargs(kwargs)
+			}
+			if cerr != nil {
+				return 0, true, cerr
+			}
+			e.pushObject(out)
+			return e.advance(), true, nil
+		}
 		argsSlice, ierr := iterToSlice(argsObj)
 		if ierr != nil {
 			// check_args_iterable: when the unpacked object is not iterable

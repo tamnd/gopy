@@ -19,7 +19,8 @@ var importErrorKwlist = []string{"name", "path", "name_from"}
 // CPython: Objects/exceptions.c:1953 ImportError type (tp_init)
 func init() {
 	objects.SetTypeDescr(PyExc_ImportError, "__init__",
-		objects.NewMethodDescr(PyExc_ImportError, "__init__", importErrorInit))
+		objects.NewMethodDescr(PyExc_ImportError, "__init__", importErrorInit).
+			WithKwParams("ImportError", importErrorKwlist, len(importErrorKwlist)))
 }
 
 // importErrorInit ports ImportError_init: it runs BaseException_init over
