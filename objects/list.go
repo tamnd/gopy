@@ -43,7 +43,7 @@ func (l *List) EnsureAttrDict() *Dict {
 var ListType = NewType("list", []*Type{objectType})
 
 func init() {
-	ListType.TpFlags |= TpFlagSequence | TpFlagMatchSelf
+	ListType.TpFlags |= TpFlagSequence | TpFlagMatchSelf | TpFlagHaveGC
 	ListType.Repr = listRepr
 	ListType.Str = listRepr
 	ListType.RichCmp = listRichCmp

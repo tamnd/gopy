@@ -447,7 +447,26 @@ const (
 	//
 	// CPython: Include/object.h:340 Py_TPFLAGS_METHOD_DESCRIPTOR
 	TpFlagMethodDescriptor uint64 = 1 << 17
+	// TpFlagHaveGC mirrors Py_TPFLAGS_HAVE_GC: set on every type whose
+	// instances participate in cyclic garbage collection (containers like
+	// tuple/list/dict/set/type/function). Atomic types (int/float/str/
+	// bytes/bool/None/object) leave it clear. _PyType_IS_GC tests it; the
+	// tuple creation path keys instant GC-tracking on whether any item's
+	// type has it (gh-139951), and type_new always adds it to heap types.
+	//
+	// CPython: Include/object.h:332 Py_TPFLAGS_HAVE_GC
+	TpFlagHaveGC uint64 = 1 << 14
 )
+
+// HasGC reports _PyType_IS_GC(t): the type carries Py_TPFLAGS_HAVE_GC, or
+// it is a heap type (CPython's type_new unconditionally adds HAVE_GC to
+// every heap type, so user classes always participate in GC).
+//
+// CPython: Include/internal/pycore_object.h:_PyType_IS_GC,
+// Objects/typeobject.c type_new (Py_TPFLAGS_HAVE_GC on heap types)
+func (t *Type) HasGC() bool {
+	return t.TpFlags&TpFlagHaveGC != 0 || t.IsUser
+}
 
 // HasInlineValues reports whether t carries Py_TPFLAGS_INLINE_VALUES.
 //
@@ -562,7 +581,7 @@ func (t *Type) FullyQualifiedName() string {
 // use to break the bootstrap cycle (Type.Header.typ == typeType).
 //
 // CPython: Objects/typeobject.c:L6361 PyType_Type
-var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype}
+var typeType = &Type{Name: "type", TpFlags: TpFlagImmutable | TpFlagBasetype | TpFlagHaveGC}
 
 func init() {
 	typeType.typ = typeType

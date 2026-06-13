@@ -80,8 +80,8 @@ func init() {
 	SetType.RichCmp = setRichCmp
 	// CPython: Objects/setobject.c:2220 PySet_Type.tp_richcompare slot wrapper
 	BindRichCmpDescriptors(SetType)
-	SetType.TpFlags |= TpFlagMatchSelf
-	FrozensetType.TpFlags |= TpFlagMatchSelf
+	SetType.TpFlags |= TpFlagMatchSelf | TpFlagHaveGC
+	FrozensetType.TpFlags |= TpFlagMatchSelf | TpFlagHaveGC
 	SetType.Iter = setIter
 	SetType.Sequence = &SequenceMethods{
 		Length:   setLen,
