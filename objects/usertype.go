@@ -484,9 +484,11 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	// installSlots handles.
 	//
 	// CPython: Objects/typeobject.c:4160 type_new_slots (may_add_weak)
+	inheritedWeakref := false
 	for _, b := range bases {
 		if b != nil && mroHasWeakref(b) {
 			t.HasWeakref = true
+			inheritedWeakref = true
 			break
 		}
 	}
@@ -494,6 +496,14 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 		if base, err := bestBase(bases); err == nil && base != nil && typeItemSize(base) == 0 {
 			t.HasWeakref = true
 		}
+	}
+	// The __weakref__ getset lands on the class that first introduces
+	// weakref support, exactly like __dict__; an inheriting subclass
+	// already sees it through the MRO.
+	//
+	// CPython: Objects/typeobject.c type_new_descriptors (add_weak gate)
+	if t.HasWeakref && !inheritedWeakref {
+		installInstanceWeakrefDescr(t)
 	}
 	if !t.HasDict {
 		return
@@ -2269,6 +2279,16 @@ func installSlots(t *Type, ns *Dict) error {
 			}
 			addDict++
 			t.HasDict = true
+			// configureManagedDict ran before __slots__ was parsed, so the
+			// managed-dict flag and the __dict__ getset it would have stamped
+			// for a no-__slots__ class were skipped. A class that names
+			// __dict__ in __slots__ still gets a per-instance dict
+			// (tp_dictoffset), so wire both here. Inline values stay off:
+			// they ride only on classes that omit __slots__ entirely.
+			//
+			// CPython: Objects/typeobject.c:4153 type_new (managed dict gate)
+			t.TpFlags |= TpFlagManagedDict
+			installInstanceDictDescr(t)
 			continue
 		case "__weakref__":
 			// CPython: Objects/typeobject.c:3998 type_new_visit_slots
@@ -2277,6 +2297,11 @@ func installSlots(t *Type, ns *Dict) error {
 			}
 			addWeak++
 			t.HasWeakref = true
+			// configureManagedDict ran before __slots__ was parsed, so the
+			// __weakref__ getset it stamps for the no-__slots__ case was
+			// skipped. A class naming __weakref__ in __slots__ still gets
+			// weakref support, so wire the descriptor here.
+			installInstanceWeakrefDescr(t)
 			continue
 		}
 		if !StrIsIdentifier(n) {

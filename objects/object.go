@@ -759,6 +759,33 @@ func installInstanceDictDescr(t *Type) {
 	SetTypeDescr(t, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
 }
 
+// installInstanceWeakrefDescr stamps the read-only __weakref__ getset on
+// the class that first introduces weak-reference support, mirroring the
+// subtype_getsets row CPython's type_new adds when may_add_weak fires.
+//
+// CPython: Objects/typeobject.c:3847 subtype_getsets_weakref_only
+func installInstanceWeakrefDescr(t *Type) {
+	SetTypeDescr(t, "__weakref__", NewGetSetDescr("__weakref__", objectGetWeakref, nil))
+}
+
+// objectGetWeakref backs the __weakref__ getset. It returns the head of
+// the referent's weakref list (the first weak reference), or None when no
+// weak reference exists yet. The descriptor is installed only on types
+// whose instances carry weakref support, so a missing list reads as None
+// rather than raising.
+//
+// CPython: Objects/typeobject.c:3818 subtype_getweakref
+func objectGetWeakref(o Object) (Object, error) {
+	if !o.Type().HasWeakref {
+		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__weakref__'", o.Type().Name)
+	}
+	h := o.Hdr()
+	if h.weakrefs == nil || h.weakrefs.head == nil {
+		return None(), nil
+	}
+	return h.weakrefs.head.asObject(), nil
+}
+
 func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
 	case *Instance:
