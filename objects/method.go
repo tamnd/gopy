@@ -451,27 +451,25 @@ func init() {
 	// CPython: Objects/funcobject.c:1594 PyClassMethod_Type
 	ClassMethodType.Setattro = GenericSetAttr
 	ClassMethodType.HasDict = true
-	// classmethod(fn): wrap fn so attribute access binds to the class.
+	// classmethod(fn): cm_new allocates with cm_callable preset to None;
+	// cm_init then validates the args and stores the real callable. The
+	// split matters for subclasses that override __init__ without calling
+	// super().__init__: the callable stays None, so repr and __func__
+	// report None rather than the constructor argument.
 	//
-	// CPython: Objects/funcobject.c:1487 cm_init
-	ClassMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-		if len(kwargs) != 0 {
-			return nil, fmt.Errorf("TypeError: classmethod() takes no keyword arguments")
-		}
-		if err := CheckPositional("classmethod", len(args), 1, 1); err != nil {
-			return nil, err
-		}
-		return NewClassMethod(args[0]), nil
+	// CPython: Objects/funcobject.c:1474 cm_new / cm_init
+	ClassMethodType.TpNew = func(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+		cm := &ClassMethod{cmCallable: None()}
+		cm.init(cls)
+		return cm, nil
 	}
-	StaticMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-		if len(kwargs) != 0 {
-			return nil, fmt.Errorf("TypeError: staticmethod() takes no keyword arguments")
-		}
-		if err := CheckPositional("staticmethod", len(args), 1, 1); err != nil {
-			return nil, err
-		}
-		return NewStaticMethod(args[0]), nil
+	SetTypeDescr(ClassMethodType, "__init__", NewMethodDescr(ClassMethodType, "__init__", classMethodInit))
+	StaticMethodType.TpNew = func(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+		sm := &StaticMethod{smCallable: None()}
+		sm.init(cls)
+		return sm, nil
 	}
+	SetTypeDescr(StaticMethodType, "__init__", NewMethodDescr(StaticMethodType, "__init__", staticMethodInit))
 
 	// cm_memberlist + cm_getsetlist + cm_methodlist, all in one
 	// init pass. __func__ and __wrapped__ both expose cm_callable; the
@@ -503,8 +501,28 @@ func init() {
 		func(o Object, v Object) error {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "classmethod")
 		}))
+	// Expose tp_repr as __repr__ so a subclass of classmethod resolves the
+	// classmethod repr through the slot wrapper rather than falling back to
+	// object.__repr__ during fixup_slot_dispatchers.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr -> __repr__)
+	SetTypeDescr(ClassMethodType, "__repr__", NewMethodDescr(ClassMethodType, "__repr__", classMethodReprDescr))
 	bindClassGetitem(ClassMethodType)
 	addDescriptorSlotWrappers(ClassMethodType)
+}
+
+// classMethodReprDescr backs classmethod.__dict__["__repr__"].
+//
+// CPython: Objects/funcobject.c:1565 cm_repr
+func classMethodReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	s, err := classMethodRepr(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 // classMethodTraverse visits the wrapped callable and instance dict.
@@ -536,6 +554,28 @@ func NewClassMethod(fn Object) *ClassMethod {
 	cm.init(ClassMethodType)
 	functoolsWraps(cm, fn)
 	return cm
+}
+
+// classMethodInit is classmethod's tp_init: it validates the single
+// positional callable and stores it, then runs functools_wraps. A
+// subclass that overrides __init__ without chaining here leaves
+// cm_callable at the None preset from cm_new.
+//
+// CPython: Objects/funcobject.c:1487 cm_init
+func classMethodInit(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: classmethod() takes no keyword arguments")
+	}
+	if err := CheckPositional("classmethod", len(args)-1, 1, 1); err != nil {
+		return nil, err
+	}
+	cm, ok := args[0].(*ClassMethod)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'classmethod' object but received a '%s'", typeNameOf(args[0]))
+	}
+	cm.cmCallable = args[1]
+	functoolsWraps(cm, cm.cmCallable)
+	return None(), nil
 }
 
 // Func returns the wrapped callable.
@@ -824,8 +864,27 @@ func init() {
 		func(o Object, v Object) error {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "staticmethod")
 		}))
+	// Expose tp_repr as __repr__ so subclasses resolve the staticmethod
+	// repr rather than object.__repr__ during fixup_slot_dispatchers.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr -> __repr__)
+	SetTypeDescr(StaticMethodType, "__repr__", NewMethodDescr(StaticMethodType, "__repr__", staticMethodReprDescr))
 	bindClassGetitem(StaticMethodType)
 	addDescriptorSlotWrappers(StaticMethodType)
+}
+
+// staticMethodReprDescr backs staticmethod.__dict__["__repr__"].
+//
+// CPython: Objects/funcobject.c:1815 sm_repr
+func staticMethodReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	s, err := staticMethodRepr(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 // staticMethodTraverse visits the wrapped callable and instance dict.
@@ -859,6 +918,25 @@ func NewStaticMethod(fn Object) *StaticMethod {
 	sm.init(StaticMethodType)
 	functoolsWraps(sm, fn)
 	return sm
+}
+
+// staticMethodInit is staticmethod's tp_init, mirroring sm_init.
+//
+// CPython: Objects/funcobject.c:1636 sm_init
+func staticMethodInit(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: staticmethod() takes no keyword arguments")
+	}
+	if err := CheckPositional("staticmethod", len(args)-1, 1, 1); err != nil {
+		return nil, err
+	}
+	sm, ok := args[0].(*StaticMethod)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'staticmethod' object but received a '%s'", typeNameOf(args[0]))
+	}
+	sm.smCallable = args[1]
+	functoolsWraps(sm, sm.smCallable)
+	return None(), nil
 }
 
 // Func returns the wrapped callable.
