@@ -91,16 +91,41 @@ func (d *Dict) lock() { d.mu.lock() }
 // CPython: Objects/dictobject.c:2716 PyDict_SetItem (Py_END_CRITICAL_SECTION)
 func (d *Dict) unlock() { d.mu.unlock() }
 
-// dictGoid returns the current goroutine's numeric id. The reentrancy
-// guard keys on the raw goroutine because a key's __hash__/__eq__ (or a
-// displaced value's __del__) re-enters synchronously on the same
-// goroutine's call stack, so the goroutine id is the exact reentry
-// identity. It prefers the vm's fast getg-based hook (a single register
-// read) and only parses runtime.Stack when that hook is unset, since the
-// parse is O(stack-depth) and the guard runs on every acquire.
+// CriticalSectionOwnerHook returns a stable identity for the running
+// Python thread (its *state.Thread id), or 0 when the current goroutine
+// is not executing inside the eval loop. The vm wires it; objects/ keeps
+// only the hook to avoid importing state.
+//
+// A generator, coroutine, or async-generator body runs on its own
+// goroutine but shares its driver's *state.Thread, exactly as CPython
+// runs a generator on the driver's PyThreadState. The critical section
+// must therefore key reentrancy on the thread, not the goroutine:
+// otherwise a driver that holds a dict's lock and then resumes a
+// generator that touches the same dict (e.g. a globals lookup) deadlocks,
+// because the body goroutine has a different goid and blocks on a lock its
+// own thread already owns.
+//
+// CPython: Python/critical_section.c keys on PyThreadState; a generator
+// shares the driver's tstate (Objects/genobject.c:248 gen_send_ex2).
+var CriticalSectionOwnerHook func() int64
+
+// dictGoid returns the identity that owns a dict's critical section: the
+// Python thread when the goroutine is inside the eval loop, else the raw
+// goroutine id. Thread ids carry a high tag bit so they never collide with
+// a bare goroutine id used by a goroutine that runs dict operations outside
+// Eval (the Go finalizer goroutine, bootstrap). A key's __hash__/__eq__ or
+// a displaced value's __del__ re-enters synchronously on the same thread,
+// so the thread id is the exact reentry identity. The goid fallback prefers
+// the vm's fast getg-based hook and only parses runtime.Stack when unset.
 //
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
 func dictGoid() int64 {
+	if CriticalSectionOwnerHook != nil {
+		if id := CriticalSectionOwnerHook(); id != 0 {
+			// Tag thread-derived ids out of the goroutine number space.
+			return id | (int64(1) << 62)
+		}
+	}
 	if GoidHook != nil {
 		return int64(GoidHook())
 	}

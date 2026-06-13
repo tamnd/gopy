@@ -387,15 +387,19 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		e.drop(1)
 		return e.advance(), nil
 	case compile.END_SEND:
-		receiver := e.peek(1)
-		_ = receiver
-		value := e.peek(0)
-		_ = value
-		var val stackref.Ref
-		val = value
-		// receiver consumed input dropped by stack shrink
-		e.drop(1 + 1)
-		e.push(val)
+		// (receiver, value -- value): close receiver only; value flows
+		// through to the output slot with its reference intact. Popping
+		// value first hands its reference off (PopStack nulls the slot, so
+		// the following drop closes only receiver), then it is re-pushed.
+		// Dropping both slots would close value as well, a double release
+		// that empties a yielded container whose only live reference is the
+		// one threading through END_SEND (concretely, `async for x in agen()`
+		// over an async generator yielding a list returned a cleared list).
+		//
+		// CPython: Python/bytecodes.c END_SEND (PyStackRef_CLOSE(receiver))
+		value := e.pop()
+		e.drop(1)
+		e.push(value)
 		return e.advance(), nil
 	case compile.ENTER_EXECUTOR:
 		panic("vm: Py_FatalError")
@@ -577,22 +581,21 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, err 
 		return e.advance(), nil
 	case compile.INSTRUMENTED_END_SEND:
 		receiver := e.peek(1)
-		_ = receiver
 		value := e.peek(0)
-		_ = value
-		var val stackref.Ref
 		receiver_o := receiver.AsObject()
-		_ = receiver_o
 		if objects.IsGenerator(receiver_o) || objects.IsCoroutine(receiver_o) {
 			err := e.monitorStopIteration(value.AsObject())
-			_ = err
 			if err != 0 {
 				return 0, e.error("error")
 			}
 		}
-		val = value
-		// receiver consumed input dropped by stack shrink
-		e.drop(1 + 1)
+		// (receiver, value -- value): close receiver only, value flows
+		// through unchanged. See the END_SEND arm above; dropping both
+		// slots double-releases value.
+		//
+		// CPython: Python/bytecodes.c INSTRUMENTED_END_SEND
+		val := e.pop()
+		e.drop(1)
 		e.push(val)
 		return e.advance(), nil
 	case compile.INSTRUMENTED_FOR_ITER:

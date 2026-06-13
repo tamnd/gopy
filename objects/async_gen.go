@@ -168,12 +168,34 @@ type AsyncGenWrappedValue struct {
 }
 
 // NewAsyncGenWrappedValue boxes v for the async-generator yield path.
+// The wrapper takes its own reference on v (Py_NewRef), the same as
+// _PyAsyncGenValueWrapperNew, and releases it in asyncGenWrappedValueDealloc.
+// Without the incref the CALL_INTRINSIC_1 arm that emits the wrap closes
+// the only reference (PyStackRef_CLOSE on its operand) and a yielded
+// container with refcount 1 is freed in place: the consumer then receives
+// the same object id but with its contents cleared by the container dealloc.
 //
-// CPython: Objects/genobject.c:2049 _PyAsyncGenValueWrapperNew
+// CPython: Objects/genobject.c:2049 _PyAsyncGenValueWrapperNew (Py_NewRef(val))
 func NewAsyncGenWrappedValue(v Object) *AsyncGenWrappedValue {
 	w := &AsyncGenWrappedValue{Value: v}
 	w.init(AsyncGenWrappedValueType)
+	Incref(v)
 	return w
+}
+
+// asyncGenWrappedValueDealloc clears the wrapped value when the wrapper is
+// reclaimed, the strong reference NewAsyncGenWrappedValue took. Mirrors
+// async_gen_wrapped_val_dealloc's Py_CLEAR(o->agw_val).
+//
+// CPython: Objects/genobject.c:1980 async_gen_wrapped_val_dealloc
+func asyncGenWrappedValueDealloc(o Object) {
+	w, ok := o.(*AsyncGenWrappedValue)
+	if !ok || w.Value == nil {
+		return
+	}
+	v := w.Value
+	w.Value = nil
+	Decref(v)
 }
 
 // asyncGenWrappedValueTraverse visits the wrapped value so the cycle
@@ -395,6 +417,7 @@ func initAsyncGenAwaitableTypes() {
 	AsyncGenWrappedValueType = NewType("async_generator_wrapped_value",
 		[]*Type{objectType})
 	AsyncGenWrappedValueType.TpTraverse = asyncGenWrappedValueTraverse
+	AsyncGenWrappedValueType.Dealloc = asyncGenWrappedValueDealloc
 
 	AddIterSlotWrappers(AsyncGenASendType)
 	AddIterSlotWrappers(AsyncGenAThrowType)
@@ -574,9 +597,18 @@ func asyncGenASendDriveResult(a *asyncGenASend, result Object, err error) (Objec
 	if w, ok := result.(*AsyncGenWrappedValue); ok {
 		a.state = asyncAwaitClosed
 		a.gen.RunningAsync.Store(0)
+		// _PyGen_SetStopIterationValue copies agw_val into the StopIteration,
+		// then Py_DECREF(result) drops the wrapper's own reference. Do the
+		// same: the StopIteration tuple now owns the value (NewTuple increfs),
+		// so releasing the wrapper here keeps the count balanced.
+		//
+		// CPython: Objects/genobject.c:1725 async_gen_unwrap_value (Py_DECREF)
 		if AsyncGenStopIterationHook != nil {
-			return nil, AsyncGenStopIterationHook(w.Value)
+			err := AsyncGenStopIterationHook(w.Value)
+			Decref(w)
+			return nil, err
 		}
+		Decref(w)
 		return nil, ErrStopIteration
 	}
 	return result, nil
@@ -839,9 +871,16 @@ func asyncGenAThrowDriveResult(a *asyncGenAThrow, result Object, err error) (Obj
 	if w, ok := result.(*AsyncGenWrappedValue); ok && !a.isClose {
 		a.state = asyncAwaitClosed
 		a.gen.RunningAsync.Store(0)
+		// Release the wrapper after copying its value into the StopIteration,
+		// mirroring async_gen_unwrap_value's Py_DECREF(result).
+		//
+		// CPython: Objects/genobject.c:1725 async_gen_unwrap_value (Py_DECREF)
 		if AsyncGenStopIterationHook != nil {
-			return nil, AsyncGenStopIterationHook(w.Value)
+			err := AsyncGenStopIterationHook(w.Value)
+			Decref(w)
+			return nil, err
 		}
+		Decref(w)
 		return nil, ErrStopIteration
 	}
 	return result, nil
@@ -1272,7 +1311,17 @@ func (g *AsyncGenerator) initHooks() error {
 		g.Finalizer = finalizer
 	}
 	if firstiter != nil && firstiter != None() {
-		if _, err := Call(firstiter, NewTuple([]Object{g}), nil); err != nil {
+		// CallOneArg borrows the generator; the temporary args tuple
+		// owns one reference (post-1727 owned-store) and must be
+		// released so the firstiter hook does not pin the generator
+		// for its whole lifetime. CPython passes the generator directly
+		// via PyObject_CallOneArg, so nothing outlives the call.
+		//
+		// CPython: Objects/genobject.c:130 async_gen_init_hooks
+		args := NewTuple([]Object{g})
+		_, err := Call(firstiter, args, nil)
+		Decref(args)
+		if err != nil {
 			return err
 		}
 	}
@@ -1434,7 +1483,9 @@ func asyncGenFinalize(o Object) {
 	if h := SaveCurrentExceptionHook; h != nil {
 		saved = h()
 	}
-	_, _ = Call(g.Finalizer, NewTuple([]Object{g}), nil)
+	args := NewTuple([]Object{g})
+	_, _ = Call(g.Finalizer, args, nil)
+	Decref(args)
 	if h := RestoreCurrentExceptionHook; h != nil {
 		h(saved)
 	}

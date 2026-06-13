@@ -239,6 +239,14 @@ func initCoroutineDescriptors() {
 		func(o Object) (Object, error) {
 			c := o.(*Coroutine)
 			if c.CrOrigin != nil {
+				// Hand the stored tuple off with its own reference; the
+				// attribute access consumes (and later releases) one, so
+				// without the incref the tuple drops to zero and its owned
+				// items are decreffed out from under the still-live field.
+				//
+				// CPython: Objects/genobject.c:1184 coro_get_cr_origin
+				// (Py_INCREF(coro->cr_origin); return ...)
+				Incref(c.CrOrigin)
 				return c.CrOrigin, nil
 			}
 			return None(), nil

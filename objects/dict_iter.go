@@ -62,14 +62,6 @@ type dictIterObj struct {
 	// builds for draining borrows src instead, so it leaves owns false
 	// and never touches the source dict's refcount.
 	owns bool
-	// result caches the most recent (key, value) tuple the item iterator
-	// handed out (di->di_result). The slot owns this reference; the next
-	// advance displaces and decrefs it, which runs any __del__ on the
-	// displaced value synchronously, and dictIterDealloc decrefs whatever
-	// remains. Only the item iterators allocate it.
-	//
-	// CPython: Objects/dictobject.c:5697 dictiter_iternextitem (di_result)
-	result *Tuple
 }
 
 var (
@@ -341,10 +333,6 @@ func dictIterDealloc(o Object) {
 	}
 	it.src = nil
 	it.owns = false
-	if it.result != nil {
-		Decref(it.result)
-		it.result = nil
-	}
 }
 
 // advance walks past dummy and empty slots until it finds the next
@@ -463,44 +451,30 @@ func dictIterNextValue(o Object) (Object, error) {
 }
 
 // dictIterNextItem yields the next (key, value) pair as a fresh two-tuple.
-// The tuple takes its own references on the key and value (the container
-// port has tuples own their items).
+// NewTuple takes its own references on the key and value (the container port
+// has tuples own their items, spec 1727).
 //
-// gopy's IterNext slots return a borrowed reference: the shared Next /
-// FOR_ITER / IterNext consumers take their own Incref where they retain the
-// result (see builtins.Next and dictIterNextKey/Value, which return the
-// dict's borrowed key/value). A `for k, v in d.items()` loop drops the
-// previous pair when it rebinds the loop targets, and that decref decrefs
-// the displaced value, running any __del__ synchronously. So a mutation
-// during iteration (e.g. the value's finalizer clearing the dict) is
-// observed on the next advance, which catches the size change.
-//
-// CPython recycles its di_result template tuple in place when it is uniquely
-// referenced, decreffing the displaced pair inline so a __del__ on the old
-// value runs at that point. gopy does not recycle in place: a fresh tuple is
-// allocated per advance (recycling would alias elements that an owned-return
-// consumer keeps), but the slot still caches the latest tuple and decrefs the
-// previous one on the next advance, which reproduces the same observable
-// __del__ timing. This requires every consumer that retains the result to own
-// a counted reference to it; the batch drain helpers (drainIterable,
-// DrainIterable) take that reference as CPython's PyIter_Next does.
+// CPython recycles a single di_result template tuple in place whenever it is
+// uniquely referenced (Objects/dictobject.c:5697 dictiter_iternextitem,
+// acquire_iter_result), which is sound there because PyIter_Next hands every
+// consumer an owned reference, so any consumer that keeps the previous pair
+// pushes its refcount above 1 and the iterator allocates a fresh tuple instead
+// of clobbering it. gopy's IterNext slots return a borrowed reference and the
+// generic consumers (min/max/sorted's list build, comparison drivers) keep
+// that borrow without an Incref, so neither in-place recycling nor decreffing
+// the previously handed-out tuple is safe: it would free or mutate a tuple the
+// caller still holds (concretely, sorted(d.items()) yielded a cleared () for
+// the first pair). gopy therefore allocates a fresh tuple per advance and lets
+// the Go GC reclaim the spent ones, matching CPython's observable result (each
+// item is a distinct, correct tuple) without the borrow hazard.
 //
 // CPython: Objects/dictobject.c:5697 dictiter_iternextitem
 func dictIterNextItem(o Object) (Object, error) {
-	it := o.(*dictIterObj)
-	k, v, err := it.advance()
+	k, v, err := o.(*dictIterObj).advance()
 	if err != nil {
 		return nil, err
 	}
-	// NewTuple takes its own references on k and v. Cache it as the slot's
-	// owned hold and release the previous tuple: that decref drops the
-	// displaced value, firing any __del__ synchronously.
-	fresh := NewTuple([]Object{k, v})
-	if it.result != nil {
-		Decref(it.result)
-	}
-	it.result = fresh
-	return fresh, nil
+	return NewTuple([]Object{k, v}), nil
 }
 
 // dictView is the shared payload behind dict.keys()/values()/items().
