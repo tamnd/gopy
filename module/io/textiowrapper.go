@@ -1579,4 +1579,20 @@ func textIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object
 
 func init() {
 	TextIOBaseType.Getattro = textIOBaseGetattr
+	// Register detach/read/readline/write as class-level method descriptors
+	// carrying METH_METHOD|METH_FASTCALL|METH_KEYWORDS so io.TextIOBase.read
+	// is a method_descriptor (its __get__ exercises the METH_METHOD arg-2
+	// type check); instance access stays on the textIOBaseGetattr fast path.
+	//
+	// CPython: Modules/_io/clinic/textio.c.h:47 _io__TextIOBase_read
+	for _, name := range []string{"detach", "read", "readline", "write"} {
+		n := name
+		objects.SetTypeDescr(TextIOBaseType, n, objects.NewMethodDescrConv(
+			TextIOBaseType, n,
+			objects.MethMethod|objects.MethFastcall|objects.MethKeywords,
+			func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				return nil, fmt.Errorf("UnsupportedOperation: %s", n)
+			},
+		))
+	}
 }

@@ -49,7 +49,7 @@ type StringIO struct {
 // StringIOType is the type singleton for _io.StringIO.
 //
 // CPython: Modules/_io/stringio.c:1073 stringio_slots
-var StringIOType = objects.NewType("_io.StringIO", []*objects.Type{objects.ObjectType()})
+var StringIOType = objects.NewType("_io.StringIO", []*objects.Type{TextIOBaseType})
 
 func init() {
 	StringIOType.Call = stringIOCall
@@ -858,10 +858,9 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 		return objects.NewBool(false), nil
 	case "encoding", "errors":
 		// _TextIOBase exposes encoding and errors as getsets that
-		// default to None. _io.StringIO inherits these in CPython;
-		// gopy's StringIO has no TextIOBase parent so we serve None
-		// directly. doctest._SpoofOut reads save_stdout.encoding
-		// inside DocTestRunner.run.
+		// default to None. _io.StringIO inherits these in CPython and
+		// gopy serves them directly here. doctest._SpoofOut reads
+		// save_stdout.encoding inside DocTestRunner.run.
 		//
 		// CPython: Modules/_io/textio.c:138 _io__TextIOBase_encoding_get_impl
 		// CPython: Modules/_io/textio.c:172 _io__TextIOBase_errors_get_impl
@@ -870,7 +869,10 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 	if fn := stringIOMethod(s, n.Value()); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", StringIOType.Name, n.Value())
+	// Anything the custom dispatch above does not serve (dunders such as
+	// __class__, __dict__, __reduce_ex__) resolves through the normal MRO
+	// walk against StringIOType's bases (_TextIOBase, _IOBase, object).
+	return objects.GenericGetAttr(o, name)
 }
 
 // stringIOMethod maps method names to BuiltinFunctions. Split in two

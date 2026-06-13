@@ -66,6 +66,13 @@ func init() {
 	MethodDescrType.Vectorcall = methodDescrVectorcall
 	// Identity hash so method descriptors are hashable.
 	MethodDescrType.Hash = identityHash
+	// Install a faithful method_get as __get__ before the generic descriptor
+	// wrapper so the METH_METHOD branch sees the raw type argument. The
+	// generic wrap_descr_get collapses a non-type arg 2 to nil, which would
+	// hide the "needs a type, not '...', as arg 2" error.
+	//
+	// CPython: Objects/descrobject.c:230 method_get
+	SetTypeDescr(MethodDescrType, "__get__", NewMethodDescr(MethodDescrType, "__get__", methodDescrDunderGet))
 	addDescriptorSlotWrappers(MethodDescrType)
 	AddCallSlotWrapper(MethodDescrType)
 	addDescrIntrospectionDescriptors(MethodDescrType)
@@ -180,6 +187,51 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, owner.Type().Name)
 	}
 	return NewBoundMethod(descr, owner), nil
+}
+
+// methodDescrDunderGet is the Python-level __get__(self, obj, type) for
+// method descriptors. Unlike the generic descriptor wrapper it keeps the
+// raw type argument so the METH_METHOD branch can reject a non-type arg 2
+// with the exact message method_get produces. descr_check in 3.14 only
+// short-circuits the obj==NULL (class) access; it no longer type-checks the
+// instance, so binding to an unrelated instance is deferred to call time.
+//
+// CPython: Objects/descrobject.c:230 method_get
+func methodDescrDunderGet(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: expected 1 or 2 arguments, got %d", len(args)-1)
+	}
+	d, ok := args[0].(*MethodDescr)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__get__' requires a 'method_descriptor' object")
+	}
+	obj := args[1]
+	if IsNone(obj) {
+		obj = nil
+	}
+	var typ Object
+	if len(args) == 3 {
+		typ = args[2]
+	}
+	if obj == nil && (typ == nil || IsNone(typ)) {
+		return nil, fmt.Errorf("TypeError: __get__(None, None) is invalid")
+	}
+	// descr_check: class access returns the descriptor itself; otherwise the
+	// instance must be an instance of the descriptor's owning type.
+	if obj == nil {
+		return d, nil
+	}
+	if !IsSubtype(obj.Type(), d.owner) {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, obj.Type().Name)
+	}
+	if d.conv&MethMethod != 0 {
+		if typ != nil {
+			if _, isType := typ.(*Type); !isType {
+				return nil, fmt.Errorf("TypeError: descriptor '%s' needs a type, not '%s', as arg 2", d.name, typ.Type().Name)
+			}
+		}
+	}
+	return NewBoundMethod(d, obj), nil
 }
 
 // methodDescrCall is the unbound call: the first positional argument

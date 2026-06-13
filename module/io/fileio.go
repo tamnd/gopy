@@ -83,6 +83,22 @@ func init() {
 	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
 	objects.SetTypeDescr(FileIOType, "__enter__", objects.NewBuiltinFunction("__enter__", fileIOEnterDescr))
 	objects.SetTypeDescr(FileIOType, "__exit__", objects.NewBuiltinFunction("__exit__", fileIOExitDescr))
+	// Register `closed` as a getset descriptor so class-level access
+	// (FileIO.closed) hands back the descriptor with its docstring; instance
+	// access stays on the fileIOGetattr fast path.
+	//
+	// CPython: Modules/_io/fileio.c:1303 fileio_getsetlist ("closed")
+	objects.SetTypeDescr(FileIOType, "closed", objects.NewGetSetDescr(
+		"closed",
+		func(o objects.Object) (objects.Object, error) {
+			fi, ok := o.(*FileIO)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor 'closed' for '_io.FileIO' objects doesn't apply to a '%s' object", o.Type().Name)
+			}
+			return objects.NewBool(fi.closed), nil
+		},
+		nil,
+	).WithDoc("True if the file is closed"))
 }
 
 func fileIOEnterDescr(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
