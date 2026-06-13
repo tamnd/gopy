@@ -130,9 +130,9 @@ func init() {
 	// writable.
 	// CPython: Objects/descrobject.c:1558 property_members
 	SetTypeDescr(PropertyType, "__doc__", NewGetSetDescr("__doc__", propertyGetDoc, propertySetDoc))
-	SetTypeDescr(PropertyType, "fget", NewGetSetDescr("fget", propertyGetFget, nil))
-	SetTypeDescr(PropertyType, "fset", NewGetSetDescr("fset", propertyGetFset, nil))
-	SetTypeDescr(PropertyType, "fdel", NewGetSetDescr("fdel", propertyGetFdel, nil))
+	SetTypeDescr(PropertyType, "fget", NewBuiltinMember(PropertyType, "fget", "", propertyGetFget, nil))
+	SetTypeDescr(PropertyType, "fset", NewBuiltinMember(PropertyType, "fset", "", propertyGetFset, nil))
+	SetTypeDescr(PropertyType, "fdel", NewBuiltinMember(PropertyType, "fdel", "", propertyGetFdel, nil))
 
 	// property_getsetlist: __name__ (read/write) and
 	// __isabstractmethod__ (read-only).

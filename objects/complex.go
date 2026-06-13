@@ -48,10 +48,18 @@ func init() {
 		Bool:       complexBool,
 	}
 
+	// complex inherits tp_setattro from object (PyObject_GenericSetAttr),
+	// so `c.real = x` routes through the readonly member descriptor below
+	// and raises "readonly attribute" rather than the generic
+	// "object has no attributes".
+	//
+	// CPython: Objects/complexobject.c:1075 PyComplex_Type (tp_setattro slot)
+	ComplexType.Setattro = GenericSetAttr
+	ComplexType.Getattro = GenericGetAttr
 	// complex_members (Objects/complexobject.c:1337): real/imag are
 	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval fields,
 	// so they surface as member_descriptor (not getset_descriptor) and
-	// reject writes with the "not writable" AttributeError.
+	// reject writes with the "readonly attribute" AttributeError.
 	SetTypeDescr(ComplexType, "real", NewBuiltinMember(ComplexType, "real", "the real part of a complex number", complexRealGetter, nil))
 	SetTypeDescr(ComplexType, "imag", NewBuiltinMember(ComplexType, "imag", "the imaginary part of a complex number", complexImagGetter, nil))
 	SetTypeDescr(ComplexType, "conjugate", NewMethodDescrConv(ComplexType, "conjugate", MethNoArgs, complexConjugateMethod))

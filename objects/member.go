@@ -161,7 +161,8 @@ func memberDescrSet(descr Object, owner Object, value Object) error {
 	// dispatches to its setter.
 	if d.getter != nil {
 		if d.readonly || d.setter == nil {
-			return fmt.Errorf("AttributeError: attribute '%s' of '%s' objects is not writable", d.name, d.owner.Name)
+			// CPython: Objects/structmember.c:227 PyMember_SetOne
+			return fmt.Errorf("AttributeError: readonly attribute")
 		}
 		return d.setter(owner, value)
 	}
