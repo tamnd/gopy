@@ -171,6 +171,14 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if owner == nil {
 		return descr, nil
 	}
+	// descr_check rejects binding to an object whose type is not a
+	// subtype of the descriptor's owner, e.g. set.add.__get__(0).
+	//
+	// CPython: Objects/descrobject.c:147 descr_check
+	d := descr.(*MethodDescr)
+	if !IsSubtype(owner.Type(), d.owner) {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, owner.Type().Name)
+	}
 	return NewBoundMethod(descr, owner), nil
 }
 
@@ -182,7 +190,7 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 func methodDescrCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
 	d := o.(*MethodDescr)
 	if len(args) == 0 {
-		return nil, fmt.Errorf("TypeError: descriptor '%s' of '%s' object needs an argument", d.name, d.owner.Name)
+		return nil, fmt.Errorf("TypeError: unbound method %s.%s() needs an argument", d.owner.Name, d.name)
 	}
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)
@@ -202,7 +210,7 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	d := callable.(*MethodDescr)
 	nargs := VectorcallNargs(nargsf)
 	if nargs == 0 {
-		return nil, fmt.Errorf("TypeError: descriptor '%s' of '%s' object needs an argument", d.name, d.owner.Name)
+		return nil, fmt.Errorf("TypeError: unbound method %s.%s() needs an argument", d.owner.Name, d.name)
 	}
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)

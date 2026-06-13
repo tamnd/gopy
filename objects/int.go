@@ -70,6 +70,8 @@ func init() {
 		Float:       intFloat,
 	}
 	initSmallInts()
+	// CPython: Objects/typeobject.c:11025 add_operators over the numeric slotdefs.
+	AddNumberSlotWrappers(IntType)
 }
 
 // NewInt builds an int from an int64. Returns the cached singleton

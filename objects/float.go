@@ -108,6 +108,8 @@ func init() {
 		}
 		return NewInt(h), nil
 	}))
+	// CPython: Objects/typeobject.c:11025 add_operators over the numeric slotdefs.
+	AddNumberSlotWrappers(FloatType)
 }
 
 // floatRealGetter backs float.real: returns self.
