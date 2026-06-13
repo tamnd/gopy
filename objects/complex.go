@@ -65,6 +65,18 @@ func init() {
 	SetTypeDescr(ComplexType, "conjugate", NewMethodDescrConv(ComplexType, "conjugate", MethNoArgs, complexConjugateMethod))
 	SetTypeDescr(ComplexType, "__complex__", NewMethodDescrConv(ComplexType, "__complex__", MethNoArgs, complexComplexMethod))
 	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescrConv(ComplexType, "__getnewargs__", MethNoArgs, complexGetNewArgsMethod))
+	// Install complex.__hash__ as a descriptor so complex.__hash__ resolves
+	// to complex_hash rather than object.__hash__, and so fixupHashAndIter
+	// installs complex_hash as the tp_hash slot on complex subclasses.
+	//
+	// CPython: Objects/complexobject.c:556 complex_hash
+	SetTypeDescr(ComplexType, "__hash__", NewMethodDescrConv(ComplexType, "__hash__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
+		h, err := complexHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	// CPython: Python/formatter_unicode.c:1693 _PyComplex_FormatAdvancedWriter
 	// is reachable both via PyObject_Format (the Format slot above) and
 	// via instance.__format__(spec). Install a method descriptor so the

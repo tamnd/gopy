@@ -43,6 +43,14 @@ func init() {
 	bind("__str__", intReprDescr)
 	bindNoArgs("__sizeof__", intSizeofMethod)
 	bindNoArgs("__getnewargs__", intGetNewArgsMethod)
+	// Install int.__hash__ as a descriptor so int.__hash__ resolves to
+	// long_hash rather than object.__hash__, and so fixupHashAndIter
+	// (which keys off LookupDescriptor(t, "__hash__")) installs long_hash
+	// as the tp_hash slot on int subclasses. Without it, hash(hexint(x))
+	// fell back to the identity hash.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	bindNoArgs("__hash__", intHashMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
@@ -211,6 +219,23 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 // digit even when the value is zero.
 //
 // CPython: Objects/longobject.c:6176 int___sizeof___impl
+// intHashMethod ports int.__hash__: hashes self through long_hash and
+// returns the result as a plain int. Registering it as a descriptor keeps
+// int.__hash__ from resolving to object.__hash__ and lets fixupHashAndIter
+// install long_hash as the tp_hash slot on int subclasses.
+//
+// CPython: Objects/longobject.c:3287 long_hash
+func intHashMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __hash__() takes no arguments (%d given)", len(args)-1)
+	}
+	h, err := intHash(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewInt(h), nil
+}
+
 func intSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)

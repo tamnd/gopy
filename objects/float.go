@@ -59,10 +59,10 @@ func init() {
 		Remainder:   floatMod,
 		Divmod:      floatDivmod,
 		Negative:    floatNeg,
-		Positive:    func(o Object) (Object, error) { return o, nil },
+		Positive:    floatPos,
 		Absolute:    floatAbs,
 		Bool:        floatBool,
-		Float:       func(o Object) (Object, error) { return o, nil },
+		Float:       floatPos,
 		Power:       floatPower,
 	}
 	// float.__getformat__(typestr) is a classmethod that returns the
@@ -610,6 +610,18 @@ func floatMul(a, b Object) (Object, error) {
 
 func floatNeg(o Object) (Object, error) {
 	return NewFloat(-o.(*Float).v), nil
+}
+
+// floatPos ports float_float, which backs both float.__float__ and
+// nb_positive. An exact float is returned unchanged; a subclass instance
+// is collapsed to a fresh plain float carrying the same value.
+//
+// CPython: Objects/floatobject.c:1602 float_float
+func floatPos(o Object) (Object, error) {
+	if o.Type() == FloatType {
+		return o, nil
+	}
+	return NewFloat(o.(*Float).v), nil
 }
 
 // floatAbs ports float_abs.

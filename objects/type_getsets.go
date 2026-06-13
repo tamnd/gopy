@@ -593,6 +593,15 @@ func typeGetDoc(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__doc__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if v, ok2 := typeDescrTable[t]["__doc__"]; ok2 {
+		// A docstring stored as a descriptor (e.g. a class that sets
+		// __doc__ = SomeDescriptor()) is fetched through its __get__
+		// with a NULL instance, exactly as type_get_doc does before
+		// handing the result back.
+		//
+		// CPython: Objects/typeobject.c:1213 type_get_doc (tp_descr_get)
+		if dg := v.Type().DescrGet; dg != nil {
+			return dg(v, nil, t)
+		}
 		return v, nil
 	}
 	return None(), nil
