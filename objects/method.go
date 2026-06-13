@@ -444,6 +444,13 @@ func init() {
 	ClassMethodType.DescrGet = classMethodDescrGet
 	ClassMethodType.TpTraverse = classMethodTraverse
 	ClassMethodType.Getattro = classMethodGetattro
+	// classmethod inherits object's tp_setattro (generic) and carries a
+	// real tp_dictoffset, so attribute writes/deletes route through the
+	// installed getsets (__annotations__, __dict__) or land in cm_dict.
+	//
+	// CPython: Objects/funcobject.c:1594 PyClassMethod_Type
+	ClassMethodType.Setattro = GenericSetAttr
+	ClassMethodType.HasDict = true
 	// classmethod(fn): wrap fn so attribute access binds to the class.
 	//
 	// CPython: Objects/funcobject.c:1487 cm_init
@@ -533,6 +540,21 @@ func NewClassMethod(fn Object) *ClassMethod {
 
 // Func returns the wrapped callable.
 func (cm *ClassMethod) Func() Object { return cm.cmCallable }
+
+// AttrDict and EnsureAttrDict expose cm_dict through the AttrDictHolder
+// interface so PyObject_GenericSetAttr can store and delete attributes
+// on a classmethod, matching CPython where classmethod inherits
+// object's tp_setattro and carries a real tp_dictoffset.
+//
+// CPython: Objects/funcobject.c:1594 PyClassMethod_Type (tp_dictoffset)
+func (cm *ClassMethod) AttrDict() *Dict { return cm.cmDict }
+
+func (cm *ClassMethod) EnsureAttrDict() *Dict {
+	if cm.cmDict == nil {
+		cm.cmDict = NewDict()
+	}
+	return cm.cmDict
+}
 
 // classMethodRepr formats the classmethod the way CPython does:
 // `<classmethod(REPR_OF_CALLABLE)>`. The earlier `<classmethod object>`
@@ -754,6 +776,12 @@ func init() {
 	StaticMethodType.DescrGet = staticMethodDescrGet
 	StaticMethodType.TpTraverse = staticMethodTraverse
 	StaticMethodType.Getattro = staticMethodGetattro
+	// staticmethod inherits object's tp_setattro (generic) and carries a
+	// real tp_dictoffset, mirroring classmethod.
+	//
+	// CPython: Objects/funcobject.c:1842 PyStaticMethod_Type
+	StaticMethodType.Setattro = GenericSetAttr
+	StaticMethodType.HasDict = true
 	// sm_dealloc releases the owned reference to sm_callable that sm_init acquired.
 	//
 	// CPython: Objects/funcobject.c:1676 sm_dealloc Py_XDECREF(im->sm_callable)
@@ -835,6 +863,21 @@ func NewStaticMethod(fn Object) *StaticMethod {
 
 // Func returns the wrapped callable.
 func (sm *StaticMethod) Func() Object { return sm.smCallable }
+
+// AttrDict and EnsureAttrDict expose sm_dict through the AttrDictHolder
+// interface so PyObject_GenericSetAttr can store and delete attributes
+// on a staticmethod, matching CPython where staticmethod inherits
+// object's tp_setattro and carries a real tp_dictoffset.
+//
+// CPython: Objects/funcobject.c:1842 PyStaticMethod_Type (tp_dictoffset)
+func (sm *StaticMethod) AttrDict() *Dict { return sm.smDict }
+
+func (sm *StaticMethod) EnsureAttrDict() *Dict {
+	if sm.smDict == nil {
+		sm.smDict = NewDict()
+	}
+	return sm.smDict
+}
 
 // staticMethodRepr matches CPython's <staticmethod(REPR_OF_CALLABLE)>.
 //
