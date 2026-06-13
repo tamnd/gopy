@@ -137,6 +137,20 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		ns = objects.NewDict()
 	}
 
+	// __prepare__ must hand back a mapping; otherwise STORE_NAME in the
+	// class body would fail later with an opaque subscript error. CPython
+	// rejects a non-mapping here with the metaclass name (or "<metaclass>"
+	// when meta is not a type).
+	//
+	// CPython: Python/bltinmodule.c:197 builtin___build_class__
+	if !objects.MappingCheck(ns) {
+		metaName := "<metaclass>"
+		if mt, ok := meta.(*objects.Type); ok {
+			metaName = mt.Name
+		}
+		return nil, fmt.Errorf("TypeError: %s.__prepare__() must return a mapping, not %s", metaName, ns.Type().Name)
+	}
+
 	// The class body opens with LOAD_NAME __name__ → STORE_NAME
 	// __module__. That LOAD_NAME must reach the enclosing module's
 	// __name__ via globals, so do not pre-stamp __name__ into the

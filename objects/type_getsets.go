@@ -285,6 +285,14 @@ func typeGetBases(o Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__bases__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
+	// A type built via type(name, bases, ns) keeps the original bases
+	// object so a tuple subclass survives as the type of __bases__.
+	//
+	// CPython: Objects/typeobject.c:1083 type_get_bases (returns tp_bases)
+	if t.BasesObj != nil {
+		Incref(t.BasesObj)
+		return t.BasesObj, nil
+	}
 	items := make([]Object, len(t.Bases))
 	for i, b := range t.Bases {
 		items[i] = b

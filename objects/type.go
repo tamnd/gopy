@@ -58,6 +58,16 @@ type Type struct {
 	Bases []*Type
 	MRO   []*Type
 
+	// BasesObj holds the exact tuple object passed as the bases when the
+	// type was built through type(name, bases, ns). CPython keeps tp_bases
+	// pointing at that very object, so a tuple subclass survives as the
+	// type of __bases__ (gh-132176). When nil, typeGetBases rebuilds a
+	// plain tuple from Bases, which is the right shape for built-ins and
+	// the class statement.
+	//
+	// CPython: Objects/typeobject.c:4756 type_new (tp_bases = Py_NewRef(bases))
+	BasesObj Object
+
 	// basesReleased latches the single base-reference release that
 	// typeUserDealloc performs, mirroring type_dealloc running once per
 	// type. gopy's refcounting can re-enter dealloc on a type that hits

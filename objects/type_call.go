@@ -295,8 +295,15 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 //
 // CPython: Objects/typeobject.c:4153 type_new
 func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
-	if len(args) < 4 {
-		return nil, fmt.Errorf("TypeError: type.__new__() takes exactly 4 arguments (%d given)", len(args))
+	// type.__new__ parses (name, bases, dict) off args; the metatype is
+	// args[0] and is not counted. CPython's PyArg_ParseTuple("UO!O!")
+	// rejects any other arity with "takes exactly 3 arguments (N given)",
+	// where N excludes the metatype. The one-argument type(x) form never
+	// reaches here: it is served at the call layer for the exact `type`.
+	//
+	// CPython: Objects/typeobject.c:4766 type_new (PyArg_ParseTuple)
+	if len(args) != 4 {
+		return nil, fmt.Errorf("TypeError: type.__new__() takes exactly 3 arguments (%d given)", len(args)-1)
 	}
 	meta, ok := args[0].(*Type)
 	if !ok {
@@ -396,7 +403,19 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	if winner != typeType {
 		return typeMetaclassCall(winner, args, kwargs)
 	}
-	return NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
+	newType, err := NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve a tuple subclass as the bases object (gh-132176): CPython
+	// stores the passed tuple verbatim in tp_bases. We only stash it when
+	// it is not the exact built-in tuple, since the plain case rebuilds
+	// identically from Bases.
+	if newType != nil && basesT.Type() != TupleType {
+		Incref(basesT)
+		newType.BasesObj = basesT
+	}
+	return newType, nil
 }
 
 // calculateMetaclass picks the most derived metaclass among metatype
