@@ -38,7 +38,7 @@ tree before porting.
 | `test_genericalias` | OK |
 | `test_class` | 1 failure (deferred, see below) |
 | `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
-| `test_descr` | 18 failures, 9 errors |
+| `test_descr` | 3 failures, 4 errors (MroTest green) |
 | `test_types` | 2 failures, 4 errors (CoroutineTests + ClassCreationTests green) |
 | `test_typing` | 115 failures / 164 errors (no abort) |
 | `test_enum` | error (missing `pydoc`) |
@@ -203,6 +203,33 @@ compares through `typeBasicSize` / `typeItemSize` (the same MRO walk the
 treated as a distinct solid base. Fixes `ClassCreationTests.test_get_original_bases`
 and `test_new_class_with_mro_entry_genericalias`.
 
+### Reentrant `__bases__` recompute and the tp_base cycle guard
+
+`type_set_bases` lets a custom metaclass `mro()` reassign `__bases__` again
+while the hierarchy is still being recomputed, and gopy mishandled the
+reentrance two ways. The recompute loop used to compute the C3 order,
+install it, run the override separately, and on a raising override
+unconditionally restore the previous MRO. That clobbered the value a
+reentrant assignment had already installed deeper in the stack.
+`mroInvoke` now computes the new MRO (dispatching to the override) without
+installing it, then `mroHierarchy` does the reentrancy check by slice
+identity, mirroring `mro_internal_unlocked`: on error it leaves `tp_mro`
+as the reentrant call left it, and on reentrance it keeps that value and
+stops instead of overwriting.
+
+Separately, the cycle check in `validateNewBases` only scanned the
+candidate base's MRO. During reentrance a custom `mro()` assigns the
+primary base before the MRO is refreshed, so a freshly formed base cycle
+slipped through and `solidBase` then looped until the stack overflowed.
+The two-pronged check from `type_set_bases_unlocked` is now ported: MRO
+scan plus a `tp_base` chain walk, with the chain walk folded into
+`PyType_IsSubtype`. `__init_subclass__` also runs through `super(t, t)` so
+an MRO that omits the type fails supercheck (gh-92112), with the bound
+hook decref'd so a discarded subclass is not pinned past dealloc. Clears
+all of `MroTest`, including `test_tp_subclasses_cycle_error_return_path`,
+`test_reent_set_bases_tp_base_cycle`, and
+`test_mutable_bases_with_failing_mro`.
+
 ---
 
 ## Checklist
@@ -221,7 +248,8 @@ and `test_new_class_with_mro_entry_genericalias`.
 - [x] shape_differs walks the MRO-resolved size so user classes are not spurious solid bases after object gained a nonzero basicsize
 - [ ] test_types: bound builtin method type (`''.join` should be `builtin_function_or_method`, not Python `method`) and `test_names` (`type(len) is type([].append)`) both need the full descrobject wrapper taxonomy, tracked as task #250. gopy folds three CPython distinctions: (a) two separate type singletons both named `builtin_function_or_method` (`BuiltinFunctionType` for `len`, `CFunctionType` for `MethodDef` methods) that must unify, (b) slot dunders (`object.__init__`, `__str__`) are plain `MethodDescr` rather than `wrapper_descriptor`, so they have no `method-wrapper` bound form. A `method_get` -> `CFunction` shim was tried and reverted because it wrongly turned `object().__init__` into `builtin_function_or_method` (regressing `test_method_wrapper_types`); the real `PyWrapperDescr_Type` / `PyMethodWrapper_Type` subsystem is required instead. Also noted: `NewCFunction` does not take a reference on `self`/`module` (no traverse/dealloc), unlike `PyCMethod_New`'s `Py_XINCREF` — fix as part of #250.
 - [ ] test_types: residual errors need C-extension support (`_testcapi` capsule/dunder-get-signature, `_queue`, subinterpreters)
-- [ ] test_descr: clear the remaining 18 failures / 9 errors
+- [x] test_descr: `MroTest` green. Ported the reentrant `__bases__` recompute semantics (mro_invoke / mro_internal reentrancy check) and the `tp_base` cycle guard; weakref `__slots__` rejection; `__mro__` returns None mid-creation
+- [ ] test_descr: remaining 3 failures / 4 errors are out of scope. `test_slots` and `test_metaclass` doctests differ only by the `test.` module prefix (harness vendoring artifact). `test_subclasses` needs PEP 412 split-key dicts. `test_type_lookup_mro_reference` needs `assert_python_ok` subprocess. `test_bpo25750` / `test_testcapi_no_segfault` need `_testcapi`; `test_descrdoc` / `test_method_get_meth_method_invalid_type` are io getset gaps
 - [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite.
 - [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — dominates the remaining errors
 - [ ] test_enum: vendor `pydoc`
