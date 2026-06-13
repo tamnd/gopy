@@ -140,6 +140,17 @@ func installSubclassAttrSlots(t *Type) {
 // attributes through getset descriptors and inherit object's generic
 // tp_getattro).
 //
+// A more-derived base that defines its own instance layout through a custom
+// tp_new but stores attributes generically (gopy's _io.StringIO, whose
+// instances are *StringIO and whose attrs go through the generic instance
+// path) shadows any deeper custom-setattro base such as _io._IOBase: its
+// subclasses use the generic instance slots, exactly as if they derived that
+// base directly. Walking past it to _IOBase's dict-keyed setattro would
+// strand the *StringIO subclass with a store its layout cannot satisfy and
+// would route reads through _IOBase's getattro, bypassing the subclass MRO
+// (so Python-level method overrides are lost). The search therefore stops at
+// the first layout owner that has no custom setattro of its own.
+//
 // CPython: Objects/typeobject.c:7521 inherit_slots
 func customAttrBase(t *Type) *Type {
 	for _, base := range t.MRO {
@@ -148,6 +159,9 @@ func customAttrBase(t *Type) *Type {
 		}
 		if hasCustomAttrSlot(base) {
 			return base
+		}
+		if base.TpNew != nil {
+			return nil
 		}
 	}
 	return nil
