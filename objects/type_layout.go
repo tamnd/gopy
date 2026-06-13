@@ -36,4 +36,9 @@ func init() {
 	SetType.BaseSize = 200
 	// CPython: Objects/setobject.c PyFrozenSet_Type.tp_basicsize
 	FrozensetType.BaseSize = 200
+	// CPython: Objects/moduleobject.c PyModule_Type.tp_basicsize. A module
+	// is its own solid base (md_dict / md_state struct), so combining it
+	// with another solid base (e.g. str) raises an instance lay-out
+	// conflict, matching CPython.
+	ModuleType.BaseSize = 56
 }

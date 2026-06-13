@@ -785,12 +785,14 @@ func objectGetClass(o Object) (Object, error) {
 	return t, nil
 }
 
-// objectSetClass implements object.__class__ set. CPython checks that
-// old and new types have compatible C-level memory layouts; gopy only
-// supports this for *Instance objects (which share a uniform layout)
-// and rejects built-in types.
+// objectSetClass implements object.__class__ set. It mirrors
+// object_set_class_world_stopped: the swap is allowed for HEAPTYPE ->
+// HEAPTYPE, or between two ModuleType subtypes (the allowlist for mutable
+// module objects), provided neither side is an immutable type. The two
+// layouts must then be compatible. The retag writes ob_type on the shared
+// Header, so it works for any object representation, not only *Instance.
 //
-// CPython: Objects/typeobject.c:7208 object_set_class
+// CPython: Objects/typeobject.c:7108 object_set_class_world_stopped
 func objectSetClass(o Object, value Object) error {
 	if value == nil {
 		return fmt.Errorf("TypeError: can't delete __class__ attribute")
@@ -799,18 +801,20 @@ func objectSetClass(o Object, value Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)
 	}
-	if newType.TpFlags&TpFlagImmutable != 0 {
-		return fmt.Errorf("TypeError: can't set __class__: new type '%s' is not mutable", newType.Name)
+	oldType := o.Type()
+	// HEAPTYPE -> HEAPTYPE or ModuleType subtype -> ModuleType subtype.
+	// Immutable (statically interned) types are excluded so code cannot
+	// repaint the type of a shared singleton such as the int 1.
+	//
+	// CPython: Objects/typeobject.c:7161 object_set_class_world_stopped
+	bothModule := IsSubtype(newType, ModuleType) && IsSubtype(oldType, ModuleType)
+	if !bothModule && (newType.TpFlags&TpFlagImmutable != 0 || oldType.TpFlags&TpFlagImmutable != 0) {
+		return fmt.Errorf("TypeError: __class__ assignment only supported for mutable types or ModuleType subclasses")
 	}
-	inst, ok := o.(*Instance)
-	if !ok {
-		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
-	}
-	oldType := inst.Type()
 	if !compatibleForAssignment(oldType, newType) {
 		return fmt.Errorf("TypeError: __class__ assignment: '%s' object layout differs from '%s'", newType.Name, oldType.Name)
 	}
-	inst.Header.typ = newType //nolint:staticcheck // QF1008: explicit Header field access mirrors CPython's ob_type layout
+	o.Hdr().typ = newType
 	return nil
 }
 
