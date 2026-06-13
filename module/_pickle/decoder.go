@@ -345,7 +345,11 @@ func (u *unpickler) load() (objects.Object, error) {
 				return nil, err
 			}
 		case opNewobj:
-			if err := u.loadNewobj(); err != nil {
+			if err := u.loadNewobj(false); err != nil {
+				return nil, err
+			}
+		case opNewobjEx:
+			if err := u.loadNewobj(true); err != nil {
 				return nil, err
 			}
 		default:
@@ -628,11 +632,28 @@ func (u *unpickler) loadBuild() error {
 	return nil
 }
 
-// loadNewobj implements NEWOBJ: pops (cls, args), calls cls(*args),
-// pushes the result.
+// loadNewobj implements NEWOBJ (use_kwargs false) and NEWOBJ_EX
+// (use_kwargs true). The stack holds cls args [kwargs] and the call is
+// cls.__new__(cls, *args, **kwargs). Crucially this invokes __new__
+// only, never __init__, so unpickling never re-runs a constructor that
+// would, say, re-append list items.
 //
-// CPython: Modules/_pickle.c:5760 load_newobj
-func (u *unpickler) loadNewobj() error {
+// CPython: Modules/_pickle.c:6039 load_newobj
+func (u *unpickler) loadNewobj(useKwargs bool) error {
+	what := "NEWOBJ"
+	var kwargs *objects.Dict
+	if useKwargs {
+		what = "NEWOBJ_EX"
+		kw, err := u.pop()
+		if err != nil {
+			return err
+		}
+		d, ok := kw.(*objects.Dict)
+		if !ok {
+			return fmt.Errorf("UnpicklingError: %s kwargs argument must be a dict, not %.200s", what, kw.Type().Name)
+		}
+		kwargs = d
+	}
 	args, err := u.pop()
 	if err != nil {
 		return err
@@ -641,13 +662,29 @@ func (u *unpickler) loadNewobj() error {
 	if err != nil {
 		return err
 	}
+	clsType, ok := cls.(*objects.Type)
+	if !ok {
+		return fmt.Errorf("UnpicklingError: %s class argument must be a type, not %.200s", what, cls.Type().Name)
+	}
 	argTuple, ok := args.(*objects.Tuple)
 	if !ok {
-		return errors.New("UnpicklingError: NEWOBJ requires a tuple as args")
+		return fmt.Errorf("UnpicklingError: %s args argument must be a tuple, not %.200s", what, args.Type().Name)
 	}
-	result, err := objects.Call(cls, argTuple, nil)
+	// Call cls.__new__(cls, *args, **kwargs). CPython invokes tp_new
+	// directly; mirroring that through the __new__ attribute keeps the
+	// (no __init__) semantics while honoring an overridden __new__.
+	newFn, err := objects.GetAttr(clsType, objects.NewStr("__new__"))
 	if err != nil {
-		return fmt.Errorf("UnpicklingError: NEWOBJ call failed: %w", err)
+		return err
+	}
+	items := make([]objects.Object, 0, argTuple.Len()+1)
+	items = append(items, clsType)
+	for i := 0; i < argTuple.Len(); i++ {
+		items = append(items, argTuple.Item(i))
+	}
+	result, err := objects.Call(newFn, objects.NewTuple(items), kwargs)
+	if err != nil {
+		return fmt.Errorf("UnpicklingError: %s call failed: %w", what, err)
 	}
 	u.push(result)
 	return nil
