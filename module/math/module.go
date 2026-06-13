@@ -728,11 +728,38 @@ func mathCeil(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	if i, ok := args[0].(*objects.Int); ok {
 		return i, nil
 	}
+	// __ceil__ is fetched through _PyObject_MaybeCallSpecialNoArgs, a
+	// TYPE-level lookup that bypasses the instance __getattribute__.
+	//
+	// CPython: Modules/mathmodule.c:1131 math_ceil (_PyObject_MaybeCallSpecialNoArgs)
+	if res, ok, err := callSpecialNoArgs(args[0], "__ceil__"); ok {
+		return res, err
+	}
 	x, err := objectToFloat(args[0], "ceil")
 	if err != nil {
 		return nil, err
 	}
 	return objects.NewInt(int64(gomath.Ceil(x))), nil
+}
+
+// callSpecialNoArgs ports _PyObject_MaybeCallSpecialNoArgs: a TYPE-level
+// MRO lookup of a dunder (bypassing the instance __getattribute__),
+// invoked with no arguments. The bool is true when the method existed
+// and was called (the Object/err pair carry its result); false means the
+// type does not define the method, so the caller should fall back.
+//
+// CPython: Objects/typeobject.c:3106 _PyObject_MaybeCallSpecialNoArgs
+func callSpecialNoArgs(o objects.Object, name string) (objects.Object, bool, error) {
+	method, err := objects.LookupSpecial(o, name)
+	if err != nil {
+		return nil, true, err
+	}
+	if method == nil {
+		return nil, false, nil
+	}
+	res, callErr := objects.CallNoArgs(method)
+	objects.Decref(method)
+	return res, true, callErr
 }
 
 // mathFloor implements math.floor(x). Returns the largest integer <= x.
@@ -743,6 +770,10 @@ func mathFloor(args []objects.Object, kwargs map[string]objects.Object) (objects
 	}
 	if i, ok := args[0].(*objects.Int); ok {
 		return i, nil
+	}
+	// CPython: Modules/mathmodule.c:1200 math_floor (_PyObject_MaybeCallSpecialNoArgs)
+	if res, ok, err := callSpecialNoArgs(args[0], "__floor__"); ok {
+		return res, err
 	}
 	x, err := objectToFloat(args[0], "floor")
 	if err != nil {
@@ -757,14 +788,19 @@ func mathTrunc(args []objects.Object, kwargs map[string]objects.Object) (objects
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: trunc() takes exactly 1 argument (%d given)", len(args))
 	}
+	if f, ok := args[0].(*objects.Float); ok {
+		return objects.NewInt(int64(gomath.Trunc(f.Float64()))), nil
+	}
+	// math.trunc has no float fallback: it requires __trunc__ on the type.
+	//
+	// CPython: Modules/mathmodule.c:2072 math_trunc (_PyObject_MaybeCallSpecialNoArgs)
+	if res, ok, err := callSpecialNoArgs(args[0], "__trunc__"); ok {
+		return res, err
+	}
 	if i, ok := args[0].(*objects.Int); ok {
 		return i, nil
 	}
-	x, err := objectToFloat(args[0], "trunc")
-	if err != nil {
-		return nil, err
-	}
-	return objects.NewInt(int64(gomath.Trunc(x))), nil
+	return nil, fmt.Errorf("TypeError: type %.100s doesn't define __trunc__ method", args[0].Type().Name)
 }
 
 // mathIsqrt implements math.isqrt(n). Integer square root: floor(sqrt(n)).
