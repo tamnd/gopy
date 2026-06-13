@@ -21,7 +21,7 @@ func TestStoreAttrSlot(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.Slots = []string{"x"}
-	objects.SetTypeDescr(cls, "x", objects.NewMemberDescr("x", 0))
+	objects.SetTypeDescr(cls, "x", objects.NewMemberDescr(cls, "x", 0))
 	inst := objects.NewInstance(cls)
 	buf := storeAttrBuf()
 	StoreAttr(inst, newAttrName("x"), buf, 0)

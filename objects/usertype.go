@@ -2300,7 +2300,7 @@ func installSlots(t *Type, ns *Dict) error {
 		resolved = append(resolved, n)
 	}
 	for i, n := range resolved {
-		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
+		SetTypeDescr(t, n, NewMemberDescr(t, n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
 	// Keep __slots__ accessible as a class attribute. CPython normalizes

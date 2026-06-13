@@ -49,11 +49,11 @@ func init() {
 	}
 
 	// complex_members (Objects/complexobject.c:1337): real/imag are
-	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval
-	// fields. PyMember and getset behave the same to Python attribute
-	// lookup, so install GetSetDescr here for consistency with int/float.
-	SetTypeDescr(ComplexType, "real", NewGetSetDescr("real", complexRealGetter, nil))
-	SetTypeDescr(ComplexType, "imag", NewGetSetDescr("imag", complexImagGetter, nil))
+	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval fields,
+	// so they surface as member_descriptor (not getset_descriptor) and
+	// reject writes with the "not writable" AttributeError.
+	SetTypeDescr(ComplexType, "real", NewBuiltinMember(ComplexType, "real", "the real part of a complex number", complexRealGetter, nil))
+	SetTypeDescr(ComplexType, "imag", NewBuiltinMember(ComplexType, "imag", "the imaginary part of a complex number", complexImagGetter, nil))
 	SetTypeDescr(ComplexType, "conjugate", NewMethodDescrConv(ComplexType, "conjugate", MethNoArgs, complexConjugateMethod))
 	SetTypeDescr(ComplexType, "__complex__", NewMethodDescrConv(ComplexType, "__complex__", MethNoArgs, complexComplexMethod))
 	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescrConv(ComplexType, "__getnewargs__", MethNoArgs, complexGetNewArgsMethod))
