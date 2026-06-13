@@ -422,6 +422,9 @@ func objectSetattrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err := checkNumArgs(args, 2); err != nil {
 		return nil, err
 	}
+	if err := hackcheck(args[0], GenericSetAttr, "__setattr__"); err != nil {
+		return nil, err
+	}
 	if err := GenericSetAttr(args[0], args[1], args[2]); err != nil {
 		return nil, err
 	}
@@ -433,10 +436,66 @@ func objectDelattrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err := checkNumArgs(args, 1); err != nil {
 		return nil, err
 	}
+	if err := hackcheck(args[0], GenericSetAttr, "__delattr__"); err != nil {
+		return nil, err
+	}
 	if err := GenericSetAttr(args[0], args[1], nil); err != nil {
 		return nil, err
 	}
 	return None(), nil
+}
+
+// hackcheck rejects object.__setattr__ / __delattr__ applied directly to a
+// type to bypass its metatype's setattro (the Carlo Verre hack). It walks the
+// metatype's MRO to find the type that defined the live setattro slot, then
+// confirms fn is the slot that would be reached without jumping over an
+// intermediate C-level override.
+//
+// CPython: Objects/typeobject.c:9513 hackcheck_unlocked
+func hackcheck(self Object, fn func(o, name, value Object) error, what string) error {
+	meta, ok := self.(*Type)
+	if !ok {
+		return nil
+	}
+	mt := meta.Type()
+	if mt == nil || len(mt.MRO) == 0 {
+		// Probably ok not to check the call in this case.
+		return nil
+	}
+	// Find the (base) type that defined the metatype's slot function.
+	defining := mt
+	for i := len(mt.MRO) - 1; i >= 0; i-- {
+		base := mt.MRO[i]
+		if fnPtr(base.Setattro) == fnPtr(slotTpSetattroHook) {
+			// Ignore Python classes: they never define a C-level setattro.
+			continue
+		}
+		if fnPtr(base.Setattro) == fnPtr(mt.Setattro) {
+			defining = base
+			break
+		}
+	}
+	// Reject calls that jump over intermediate C-level overrides.
+	for base := defining; base != nil; base = primaryBase(base) {
+		if fnPtr(base.Setattro) == fnPtr(fn) {
+			// fn is the right slot function to call.
+			return nil
+		}
+		if fnPtr(base.Setattro) != fnPtr(slotTpSetattroHook) {
+			// base is not a Python class and overrides fn; its setattro
+			// should be called instead.
+			return fmt.Errorf("TypeError: can't apply this %s to %s object", what, mt.Name)
+		}
+	}
+	return nil
+}
+
+// primaryBase returns t's first base (CPython tp_base), or nil for object.
+func primaryBase(t *Type) *Type {
+	if len(t.Bases) == 0 {
+		return nil
+	}
+	return t.Bases[0]
 }
 
 // richCompareDescr returns the slot wrapper for the named rich
