@@ -38,7 +38,35 @@ func init() {
 	bindClassGetitem(TupleType)
 	bindClassGetitem(SetType)
 	bindClassGetitem(FrozensetType)
-	bindClassGetitem(typeType)
+	// Note: `type` itself is NOT given a __class_getitem__. CPython's `type`
+	// has no such method (`'__class_getitem__' in type.__dict__` is False);
+	// `type[int]` is served by type's mp_subscript slot, mirrored by the
+	// `cls == TypeType()` fast path in vm/eval_simple.go typeSubscript.
+	// Wiring it here would make every class inherit it through the metatype,
+	// so int[x] would wrongly succeed instead of raising "not subscriptable".
+	//
+	// CPython: Objects/typeobject.c type_subscript (mp_subscript, not a
+	// __class_getitem__ method)
+	// Further built-ins whose CPython tp_methods carry a
+	// "__class_getitem__" entry pointing at Py_GenericAlias.
+	//
+	// CPython: Objects/enumobject.c enum_methods
+	bindClassGetitem(EnumerateType)
+	// CPython: Objects/memoryobject.c memory_methods
+	bindClassGetitem(MemoryViewType)
+	// CPython: Objects/descrobject.c mappingproxy_methods
+	bindClassGetitem(MappingProxyType)
+	// GeneratorType/CoroutineType/AsyncGeneratorType are assigned inside
+	// their own init() (not a top-level var), so they may be nil when this
+	// init() runs. They wire __class_getitem__ themselves, right after
+	// NewType. CPython: Objects/genobject.c gen_methods / coro_methods /
+	// async_gen_methods.
+	// CPython: Objects/weakrefobject.c weakref_methods
+	bindClassGetitem(WeakrefType)
+	// CPython: Objects/templateobject.c template_methods
+	bindClassGetitem(TemplateStrType)
+	// CPython: Objects/interpolationobject.c interpolation_methods
+	bindClassGetitem(InterpolationType)
 	// typing.Generic[T] subscription. Uses a hookable wrapper so that
 	// typing.py can redirect through _generic_class_getitem (which runs
 	// _type_convert -> _make_forward_ref -> SyntaxError validation on
@@ -80,6 +108,16 @@ func bindGenericClassGetitem(t *Type) {
 		return NewGenericAlias(tp, arg), nil
 	})
 	SetTypeDescr(t, "__class_getitem__", NewClassMethod(fn))
+}
+
+// BindClassGetitem is the exported entry point so module packages
+// (_collections deque, itertools chain, _sre SRE_Pattern/SRE_Match,
+// contextvars ContextVar/Token, os.DirEntry) can wire the same
+// __class_getitem__ classmethod their CPython tp_methods tables carry.
+//
+// CPython: Objects/genericaliasobject.c:1040 Py_GenericAlias
+func BindClassGetitem(t *Type) {
+	bindClassGetitem(t)
 }
 
 // bindClassGetitem installs a `__class_getitem__` classmethod on t

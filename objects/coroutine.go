@@ -105,6 +105,8 @@ var CoroAwaitType *Type
 
 func init() {
 	CoroutineType = NewType("coroutine", []*Type{objectType})
+	// CPython: Objects/genobject.c coro_methods ("__class_getitem__")
+	bindClassGetitem(CoroutineType)
 	CoroutineType.Repr = coroRepr
 	CoroutineType.Str = coroRepr
 	CoroutineType.Getattro = GenericGetAttr

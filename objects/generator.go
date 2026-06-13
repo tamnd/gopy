@@ -192,6 +192,8 @@ var GeneratorType *Type
 
 func init() {
 	GeneratorType = NewType("generator", []*Type{objectType})
+	// CPython: Objects/genobject.c gen_methods ("__class_getitem__")
+	bindClassGetitem(GeneratorType)
 	GeneratorType.Repr = genRepr
 	GeneratorType.Str = genRepr
 	GeneratorType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }

@@ -1299,6 +1299,8 @@ var ChainType = objects.NewType("chain", []*objects.Type{objects.ObjectType()})
 
 func init() {
 	finishType(ChainType, chainNext)
+	// CPython: Modules/itertoolsmodule.c chain_methods ("__class_getitem__")
+	objects.BindClassGetitem(ChainType)
 	ChainType.TpNew = chainNew
 	objects.SetTypeDescr(ChainType, "from_iterable",
 		objects.NewClassMethod(objects.NewBuiltinFunction("from_iterable", chainFromIterable)))

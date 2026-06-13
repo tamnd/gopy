@@ -78,6 +78,10 @@ func init() {
 	PatternType.Getattro = objects.GenericGetAttr
 	MatchType.Getattro = objects.GenericGetAttr
 	ScannerType.Getattro = objects.GenericGetAttr
+	// SRE_Pattern and SRE_Match are subscriptable via __class_getitem__.
+	// CPython: Modules/_sre/sre.c pattern_methods / match_methods
+	objects.BindClassGetitem(PatternType)
+	objects.BindClassGetitem(MatchType)
 	// Compiled patterns and match objects are hashable by identity in CPython.
 	// CPython: Modules/_sre.c SRE_Pattern_Type (tp_hash not overridden)
 	PatternType.Hash = objects.IdentityHash

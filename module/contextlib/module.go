@@ -70,6 +70,25 @@ func buildModule() (*objects.Module, error) {
 // CPython: Lib/contextlib.py:35 AbstractContextManager
 var abstractCMType = objects.NewType("AbstractContextManager", []*objects.Type{objects.ObjectType()})
 
+func init() {
+	// AbstractContextManager (and the async variant) carry a
+	// __class_getitem__ = classmethod(GenericAlias) in their class body, so
+	// AbstractContextManager[int] yields a types.GenericAlias.
+	//
+	// CPython: Lib/contextlib.py:21 AbstractContextManager.__class_getitem__
+	cg := objects.NewBuiltinFunction("__class_getitem__", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("TypeError: __class_getitem__() takes exactly one argument (%d given)", len(args)-1)
+		}
+		cls, ok := args[0].(*objects.Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __class_getitem__() requires a type")
+		}
+		return objects.NewGenericAlias(cls, args[1]), nil
+	})
+	objects.SetTypeDescr(abstractCMType, "__class_getitem__", objects.NewClassMethod(cg))
+}
+
 // contextDecoratorType backs ContextDecorator / AsyncContextDecorator.
 // The CPython class only adds a __call__ that wraps a function so it
 // re-enters the context on every call; unittest does not exercise that

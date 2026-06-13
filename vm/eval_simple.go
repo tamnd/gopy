@@ -1940,26 +1940,27 @@ func typeSubscript(cls *objects.Type, key objects.Object) (objects.Object, error
 	if cls == objects.TypeType() {
 		return objects.NewGenericAlias(cls, key), nil
 	}
-	descr, _ := objects.LookupDescriptor(cls, "__class_getitem__")
+	// Mirror PyObject_GetItem's type branch: a full attribute lookup for
+	// __class_getitem__ on the class object. This walks both gopy's Go-level
+	// descriptor table (built-in types) and the Python class __dict__ across
+	// the MRO (user classes like contextlib.AbstractContextManager and
+	// dataclasses.Field that set __class_getitem__ = classmethod(GenericAlias)
+	// in the class body). LookupAttr binds the descriptor, so a classmethod
+	// already sees the class as its implicit first argument.
+	//
+	// CPython: Objects/abstract.c:181 PyObject_GetItem (type branch,
+	// _PyObject_LookupAttr(o, &_Py_ID(__class_getitem__), &meth))
+	meth, err := objects.LookupAttrString(cls, "__class_getitem__")
+	if err != nil {
+		return nil, err
+	}
 	// A __class_getitem__ set to None disables subscription: CPython treats
 	// the None attribute as absent and falls through to the not-subscriptable
 	// error rather than trying to call None.
 	//
 	// CPython: Objects/abstract.c:181 PyObject_GetItem (meth != Py_None gate)
-	if descr != nil && !objects.IsNone(descr) {
-		// Bind the descriptor against cls so a classmethod (or a plain
-		// callable installed via SetTypeDescr) sees the class as its
-		// implicit first argument.
-		dt := descr.Type()
-		bound := descr
-		if dt.DescrGet != nil {
-			v, err := dt.DescrGet(descr, cls, cls)
-			if err != nil {
-				return nil, err
-			}
-			bound = v
-		}
-		return objects.Call(bound, objects.NewTuple([]objects.Object{key}), nil)
+	if meth != nil && !objects.IsNone(meth) {
+		return objects.Call(meth, objects.NewTuple([]objects.Object{key}), nil)
 	}
 	return nil, fmt.Errorf("TypeError: type '%s' is not subscriptable", cls.Name)
 }

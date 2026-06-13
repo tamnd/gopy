@@ -64,7 +64,10 @@ func registerArrayMethods(t *objects.Type) {
 	}
 	objects.SetTypeDescr(t, "typecode", objects.NewGetSetDescr("typecode", arrayGetTypecode, nil))
 	objects.SetTypeDescr(t, "itemsize", objects.NewGetSetDescr("itemsize", arrayGetItemsize, nil))
-	objects.SetTypeDescr(t, "__class_getitem__", objects.NewMethodDescr(t, "__class_getitem__", arrayClassGetitem))
+	// PEP 585: array.__class_getitem__ is METH_O|METH_CLASS in CPython, so
+	// subscripting the type (array[int]) binds the class as the first
+	// argument. Wrap in a classmethod rather than an instance MethodDescr.
+	objects.SetTypeDescr(t, "__class_getitem__", objects.NewClassMethod(objects.NewBuiltinFunction("__class_getitem__", arrayClassGetitem)))
 }
 
 // --- helpers ----------------------------------------------------------------

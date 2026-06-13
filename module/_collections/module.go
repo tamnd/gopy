@@ -72,6 +72,8 @@ var DequeType = newDequeType()
 
 func newDequeType() *objects.Type {
 	t := objects.NewType("deque", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_collectionsmodule.c deque_methods ("__class_getitem__")
+	objects.BindClassGetitem(t)
 	t.HasDict = false
 	t.Repr = dequeRepr
 	t.Str = dequeRepr

@@ -56,6 +56,9 @@ type DirEntry struct {
 var DirEntryType = objects.NewType("os.DirEntry", []*objects.Type{objects.ObjectType()})
 
 func init() {
+	// os.DirEntry is subscriptable via __class_getitem__.
+	// CPython: Modules/posixmodule.c DirEntry_methods ("__class_getitem__")
+	objects.BindClassGetitem(DirEntryType)
 	ScandirIteratorType.Iter = scandirIter
 	ScandirIteratorType.IterNext = scandirIterNext
 	objects.SetTypeDescr(ScandirIteratorType, "__enter__", objects.NewBuiltinFunction("__enter__", scandirEnter))
