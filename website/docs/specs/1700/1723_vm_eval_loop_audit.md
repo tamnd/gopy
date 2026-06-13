@@ -134,6 +134,18 @@ regression (`test_weakref` 30/15 vs base 31/18, `test_gc` identical to base, the
 at-risk sweep unchanged, both P11 gates still green). Full design, wiring table,
 and verification in spec 1728.
 
+**test_coroutines green, test_call skips closed to the native subsystem (2026-06-13, commit 073e9c60).** Reran the full 21-file in-scope panel after porting the `_testcapi.awaitType` fixture. The three `test_coroutines.CAPITest` `tp_await` cases were erroring on a missing `awaitType` attribute (gopy's `_testcapi` imports, so the class never hit the `skipIf(_testcapi is None)` guard CPython also skips on a no-`_testcapi` build); they now run and pass. `awaitType` is a faithful port of `Modules/_testcapimodule.c:2796 awaitObject`: a type whose `tp_as_async->am_await` returns the stored object, exposed both as the async slot and a `__await__` method descriptor, with the stored iterator incref'd in `tp_new` and visited by `tp_traverse` (without that, the temporary `iter([1])` reached refcount 0 and the awaitable yielded nothing). `test_coroutines` is now fully green (99 pass, was 3 errors).
+
+Panel standing after this run: 21/21 in-scope files green except `test_call`, which keeps `failures=1, errors=1, skipped=3`. Every one of those five maps to the `_testcapi`/`_testinternalcapi` native test-fixture subsystem, not VM/eval-loop logic:
+
+| test_call row | kind | needs |
+|------|------|-------|
+| test_super_deep | fail | C-stack-margin recursion: each `_testcapi.pyobject_vectorcall` trampoline must consume the native recursion budget so `c_recurse(90_000)` overflows under limit 100_000 while plain `recurse(90_000)` does not. gopy counts Python frames on a goroutine stack, so the C trampoline is free. |
+| test_margin_is_sufficient | error | `_testinternalcapi.get_stack_pointer` / `get_stack_margin` reading the live C stack. |
+| test_setvectorcall (×3) | skip | `_testinternalcapi.SPECIALIZATION_THRESHOLD`. |
+
+A trial port of `_testinternalcapi` exposing just `SPECIALIZATION_THRESHOLD` did clear the three setvectorcall skips, but it is a partial slice that regresses the wider suite: `support.check_sizeof` and several other gates short-circuit on `import _testinternalcapi`, so merely making the module importable un-skips sizeof/immortality/native-stack assertions across `test_frame` (in-panel: `test_sizeof` flipped skip to fail), `test_builtin`, and `test_exceptions`, which need the full sizeof model (`SIZEOF_PYGC_HEAD` plus CPython C-struct basicsizes for every type), the immortal-refcount model, and the native C-stack hooks. Per the whole-subsystem rule that trial was reverted; `awaitType` (a complete `_testcapi` type) stays. The remaining `test_call` five and `test_frame`'s two divergent skips (`test_sizeof` needs `_testinternalcapi`, `test_basic` needs `ctypes`) plus `test_generators`'s one divergent skip (`_testcapi.raise_SIGINT_then_send_None`) are all the same native-fixture subsystem, tracked whole as #244 (`_testcapi.raise_SIGINT_then_send_None`) and #245 (`_testinternalcapi` sizeof/stack + `ctypes`). The eight `test_frame.FrameLocalsProxyMappingTests` skips are unconditional `@unittest.skip` in the test source, so they match CPython exactly.
+
 ## Goal
 
 Run every test in the spec 1700 VM/eval-loop panel (22 files), confirm which
