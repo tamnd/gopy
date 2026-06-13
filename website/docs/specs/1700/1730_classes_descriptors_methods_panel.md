@@ -39,7 +39,7 @@ tree before porting.
 | `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
 | `test_descr` | 21 failures, 14 errors |
 | `test_types` | 11 failures, 20 errors |
-| `test_typing` | import crash (`__parameters__`) |
+| `test_typing` | runner abort (`__parameters__`) in CollectionsAbcTests |
 | `test_genericalias` | error (missing `concurrent.futures.thread`) |
 | `test_enum` | error (missing `pydoc`) |
 
@@ -121,7 +121,7 @@ without `__trunc__` raises.
 - [x] test_abc, test_super, test_property, test_descrtut, test_dynamicclassattribute green
 - [ ] test_descr: clear the remaining 21 failures / 14 errors
 - [ ] test_types: clear UnionTests / MappingProxy / float-int `__format__` clusters
-- [ ] test_typing: fix `__parameters__` AttributeError at import ([[1730]] blocks on generic-alias `__parameters__`)
+- [ ] test_typing: runner aborts in `CollectionsAbcTests` (right after `test_bytestring`) with `AttributeError: __parameters__`. The unittest suite's `_isnotsuite` calls `iter(test)` on what should be a `TestCase`, but the object is a typing `_BaseGenericAlias`; iterating it yields `Unpack[self]`, whose evaluation reaches `__getattr__('__parameters__')` and raises. `__parameters__` resolves correctly on a standalone `List[int]`/`List[T]`, so the divergence is in how that test class's suite is built (a generic alias landing in `_tests` where a TestCase belongs), not in the alias machinery itself. Next: find which `CollectionsAbcTests` member injects the alias into the suite.
 - [ ] test_genericalias: vendor `concurrent.futures` as a package (`_base`/`thread`/`process`)
 - [ ] test_enum: vendor `pydoc`
 - [ ] test_class: `test_detach_materialized_dict_no_memory` needs `_testcapi.set_nomemory` (allocator fault injection, infeasible on the Go runtime; deferred)
