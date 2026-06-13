@@ -15,7 +15,7 @@ import (
 // Include/internal/pycore_object.h _Py_INCREF_IMMORTAL_STAT_INC
 func Incref(o Object) {
 	h := o.Hdr()
-	if atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt {
+	if atomic.LoadInt64(&h.refcnt) >= ImmortalMinimumRefcnt {
 		return
 	}
 	atomic.AddInt64(&h.refcnt, 1)
@@ -44,7 +44,7 @@ func Incref(o Object) {
 //	(PyObject_CallFinalizerFromDealloc call before deallocation)
 func Decref(o Object) {
 	h := o.Hdr()
-	if atomic.LoadInt64(&h.refcnt) >= ImmortalRefcnt {
+	if atomic.LoadInt64(&h.refcnt) >= ImmortalMinimumRefcnt {
 		return
 	}
 	newrc := atomic.AddInt64(&h.refcnt, -1)

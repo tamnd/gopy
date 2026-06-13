@@ -272,6 +272,16 @@ func registerFunctionReadOnlyGetSets() {
 			if f.Closure == nil {
 				return None(), nil
 			}
+			// func_closure is a T_OBJECT_EX member; member access
+			// returns a new reference via Py_XNewRef. Without the
+			// Incref the borrowed tuple is decref'd to zero by the
+			// consuming call (e.g. exec(closure=f.__closure__) or
+			// sys.getrefcount), which deallocs the shared closure
+			// tuple out from under the original function.
+			//
+			// CPython: Objects/funcobject.c:633 func_memberlist (T_OBJECT_EX),
+			// Python/structmember.c PyMember_GetOne (Py_XNewRef)
+			Incref(f.Closure)
 			return f.Closure, nil
 		},
 		nil))
