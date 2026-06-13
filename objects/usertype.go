@@ -481,30 +481,24 @@ func applyMetaclassMRO(t *Type, meta *Type) error {
 	if owner, ok := mroDescrOwner(descr); ok && owner == typeType {
 		return nil
 	}
+	// mro_internal stamps tp_mro only after mro_invoke returns, so the
+	// custom mro() sees tp_mro still at its pre-creation value (NULL for a
+	// freshly built type). NewType has already filled t.MRO with the C3
+	// default; drop it back to nil across the call so cls.__mro__ reports
+	// None inside the override, matching CPython. A reentrant __bases__
+	// assignment from within mro() may repopulate t.MRO before we return.
+	//
+	// CPython: Objects/typeobject.c:3552 mro_internal_unlocked (set_tp_mro
+	// runs after mro_invoke)
+	t.MRO = nil
 	bound := bindDescr(descr, t, meta)
 	res, err := callBound(bound, nil, nil)
 	if err != nil {
 		return err
 	}
-	tup, ok := res.(*Tuple)
-	if !ok {
-		lst, ok := res.(*List)
-		if !ok {
-			return fmt.Errorf("TypeError: mro() returned a non-tuple: %s", typeNameOf(res))
-		}
-		items := make([]Object, lst.Len())
-		for i := 0; i < lst.Len(); i++ {
-			items[i] = lst.Item(i)
-		}
-		tup = NewTuple(items)
-	}
-	newMRO := make([]*Type, 0, tup.Len())
-	for i := 0; i < tup.Len(); i++ {
-		entry, ok := tup.Item(i).(*Type)
-		if !ok {
-			return fmt.Errorf("TypeError: mro() returned a non-type at index %d: %s", i, typeNameOf(tup.Item(i)))
-		}
-		newMRO = append(newMRO, entry)
+	newMRO, err := mroResultToTypes(res)
+	if err != nil {
+		return err
 	}
 	t.MRO = newMRO
 	return nil
@@ -966,66 +960,47 @@ func typeSetNames(t *Type, ns *Dict) error {
 }
 
 // typeInitSubclass invokes the parent's __init_subclass__ hook on the
-// freshly built subclass. CPython runs this from type_new after the
-// type is fully constructed; it walks the MRO starting one position
-// past `t` (via super(t, t)) so the subclass's own override does not
-// recursively reapply. kwargs is the leftover class-creation kwargs
-// after the metaclass has been pulled out, so subclass hooks see
-// `class C(Base, foo=1):` as init_subclass(cls, foo=1).
+// freshly built subclass. CPython builds super(t, t) and looks
+// __init_subclass__ up on it, so the subclass's own override is skipped
+// and the bound parent hook runs. Routing through super (rather than a
+// hand-rolled MRO walk past index 1) also reproduces supercheck: a type
+// whose custom mro() returned an MRO that omits the type itself fails the
+// super(t, t) construction with a TypeError, matching gh-92112. kwargs is
+// the leftover class-creation kwargs after the metaclass has been pulled
+// out, so subclass hooks see `class C(Base, foo=1):` as
+// init_subclass(cls, foo=1).
 //
-// CPython: Objects/typeobject.c:4595 type_init_subclass
+// CPython: Objects/typeobject.c:11560 type_new_init_subclass
 func typeInitSubclass(t *Type, kwargs map[string]Object) error {
-	for i := 1; i < len(t.MRO); i++ {
-		base := t.MRO[i]
-		descr, _ := lookupOnType(base, "__init_subclass__")
-		if descr == nil {
-			continue
-		}
-		dt := descr.Type()
-		var callable Object
-		callableIsNew := dt.DescrGet != nil
-		if callableIsNew {
-			bound, err := dt.DescrGet(descr, t, t)
-			if err != nil {
-				return err
-			}
-			callable = bound
-		} else {
-			callable = descr
-		}
-		var kwd *Dict
-		if len(kwargs) > 0 {
-			kwd = NewDict()
-			for k, v := range kwargs {
-				if err := kwd.SetItem(NewStr(k), v); err != nil {
-					return err
-				}
-			}
-		}
-		// CPython: Objects/typeobject.c:4584 type_new_init_subclass
-		_, callErr := Call(callable, NewTuple(nil), kwd)
-		// CPython: Objects/typeobject.c:4584 Py_DECREF(func) after call
-		if callableIsNew {
-			Decref(callable)
-		}
-		if callErr != nil {
-			return callErr
-		}
+	su, err := NewSuper(t, t)
+	if err != nil {
+		return err
+	}
+	// LookupAttrString hands back a new reference: the classmethod bind
+	// increfs t into the bound __init_subclass__. CPython Py_DECREFs both
+	// super and func once the hook returns; mirror that so the bound method
+	// does not keep a refcounted edge to t alive, which would block
+	// type_dealloc's remove_all_subclasses for a discarded subclass.
+	callable, err := LookupAttrString(su, "__init_subclass__")
+	if err != nil {
+		return err
+	}
+	if callable == nil {
 		return nil
 	}
-	return nil
-}
-
-// lookupOnType returns the descriptor stored directly in t's
-// typeDescrTable (no MRO walk). Used by typeInitSubclass to find the
-// first ancestor that owns __init_subclass__.
-func lookupOnType(t *Type, name string) (Object, bool) {
-	if descrs, ok := typeDescrTable[t]; ok {
-		if v, ok := descrs[name]; ok {
-			return v, true
+	defer Decref(callable)
+	var kwd *Dict
+	if len(kwargs) > 0 {
+		kwd = NewDict()
+		for k, v := range kwargs {
+			if err := kwd.SetItem(NewStr(k), v); err != nil {
+				return err
+			}
 		}
 	}
-	return nil, false
+	// CPython: Objects/typeobject.c:11575 PyObject_VectorcallDict(func, NULL, 0, kwds)
+	_, callErr := Call(callable, NewTuple(nil), kwd)
+	return callErr
 }
 
 // fixupSlotDispatchers wires the type's C-level slots to Python-level

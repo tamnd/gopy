@@ -80,10 +80,13 @@ func typeSubclassesMeth(args []Object, _ map[string]Object) (Object, error) {
 	return NewList(items), nil
 }
 
-// typeMroMeth implements type.mro() -> list. Returns the same content as
-// __mro__ but as a Python list rather than a tuple.
+// typeMroMeth implements type.mro() -> list. Like mro_implementation, it
+// recomputes the C3 linearization from tp_bases rather than echoing the
+// stored tp_mro: a custom metaclass mro() calls type.mro(cls) while the
+// type is mid-creation and tp_mro is still NULL, so reading t.MRO would
+// hand back an empty list. Recomputing keeps it correct in that window.
 //
-// CPython: Objects/typeobject.c:1254 type_mro
+// CPython: Objects/typeobject.c:3434 type_mro_impl (mro_implementation)
 func typeMroMeth(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("TypeError: descriptor 'mro' of 'type' object needs an argument")
@@ -92,8 +95,12 @@ func typeMroMeth(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'mro' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
 	}
-	items := make([]Object, len(t.MRO))
-	for i, b := range t.MRO {
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Object, len(mro))
+	for i, b := range mro {
 		items[i] = b
 	}
 	return NewList(items), nil
@@ -513,10 +520,12 @@ func validateNewBases(t *Type, tup *Tuple) ([]*Type, error) {
 			return nil, fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
 		}
 		// A base that already has t in its ancestry (or is t itself) would
-		// close an inheritance cycle.
+		// close an inheritance cycle. The MRO scan alone misses a cycle that
+		// a reentrant custom mro() forms through the primary base before the
+		// MRO is refreshed, so basesCauseCycle also walks the tp_base chain.
 		//
 		// CPython: Objects/typeobject.c:1823 type_set_bases_unlocked
-		if b == t || IsSubtype(b, t) {
+		if b == t || basesCauseCycle(b, t) {
 			return nil, fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
 		}
 		newBases = append(newBases, b)
@@ -550,21 +559,37 @@ func mroHierarchy(t *Type, saved *[]mroSnapshot, visited map[*Type]bool) error {
 	}
 	visited[t] = true
 	old := t.MRO
-	mro, err := c3Linearize(t)
-	if err != nil {
-		return err
-	}
-	t.MRO = mro
-	// Honor a metaclass mro() override (mro_invoke). A raising override,
-	// e.g. test_descr's WorkOnce, must propagate; restore this type's MRO
-	// first so the caller's rollback walk does not double-restore it.
+	// mro_invoke computes the new MRO, dispatching to a metaclass mro()
+	// override (e.g. test_descr's WorkOnce/DebugHelperMeta). It does not
+	// install the result; a custom mro() may reassign t.__bases__
+	// reentrantly, which installs a fresh t.MRO deeper in the stack.
 	//
-	// CPython: Objects/typeobject.c:2228 mro_invoke
-	if err := applyMetaclassMRO(t, t.Type()); err != nil {
-		t.MRO = old
+	// CPython: Objects/typeobject.c:3563 mro_internal_unlocked
+	newMRO, err := mroInvoke(t)
+	// Reentrancy check against the value captured before the call: a
+	// changed slice header means a reentrant assignment already recomputed
+	// t and its whole subtree.
+	//
+	// CPython: Objects/typeobject.c:3564 mro_internal_unlocked (reent)
+	reent := !sameSliceIdentity(t.MRO, old)
+	if err != nil {
+		// On error mro_internal returns -1 without touching tp_mro, leaving
+		// whatever a reentrant assignment installed. Do not restore old.
+		//
+		// CPython: Objects/typeobject.c:3569 mro_internal_unlocked (return -1)
 		return err
 	}
-	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old, newMRO: t.MRO})
+	if reent {
+		// The reentrant assignment already recomputed t and every subclass;
+		// installing newMRO here would clobber it. Stop without recording a
+		// snapshot, exactly as mro_internal returning 0 short-circuits
+		// mro_hierarchy_for_complete_type.
+		//
+		// CPython: Objects/typeobject.c:3573 mro_internal_unlocked (return 0)
+		return nil
+	}
+	t.MRO = newMRO
+	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old, newMRO: newMRO})
 	for _, sub := range t.Subclasses() {
 		if err := mroHierarchy(sub, saved, visited); err != nil {
 			return err
@@ -573,13 +598,19 @@ func mroHierarchy(t *Type, saved *[]mroSnapshot, visited map[*Type]bool) error {
 	return nil
 }
 
-// typeGetMRO returns a tuple of t.MRO. Mirrors type_mro.
+// typeGetMRO returns a tuple of t.MRO, or None when tp_mro has not been
+// set yet. A custom metaclass mro() runs while the type is mid-creation
+// with tp_mro still NULL, and test code reads cls.__mro__ to detect that
+// window, so an unset MRO must surface as None rather than an empty tuple.
 //
-// CPython: Objects/typeobject.c:1183 type_get_mro
+// CPython: Objects/typeobject.c:1697 type_get_mro
 func typeGetMRO(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__mro__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if t.MRO == nil {
+		return None(), nil
 	}
 	items := make([]Object, len(t.MRO))
 	for i, b := range t.MRO {
