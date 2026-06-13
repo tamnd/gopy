@@ -26,7 +26,7 @@ tree before porting.
 
 ---
 
-## Panel state (run from `test/cpython/`, audit date 2026-06-13)
+## Panel state (run from `test/cpython/`, audit date 2026-06-14)
 
 | File | Result |
 | --- | --- |
@@ -35,12 +35,12 @@ tree before porting.
 | `test_property` | OK (31, 2 skipped) |
 | `test_descrtut` | OK (8) |
 | `test_dynamicclassattribute` | OK (12, 1 skipped) |
+| `test_genericalias` | OK |
 | `test_class` | 1 failure (deferred, see below) |
 | `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
-| `test_descr` | 21 failures, 14 errors |
-| `test_types` | 11 failures, 20 errors |
-| `test_typing` | 709 run, 141 failures / 293 errors (no abort) |
-| `test_genericalias` | error (missing `concurrent.futures.thread`) |
+| `test_descr` | 18 failures, 9 errors |
+| `test_types` | 9 failures, 7 errors |
+| `test_typing` | 115 failures / 164 errors (no abort) |
 | `test_enum` | error (missing `pydoc`) |
 
 ---
@@ -130,9 +130,47 @@ and `object.__getstate__`, which probe `__dict__` on `__slots__` objects.
 on a `defaultdict`'s backing storage instead of crashing on the type
 assertion. test_typing now runs to completion (709 tests).
 
-The residual 141 failures / 293 errors are dominated (~236) by PEP 646
-`TypeVarTuple` and PEP 612 `ParamSpec` substitution, which gopy's
-`subsParameters` does not yet implement. That is a separate subsystem port.
+The residual failures / errors are dominated by PEP 646 `TypeVarTuple` and
+PEP 612 `ParamSpec` substitution, which gopy's `subsParameters` does not yet
+fully implement. That is a separate subsystem port.
+
+### types.UnionType / TypeVar / GenericAlias operator parity
+
+Four parity gaps in the `|` operator and GenericAlias subclassing:
+
+- The union builder probed each arg with `PyObject_Hash` to decide the
+  hashable vs unhashable bucket, but on failure it never cleared the pending
+  exception the way `unionbuilder_add_single_unchecked` does with
+  `PyErr_Clear`. With unhashable args alive the leaked `TypeError` surfaced
+  later from an unrelated string-keyed dict lookup. `addSingleUnchecked` now
+  clears it at the point of the swallow.
+- `union_hash` re-hashes each unhashable arg so the error carries that arg's
+  own `TypeError` rather than a generic "N unhashable elements".
+- `TypeVar` and `ParamSpec` gained `__or__`/`__ror__` (building a
+  `typing.Union`), so `T | None` no longer raises unsupported-operand.
+- `GenericAlias` exposes `__new__`/`__repr__`/`__hash__` in its type dict and
+  `ga_new` honours the passed `cls`, so a Python subclass of
+  `types.GenericAlias` gets an instance of itself and inherits the repr.
+
+`test_types.UnionTests` is green (29 tests, 1 CPython skip matched).
+
+### int / float `__format__` method descriptors
+
+Both types carried a working `PyObject_Format` slot (so f-strings and
+`str.format` worked) but exposed no `__format__` in the type dict, so an
+explicit `(123).__format__('d')` fell through to `object.__format__` and was
+rejected. Installed method descriptors routing through the same renderers;
+bool inherits int's through the MRO; empty spec returns `str(self)`.
+
+### locale.format_string and the float 'n' presentation type
+
+`test_types` exercises `locale.format_string('%d'/'%g', x, grouping=True)`
+against `format(x, 'n')`. Two gaps: gopy's `locale.py` was a stub without
+`format_string`, and the float renderer never handled the `'n'` presentation
+type. Vendored `format_string` plus its helpers (`_group`,
+`_grouping_intervals`, `_strip_padding`, `_format`, `_localize`) from
+`Lib/locale.py`, running off the existing `localeconv()`, and added `'n'` to
+the float renderer (it is `'g'` plus LC_NUMERIC grouping).
 
 ---
 
@@ -144,12 +182,14 @@ The residual 141 failures / 293 errors are dominated (~236) by PEP 646
 - [x] Slot-state pickling through `copyreg._slotnames`
 - [x] `math.ceil/floor/trunc` route through the type-level dunder
 - [x] `TpFlagAbstract` wired to `__abstractmethods__`
-- [x] test_abc, test_super, test_property, test_descrtut, test_dynamicclassattribute green
-- [ ] test_descr: clear the remaining 21 failures / 14 errors
-- [ ] test_types: clear UnionTests / MappingProxy / float-int `__format__` clusters
-- [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite. Now runs all 709 tests.
-- [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — accounts for ~236 of the remaining errors
-- [ ] test_genericalias: vendor `concurrent.futures` as a package (`_base`/`thread`/`process`)
+- [x] test_abc, test_super, test_property, test_descrtut, test_dynamicclassattribute, test_genericalias green
+- [x] test_types: UnionTests green (union exc-clear + re-hash, TypeVar/ParamSpec `__or__`, GenericAlias subclass `__new__`/`__repr__`)
+- [x] test_types: int/float `__format__` descriptors + `locale.format_string` + float `'n'` presentation type
+- [ ] test_types: bound builtin method type (`''.join` should be `builtin_function_or_method`, not Python `method`) — `method_get` must produce a `PyCMethod`-style bound object; affects `test_names`, `test_method_descriptor_types`
+- [ ] test_types: residual MappingProxy / CoroutineTests / ClassCreation / internal_sizes
+- [ ] test_descr: clear the remaining 18 failures / 9 errors
+- [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite.
+- [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — dominates the remaining errors
 - [ ] test_enum: vendor `pydoc`
 - [ ] test_class: `test_detach_materialized_dict_no_memory` needs `_testcapi.set_nomemory` (allocator fault injection, infeasible on the Go runtime; deferred)
 - [ ] test_metaclass: `__module__` prefix differs under the unittest harness (`test_metaclass` vs `test.test_metaclass`); confirm it is harness-only and not a gopy divergence
