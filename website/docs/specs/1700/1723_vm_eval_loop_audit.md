@@ -105,6 +105,24 @@ reverted to baseline so the tree stays green and the two gates stay honestly red
 Full diagnosis and the next-pass plan (port `Py_INCREF(seq)` into every iterator
 constructor first, flip dealloc last) is in spec 1727, "P5 second dry-run".
 
+**Owned-store fallout cleared, both gates green (2026-06-13).** Re-running the
+full panel after the owned-store port (1727) and the per-dict critical sections
+(1728) surfaced six reference-discipline regressions the borrow model had hidden:
+a borrowed `cr_origin` getter, the async-gen firstiter/finalizer hooks leaking
+their args tuple, the async-gen value wrap/unwrap refcounts, an `END_SEND` slot
+mix-up, a `dict_iter` tuple-cache aliasing, and a per-dict-lock deadlock across a
+generator drive (the lock keyed reentrancy on the goroutine, but a generator body
+shares its driver's `*state.Thread`, so it now keys on the thread). All six are
+CPython-faithful ports, fully written up with citations in spec 1729. With them
+landed the panel is 20/21 fully green and the two P11 gates are now green:
+`test_iter.test_ref_counting_behavior` and `test_frame.test_clear_refcycles` both
+pass (the failed-unpack decref from spec 1726 #246 plus the owned-store deallocs
+made the refcount a true liveness signal for those two scenarios). The
+2026-06-10 re-run table below predates this and is superseded: `test_call` still
+carries its `_testcapi` whole-port gaps (#243/#245), but the `test_frame` and
+`test_iter` rows are no longer red. `test_gc` is byte-identical to the pre-fix
+build; the threaded `test_weakref` `MappingTestCase` tests still pass.
+
 **Dict critical sections landed (2026-06-12).** A prerequisite for any concurrent
 owned-store work surfaced while running the P11 sweep under no-GIL threading:
 `test_weakref`'s `WeakValueDictionary` tests mutate a shared dict from one
