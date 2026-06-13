@@ -325,11 +325,17 @@ func typeGetBase(o Object) (Object, error) {
 }
 
 // shapeDiffers reports whether two types lay their instances out
-// differently. CPython compares tp_basicsize and tp_itemsize.
+// differently. CPython compares tp_basicsize and tp_itemsize, which are
+// always concrete on a finished type. gopy leaves the raw BaseSize /
+// ItemSize fields at zero on user types and resolves the inherited size
+// by walking the MRO, so the comparison must go through typeBasicSize /
+// typeItemSize too. Comparing the raw fields would report a spurious
+// difference (0 vs object's 16) for a plain user class against object
+// and wrongly make it its own solid base.
 //
 // CPython: Objects/typeobject.c:2962 shape_differs
 func shapeDiffers(t1, t2 *Type) bool {
-	return t1.BaseSize != t2.BaseSize || t1.ItemSize != t2.ItemSize
+	return typeBasicSize(t1) != typeBasicSize(t2) || typeItemSize(t1) != typeItemSize(t2)
 }
 
 // solidBase returns the most-derived ancestor of t whose instance

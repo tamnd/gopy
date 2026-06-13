@@ -771,6 +771,13 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			// CPython: Python/bytecodes.c _SEND (StopIteration path)
 			// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
 			setRunningYieldFrom(e.genRunning, nil)
+			// _PyGen_FetchStopIterationValue clears the error indicator once
+			// it pulls the value out. A Python-level `raise StopIteration`
+			// inside the sub-iterator's send() leaves the exception live on
+			// the thread state; if we don't clear it, the enclosing
+			// coroutine's own RETURN re-reports the stale StopIteration
+			// instead of completing with its real return value.
+			pyerrors.Clear(e.ts)
 			e.pushObject(retVal)
 			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
@@ -1056,6 +1063,19 @@ func (e *evalState) stopIterRetval(err error) (objects.Object, bool) {
 	}
 	if err == nil {
 		return nil, false
+	}
+	// A Python-level `raise StopIteration` inside a sub-iterator's send()
+	// (e.g. the duck-typed coroutine in types._GeneratorWrapper) surfaces
+	// here as an excSentinelError carrying the live exception, not as a
+	// RaisedError or the bare ErrStopIteration sentinel. Unwrap it so the
+	// SEND opcode can pull the value out and hand it to END_SEND.
+	//
+	// CPython: Objects/genobject.c:1024 _PyGen_FetchStopIterationValue
+	var se *excSentinelError
+	if errors.As(err, &se) && se.exc != nil && isStopIterationException(se.exc) {
+		val := stopIterationExcValue(se.exc)
+		pyerrors.Clear(e.ts)
+		return val, true
 	}
 	if live := pyerrors.Occurred(e.ts); live != nil {
 		if isStopIterationException(live) {
