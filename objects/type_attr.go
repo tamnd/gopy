@@ -500,13 +500,23 @@ func isSlotDunderName(name string) bool {
 
 // refixupSlotDispatchers re-runs fixupSlotDispatchers on t and every
 // subclass that does not override the affected slots, mirroring how
-// update_slot walks the subclass tree.
+// update_slot walks the subclass tree. The visited set guards against
+// the cyclic tp_subclasses graphs that __bases__ assignment can build
+// (e.g. test_descr's tp_subclasses_cycle cases).
 //
 // CPython: Objects/typeobject.c:11455 update_slot (recursion over subclasses)
 func refixupSlotDispatchers(t *Type) {
+	refixupSlotDispatchersVisited(t, map[*Type]bool{})
+}
+
+func refixupSlotDispatchersVisited(t *Type, visited map[*Type]bool) {
+	if visited[t] {
+		return
+	}
+	visited[t] = true
 	fixupSlotDispatchers(t)
 	for _, sub := range t.Subclasses() {
-		refixupSlotDispatchers(sub)
+		refixupSlotDispatchersVisited(sub, visited)
 	}
 }
 

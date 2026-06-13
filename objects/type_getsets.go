@@ -429,7 +429,7 @@ func typeSetBases(o Object, v Object) error {
 	//
 	// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
 	var saved []mroSnapshot
-	if err := mroHierarchy(t, &saved); err != nil {
+	if err := mroHierarchy(t, &saved, map[*Type]bool{}); err != nil {
 		for i := len(saved) - 1; i >= 0; i-- {
 			saved[i].cls.MRO = saved[i].oldMRO
 		}
@@ -463,15 +463,29 @@ type mroSnapshot struct {
 // subclass, appending each (type, old MRO) pair to saved as it goes.
 //
 // CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
-func mroHierarchy(t *Type, saved *[]mroSnapshot) error {
+func mroHierarchy(t *Type, saved *[]mroSnapshot, visited map[*Type]bool) error {
+	if visited[t] {
+		return nil
+	}
+	visited[t] = true
+	old := t.MRO
 	mro, err := c3Linearize(t)
 	if err != nil {
 		return err
 	}
-	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: t.MRO})
 	t.MRO = mro
+	// Honor a metaclass mro() override (mro_invoke). A raising override,
+	// e.g. test_descr's WorkOnce, must propagate; restore this type's MRO
+	// first so the caller's rollback walk does not double-restore it.
+	//
+	// CPython: Objects/typeobject.c:2228 mro_invoke
+	if err := applyMetaclassMRO(t, t.Type()); err != nil {
+		t.MRO = old
+		return err
+	}
+	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old})
 	for _, sub := range t.Subclasses() {
-		if err := mroHierarchy(sub, saved); err != nil {
+		if err := mroHierarchy(sub, saved, visited); err != nil {
 			return err
 		}
 	}
