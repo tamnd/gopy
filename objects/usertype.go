@@ -2116,12 +2116,18 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 //
 // CPython: Objects/typeobject.c:9395 slot_tp_new
 func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	newFn, _ := LookupDescriptor(cls, "__new__")
+	// Bind through getattr so a __new__ defined as a classmethod or
+	// staticmethod is unwrapped by its own __get__ (classmethod yields a
+	// method already bound to cls, which is why C(1) reaches the body as
+	// __new__(cls, cls, 1)). slot_tp_new uses GetAttr for exactly this.
+	//
+	// CPython: Objects/typeobject.c:9395 slot_tp_new
+	newFn, err := GetAttr(cls, NewStr("__new__"))
+	if err != nil {
+		return nil, err
+	}
 	if newFn == nil {
 		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
-	}
-	if sm, ok := newFn.(*StaticMethod); ok {
-		newFn = sm.smCallable
 	}
 	posArgs := make([]Object, 0, len(args)+1)
 	posArgs = append(posArgs, cls)
@@ -2147,12 +2153,16 @@ func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 //
 // CPython: Objects/typeobject.c:9395 slot_tp_new
 func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
-	newFn, _ := LookupDescriptor(cls, "__new__")
+	// Bind through getattr (see slotTpNew) so classmethod/staticmethod
+	// __new__ are unwrapped by their own descriptor protocol.
+	//
+	// CPython: Objects/typeobject.c:9395 slot_tp_new
+	newFn, err := GetAttr(cls, NewStr("__new__"))
+	if err != nil {
+		return nil, err
+	}
 	if newFn == nil {
 		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
-	}
-	if sm, ok := newFn.(*StaticMethod); ok {
-		newFn = sm.smCallable
 	}
 	posArgs := make([]Object, 0, len(args)+1)
 	posArgs = append(posArgs, cls)
