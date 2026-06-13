@@ -739,8 +739,78 @@ func objectSetClass(o Object, value Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
 	}
+	oldType := inst.Type()
+	if !compatibleForAssignment(oldType, newType) {
+		return fmt.Errorf("TypeError: __class__ assignment: '%s' object layout differs from '%s'", newType.Name, oldType.Name)
+	}
 	inst.Header.typ = newType //nolint:staticcheck // QF1008: explicit Header field access mirrors CPython's ob_type layout
 	return nil
+}
+
+// compatibleForAssignment reports whether an instance may have its
+// __class__ switched from oldto to newto. It walks each type up to the
+// most-derived ancestor that still changed its instance layout, then
+// accepts the swap when those two ancestors are the same type or share a
+// base and added the same slots. This guards the member-descriptor
+// offsets so a reassigned instance keeps reading its slots correctly.
+//
+// CPython: Objects/typeobject.c:7155 compatible_for_assignment
+func compatibleForAssignment(oldto, newto *Type) bool {
+	newbase := newto
+	for compatibleWithTpBase(newbase) {
+		b, _ := bestBase(newbase.Bases)
+		if b == nil {
+			break
+		}
+		newbase = b
+	}
+	oldbase := oldto
+	for compatibleWithTpBase(oldbase) {
+		b, _ := bestBase(oldbase.Bases)
+		if b == nil {
+			break
+		}
+		oldbase = b
+	}
+	if newbase == oldbase {
+		return true
+	}
+	nb, _ := bestBase(newbase.Bases)
+	ob, _ := bestBase(oldbase.Bases)
+	return nb == ob && sameSlotsAdded(newbase, oldbase)
+}
+
+// compatibleWithTpBase reports whether child lays its instances out
+// identically to its base: it adds no named slots and introduces no new
+// managed dict or weakref storage. Mirrors the tp_basicsize /
+// tp_dictoffset / tp_weaklistoffset equality test.
+//
+// CPython: Objects/typeobject.c:7136 compatible_with_tp_base
+func compatibleWithTpBase(child *Type) bool {
+	parent, _ := bestBase(child.Bases)
+	if parent == nil {
+		return false
+	}
+	return len(child.Slots) == 0 &&
+		child.HasDict == parent.HasDict &&
+		child.HasWeakref == parent.HasWeakref
+}
+
+// sameSlotsAdded reports whether two types that share a base contribute
+// the same instance-layout extension: identical (already sorted) slot
+// names plus matching managed-dict and weakref additions.
+//
+// CPython: Objects/typeobject.c:7100 same_slots_added
+func sameSlotsAdded(a, b *Type) bool {
+	if len(a.Slots) != len(b.Slots) {
+		return false
+	}
+	for i := range a.Slots {
+		if a.Slots[i] != b.Slots[i] {
+			return false
+		}
+	}
+	return a.HasDict == b.HasDict && a.HasWeakref == b.HasWeakref
 }
 
 // objectGetDict implements object.__dict__ get for HasDict-bearing

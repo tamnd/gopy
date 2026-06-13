@@ -17,6 +17,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 )
@@ -2334,6 +2335,13 @@ func installSlots(t *Type, ns *Dict) error {
 		}
 		resolved = append(resolved, n)
 	}
+	// Sort the mangled slot names before assigning member offsets. The
+	// sorted order makes two classes that declare the same slots (in any
+	// order) lay their instances out identically, which is what lets
+	// __class__ be reassigned between them with the slot values intact.
+	//
+	// CPython: Objects/typeobject.c:4046 type_new_slots_impl (PyList_Sort)
+	sort.Strings(resolved)
 	for i, n := range resolved {
 		SetTypeDescr(t, n, NewMemberDescr(t, n, t.SlotsBase+i))
 	}
