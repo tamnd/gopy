@@ -408,20 +408,9 @@ func typeSetBases(o Object, v Object) error {
 	if tup.Len() == 0 {
 		return fmt.Errorf("TypeError: can only assign non-empty tuple to %s.__bases__", t.Name)
 	}
-	newBases := make([]*Type, 0, tup.Len())
-	for i := 0; i < tup.Len(); i++ {
-		b, ok := tup.Item(i).(*Type)
-		if !ok {
-			return fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
-		}
-		// A base that already has t in its ancestry (or is t itself) would
-		// close an inheritance cycle.
-		//
-		// CPython: Objects/typeobject.c:1823 type_set_bases_unlocked
-		if b == t || IsSubtype(b, t) {
-			return fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
-		}
-		newBases = append(newBases, b)
+	newBases, err := validateNewBases(t, tup)
+	if err != nil {
+		return err
 	}
 	// The new best base must lay its instances out compatibly with the old
 	// one, the same gate object.__class__ assignment uses.
@@ -437,18 +426,47 @@ func typeSetBases(o Object, v Object) error {
 	}
 
 	oldBases := t.Bases
+	oldBasesObj := t.BasesObj
 	t.Bases = newBases
+	// BasesObj is the identity token for reentrancy detection below: a
+	// custom mro() invoked while we recompute the hierarchy may assign
+	// __bases__ again, which overwrites this field with its own tuple.
+	t.BasesObj = tup
 	// Recompute the MRO for t and every transitive subclass, recording the
 	// prior MROs so a C3 conflict deeper in the tree can be rolled back.
 	//
 	// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
 	var saved []mroSnapshot
 	if err := mroHierarchy(t, &saved, map[*Type]bool{}); err != nil {
+		// Roll the MROs back, but skip any type a reentrant assignment
+		// recomputed in the meantime: that newer MRO must survive.
+		//
+		// CPython: Objects/typeobject.c:1895 type_set_bases_unlocked (undo)
 		for i := len(saved) - 1; i >= 0; i-- {
-			saved[i].cls.MRO = saved[i].oldMRO
+			if sameMRO(saved[i].cls.MRO, saved[i].newMRO) {
+				saved[i].cls.MRO = saved[i].oldMRO
+			}
 		}
-		t.Bases = oldBases
+		// Only restore __bases__ if a reentrant assignment has not already
+		// replaced it; otherwise the reentrant result is the live one.
+		//
+		// CPython: Objects/typeobject.c:1912 type_set_bases_unlocked (bail)
+		if t.BasesObj == tup {
+			t.Bases = oldBases
+			t.BasesObj = oldBasesObj
+		}
 		return err
+	}
+	// Take no action if tp_bases was replaced through reentrance: the
+	// reentrant call already moved t between the subclass lists and
+	// updated slots, and redoing it here would re-add t to bases it no
+	// longer has.
+	//
+	// CPython: Objects/typeobject.c:1869 type_set_bases_unlocked
+	//
+	//	(if (lookup_tp_bases(type) == new_bases))
+	if t.BasesObj != tup {
+		return nil
 	}
 	// Move t between the old and new bases' subclass lists, then re-derive
 	// the inherited slots for t and its subclasses.
@@ -465,12 +483,61 @@ func typeSetBases(o Object, v Object) error {
 	return nil
 }
 
+// sameMRO reports whether two MRO slices hold the same types in the same
+// order. type_set_bases_unlocked compares tp_mro by pointer identity to
+// decide whether a reentrant assignment recomputed it; gopy stores the
+// MRO as a fresh slice each pass, so element-wise equality stands in for
+// that identity check.
+func sameMRO(a, b []*Type) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateNewBases converts the assigned __bases__ tuple into a slice of
+// types, rejecting non-type entries and any base that would close an
+// inheritance cycle through t.
+//
+// CPython: Objects/typeobject.c:1812 type_set_bases_unlocked (argument loop)
+func validateNewBases(t *Type, tup *Tuple) ([]*Type, error) {
+	newBases := make([]*Type, 0, tup.Len())
+	for i := 0; i < tup.Len(); i++ {
+		b, ok := tup.Item(i).(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
+		}
+		// A base that already has t in its ancestry (or is t itself) would
+		// close an inheritance cycle.
+		//
+		// CPython: Objects/typeobject.c:1823 type_set_bases_unlocked
+		if b == t || IsSubtype(b, t) {
+			return nil, fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
+		}
+		newBases = append(newBases, b)
+	}
+	return newBases, nil
+}
+
 // mroSnapshot pairs a type with the MRO it had before a __bases__
-// assignment, so the whole hierarchy can be rolled back on a later
-// failure.
+// assignment (oldMRO) and the MRO this pass installed (newMRO), so the
+// whole hierarchy can be rolled back on a later failure. The rollback
+// only restores a type whose MRO is still the one this pass set: a
+// reentrant __bases__ assignment fired from a custom mro() may have
+// recomputed it, and that fresher MRO must survive.
+//
+// CPython: Objects/typeobject.c:1895 type_set_bases_unlocked
+//
+//	(undo loop: "Do not rollback if cls has a newer version of MRO")
 type mroSnapshot struct {
 	cls    *Type
 	oldMRO []*Type
+	newMRO []*Type
 }
 
 // mroHierarchy recomputes t's MRO and then recurses into every direct
@@ -497,7 +564,7 @@ func mroHierarchy(t *Type, saved *[]mroSnapshot, visited map[*Type]bool) error {
 		t.MRO = old
 		return err
 	}
-	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old})
+	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old, newMRO: t.MRO})
 	for _, sub := range t.Subclasses() {
 		if err := mroHierarchy(sub, saved, visited); err != nil {
 			return err
