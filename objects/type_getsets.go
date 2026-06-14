@@ -652,10 +652,20 @@ func typeGetParameters(o Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
+	// __parameters__ hands back a stored tuple, so it must return an owned
+	// reference the way CPython's getset getters do (a dict-entry read goes
+	// through _PyDict_GetItemRef which increfs). Without the Incref the
+	// caller's arg-drop decrefs the pinned tuple toward zero and tuple_dealloc
+	// empties it, so the second cls[...] subscription reads an empty tuple and
+	// raises "is not a generic class".
+	//
+	// CPython: Lib/typing.py:1209 cls.__parameters__ as a counted dict entry
 	if t.TypingParameters != nil {
+		Incref(t.TypingParameters)
 		return t.TypingParameters, nil
 	}
 	if t.TypeParams != nil {
+		Incref(t.TypeParams)
 		return t.TypeParams, nil
 	}
 	return NewTuple(nil), nil

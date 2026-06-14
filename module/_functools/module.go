@@ -1601,6 +1601,11 @@ func infiniteLruCacheWrapper(w *LruCacheWrapper, args []objects.Object, kwDict *
 	w.mu.Lock()
 	if v, err := w.Cache.GetItemKnownHash(key, keyHash); err == nil {
 		w.Hits++
+		// GetItemKnownHash returns a borrowed reference; hand the caller a new
+		// one so a Decref of the returned value cannot drop the cache's entry to
+		// zero and clear it. CPython: _PyDict_GetItemRef_KnownHash returns a new
+		// reference at infinite_lru_cache_wrapper.
+		objects.Incref(v)
 		w.mu.Unlock()
 		return v, nil
 	}
@@ -1612,6 +1617,9 @@ func infiniteLruCacheWrapper(w *LruCacheWrapper, args []objects.Object, kwDict *
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// SetItemKnownHash increfs res for the dict entry; res keeps the reference
+	// returned by callFunc for the caller. CPython: _PyDict_SetItem_KnownHash
+	// then `return result` in infinite_lru_cache_wrapper.
 	if err := w.Cache.SetItemKnownHash(key, res, keyHash); err != nil {
 		return nil, err
 	}
@@ -1652,6 +1660,10 @@ func boundedLruCacheWrapper(w *LruCacheWrapper, args []objects.Object, kwDict *o
 		appendLink(w, link)
 		w.Hits++
 		result := link.result
+		// The node owns the cached result; hand the caller a fresh reference so
+		// its Decref cannot clear the still-cached value. CPython: Py_INCREF on
+		// link->result in bounded_lru_cache_get_lock_held.
+		objects.Incref(result)
 		w.mu.Unlock()
 		return result, nil
 	}
@@ -1679,10 +1691,20 @@ func boundedLruCacheWrapper(w *LruCacheWrapper, args []objects.Object, kwDict *o
 		_ = w.Cache.DelItem(oldest.key)
 	}
 	link := &lruListNode{key: key, result: res}
+	// The node owns a reference to the result, released in lruNodeHolderDealloc
+	// when the entry is evicted or the cache is cleared. res keeps the reference
+	// returned by callFunc for the caller. CPython: link->result = result steals
+	// the call's reference, then `return Py_NewRef(result)`.
+	objects.Incref(res)
 	appendLink(w, link)
-	if err := w.Cache.SetItemKnownHash(key, newLruNodeHolder(link), keyHash); err != nil {
+	holder := newLruNodeHolder(link)
+	if err := w.Cache.SetItemKnownHash(key, holder, keyHash); err != nil {
 		return nil, err
 	}
+	// SetItemKnownHash increfs the holder for the dict entry; drop our creation
+	// reference so the dict owns the sole reference. CPython: Py_DECREF(link)
+	// after _PyDict_SetItem_KnownHash in bounded_lru_cache_update_lock_held.
+	objects.Decref(holder)
 	return res, nil
 }
 
@@ -1719,7 +1741,33 @@ type lruNodeHolder struct {
 	node *lruListNode
 }
 
-var lruNodeHolderType = objects.NewType("_lru_list_elem", []*objects.Type{objects.ObjectType()})
+var lruNodeHolderType = newLruNodeHolderType()
+
+func newLruNodeHolderType() *objects.Type {
+	t := objects.NewType("_lru_list_elem", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_functoolsmodule.c:1094 lru_list_elem_dealloc decrefs
+	// both link->key and link->result. gopy's node owns only the result
+	// reference (Incref'd when the node is created in boundedLruCacheWrapper);
+	// the cache dict entry owns the key, so the node carries a borrowed key
+	// pointer used solely to address the entry on eviction.
+	t.Dealloc = lruNodeHolderDealloc
+	return t
+}
+
+// lruNodeHolderDealloc releases the result reference the cache node owns.
+// Fires when the dict entry holding the wrapper is removed (eviction or
+// cache_clear) and the holder's last reference drops.
+//
+// CPython: Modules/_functoolsmodule.c:1094 lru_list_elem_dealloc
+func lruNodeHolderDealloc(o objects.Object) {
+	h, ok := o.(*lruNodeHolder)
+	if !ok || h.node == nil {
+		return
+	}
+	if h.node.result != nil {
+		objects.Decref(h.node.result)
+	}
+}
 
 // newLruNodeHolder wraps an lru list node so it can live in the cache
 // dict's value slot. The dict does not own the linked list; eviction
