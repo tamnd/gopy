@@ -270,14 +270,27 @@ func gaHash(o Object) (int64, error) {
 }
 
 // gaCall forwards a parameterized class call to its origin: list[int]()
-// builds an empty list, dict[str, int]() builds an empty dict. The
-// runtime drops __orig_class__ tagging since gopy does not yet support
-// per-instance attribute injection on built-ins.
+// builds an empty list, dict[str, int]() builds an empty dict. The result
+// is tagged with __orig_class__ = self so foo[int]().__orig_class__ recovers
+// the alias; failures to set the attribute (built-ins with no __dict__,
+// __slots__ types) are swallowed exactly as CPython swallows AttributeError
+// and TypeError there.
 //
 // CPython: Objects/genericaliasobject.c:637 ga_call
 func gaCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
 	ga := o.(*GenericAlias)
-	return Call(ga.origin, NewTuple(args), kwargsToDict(kwargs))
+	obj, err := Call(ga.origin, NewTuple(args), kwargsToDict(kwargs))
+	if err != nil {
+		return nil, err
+	}
+	// PyObject_SetAttr(obj, "__orig_class__", self); on AttributeError or
+	// TypeError the error is cleared and obj returned untagged.
+	if serr := SetAttr(obj, NewStr("__orig_class__"), o); serr != nil {
+		if !isAttributeError(serr) && !isTypeError(serr) {
+			return nil, serr
+		}
+	}
+	return obj, nil
 }
 
 // kwargsToDict turns a map[string]Object kwargs into a *Dict, or nil

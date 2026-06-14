@@ -30,6 +30,72 @@ func init() {
 	SetTypeDescr(typeType, "mro", NewMethodDescr(typeType, "mro", typeMroMeth))
 	// CPython: Objects/typeobject.c:5862 type___dir___impl
 	SetTypeDescr(typeType, "__dir__", NewMethodDescr(typeType, "__dir__", typeDirMeth))
+	// type.__subclasscheck__ / type.__instancecheck__ run the "real" check
+	// (recursive_issubclass / recursive_isinstance) without re-dispatching
+	// through a metaclass __subclasscheck__, so subclasses like typing's
+	// _ProtocolMeta can delegate to them via super()/type.__subclasscheck__.
+	//
+	// CPython: Objects/typeobject.c:5995 type___subclasscheck___impl
+	// CPython: Objects/typeobject.c:5982 type___instancecheck___impl
+	SetTypeDescr(typeType, "__subclasscheck__", NewMethodDescr(typeType, "__subclasscheck__", typeSubclasscheckMeth))
+	SetTypeDescr(typeType, "__instancecheck__", NewMethodDescr(typeType, "__instancecheck__", typeInstancecheckMeth))
+}
+
+// typeSubclasscheckMeth implements type.__subclasscheck__(cls, subclass):
+// the structural (MRO / __bases__) subclass test, bypassing any metaclass
+// __subclasscheck__ override so it can serve as the base implementation.
+//
+// CPython: Objects/typeobject.c:5995 type___subclasscheck___impl
+//          (_PyObject_RealIsSubclass -> recursive_issubclass)
+func typeSubclasscheckMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __subclasscheck__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	cls, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasscheck__' requires a 'type' object")
+	}
+	ok2, err := realIsSubclass(args[1], cls)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok2), nil
+}
+
+// typeInstancecheckMeth implements type.__instancecheck__(cls, instance):
+// the structural isinstance test (type(instance) is a subclass of cls),
+// bypassing any metaclass __instancecheck__ override.
+//
+// CPython: Objects/typeobject.c:5982 type___instancecheck___impl
+//          (_PyObject_RealIsInstance -> recursive_isinstance)
+func typeInstancecheckMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __instancecheck__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	cls, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__instancecheck__' requires a 'type' object")
+	}
+	ok2, err := realIsSubclass(args[1].Type(), cls)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok2), nil
+}
+
+// realIsSubclass is the metaclass-bypassing subclass test used by
+// type.__subclasscheck__/__instancecheck__: direct PyType_IsSubtype when
+// both operands are real types, otherwise the abstract __bases__ walk.
+//
+// CPython: Objects/abstract.c:2742 recursive_issubclass
+func realIsSubclass(sub Object, cls *Type) (bool, error) {
+	if st, ok := sub.(*Type); ok {
+		return IsSubtype(st, cls), nil
+	}
+	if err := checkClass(sub, "issubclass() arg 1 must be a class"); err != nil {
+		return false, err
+	}
+	return abstractIsSubclass(sub, cls, 1)
 }
 
 // typeDirMeth implements type.__dir__(): the names reachable by merging
