@@ -116,6 +116,15 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		search = paths
 	}
 
+	// PEP 420: a directory matching the tail with no __init__.py and no
+	// flat-file match is a namespace portion. CPython's PathFinder
+	// accumulates portions across every path entry and, only after no
+	// regular module is found anywhere, builds a namespace package whose
+	// __path__ is the collected portions.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:1430 FileFinder.find_spec
+	// (namespace portion path) / Lib/importlib/_bootstrap.py:1167 PathFinder
+	var namespacePortions []string
 	for _, entry := range search {
 		dir := entry
 		if dir == "" {
@@ -144,6 +153,14 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			bindOnParent(parent, tail, mod)
 			return mod, nil
 		}
+		if isDir(pkgDir) {
+			namespacePortions = append(namespacePortions, pkgDir)
+		}
+	}
+	if len(namespacePortions) > 0 {
+		mod := loadAsNamespace(exec, name, parent, namespacePortions)
+		bindOnParent(parent, tail, mod)
+		return mod, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
 }
@@ -274,6 +291,35 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	return mod, nil
 }
 
+// loadAsNamespace builds a PEP 420 namespace package: a module with no
+// __file__, a __path__ spanning every contributing directory, and a
+// namespace __spec__ (loader None, origin None). The body is never
+// executed because a namespace package has no __init__.py.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec (namespace) /
+// Lib/importlib/_bootstrap_external.py:1230 NamespaceLoader
+func loadAsNamespace(exec Executor, name, parent string, portions []string) *objects.Module {
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	items := make([]objects.Object, len(portions))
+	for i, s := range portions {
+		items[i] = objects.NewStr(s)
+	}
+	_ = d.SetItem(objects.NewStr("__path__"), objects.NewList(items))
+	_ = d.SetItem(objects.NewStr("__package__"), objects.NewStr(name))
+	_ = d.SetItem(objects.NewStr("__file__"), objects.None())
+	if _, err := d.GetItem(objects.NewStr("__doc__")); err != nil {
+		_ = d.SetItem(objects.NewStr("__doc__"), objects.None())
+	}
+	_ = parent
+	AddModule(name, mod)
+	attachNamespaceSpec(exec, mod, name, portions)
+	return mod
+}
+
 // loadAsModule is the flat-file equivalent: load source, set
 // __file__ and __package__ (which is the parent dotted name, or ""
 // for top-level), then exec.
@@ -347,6 +393,24 @@ func attachSpecAttrs(exec Executor, mod *objects.Module, name, origin string, se
 	flushPendingSpecs(util)
 }
 
+// attachNamespaceSpec binds a PEP 420 namespace ModuleSpec (loader None,
+// origin None, submodule_search_locations = the portions) onto mod. Like
+// the file path it defers when importlib.util is not importable yet.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec (namespace)
+func attachNamespaceSpec(exec Executor, mod *objects.Module, name string, portions []string) {
+	p := pendingSpec{mod: mod, name: name, search: portions, namespace: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
 // AttachBuiltinSpec gives a built-in (inittab) module the __spec__ /
 // __loader__ surface CPython's BuiltinImporter installs: origin
 // "built-in", no source, no file. It is deferred just like the
@@ -374,11 +438,12 @@ func AttachBuiltinSpec(exec Executor, mod *objects.Module, name string) {
 // pendingSpec records a module whose spec could not be built yet because
 // importlib.util was not importable at the time.
 type pendingSpec struct {
-	mod     *objects.Module
-	name    string
-	origin  string
-	search  []string
-	builtin bool
+	mod       *objects.Module
+	name      string
+	origin    string
+	search    []string
+	builtin   bool
+	namespace bool
 }
 
 var (
@@ -424,6 +489,34 @@ func applySpec(util *objects.Module, p pendingSpec) {
 
 // buildSpec calls the appropriate importlib.util constructor for p.
 func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
+	if p.namespace {
+		// A PEP 420 namespace spec: loader None, origin None, the
+		// portions as submodule_search_locations. machinery.ModuleSpec
+		// is the faithful constructor; util re-exports it.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+		machinery, ok := GetModule("importlib.machinery")
+		if !ok {
+			return nil
+		}
+		ctor, err := machinery.Dict().GetItem(objects.NewStr("ModuleSpec"))
+		if err != nil {
+			return nil
+		}
+		kwargs := objects.NewDict()
+		_ = kwargs.SetItem(objects.NewStr("is_package"), objects.True())
+		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
+		spec, cerr := objects.Call(ctor, args, kwargs)
+		if cerr != nil || spec == objects.None() {
+			return nil
+		}
+		items := make([]objects.Object, len(p.search))
+		for i, s := range p.search {
+			items[i] = objects.NewStr(s)
+		}
+		_ = objects.SetAttr(spec, objects.NewStr("submodule_search_locations"), objects.NewList(items))
+		return spec
+	}
 	if p.builtin {
 		fn, err := util.Dict().GetItem(objects.NewStr("spec_from_loader"))
 		if err != nil {
@@ -507,6 +600,19 @@ func isFile(path string) bool {
 		return false
 	}
 	return info.Mode().IsRegular()
+}
+
+// isDir reports whether path exists and is a directory. It is the gopy
+// stand-in for importlib's _path_isdir helper used by namespace-portion
+// detection.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:153 _path_isdir
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 var (

@@ -209,8 +209,7 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 			//
 			// CPython: Python/import.c:1759 import_name (sets ImportError)
 			if errors.Is(ierr, imp.ErrModuleNotFound) {
-				pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
-					fmt.Sprintf("No module named %q", modname))
+				pyerrors.SetModuleNotFound(e.ts, modname)
 			}
 			return 0, true, ierr
 		}

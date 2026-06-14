@@ -120,6 +120,23 @@ func Init() (*objects.Dict, error) {
 		return nil, err
 	}
 
+	// Import-system state the runtime exposes at the top level. CPython
+	// stamps these in PySys_Create / the import bootstrap; runpy and
+	// pkgutil read them directly. gopy's import is Go-side so the hooks
+	// list and the importer cache stay empty, and bytecode is never
+	// written, but the attributes must exist with the right types.
+	//
+	// CPython: Python/sysmodule.c _PySys_AddObject path_hooks/path_importer_cache
+	if err := setItem(d, "dont_write_bytecode", objects.NewBool(true)); err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "path_hooks", objects.NewList(nil)); err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "path_importer_cache", objects.NewDict()); err != nil {
+		return nil, err
+	}
+
 	return d, nil
 }
 

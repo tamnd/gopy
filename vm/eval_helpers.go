@@ -275,8 +275,7 @@ func (e *evalState) importName(name, fromlist, level objects.Object) objects.Obj
 	mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, lvl)
 	if ierr != nil {
 		if errors.Is(ierr, imp.ErrModuleNotFound) {
-			pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
-				fmt.Sprintf("No module named %q", modname))
+			pyerrors.SetModuleNotFound(e.ts, modname)
 		}
 		e.pendingErr = ierr
 		return nil

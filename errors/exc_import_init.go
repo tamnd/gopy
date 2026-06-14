@@ -21,6 +21,55 @@ func init() {
 	objects.SetTypeDescr(PyExc_ImportError, "__init__",
 		objects.NewMethodDescr(PyExc_ImportError, "__init__", importErrorInit).
 			WithKwParams("ImportError", importErrorKwlist, len(importErrorKwlist)))
+
+	// name / path / name_from are Py_T_OBJECT members on
+	// PyImportErrorObject: reading a member that was never set yields
+	// None rather than raising AttributeError, and writing stores the
+	// value. runpy/importlib both read e.name on a caught ImportError,
+	// so the attribute must always exist.
+	//
+	// CPython: Objects/exceptions.c:1893 ImportError_members
+	for _, name := range importErrorKwlist {
+		field := name
+		objects.SetTypeDescr(PyExc_ImportError, field, objects.NewGetSetDescr(field,
+			func(o objects.Object) (objects.Object, error) { return importErrorMember(o, field) },
+			func(o, v objects.Object) error { return importErrorMemberSet(o, field, v) }))
+	}
+}
+
+// importErrorMember reads an ImportError member from the instance attr
+// dict, returning None when unset to mirror Py_T_OBJECT's NULL->None.
+//
+// CPython: Include/descrobject.h Py_T_OBJECT (member_get NULL -> None)
+func importErrorMember(o objects.Object, field string) (objects.Object, error) {
+	e, ok := o.(*Exception)
+	if !ok {
+		return objects.None(), nil
+	}
+	d := e.AttrDict()
+	if d == nil {
+		return objects.None(), nil
+	}
+	v, err := d.GetItem(objects.NewStr(field))
+	if err != nil || v == nil {
+		return objects.None(), nil
+	}
+	return v, nil
+}
+
+// importErrorMemberSet writes an ImportError member through the
+// instance attr dict, allocating it lazily.
+//
+// CPython: Objects/exceptions.c:1893 ImportError_members (member_set)
+func importErrorMemberSet(o objects.Object, field string, v objects.Object) error {
+	e, ok := o.(*Exception)
+	if !ok {
+		return nil
+	}
+	if v == nil {
+		v = objects.None()
+	}
+	return e.EnsureAttrDict().SetItem(objects.NewStr(field), v)
 }
 
 // importErrorInit ports ImportError_init: it runs BaseException_init over

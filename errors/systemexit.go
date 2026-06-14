@@ -8,6 +8,23 @@ import (
 	"github.com/tamnd/gopy/state"
 )
 
+// unhandledKeyboardInterrupt records that a KeyboardInterrupt reached
+// the top-level print path. Modules/main.c reads the matching runtime
+// flag after Py_RunMain and re-raises SIGINT so the process dies by
+// signal (exit status -SIGINT) rather than a plain non-zero code.
+//
+// CPython: Python/pythonrun.c:625 unhandled_keyboard_interrupt store
+var unhandledKeyboardInterrupt bool
+
+// UnhandledKeyboardInterrupt reports whether a KeyboardInterrupt was
+// surfaced to the top-level handler since the last reset. The CLI
+// entry point consults it to decide whether to exit via SIGINT.
+//
+// CPython: Modules/main.c:786 _PyRuntime.signals.unhandled_keyboard_interrupt
+func UnhandledKeyboardInterrupt() bool {
+	return unhandledKeyboardInterrupt
+}
+
 // HandleSystemExit inspects the current exception. If it is a
 // SystemExit, the exit code is read off the args and the exception
 // is cleared; the caller propagates the code. KeyboardInterrupt is
@@ -26,6 +43,7 @@ func HandleSystemExit(ts *state.Thread) (code int, handled bool) {
 		return 0, false
 	}
 	if Match(exc, PyExc_KeyboardInterrupt) {
+		unhandledKeyboardInterrupt = true
 		return 0, false
 	}
 	if !Match(exc, PyExc_SystemExit) {

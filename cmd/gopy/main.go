@@ -9,14 +9,17 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
 	"strings"
+	"syscall"
 
 	"github.com/tamnd/gopy/build"
 	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/getopt"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/module/gc"
@@ -58,7 +61,32 @@ func mainWithProfile() int {
 			_ = f.Close()
 		}()
 	}
-	return run(os.Args[1:], os.Stdout, os.Stderr)
+	exitcode := run(os.Args[1:], os.Stdout, os.Stderr)
+	// bpo-1054041: if a KeyboardInterrupt went unhandled, exit through
+	// the default SIGINT handler so a calling shell sees the ^C and the
+	// process reports death-by-signal rather than a plain error code.
+	//
+	// CPython: Modules/main.c:786 Py_RunMain (unhandled_keyboard_interrupt)
+	if pyerrors.UnhandledKeyboardInterrupt() {
+		exitcode = exitSigint()
+	}
+	return exitcode
+}
+
+// exitSigint resets SIGINT to its default disposition and delivers it
+// to this process, so an unhandled KeyboardInterrupt terminates the
+// interpreter by signal (exit status -SIGINT / 128+SIGINT).
+//
+// CPython: Modules/main.c:730 exit_sigint
+func exitSigint() int {
+	signal.Reset(syscall.SIGINT)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGINT); err != nil {
+		// Impossible in normal environments; fall back to the code
+		// CPython returns when the signal could not be delivered.
+		return int(syscall.SIGINT) + 128
+	}
+	// Give the signal a moment to be delivered before falling through.
+	select {}
 }
 
 // run drives _PyOS_GetOpt the same way pymain_init walks argv before
@@ -195,6 +223,17 @@ func installPathFinder(scriptPath string) {
 	}
 	if root := findStdlibRoot(); root != "" {
 		paths = append(paths, root)
+		// Pin the resolved root into the environment so any subprocess
+		// this interpreter spawns through sys.executable bootstraps from
+		// the same stdlib, even when it runs in an unrelated cwd (e.g.
+		// subprocess.run(cwd=tmpdir)). CPython's child interpreters
+		// self-locate from the executable's prefix; gopy carries it
+		// explicitly via GOPY_STDLIB.
+		//
+		// CPython: Modules/getpath.py:550 calculate_path (prefix inherited)
+		if os.Getenv("GOPY_STDLIB") == "" {
+			_ = os.Setenv("GOPY_STDLIB", root)
+		}
 	}
 	imp.SetPathFinder(&imp.PathFinder{
 		Paths:    paths,

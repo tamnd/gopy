@@ -630,6 +630,16 @@ func currentImporter(name, pkgname string, level int, _ []string) (objects.Objec
 	exec := &vmExecutor{ts: ts, builtins: b}
 	mod, err := imp.ImportModuleLevel(exec, name, pkgname, level)
 	if err != nil {
+		// A missing module must surface as a ModuleNotFoundError whose
+		// `name` member is the dotted name being imported. runpy reads
+		// exc.name to decide whether to keep searching, so a generic Go
+		// error synthesized without the attribute breaks that contract.
+		//
+		// CPython: Python/import.c:1759 import_name (ModuleNotFoundError, name=)
+		if errors.Is(err, imp.ErrModuleNotFound) {
+			exc := pyerrors.MakeModuleNotFound(name)
+			return nil, objects.NewRaisedError(exc, err.Error())
+		}
 		return nil, err
 	}
 	return mod, nil

@@ -88,14 +88,17 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		executable = execs[0]
 	}
 
-	// args[4]: cwd - string or None
+	// args[4]: cwd - PyUnicode_FSConverter accepts str, bytes, or any
+	// os.PathLike (pathlib.Path), so subprocess.run(cwd=Path(...)) works.
+	//
+	// CPython: Modules/_posixsubprocess.c subprocess_fork_exec ("O&" cwd_obj)
 	cwd := ""
 	if args[4] != nil && args[4] != objects.None() {
-		s, ok := args[4].(*objects.Unicode)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: cwd must be str or None")
+		s, err := fsConvert(args[4])
+		if err != nil {
+			return nil, err
 		}
-		cwd = s.Value()
+		cwd = s
 	}
 
 	// args[5]: env_list - list of "KEY=VALUE" strings or None.
@@ -226,6 +229,27 @@ func objectToString(obj objects.Object) (string, error) {
 	default:
 		return "", fmt.Errorf("expected str, got %s", obj.Type().Name)
 	}
+}
+
+// fsConvert mirrors PyUnicode_FSConverter: it accepts a str, bytes, or
+// any os.PathLike (pathlib.Path) by invoking __fspath__ and recursing.
+//
+// CPython: Modules/posixmodule.c PyUnicode_FSConverter / PyOS_FSPath
+func fsConvert(obj objects.Object) (string, error) {
+	switch v := obj.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	if fspath, err := objects.GetAttr(obj, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return fsConvert(result)
+	}
+	return "", fmt.Errorf("TypeError: cwd must be str or None")
 }
 
 // toIntFd extracts a file descriptor integer from a Python int object.

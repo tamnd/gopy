@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -31,6 +32,7 @@ func buildModule() (*objects.Module, error) {
 		{"has_split_table", hasSplitTable},
 		{"get_static_builtin_types", getStaticBuiltinTypes},
 		{"identify_type_slot_wrappers", identifyTypeSlotWrappers},
+		{"get_recursion_depth", getRecursionDepth},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {
@@ -64,6 +66,24 @@ func buildModule() (*objects.Module, error) {
 	return m, nil
 }
 
+// getRecursionDepth returns the Python recursion depth of the caller,
+// matching tstate->py_recursion_limit - tstate->py_recursion_remaining.
+// gopy tracks depth by the active interpreter-frame chain, so the count
+// of frames from the caller back to the root is the same quantity. The
+// C probe pushes no Python frame, so the caller's frame is the base.
+//
+// CPython: Modules/_testinternalcapi.c:110 get_recursion_depth
+func getRecursionDepth(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if sys.CurrentInterpreterFrameHook == nil {
+		return objects.NewInt(0), nil
+	}
+	depth := int64(0)
+	for f := sys.CurrentInterpreterFrameHook(); f != nil; f = f.FrameBack() {
+		depth++
+	}
+	return objects.NewInt(depth), nil
+}
+
 // hasInlineValues reports whether obj currently keeps its attributes in
 // the type's inline-values array. It mirrors the C probe: the owning type
 // must carry Py_TPFLAGS_INLINE_VALUES and the instance's value array must
@@ -89,7 +109,8 @@ func hasInlineValues(args []objects.Object, _ map[string]objects.Object) (object
 // inheritance across the static type set.
 //
 // CPython: Modules/_testinternalcapi.c:2334 get_static_builtin_types
-//          (Objects/typeobject.c _PyStaticType_GetBuiltins)
+//
+//	(Objects/typeobject.c _PyStaticType_GetBuiltins)
 func getStaticBuiltinTypes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	types := []*objects.Type{
 		objects.ObjectType(), objects.TypeType(),
@@ -112,7 +133,8 @@ func getStaticBuiltinTypes(_ []objects.Object, _ map[string]objects.Object) (obj
 // resolve to a wrapper_descriptor on that type.
 //
 // CPython: Objects/typeobject.c:11494 _PyType_GetSlotWrapperNames
-//          (Objects/typeobject.c:10952 slotdefs)
+//
+//	(Objects/typeobject.c:10952 slotdefs)
 var slotWrapperNames = []string{
 	"__getattribute__", "__getattr__", "__setattr__", "__delattr__",
 	"__repr__", "__hash__", "__call__", "__str__",
@@ -137,7 +159,8 @@ var slotWrapperNames = []string{
 // slotdefs table.
 //
 // CPython: Modules/_testinternalcapi.c:2341 identify_type_slot_wrappers
-//          (Objects/typeobject.c:11494 _PyType_GetSlotWrapperNames)
+//
+//	(Objects/typeobject.c:11494 _PyType_GetSlotWrapperNames)
 func identifyTypeSlotWrappers(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	items := make([]objects.Object, len(slotWrapperNames))
 	for i, n := range slotWrapperNames {

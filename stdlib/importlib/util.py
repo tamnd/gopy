@@ -78,6 +78,15 @@ def _spec_from_search(name, search):
     if search is None:
         return None
     tail = name.rpartition(".")[2]
+    # PEP 420: every directory that matches the tail but lacks a regular
+    # __init__.py / module file contributes a namespace portion. CPython's
+    # PathFinder accumulates these across all path entries and, if no
+    # concrete module is found, returns a namespace spec whose loader is
+    # None and whose search locations are the collected portions.
+    #
+    # CPython: Lib/importlib/_bootstrap_external.py:1496 _fill_cache /
+    # PathFinder._get_spec namespace_path accumulation
+    namespace_portions = []
     for entry in search:
         directory = entry if entry else "."
         pkg_init = os.path.join(directory, tail, "__init__.py")
@@ -90,6 +99,13 @@ def _spec_from_search(name, search):
         if os.path.isfile(mod_file):
             return spec_from_file_location(
                 name, mod_file, loader=_SourceFileLoader(name, mod_file))
+        pkg_dir = os.path.join(directory, tail)
+        if os.path.isdir(pkg_dir):
+            namespace_portions.append(pkg_dir)
+    if namespace_portions:
+        spec = ModuleSpec(name, None, is_package=True)
+        spec.submodule_search_locations = list(namespace_portions)
+        return spec
     return None
 
 

@@ -24,6 +24,30 @@ func SetString(ts *state.Thread, t *objects.Type, msg string) {
 	Set(ts, t, args)
 }
 
+// MakeModuleNotFound builds (without raising) a ModuleNotFoundError
+// instance carrying the `name` member, so a caller that returns it as a
+// Go error preserves the attribute through synthesizeException.
+//
+// CPython: Python/import.c:1759 import_name (ModuleNotFoundError, name=)
+func MakeModuleNotFound(name string) *Exception {
+	msg := "No module named '" + name + "'"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	return exc
+}
+
+// SetModuleNotFound raises ModuleNotFoundError("No module named %r",
+// name=name), stamping the `name` member the import machinery promises
+// on every miss so callers like runpy can read exc.name.
+//
+// CPython: Python/import.c:1759 import_name (ModuleNotFoundError, name=)
+func SetModuleNotFound(ts *state.Thread, name string) {
+	msg := "No module named '" + name + "'"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	Raise(ts, exc)
+}
+
 // Format raises an exception built from a printf-style template.
 // Returns nil so callers can `return errors.Format(ts, ...)`.
 //
