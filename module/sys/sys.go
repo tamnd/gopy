@@ -16,9 +16,11 @@
 package sys
 
 import (
+	"sort"
 	"strconv"
 
 	"github.com/tamnd/gopy/build"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -269,17 +271,41 @@ func implementation() *objects.Namespace {
 	return n
 }
 
-// builtinModuleNames returns the tuple of module names that are
-// compiled into the interpreter. Until 1623 lands the import system
-// the list contains just the modules gopy initializes statically
-// (builtins, sys). The slice grows as 1651 lands more modules.
+// notStaticallyLinked lists modules that gopy keeps in its inittab as a
+// Go-side import shortcut but that CPython ships as pure-Python stdlib
+// (.py files on sys.path), so they never appear in CPython's
+// PyImport_Inittab. They are filtered out of builtin_module_names so
+// that, e.g., 'os' in sys.builtin_module_names stays False as on a
+// normal CPython build.
+var notStaticallyLinked = map[string]bool{
+	"os":          true,
+	"warnings":    true,
+	"dataclasses": true,
+	"difflib":     true,
+	"fnmatch":     true,
+}
+
+// builtinModuleNames returns the sorted tuple of module names compiled
+// into the interpreter. CPython builds this directly from
+// PyImport_Inittab; gopy statically links every extension module into
+// the binary, so the table is the inittab snapshot minus the handful of
+// pure-Python modules gopy registers there only as an import shortcut.
 //
 // CPython: Python/sysmodule.c:3859 list_builtin_module_names
 func builtinModuleNames() *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
-		objects.NewStr("builtins"),
-		objects.NewStr("sys"),
-	})
+	names := make([]string, 0, 64)
+	for _, e := range imp.InittabSnapshot() {
+		if notStaticallyLinked[e.Name] {
+			continue
+		}
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	items := make([]objects.Object, len(names))
+	for i, n := range names {
+		items[i] = objects.NewStr(n)
+	}
+	return objects.NewTuple(items)
 }
 
 // hashInfo is sys.hash_info as a SimpleNamespace. The field order

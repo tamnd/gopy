@@ -22,14 +22,15 @@ func init() {
 		objects.NewMethodDescr(PyExc_ImportError, "__init__", importErrorInit).
 			WithKwParams("ImportError", importErrorKwlist, len(importErrorKwlist)))
 
-	// name / path / name_from are Py_T_OBJECT members on
+	// msg / name / path / name_from are Py_T_OBJECT members on
 	// PyImportErrorObject: reading a member that was never set yields
 	// None rather than raising AttributeError, and writing stores the
 	// value. runpy/importlib both read e.name on a caught ImportError,
-	// so the attribute must always exist.
+	// so the attribute must always exist. msg is set from the single
+	// positional arg by ImportError_init rather than via a keyword.
 	//
-	// CPython: Objects/exceptions.c:1893 ImportError_members
-	for _, name := range importErrorKwlist {
+	// CPython: Objects/exceptions.c:1932 ImportError_members
+	for _, name := range append([]string{"msg"}, importErrorKwlist...) {
 		field := name
 		objects.SetTypeDescr(PyExc_ImportError, field, objects.NewGetSetDescr(field,
 			func(o objects.Object) (objects.Object, error) { return importErrorMember(o, field) },
@@ -95,6 +96,14 @@ func importErrorInit(args []objects.Object, kwargs map[string]objects.Object) (o
 	e, ok := args[0].(*Exception)
 	if !ok {
 		return objects.None(), nil
+	}
+
+	// msg is set from the lone positional argument: PyTuple_GET_SIZE(args)
+	// counts the exception args tuple, which here is args[1:].
+	//
+	// CPython: Objects/exceptions.c:1836 ImportError_init (self->msg)
+	if len(args) == 2 {
+		_ = e.EnsureAttrDict().SetItem(objects.NewStr("msg"), args[1])
 	}
 
 	if len(kwargs) > 0 {
