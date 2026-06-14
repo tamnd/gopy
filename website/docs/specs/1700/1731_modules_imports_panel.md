@@ -29,20 +29,20 @@ tree before porting.
 The panel is the 12 flat files plus the three directory suites. CPython 3.14.5
 runs all of the non-interpreter files green.
 
-| Test | CPython 3.14.5 | gopy baseline (audit 2026-06-14) |
+| Test | CPython 3.14.5 | gopy (audit 2026-06-15) |
 | --- | --- | --- |
-| `test_module/` (dir) | OK | to re-audit |
-| `test_import/` (dir) | OK | to re-audit |
-| `test_importlib/` (dir) | OK | to re-audit |
-| `test_modulefinder` | OK | `ModuleNotFoundError: modulefinder` |
+| `test_module/` (dir) | OK | OK (39 tests) |
+| `test_import/` (dir) | OK | import error: full importlib finders not live |
+| `test_importlib/` (dir) | OK | depends on live finders |
+| `test_modulefinder` | OK | 17 ERROR: `importlib.machinery.PathFinder` missing |
 | `test_pkg` | OK | AssertionError: module `dir()` missing `__cached__`/`__doc__`/`__loader__`/`__spec__` |
-| `test_pkgutil` | OK | `AttributeError: os has no attribute altsep` |
+| `test_pkgutil` | OK | 7 failures, 1 error |
 | `test_pyclbr` | OK | `ModuleNotFoundError: pyclbr` |
 | `test_pkgimport` | (covered by `test_import/`) | no flat file |
-| `test_runpy` | OK | 1 ERROR (`test_run_package_init_exceptions`) |
+| `test_runpy` | OK | 3 ERROR |
 | `test_frozen` | OK | `ModuleNotFoundError: __hello__` (frozen module) |
-| `test_zipimport` | OK | `AttributeError: os has no attribute altsep` |
-| `test_zipimport_support` | OK | `AttributeError: os has no attribute altsep` |
+| `test_zipimport` | OK | **OK (91 tests, 4 skipped)** |
+| `test_zipimport_support` | OK | needs vendored `test.test_doctest` (doctest) |
 | `test_zipapp` | OK | `ModuleNotFoundError: zipapp` |
 | `test__interpchannels` | PEP 554 | deferred (see below) |
 | `test__interpreters` | PEP 554 | deferred (`_interpreters.run_string` missing) |
@@ -66,6 +66,32 @@ CPython 3.14.5 (counts and `-v` lists).
   `test_run_package_init_exceptions`; port the package-init exception path.
 - **P5 — directory suites.** Re-audit `test_import/`, `test_importlib/`,
   `test_module/` against CPython and close residuals.
+- **P7 — live importlib finders (architectural).** gopy dispatches imports
+  Go-side: `sys.meta_path` is empty where CPython has
+  `[BuiltinImporter, FrozenImporter, PathFinder]`, and `importlib.machinery`
+  is a stub that does not re-export `PathFinder` / `FrozenImporter` /
+  `BuiltinImporter`. The Python finder classes in `_bootstrap.py` exist but
+  are not wired into `sys.meta_path`, and `_imp` is missing the functions the
+  full bootstrap drives (`extension_suffixes`, `find_frozen`,
+  `get_frozen_object`, `is_frozen_package`, `create_builtin`, `exec_builtin`,
+  `create_dynamic`, `exec_dynamic`, `_fix_co_filename`). This is the root of
+  the `test_import/`, `test_importlib/`, `test_modulefinder`, and `test_runpy`
+  residuals. Closing it means making the Python finders the real dispatch path
+  (populate `sys.meta_path`, port the `_imp` C functions, vendor the full
+  `_bootstrap_external.py` with `PathFinder`) instead of the Go-side shim.
+  This is a subsystem port on the scale of its own spec.
+
+## Notable fixes
+
+- `func_getattro` now increfs `__dict__` attribute reads
+  (`Objects/funcobject.c` Py_XINCREF). A list stored on a function (mock keeps
+  its `patchings` list this way) was emptied by `list_dealloc` after the first
+  read, so a shared decorator silently stopped patching across test classes.
+  This fixed `test_zipimport.test_checked_hash_based_change_pyc` in the
+  cross-class run.
+- `_testcapi.config_get` / `config_getint` / `config_names` ported over a
+  `PyConfig_Get` spec table (`Python/initconfig.c`), fixing the two
+  `testTraceback` errors.
 - **P6 — interpreters.** `test__interpreters` / `test__interpchannels` are
   PEP 554 subinterpreters. Match CPython's behaviour: if CPython skips on this
   build, gopy skips; otherwise port the `_interpreters` surface the tests reach.
@@ -77,7 +103,10 @@ CPython 3.14.5 (counts and `-v` lists).
 - [ ] P2: vendor `modulefinder`
 - [ ] P2: vendor `pyclbr`
 - [ ] P2: vendor `zipapp`
+- [x] `test_zipimport` green (91 tests): `func_getattro` incref + `config_get` port
+- [x] `test_module/` green (39 tests)
 - [ ] P3: frozen `__hello__` + frozen module table for `test_frozen`
 - [ ] P4: `test_runpy` package-init exception path
 - [ ] P5: re-audit `test_import/`, `test_importlib/`, `test_module/`
+- [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
