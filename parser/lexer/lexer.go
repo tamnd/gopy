@@ -1207,17 +1207,19 @@ func (s *State) scanOperator(c int) Tok {
 		tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 	default:
 		// Non-printable characters get a specific error message; printable
-		// but unrecognized characters (e.g. `$`) return a bare ERRORTOKEN
-		// so the parser's error-recovery rules can produce the contextual
-		// message ("invalid syntax", "f-string: expecting …", etc.).
+		// but unrecognized characters (`$`, `?`, backtick) fall through to
+		// _PyToken_OneChar, whose default arm returns the generic OP token.
+		// The PEG parser then rejects the stray operator with "invalid
+		// syntax", and the standalone tokenize module surfaces it as an OP
+		// token instead of raising.
 		//
-		// CPython: Parser/lexer/lexer.c:1376 (default case in tok_get_normal_mode)
+		// CPython: Parser/lexer/lexer.c:1389 return MAKE_TOKEN(_PyToken_OneChar(c))
 		if !isPrintable(rune(c)) {
 			s.syntaxError("invalid non-printable character U+%04X", c)
+			tok = s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		} else {
-			s.done = eToken
+			tok = s.tokenSetup(oneCharOp(c), s.start, s.cur)
 		}
-		tok = s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 	}
 	if ftCursorValid && c != '{' {
 		s.setFtstringExpr(&tok, byte(c), savedInDebug)

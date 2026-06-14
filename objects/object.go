@@ -43,7 +43,12 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c:7950 object_methods
 	SetTypeDescr(objectType, "__new__", NewBuiltinFunction("object.__new__", objectNewBuiltin))
-	SetTypeDescr(objectType, "__init__", NewMethodDescr(objectType, "__init__", objectInitDescr))
+	// object.__init__ stands in for slot_tp_init's wrapper_descriptor, so
+	// its bound form is a method-wrapper (gopy's BoundMethod), matching
+	// type(object().__init__).
+	//
+	// CPython: Objects/typeobject.c slotdefs tp_init (slot_tp_init)
+	SetTypeDescr(objectType, "__init__", NewMethodDescr(objectType, "__init__", objectInitDescr).AsSlotWrapper())
 	// METH_O / METH_NOARGS rows carry their clinic flag so
 	// methodDescrCheckArity formats the arity TypeError through
 	// _PyObject_FunctionStr, yielding "object.__reduce__() takes no
@@ -79,24 +84,24 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators (slot wrapper for
 	// each non-NULL entry in slotdefs whose slot is tp_repr/tp_str/...)
-	SetTypeDescr(objectType, "__repr__", NewMethodDescr(objectType, "__repr__", objectReprDescr))
-	SetTypeDescr(objectType, "__str__", NewMethodDescr(objectType, "__str__", objectStrDescr))
-	SetTypeDescr(objectType, "__hash__", NewMethodDescr(objectType, "__hash__", objectHashDescr))
-	SetTypeDescr(objectType, "__getattribute__", NewMethodDescr(objectType, "__getattribute__", objectGetattributeDescr))
-	SetTypeDescr(objectType, "__setattr__", NewMethodDescr(objectType, "__setattr__", objectSetattrDescr))
-	SetTypeDescr(objectType, "__delattr__", NewMethodDescr(objectType, "__delattr__", objectDelattrDescr))
+	SetTypeDescr(objectType, "__repr__", NewMethodDescr(objectType, "__repr__", objectReprDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__str__", NewMethodDescr(objectType, "__str__", objectStrDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__hash__", NewMethodDescr(objectType, "__hash__", objectHashDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__getattribute__", NewMethodDescr(objectType, "__getattribute__", objectGetattributeDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__setattr__", NewMethodDescr(objectType, "__setattr__", objectSetattrDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__delattr__", NewMethodDescr(objectType, "__delattr__", objectDelattrDescr).AsSlotWrapper())
 
 	// tp_richcompare slot wrappers: one per operator. object's
 	// richcompare returns NotImplemented for non-EQ/NE and identity
 	// for EQ/NE.
 	//
 	// CPython: Objects/typeobject.c:6950 object_richcompare
-	SetTypeDescr(objectType, "__eq__", NewMethodDescr(objectType, "__eq__", richCompareDescr(CompareEQ)))
-	SetTypeDescr(objectType, "__ne__", NewMethodDescr(objectType, "__ne__", richCompareDescr(CompareNE)))
-	SetTypeDescr(objectType, "__lt__", NewMethodDescr(objectType, "__lt__", richCompareDescr(CompareLT)))
-	SetTypeDescr(objectType, "__le__", NewMethodDescr(objectType, "__le__", richCompareDescr(CompareLE)))
-	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__", richCompareDescr(CompareGT)))
-	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__", richCompareDescr(CompareGE)))
+	SetTypeDescr(objectType, "__eq__", NewMethodDescr(objectType, "__eq__", richCompareDescr(CompareEQ)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__ne__", NewMethodDescr(objectType, "__ne__", richCompareDescr(CompareNE)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__lt__", NewMethodDescr(objectType, "__lt__", richCompareDescr(CompareLT)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__le__", NewMethodDescr(objectType, "__le__", richCompareDescr(CompareLE)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__", richCompareDescr(CompareGT)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__", richCompareDescr(CompareGE)).AsSlotWrapper())
 
 	// __dict__ getset is installed by subtype_dict in CPython only on the
 	// type that first introduces a managed dict (tp_dictoffset != 0), not
@@ -596,7 +601,7 @@ func BindRichCmpDescriptors(t *Type) {
 				}
 				return rcmp(args[0], args[1], op)
 			},
-		))
+		).AsSlotWrapper())
 	}
 }
 

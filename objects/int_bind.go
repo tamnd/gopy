@@ -59,9 +59,40 @@ func init() {
 	SetTypeDescr(IntType, "numerator", NewGetSetDescr("numerator", intRealGetter, nil))
 	SetTypeDescr(IntType, "denominator", NewGetSetDescr("denominator", intDenominatorGetter, nil))
 
-	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
-		NewBuiltinFunction("from_bytes", intFromBytesMethod),
-	))
+	// int.from_bytes is METH_CLASS, so its type-level descriptor is a
+	// classmethod_descriptor (PyClassMethodDescr_Type). Binding it yields
+	// a builtin_function_or_method whose m_self is the class, matching
+	// int.__dict__['from_bytes'] being a classmethod_descriptor and
+	// int.from_bytes being a builtin method.
+	//
+	// CPython: Objects/longobject.c:6500 int_methods (from_bytes METH_CLASS)
+	SetTypeDescr(IntType, "from_bytes", NewClassMethodDescr(IntType, &MethodDef{
+		Name:  "from_bytes",
+		Flags: MethVarargs | MethKeywords | MethClass,
+		VarargsKw: func(self Object, args *Tuple, kwargs *Dict) (Object, error) {
+			full := make([]Object, 0, args.Len()+1)
+			full = append(full, self)
+			for i := 0; i < args.Len(); i++ {
+				full = append(full, args.Item(i))
+			}
+			var kw map[string]Object
+			if kwargs != nil && kwargs.Len() > 0 {
+				kw = make(map[string]Object, kwargs.Len())
+				for _, k := range kwargs.Keys() {
+					ks, err := Str(k)
+					if err != nil {
+						return nil, err
+					}
+					v, err := kwargs.GetItem(k)
+					if err != nil {
+						return nil, err
+					}
+					kw[ks] = v
+				}
+			}
+			return intFromBytesMethod(full, kw)
+		},
+	}))
 }
 
 // intRoundMethod implements int.__round__(ndigits=None). Rounding an

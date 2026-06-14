@@ -28,15 +28,15 @@ func addDescriptorSlotWrappers(t *Type) {
 	}
 	if t.DescrGet != nil {
 		if _, exists := typeDescrTable[t]["__get__"]; !exists {
-			SetTypeDescr(t, "__get__", NewMethodDescr(t, "__get__", makeWrapDescrGet(t)))
+			SetTypeDescr(t, "__get__", NewMethodDescr(t, "__get__", makeWrapDescrGet(t)).AsSlotWrapper())
 		}
 	}
 	if t.DescrSet != nil {
 		if _, exists := typeDescrTable[t]["__set__"]; !exists {
-			SetTypeDescr(t, "__set__", NewMethodDescr(t, "__set__", makeWrapDescrSet(t)))
+			SetTypeDescr(t, "__set__", NewMethodDescr(t, "__set__", makeWrapDescrSet(t)).AsSlotWrapper())
 		}
 		if _, exists := typeDescrTable[t]["__delete__"]; !exists {
-			SetTypeDescr(t, "__delete__", NewMethodDescr(t, "__delete__", makeWrapDescrDelete(t)))
+			SetTypeDescr(t, "__delete__", NewMethodDescr(t, "__delete__", makeWrapDescrDelete(t)).AsSlotWrapper())
 		}
 	}
 }
@@ -128,12 +128,12 @@ func AddIterSlotWrappers(t *Type) {
 	}
 	if t.Iter != nil {
 		if _, exists := typeDescrTable[t]["__iter__"]; !exists {
-			SetTypeDescr(t, "__iter__", NewMethodDescr(t, "__iter__", makeWrapIter(t)))
+			SetTypeDescr(t, "__iter__", NewMethodDescr(t, "__iter__", makeWrapIter(t)).AsSlotWrapper())
 		}
 	}
 	if t.IterNext != nil {
 		if _, exists := typeDescrTable[t]["__next__"]; !exists {
-			d := NewMethodDescr(t, "__next__", makeWrapIterNext(t))
+			d := NewMethodDescr(t, "__next__", makeWrapIterNext(t)).AsSlotWrapper()
 			// CPython: Objects/typeobject.c slotdefs tp_iternext wrapper doc
 			d.doc = "Implement next(self)."
 			SetTypeDescr(t, "__next__", d)
@@ -192,7 +192,7 @@ func AddCallSlotWrapper(t *Type) {
 	if _, exists := typeDescrTable[t]["__call__"]; exists {
 		return
 	}
-	SetTypeDescr(t, "__call__", NewMethodDescr(t, "__call__", makeWrapCall(t)))
+	SetTypeDescr(t, "__call__", NewMethodDescr(t, "__call__", makeWrapCall(t)).AsSlotWrapper())
 }
 
 // makeWrapCall returns the (self, *args, **kwargs) wrapper for the callable

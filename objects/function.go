@@ -266,7 +266,13 @@ func registerFunctionIdentityGetSets() {
 //
 // CPython: Objects/funcobject.c:633 func_memberlist
 func registerFunctionReadOnlyGetSets() {
-	SetTypeDescr(FunctionType, "__closure__", NewGetSetDescr("__closure__",
+	// func_memberlist rows are PyMemberDef entries (T_OBJECT), so these
+	// surface as member_descriptor, not getset_descriptor. types.py derives
+	// MemberDescriptorType from type(FunctionType.__globals__); registering
+	// them as getsets reported getset_descriptor and broke that identity.
+	//
+	// CPython: Objects/funcobject.c:633 func_memberlist
+	SetTypeDescr(FunctionType, "__closure__", NewBuiltinMember(FunctionType, "__closure__", "",
 		func(o Object) (Object, error) {
 			f := o.(*Function)
 			if f.Closure == nil {
@@ -285,10 +291,10 @@ func registerFunctionReadOnlyGetSets() {
 			return f.Closure, nil
 		},
 		nil))
-	SetTypeDescr(FunctionType, "__globals__", NewGetSetDescr("__globals__",
+	SetTypeDescr(FunctionType, "__globals__", NewBuiltinMember(FunctionType, "__globals__", "",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Globals), nil },
 		nil))
-	SetTypeDescr(FunctionType, "__builtins__", NewGetSetDescr("__builtins__",
+	SetTypeDescr(FunctionType, "__builtins__", NewBuiltinMember(FunctionType, "__builtins__", "",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Builtins), nil },
 		nil))
 }

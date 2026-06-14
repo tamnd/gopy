@@ -80,12 +80,11 @@ func buildModule() (*objects.Module, error) {
 		//
 		// CPython: Modules/_typesmodule.c MethodWrapperType (_PyMethodWrapper_Type)
 		{"MethodWrapperType", objects.BoundMethodType},
-		// classmethod_descriptor isn't a distinct type in gopy; the
-		// classmethod object itself is what dict.__dict__['fromkeys']
-		// returns. Alias keeps types.ClassMethodDescriptorType resolvable.
+		// classmethod_descriptor is the type of dict.__dict__['fromkeys'],
+		// distinct from the classmethod wrapper produced by @classmethod.
 		//
 		// CPython: Modules/_typesmodule.c ClassMethodDescriptorType (PyClassMethodDescr_Type)
-		{"ClassMethodDescriptorType", objects.ClassMethodType},
+		{"ClassMethodDescriptorType", objects.ClassMethodDescrType},
 		// CPython: Modules/_typesmodule.c:42 ModuleType
 		{"ModuleType", objects.ModuleType},
 		// CPython: Modules/_typesmodule.c:43 NoneType

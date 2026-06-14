@@ -101,7 +101,13 @@ func init() {
 	// hide the "needs a type, not '...', as arg 2" error.
 	//
 	// CPython: Objects/descrobject.c:230 method_get
-	SetTypeDescr(MethodDescrType, "__get__", NewMethodDescr(MethodDescrType, "__get__", methodDescrDunderGet))
+	// method_get carries the Argument Clinic signature "($self, instance,
+	// owner=None, /)"; inspect strips the bound $self, leaving
+	// (instance, owner=None) so inspect.signature(x.__get__) resolves.
+	//
+	// CPython: Objects/descrobject.c:230 method_get (descr_get clinic input)
+	SetTypeDescr(MethodDescrType, "__get__", NewMethodDescr(MethodDescrType, "__get__", methodDescrDunderGet).
+		WithTextSignature("($self, instance, owner=None, /)"))
 	addDescriptorSlotWrappers(MethodDescrType)
 	AddCallSlotWrapper(MethodDescrType)
 	addDescrIntrospectionDescriptors(MethodDescrType)
