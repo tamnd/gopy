@@ -211,7 +211,16 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 			// the import-machinery contract.
 			//
 			// CPython: Python/import.c:1759 import_name (sets ImportError)
-			if errors.Is(ierr, imp.ErrModuleNotFound) {
+			//
+			// A failure raised while executing the module body (the imported
+			// module itself ran a failing `import`, etc.) already left the
+			// real exception on the thread state with its own traceback, so
+			// re-synthesizing here would discard it and the inner frame it
+			// points at. Only synthesize for a genuine lookup miss.
+			//
+			// CPython: Python/import.c:1759 import_name only sets the error
+			// when PyImport_ImportModuleLevelObject returns NULL without one.
+			if errors.Is(ierr, imp.ErrModuleNotFound) && !errors.Is(ierr, imp.ErrModuleExecFailed) {
 				pyerrors.SetModuleNotFound(e.ts, modname)
 			}
 			return 0, true, ierr

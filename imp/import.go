@@ -18,6 +18,14 @@ import (
 // ErrModuleNotFound is returned when no finder can locate the named module.
 var ErrModuleNotFound = fmt.Errorf("imp: ModuleNotFoundError")
 
+// ErrModuleExecFailed tags a load failure that happened while executing a
+// located module's body (rather than failing to locate it). The real Python
+// exception is already live on the thread state with its own traceback, so
+// the import opcode must propagate it instead of synthesizing a fresh
+// ModuleNotFoundError. A nested `import missing` inside the body wraps
+// ErrModuleNotFound, so callers check this sentinel first.
+var ErrModuleExecFailed = fmt.Errorf("imp: module body raised")
+
 // ImportModule performs an absolute import of name. It is the
 // zero-level convenience wrapper around ImportModuleLevel.
 //

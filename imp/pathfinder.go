@@ -19,6 +19,7 @@
 package imp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -107,6 +108,16 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			// CPython: Lib/importlib/_bootstrap.py:1227 _find_and_load
 			pm, err := ImportModuleLevel(exec, parent, "", 0)
 			if err != nil {
+				// A parent that was located but raised while executing its
+				// __init__ must surface that exception verbatim (CPython
+				// propagates it from _find_and_load), so do not relabel it
+				// as a finder miss. Only a genuine parent-not-found is a
+				// miss the child lookup can recover from.
+				//
+				// CPython: Lib/importlib/_bootstrap.py:1227 _find_and_load
+				if errors.Is(err, ErrModuleExecFailed) || !errors.Is(err, ErrModuleNotFound) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("%w: parent package %q: %w", errFinderMiss, parent, err)
 			}
 			parentMod = pm
@@ -401,7 +412,7 @@ func loadFromSpec(exec Executor, name string, spec objects.Object) (*objects.Mod
 	}
 	if _, err := objects.Call(execMod, objects.NewTuple([]objects.Object{module}), nil); err != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadFromSpec %q: exec_module: %w", name, err)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: exec_module: %w: %w", name, err, ErrModuleExecFailed)
 	}
 	// exec_module may reassign sys.modules[name]; re-read it the way
 	// CPython's _load_unlocked returns sys.modules[spec.name].
@@ -534,7 +545,7 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	setSpecInitializing(mod, false)
 	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, execErr)
+		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so an `__init__.py` that reassigns its own entry
@@ -579,7 +590,7 @@ func loadAsPackageBytecode(exec Executor, initFile, pkgDir, name string) (*objec
 	setSpecInitializing(mod, false)
 	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w", name, execErr)
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
 	if final, ok := GetModule(name); ok {
 		return final, nil
@@ -614,7 +625,7 @@ func loadAsModuleBytecode(exec Executor, file, name, parent string) (*objects.Mo
 	setSpecInitializing(mod, false)
 	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w", name, execErr)
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
 	if final, ok := GetModule(name); ok {
 		return final, nil
@@ -706,7 +717,7 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	setSpecInitializing(mod, false)
 	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, execErr)
+		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so a module body that reassigns its own entry
