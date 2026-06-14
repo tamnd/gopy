@@ -59,5 +59,11 @@ func typeRepr(o Object) (string, error) {
 	if mod == "" || mod == "builtins" {
 		return "<class '" + t.Name + "'>", nil
 	}
-	return "<class '" + mod + "." + t.Name + "'>", nil
+	// CPython formats the qualified branch with tp_qualname, not tp_name,
+	// so nested/local classes render their full dotted __qualname__.
+	qual := t.Name
+	if t.IsUser && t.Qualname != "" {
+		qual = t.Qualname
+	}
+	return "<class '" + mod + "." + qual + "'>", nil
 }

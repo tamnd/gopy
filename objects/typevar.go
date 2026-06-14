@@ -268,8 +268,41 @@ func constEvaluatorString(value Object) (Object, error) {
 var GenericType = NewType("typing.Generic", []*Type{objectType})
 
 func init() {
+	// typing.Generic is a plain Python class in CPython (typing.py), so it
+	// inherits object.__new__ and its concrete subclasses are instantiable.
+	// gopy models Generic as a native type; without an explicit tp_new the
+	// staticbase walk in objectNewBuiltin treats it as DISALLOW_INSTANTIATION
+	// and refuses object.__new__(C) for any C(Generic[...]) subclass. Wiring
+	// objectNew restores the inherited-slot semantics.
+	//
+	// CPython: Objects/typevarobject.c PyGeneric_Type (no tp_new -> object_new)
+	GenericType.TpNew = objectNew
+	// generic_spec is built with PyType_FromSpec, so Generic carries
+	// Py_TPFLAGS_HEAPTYPE in CPython. copyreg._reduce_ex walks an object's
+	// MRO and stops at the first base whose HEAPTYPE bit is clear; without
+	// the bit it would stop at Generic and try Generic(self), which raises
+	// "typing.Generic() takes no arguments". Stamp the bit so the walk falls
+	// through Generic to object and pickles via state=None.
+	//
+	// CPython: Objects/typevarobject.c:2331 generic_spec (Py_TPFLAGS_DEFAULT
+	// | Py_TPFLAGS_BASETYPE, heap-allocated via PyType_FromSpec)
+	GenericType.TpFlags |= TpFlagHeapType
+
+	// CPython: Objects/typevarobject.c typevar_repr. infer_variance TypeVars
+	// drop the prefix; covariant uses '+', contravariant '-', invariant '~'.
 	TypeVarType.Repr = func(o Object) (string, error) {
-		return "~" + o.(*TypeVar).NameStr, nil
+		tv := o.(*TypeVar)
+		if tv.InferVariance {
+			return tv.NameStr, nil
+		}
+		switch {
+		case tv.Covariant:
+			return "+" + tv.NameStr, nil
+		case tv.Contravariant:
+			return "-" + tv.NameStr, nil
+		default:
+			return "~" + tv.NameStr, nil
+		}
 	}
 	TypeVarType.Str = TypeVarType.Repr
 	// CPython: Objects/typevarobject.c:687 typevar_tp_hash (id-based)
