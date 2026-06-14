@@ -318,6 +318,14 @@ func registerFunctionMutableGetSets() {
 			if f.Defaults == nil {
 				return None(), nil
 			}
+			// func_get_defaults returns Py_XNewRef(defaults): the member
+			// is a borrowed reference, so without the Incref a consuming
+			// call (e.g. print(f.__defaults__)) decrefs the shared tuple
+			// to zero and frees the code constant out from under the
+			// function.
+			//
+			// CPython: Objects/funcobject.c:752 func_get_defaults (Py_XNewRef)
+			Incref(f.Defaults)
 			return f.Defaults, nil
 		},
 		funcSetDefaultsAttr))
@@ -327,6 +335,12 @@ func registerFunctionMutableGetSets() {
 			if f.KwDefaults == nil {
 				return None(), nil
 			}
+			// func_get_kwdefaults returns Py_XNewRef(kwdefaults): the
+			// borrowed member must be incref'd or a consuming call frees
+			// the shared dict.
+			//
+			// CPython: Objects/funcobject.c:802 func_get_kwdefaults (Py_XNewRef)
+			Incref(f.KwDefaults)
 			return f.KwDefaults, nil
 		},
 		funcSetKwDefaultsAttr))
@@ -386,14 +400,30 @@ func funcSetCodeAttr(o Object, v Object) error {
 func funcSetDefaultsAttr(o Object, v Object) error {
 	f := o.(*Function)
 	if v == nil || v == None() {
+		old := f.Defaults
 		f.SetDefaults(nil)
+		if old != nil {
+			Decref(old)
+		}
 		return nil
 	}
 	t, ok := v.(*Tuple)
 	if !ok {
 		return fmt.Errorf("TypeError: __defaults__ must be set to a tuple object")
 	}
+	// func_set_defaults uses Py_XSETREF: the function takes its own
+	// reference to the new tuple and drops the old. Without the Incref
+	// the caller's reference (e.g. a local that is dropped when its
+	// frame pops) is the only one keeping the tuple alive, so it is
+	// freed out from under the function.
+	//
+	// CPython: Objects/funcobject.c:784 func_set_defaults (Py_XSETREF)
+	Incref(t)
+	old := f.Defaults
 	f.SetDefaults(t)
+	if old != nil {
+		Decref(old)
+	}
 	return nil
 }
 
@@ -404,14 +434,27 @@ func funcSetDefaultsAttr(o Object, v Object) error {
 func funcSetKwDefaultsAttr(o Object, v Object) error {
 	f := o.(*Function)
 	if v == nil || v == None() {
+		old := f.KwDefaults
 		f.SetKwDefaults(nil)
+		if old != nil {
+			Decref(old)
+		}
 		return nil
 	}
 	d, ok := v.(*Dict)
 	if !ok {
 		return fmt.Errorf("TypeError: __kwdefaults__ must be set to a dict object")
 	}
+	// func_set_kwdefaults uses Py_XSETREF, same ownership rule as
+	// __defaults__.
+	//
+	// CPython: Objects/funcobject.c:826 func_set_kwdefaults (Py_XSETREF)
+	Incref(d)
+	old := f.KwDefaults
 	f.SetKwDefaults(d)
+	if old != nil {
+		Decref(old)
+	}
 	return nil
 }
 
