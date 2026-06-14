@@ -149,12 +149,23 @@ func baseExceptionAddNote(args []objects.Object, _ map[string]objects.Object) (o
 // CPython: Objects/exceptions.c:298 BaseException_add_note_impl (read path)
 func notesGet(owner objects.Object) (objects.Object, error) {
 	e := owner.(*Exception)
+	// getset readers return a new reference, mirroring tp_getset's
+	// Py_INCREF(self->...). Without it the borrowed list reaches refcount
+	// zero when the VM decrefs a transient (e.g. the argument of
+	// len(exc.__notes__)) and listDealloc empties it in place, so a second
+	// read sees an empty list.
+	//
+	// CPython: Objects/exceptions.c:298 BaseException_add_note_impl (the
+	// stored list is handed back through the generic getattr, which holds
+	// its own reference)
 	if e.NotesObj != nil {
+		objects.Incref(e.NotesObj)
 		return e.NotesObj, nil
 	}
 	if e.Notes == nil {
 		return nil, errors.New("AttributeError: __notes__")
 	}
+	objects.Incref(e.Notes)
 	return e.Notes, nil
 }
 
