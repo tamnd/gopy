@@ -28,13 +28,17 @@ type UnionType struct {
 	parameters     *Tuple
 }
 
-// UnionTypeType is the type singleton for types.UnionType. Mirrors
-// _PyUnion_Type.
+// UnionTypeType is the type singleton for types.UnionType, which in 3.14 is
+// the same object as typing.Union and carries tp_name "typing.Union".
 //
-// CPython: Objects/unionobject.c:524 _PyUnion_Type
-var UnionTypeType = NewType("types.UnionType", []*Type{objectType})
+// CPython: Objects/unionobject.c:526 _PyUnion_Type (.tp_name = "typing.Union")
+var UnionTypeType = NewType("typing.Union", []*Type{objectType})
 
 func init() {
+	// Built from Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC only, so it omits
+	// Py_TPFLAGS_BASETYPE: class C(int | str) / class C(Union) is rejected.
+	// CPython: Objects/unionobject.c:534 _PyUnion_Type .tp_flags
+	UnionTypeType.TpFlags &^= TpFlagBasetype
 	UnionTypeType.Repr = unionRepr
 	UnionTypeType.Str = unionRepr
 	UnionTypeType.Hash = unionHash

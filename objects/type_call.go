@@ -524,8 +524,18 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	if cls.TpNew != nil {
 		return typeCallViaTpNewWithDict(cls, args, kwargs)
 	}
+	// Some builtin types (contextvars.Context/ContextVar/Token, the io
+	// classes) expose construction through their tp_call slot rather than a
+	// dedicated tp_new. Route the type call there, but only when cls.Call is
+	// genuinely the constructor: a type that defines a __call__ instance
+	// descriptor uses cls.Call as its *instance* tp_call (e.g. the keyobject
+	// returned by functools.cmp_to_key), so calling the type itself must not
+	// reuse that slot. Such a type has no tp_new and falls through to the
+	// "cannot create instances directly" error, matching CPython tp_new=0.
 	if cls.Call != nil && !cls.IsUser {
-		return cls.Call(callable, args, kwmap)
+		if d, _ := LookupDescriptor(cls, "__call__"); d == nil {
+			return cls.Call(callable, args, kwmap)
+		}
 	}
 	if !cls.IsUser {
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
