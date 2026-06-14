@@ -174,6 +174,13 @@ import (
 	// CPython: Modules/_testcapi/vectorcall.c:1 vectorcall fixtures
 	_ "github.com/tamnd/gopy/module/_testcapi"
 
+	// Built-in module: _testmultiphase. Registers itself via
+	// module/_testmultiphase/module.go init(). Reproduces the PEP 489
+	// multi-phase init extension's main module so test.test_importlib.util
+	// imports instead of raising SkipTest.
+	// CPython: Modules/_testmultiphase.c:447 PyInit__testmultiphase
+	_ "github.com/tamnd/gopy/module/_testmultiphase"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.

@@ -13,6 +13,12 @@ CPython: Lib/importlib/__init__.py
 
 from . import machinery  # bind importlib.machinery attribute eagerly
 
+# CPython re-exports the bootstrap __import__ here (Lib/importlib/__init__.py
+# `from ._bootstrap import __import__`). gopy's bootstrap lives Go-side and
+# is what builtins.__import__ already points at, so re-export that to keep
+# the public `importlib.__import__` surface.
+from builtins import __import__
+
 __all__ = ['import_module', 'invalidate_caches', 'machinery', 'reload']
 
 
