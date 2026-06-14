@@ -1136,14 +1136,25 @@ func init() {
 //
 // CPython: Objects/typevarobject.c:687 typevar_new_impl
 func typevarTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	if len(args) < 1 {
+	// name is the first positional argument but Argument Clinic also
+	// accepts it as a keyword (TypeVar(name="T")).
+	//
+	// CPython: Objects/typevarobject.c:687 typevar_new_impl (Clinic signature)
+	var nameArg Object
+	var constraints []Object
+	if len(args) >= 1 {
+		nameArg = args[0]
+		constraints = args[1:]
+	} else if v, ok := kwargs["name"]; ok {
+		nameArg = v
+		delete(kwargs, "name")
+	} else {
 		return nil, fmt.Errorf("TypeError: TypeVar() missing required argument: 'name'")
 	}
-	nameObj, ok := args[0].(*Unicode)
+	nameObj, ok := nameArg.(*Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: TypeVar() argument 'name' must be str")
 	}
-	constraints := args[1:]
 	var bound Object
 	var defaultVal Object
 	hasDefault := false
@@ -1186,6 +1197,18 @@ func typevarTpNew(_ *Type, args []Object, kwargs map[string]Object) (Object, err
 			return nil, fmt.Errorf("TypeError: Constraints cannot be combined with bound=...")
 		}
 		constraintsTup = NewTuple(constraints)
+	}
+	// A non-None bound is run through typing._type_check, which rejects
+	// non-type objects (bare special forms, tuples, ...) with
+	// "Bound must be a type. Got <repr>.".
+	//
+	// CPython: Objects/typevarobject.c:712 typevar_new_impl (_Py_typevar_check_bound)
+	if bound != nil {
+		checked, err := callTypingFunc("_type_check", bound, NewStr("Bound must be a type."))
+		if err != nil {
+			return nil, err
+		}
+		bound = checked
 	}
 	tv := NewTypeVar(nameObj.Value(), bound, constraintsTup)
 	if hasDefault {
