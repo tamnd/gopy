@@ -83,7 +83,7 @@ type MethodDescr struct {
 // CPython: Objects/descrobject.c:1471 PyWrapperDescr_Type
 func (d *MethodDescr) AsSlotWrapper() *MethodDescr {
 	d.slotWrapper = true
-	d.Header.typ = WrapperDescrType
+	d.typ = WrapperDescrType
 	return d
 }
 
