@@ -56,6 +56,25 @@ type MethodDescr struct {
 	kwParams     []string
 	kwFname      string
 	kwCountLimit int
+
+	// slotWrapper marks a descriptor that stands in for a CPython
+	// slot_wrapper (wrapper_descriptor) rather than a PyMethodDef
+	// method_descriptor. gopy collapses several tp-slot dunders
+	// (object.__init__, the descr_get/set/iter/call wrappers) onto
+	// MethodDescr; binding such a descriptor must yield a method-wrapper
+	// (gopy's BoundMethod), not a PyCMethod, so type(object().__init__)
+	// stays a "method" the way CPython reports "method-wrapper".
+	//
+	// CPython: Objects/descrobject.c:451 wrapperdescr_get (method-wrapper)
+	slotWrapper bool
+}
+
+// AsSlotWrapper marks the descriptor as a slot_wrapper stand-in so its
+// bound form is a method-wrapper rather than a PyCMethod. Returns the
+// receiver for chaining at registration time.
+func (d *MethodDescr) AsSlotWrapper() *MethodDescr {
+	d.slotWrapper = true
+	return d
 }
 
 // MethodDescrType is the type singleton for method descriptors.
@@ -208,7 +227,56 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if !IsSubtype(owner.Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, owner.Type().Name)
 	}
-	return NewBoundMethod(descr, owner), nil
+	// A slot_wrapper stand-in binds to a method-wrapper (BoundMethod);
+	// only a genuine method_descriptor mints a PyCMethod.
+	if d.slotWrapper {
+		return NewBoundMethod(descr, owner), nil
+	}
+	return newBoundCMethod(d, owner), nil
+}
+
+// newBoundCMethod binds a method descriptor to an instance the way
+// method_get does: PyCMethod_New produces a builtin_function_or_method
+// whose m_self is the receiver, not a separate bound-method object. So
+// `[].append` is a builtin_function_or_method, type([].append) is that
+// type, and repr reads "<built-in method append of list object at ...>".
+// The Fn closure prepends the receiver and runs the descriptor's own
+// call machinery (subtype + arity checks, then ml_meth), mirroring
+// cfunction_call dispatching ml_meth(m_self, args).
+//
+// CPython: Objects/descrobject.c:230 method_get (PyCMethod_New)
+// CPython: Objects/methodobject.c:544 cfunction_call
+func newBoundCMethod(d *MethodDescr, self Object) *BuiltinFunction {
+	// PyCMethod_New keeps its own reference to m_self; without the Incref
+	// a bound method off a temporary ([].append, sorted(x).pop) sees its
+	// receiver decref'd to zero by the LOAD_ATTR owner-release before the
+	// call runs.
+	//
+	// CPython: Objects/classobject.c PyCMethod_New (Py_XNewRef(self))
+	Incref(self)
+	bf := &BuiltinFunction{
+		Name:     d.name,
+		Conv:     d.conv,
+		Self:     self,
+		ownsSelf: true,
+		Doc:      d.doc,
+		// boundDescr drives the order-preserving vectorcall path
+		// (builtinFunctionVectorcall forwards kwnames straight to
+		// methodDescrVectorcall). The Fn closure is the slow tp_call
+		// fallback: a Go map has already lost keyword order by the time it
+		// arrives, but CALL_KW always routes through vectorcall, so the
+		// order-sensitive callers never reach here.
+		boundDescr: d,
+		Fn: func(args []Object, kwargs map[string]Object) (Object, error) {
+			full := make([]Object, 0, len(args)+1)
+			full = append(full, self)
+			full = append(full, args...)
+			return methodDescrCall(d, full, kwargs)
+		},
+	}
+	bf.TextSignature = d.textSig
+	bf.init(BuiltinFunctionType)
+	return bf
 }
 
 // methodDescrDunderGet is the Python-level __get__(self, obj, type) for
@@ -253,7 +321,10 @@ func methodDescrDunderGet(args []Object, _ map[string]Object) (Object, error) {
 			}
 		}
 	}
-	return NewBoundMethod(d, obj), nil
+	if d.slotWrapper {
+		return NewBoundMethod(d, obj), nil
+	}
+	return newBoundCMethod(d, obj), nil
 }
 
 // methodDescrCall is the unbound call: the first positional argument
