@@ -82,22 +82,14 @@ def _resolve_search_paths(name):
     return getattr(pkg, "__path__", None)
 
 
-def find_spec(name, package=None):
-    """Locate name on sys.path (or the parent package's __path__) and
-    return a ModuleSpec the caller can drive through .loader.get_code().
+def _spec_from_search(name, search):
+    """Scan the directory list `search` for name's tail and build a spec.
 
-    CPython: Lib/importlib/util.py:90 find_spec
+    Shared by find_spec and _find_spec_from_path; mirrors the suffix
+    loop FileFinder.find_spec runs against a single path entry list.
+
+    CPython: Lib/importlib/_bootstrap_external.py:1357 FileFinder.find_spec
     """
-    if name.startswith("."):
-        if package is None:
-            raise ValueError("relative module name requires package")
-        name = resolve_name(name, package)
-    if name in sys.modules:
-        mod = sys.modules[name]
-        spec = getattr(mod, "__spec__", None)
-        if spec is not None:
-            return spec
-    search = _resolve_search_paths(name)
     if search is None:
         return None
     tail = name.rpartition(".")[2]
@@ -114,6 +106,49 @@ def find_spec(name, package=None):
             return _ModuleSpec(name, _SourceFileLoader(name, mod_file),
                                origin=mod_file)
     return None
+
+
+def find_spec(name, package=None):
+    """Locate name on sys.path (or the parent package's __path__) and
+    return a ModuleSpec the caller can drive through .loader.get_code().
+
+    CPython: Lib/importlib/util.py:90 find_spec
+    """
+    if name.startswith("."):
+        if package is None:
+            raise ValueError("relative module name requires package")
+        name = resolve_name(name, package)
+    if name in sys.modules:
+        mod = sys.modules[name]
+        spec = getattr(mod, "__spec__", None)
+        if spec is not None:
+            return spec
+    return _spec_from_search(name, _resolve_search_paths(name))
+
+
+def _find_spec_from_path(name, path=None):
+    """Return the spec for name, searching `path` (or sys.path).
+
+    First sys.modules is checked; if the module is already imported its
+    __spec__ is returned (None __spec__ raises ValueError). Otherwise the
+    given path is scanned. Dotted names do not implicitly import their
+    parents, matching CPython.
+
+    CPython: Lib/importlib/util.py:_find_spec_from_path
+    """
+    if name not in sys.modules:
+        search = sys.path if path is None else path
+        return _spec_from_search(name, search)
+    module = sys.modules[name]
+    if module is None:
+        return None
+    try:
+        spec = module.__spec__
+    except AttributeError:
+        raise ValueError(f'{name}.__spec__ is not set') from None
+    if spec is None:
+        raise ValueError(f'{name}.__spec__ is None')
+    return spec
 
 
 def module_from_spec(spec):
