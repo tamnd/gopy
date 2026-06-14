@@ -206,7 +206,6 @@ func osTimes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, e
 }
 
 func init() {
-	_ = imp.AppendInittab("os", buildOS)
 	_ = imp.AppendInittab("posix", buildPosixModule)
 	// On Windows, Lib/os.py does `from nt import *`; register the same
 	// syscall surface under the "nt" name so `import nt` resolves.
@@ -280,13 +279,25 @@ func buildPath() (*objects.Module, error) {
 func buildOS() (*objects.Module, error) {
 	// environ: populate from the real process environment.
 	// CPython: Modules/posixmodule.c:1768 convertenviron
+	// posix.environ holds bytes keys/values on POSIX (Lib/os.py decodes
+	// them through fsdecode); the nt build keeps str. CPython:
+	// Modules/posixmodule.c convertenviron.
+	environBytes := runtime.GOOS != "windows"
 	environDict := objects.NewDict()
 	for _, kv := range goos.Environ() {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
-		if err := environDict.SetItem(objects.NewStr(k), objects.NewStr(v)); err != nil {
+		var kObj, vObj objects.Object
+		if environBytes {
+			kObj = objects.NewBytes([]byte(k))
+			vObj = objects.NewBytes([]byte(v))
+		} else {
+			kObj = objects.NewStr(k)
+			vObj = objects.NewStr(v)
+		}
+		if err := environDict.SetItem(kObj, vObj); err != nil {
 			return nil, err
 		}
 	}
@@ -329,6 +340,8 @@ func buildOS() (*objects.Module, error) {
 		{"listdir", objects.NewBuiltinFunction("listdir", listdir)},
 		{"stat", objects.NewBuiltinFunction("stat", stat)},
 		{"getenv", objects.NewBuiltinFunction("getenv", getenv)},
+		{"putenv", objects.NewBuiltinFunction("putenv", putenv)},
+		{"unsetenv", objects.NewBuiltinFunction("unsetenv", unsetenv)},
 		{"getpid", objects.NewBuiltinFunction("getpid", getpid)},
 		{"getuid", objects.NewBuiltinFunction("getuid", getuid)},
 		{"makedirs", objects.NewBuiltinFunction("makedirs", makedirs)},
@@ -883,6 +896,61 @@ func stat(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 
 // getenv mirrors Lib/os.py:818 getenv: returns environ[key] or default.
 // CPython: Lib/os.py:818 getenv
+// fsArg decodes a putenv/unsetenv argument that may arrive as str or
+// bytes (Lib/os.py's posix _Environ fsencodes keys and values to bytes
+// before calling putenv / unsetenv).
+func fsArg(o objects.Object) (string, error) {
+	switch v := o.(type) {
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	case *objects.ByteArray:
+		return string(v.Bytes()), nil
+	default:
+		return objects.Str(o)
+	}
+}
+
+// putenv implements posix.putenv(key, value): set a process environment
+// variable. Lib/os.py's _Environ.__setitem__ calls it before updating
+// its backing dict.
+//
+// CPython: Modules/posixmodule.c os_putenv_impl
+func putenv(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: putenv() takes exactly 2 arguments (%d given)", len(args))
+	}
+	key, err := fsArg(args[0])
+	if err != nil {
+		return nil, err
+	}
+	value, err := fsArg(args[1])
+	if err != nil {
+		return nil, err
+	}
+	if err := goos.Setenv(key, value); err != nil {
+		return nil, fmt.Errorf("OSError: %s", err.Error())
+	}
+	return objects.None(), nil
+}
+
+// unsetenv implements posix.unsetenv(key): remove a process environment
+// variable. Lib/os.py's _Environ.__delitem__ calls it.
+//
+// CPython: Modules/posixmodule.c os_unsetenv_impl
+func unsetenv(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: unsetenv() takes exactly 1 argument (%d given)", len(args))
+	}
+	key, err := fsArg(args[0])
+	if err != nil {
+		return nil, err
+	}
+	if err := goos.Unsetenv(key); err != nil {
+		return nil, fmt.Errorf("OSError: %s", err.Error())
+	}
+	return objects.None(), nil
+}
+
 func getenv(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("TypeError: getenv() missing required argument: 'key'")

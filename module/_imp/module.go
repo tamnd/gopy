@@ -21,6 +21,7 @@
 package _imp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -146,9 +147,7 @@ func buildModule() (*objects.Module, error) {
 	// CPython: Python/import.c:4380 _imp_create_dynamic_impl
 	// CPython: Python/import.c:4440 _imp_exec_dynamic_impl
 	if err := d.SetItem(objects.NewStr("create_dynamic"),
-		objects.NewBuiltinFunction("create_dynamic", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
-		})); err != nil {
+		objects.NewBuiltinFunction("create_dynamic", createDynamic)); err != nil {
 		return nil, err
 	}
 	if err := d.SetItem(objects.NewStr("exec_dynamic"),
@@ -274,11 +273,106 @@ func getFrozenObject(args []objects.Object, _ map[string]objects.Object) (object
 	if err != nil {
 		return nil, err
 	}
+
+	// When an explicit data buffer is supplied, CPython unmarshals it
+	// directly rather than consulting the frozen table; a buffer that does
+	// not decode to a code object raises ImportError "... is invalid".
+	if len(args) >= 2 && !objects.IsNone(args[1]) {
+		data, err := toBuffer(args[1])
+		if err != nil {
+			return nil, fmt.Errorf("TypeError: get_frozen_object() argument 2 must be bytes, not '%T'", args[1])
+		}
+		return unmarshalFrozenData(args[0], data)
+	}
+
 	fm, ok := imp.FindFrozen(name)
 	if !ok || fm.Code == nil {
 		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
 	}
 	return fm.Code, nil
+}
+
+// unmarshalFrozenData ports unmarshal_frozen_code for the explicit-data
+// path of get_frozen_object: an empty or non-code or undecodable buffer
+// raises ImportError "Frozen object named %R is invalid" (a non-code
+// object that decodes cleanly raises TypeError instead).
+//
+// CPython: Python/import.c unmarshal_frozen_code / set_frozen_error
+func unmarshalFrozenData(nameObj objects.Object, data []byte) (objects.Object, error) {
+	nameRepr, rerr := objects.Repr(nameObj)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("ImportError: Frozen object named %s is invalid", nameRepr)
+	}
+	obj, err := marshal.Load(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("ImportError: Frozen object named %s is invalid", nameRepr)
+	}
+	code, ok := obj.(*objects.Code)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: frozen object %s is not a code object", nameRepr)
+	}
+	return code, nil
+}
+
+// createDynamic implements _imp.create_dynamic(spec, file=None). gopy
+// cannot load CPython C extension shared objects, so the load itself
+// fails with ImportError. The spec.name / spec.origin validation that
+// _Py_ext_module_loader_info_init_from_spec performs still runs first,
+// so a name or origin with an embedded null raises ValueError exactly as
+// CPython does before the unsupported-load failure.
+//
+// CPython: Python/import.c:4743 _imp_create_dynamic_impl
+// CPython: Python/importdl.c:115 _Py_ext_module_loader_info_init
+func createDynamic(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: create_dynamic() missing required argument 'spec'")
+	}
+	spec := args[0]
+
+	nameObj, err := objects.GetAttr(spec, objects.NewStr("name"))
+	if err != nil {
+		return nil, err
+	}
+	nameStr, ok := nameObj.(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: module name must be a string")
+	}
+	if err := checkEmbeddedNull(nameStr.Value()); err != nil {
+		return nil, err
+	}
+
+	originObj, err := objects.GetAttr(spec, objects.NewStr("origin"))
+	if err != nil {
+		return nil, err
+	}
+	if !objects.IsNone(originObj) {
+		originStr, ok := originObj.(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: module filename must be a string")
+		}
+		if err := checkEmbeddedNull(originStr.Value()); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
+}
+
+// checkEmbeddedNull mirrors the ValueError CPython raises when encoding a
+// str that contains a NUL, the failure path the name / filename encode
+// steps in _Py_ext_module_loader_info_init hit for an embedded null.
+//
+// CPython: Objects/unicodeobject.c PyUnicode_AsUTF8AndSize (embedded null)
+func checkEmbeddedNull(s string) error {
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return fmt.Errorf("ValueError: embedded null character")
+		}
+	}
+	return nil
 }
 
 // createBuiltin implements _imp.create_builtin(spec). It reads spec.name

@@ -187,6 +187,8 @@ func direntryGetattr(o objects.Object, name objects.Object) (objects.Object, err
 		return objects.NewBuiltinFunction("is_file", direntryIsFile(de)), nil
 	case "is_symlink":
 		return objects.NewBuiltinFunction("is_symlink", direntryIsSymlink(de)), nil
+	case "is_junction":
+		return objects.NewBuiltinFunction("is_junction", direntryIsJunction(de)), nil
 	case "stat":
 		return objects.NewBuiltinFunction("stat", direntryStat(de)), nil
 	case "inode":
@@ -249,6 +251,17 @@ func direntryIsFile(de *DirEntry) func(args []objects.Object, kwargs map[string]
 func direntryIsSymlink(de *DirEntry) func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	return func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.NewBool(de.ent.Type()&goos.ModeSymlink != 0), nil
+	}
+}
+
+// direntryIsJunction builds the bound is_junction() method. Junctions
+// are a Windows-only concept; on every platform gopy targets here the
+// answer is always False.
+//
+// CPython: Modules/posixmodule.c DirEntry_is_junction
+func direntryIsJunction(_ *DirEntry) func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.False(), nil
 	}
 }
 
