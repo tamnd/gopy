@@ -1046,6 +1046,86 @@ var ParamSpecArgsType = NewType("typing.ParamSpecArgs", []*Type{objectType})
 // CPython: Objects/typevarobject.c:1136 paramspeckwargs_spec
 var ParamSpecKwargsType = NewType("typing.ParamSpecKwargs", []*Type{objectType})
 
+// paramSpecArgsDoc mirrors CPython Objects/typevarobject.c:1049 paramspecargs_doc.
+const paramSpecArgsDoc = "The args for a ParamSpec object.\n" +
+	"\n" +
+	"Given a ParamSpec object P, P.args is an instance of ParamSpecArgs.\n" +
+	"\n" +
+	"ParamSpecArgs objects have a reference back to their ParamSpec::\n" +
+	"\n" +
+	"    >>> P = ParamSpec(\"P\")\n" +
+	"    >>> P.args.__origin__ is P\n" +
+	"    True\n" +
+	"\n" +
+	"This type is meant for runtime introspection and has no special meaning\n" +
+	"to static type checkers.\n"
+
+// paramSpecKwargsDoc mirrors CPython Objects/typevarobject.c:1129 paramspeckwargs_doc.
+const paramSpecKwargsDoc = "The kwargs for a ParamSpec object.\n" +
+	"\n" +
+	"Given a ParamSpec object P, P.kwargs is an instance of ParamSpecKwargs.\n" +
+	"\n" +
+	"ParamSpecKwargs objects have a reference back to their ParamSpec::\n" +
+	"\n" +
+	"    >>> P = ParamSpec(\"P\")\n" +
+	"    >>> P.kwargs.__origin__ is P\n" +
+	"    True\n" +
+	"\n" +
+	"This type is meant for runtime introspection and has no special meaning\n" +
+	"to static type checkers.\n"
+
+// paramSpecDoc mirrors CPython Objects/typevarobject.c:1438 paramspec_doc.
+const paramSpecDoc = "Parameter specification variable.\n" +
+	"\n" +
+	"The preferred way to construct a parameter specification is via the\n" +
+	"dedicated syntax for generic functions, classes, and type aliases,\n" +
+	"where the use of '**' creates a parameter specification::\n" +
+	"\n" +
+	"    type IntFunc[**P] = Callable[P, int]\n" +
+	"\n" +
+	"The following syntax creates a parameter specification that defaults\n" +
+	"to a callable accepting two positional-only arguments of types int\n" +
+	"and str:\n" +
+	"\n" +
+	"    type IntFuncDefault[**P = [int, str]] = Callable[P, int]\n" +
+	"\n" +
+	"For compatibility with Python 3.11 and earlier, ParamSpec objects\n" +
+	"can also be created as follows::\n" +
+	"\n" +
+	"    P = ParamSpec('P')\n" +
+	"    DefaultP = ParamSpec('DefaultP', default=[int, str])\n" +
+	"\n" +
+	"Parameter specification variables exist primarily for the benefit of\n" +
+	"static type checkers.  They are used to forward the parameter types of\n" +
+	"one callable to another callable, a pattern commonly found in\n" +
+	"higher-order functions and decorators.  They are only valid when used\n" +
+	"in ``Concatenate``, or as the first argument to ``Callable``, or as\n" +
+	"parameters for user-defined Generics. See class Generic for more\n" +
+	"information on generic types.\n" +
+	"\n" +
+	"An example for annotating a decorator::\n" +
+	"\n" +
+	"    def add_logging[**P, T](f: Callable[P, T]) -> Callable[P, T]:\n" +
+	"        '''A type-safe decorator to add logging to a function.'''\n" +
+	"        def inner(*args: P.args, **kwargs: P.kwargs) -> T:\n" +
+	"            logging.info(f'{f.__name__} was called')\n" +
+	"            return f(*args, **kwargs)\n" +
+	"        return inner\n" +
+	"\n" +
+	"    @add_logging\n" +
+	"    def add_two(x: float, y: float) -> float:\n" +
+	"        '''Add two numbers together.'''\n" +
+	"        return x + y\n" +
+	"\n" +
+	"Parameter specification variables can be introspected. e.g.::\n" +
+	"\n" +
+	"    >>> P = ParamSpec(\"P\")\n" +
+	"    >>> P.__name__\n" +
+	"    'P'\n" +
+	"\n" +
+	"Note that only parameter specification variables defined in the global\n" +
+	"scope can be pickled.\n"
+
 // NewParamSpecArgs builds the P.args attribute for ParamSpec P.
 //
 // CPython: Objects/typevarobject.c:1233 _Py_paramspecargs_new
@@ -1095,6 +1175,14 @@ func init() {
 	}
 	SetTypeDescr(ParamSpecArgsType, "__origin__", NewGetSetDescr("__origin__", originGet, nil))
 	SetTypeDescr(ParamSpecKwargsType, "__origin__", NewGetSetDescr("__origin__", originGet, nil))
+
+	// CPython: Objects/typevarobject.c:1049 paramspecargs_doc,
+	// Objects/typevarobject.c:1129 paramspeckwargs_doc,
+	// Objects/typevarobject.c:1438 paramspec_doc. These docstrings carry
+	// doctest examples that typing's load_tests doctest suite collects.
+	SetTypeDescr(ParamSpecArgsType, "__doc__", NewStr(paramSpecArgsDoc))
+	SetTypeDescr(ParamSpecKwargsType, "__doc__", NewStr(paramSpecKwargsDoc))
+	SetTypeDescr(ParamSpecType, "__doc__", NewStr(paramSpecDoc))
 
 	SetTypeDescr(ParamSpecType, "args", NewGetSetDescr("args", func(o Object) (Object, error) {
 		return NewParamSpecArgs(o), nil
