@@ -35,13 +35,13 @@ tree before porting.
 | `test_property` | OK (31, 2 skipped) |
 | `test_descrtut` | OK (8) |
 | `test_dynamicclassattribute` | OK (12, 1 skipped) |
-| `test_genericalias` | OK |
-| `test_class` | 1 failure (deferred, see below) |
-| `test_metaclass` | 1 failure (harness `__module__` prefix, pre-existing) |
-| `test_descr` | 3 failures, 4 errors (MroTest green) |
-| `test_types` | 2 failures, 4 errors (CoroutineTests + ClassCreationTests green) |
-| `test_typing` | 115 failures / 164 errors (no abort) |
-| `test_enum` | error (missing `pydoc`) |
+| `test_genericalias` | OK (36) |
+| `test_metaclass` | OK (1) |
+| `test_typing` | OK (709) |
+| `test_enum` | OK (1081, 4 skipped) |
+| `test_class` | 1 failure (`test_detach_materialized_dict_no_memory`, deferred) |
+| `test_descr` | 2 failures (type-dict representation + PEP 412, deferred) |
+| `test_types` | 3 errors (missing `_queue` / `_datetime` CAPI / subinterpreters) |
 
 ---
 
@@ -229,6 +229,48 @@ hook decref'd so a discarded subclass is not pinned past dealloc. Clears
 all of `MroTest`, including `test_tp_subclasses_cycle_error_return_path`,
 `test_reent_set_bases_tp_base_cycle`, and
 `test_mutable_bases_with_failing_mro`.
+
+### descrobject wrapper taxonomy and builtin-method equality
+
+The bound-method type story is now CPython-faithful for the cases the panel
+exercises:
+
+- `classmethod_descriptor` is its own type. `dict.fromkeys` and
+  `int.from_bytes` bind through `classmethod_get` -> `PyCMethod_New`, so the
+  bound object reports `builtin_function_or_method` with `m_self` set to the
+  class, and `type(int.__dict__['from_bytes'])` is `classmethod_descriptor`.
+- `func_memberlist` rows (`__closure__`, `__globals__`, `__builtins__`) install
+  as `member_descriptor` rather than `getset_descriptor`, so
+  `types.MemberDescriptorType` (derived from `type(FunctionType.__globals__)`)
+  keeps its identity.
+- object's slot stand-ins (`__init__`, `__repr__`, `__str__`, `__hash__`,
+  `__getattribute__`, the rich-compare set, `__get__`/`__set__`/`__delete__`,
+  `__iter__`, `__next__`, `__call__`) are tagged as slot wrappers, so their
+  bound form is a method-wrapper.
+- list's `sq_*`/`mp_*`/`tp_richcompare`/`tp_repr`/`tp_iter` dunders (`__add__`,
+  `__mul__`, `__rmul__`, `__iadd__`, `__imul__`, `__setitem__`, `__delitem__`,
+  `__contains__`, `__len__`, `__iter__`, `__repr__`, `__eq__` … `__ge__`) now
+  install as `wrapper_descriptor` via an `add_operators`-style helper, so
+  `type(list.__add__)` is `wrapper_descriptor` and `l.__add__` binds to a
+  method-wrapper carrying `__objclass__`. `__getitem__` and `__reversed__` stay
+  method descriptors, matching CPython (list defines them as real method rows).
+- `builtin_function_or_method` gained `meth_richcompare` and `meth_hash`, so
+  `l.append == l.append` holds (same receiver identity, same underlying method)
+  without the receiver's own hash leaking into the function's.
+
+Clears `test_descr.test_method_wrapper` and `test_builtin_function_or_method`.
+
+### method_get clinic signature and the tokenizer OP fallback
+
+`method_get` now carries the Argument Clinic signature
+`($self, instance, owner=None, /)`, so `inspect.signature(x.__get__)` resolves.
+The unblocking fix was in the tokenizer: gopy's lexer emitted `ERRORTOKEN` (and
+forced a `TokenError`) for printable unrecognized bytes like `$`, `?` and
+backtick, whereas CPython's `_PyToken_OneChar` returns the generic `OP` token
+for them and lets the PEG parser reject them. The lexer default arm now routes
+those bytes through `oneCharOp`, so `tokenize` yields an `OP` token (which
+`inspect` consumes when parsing `$self`) while `compile` still raises "invalid
+syntax". Clears `test_descr.test_dunder_get_signature`.
 
 ---
 
