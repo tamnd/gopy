@@ -240,6 +240,9 @@ func buildModule() (*objects.Module, error) {
 		{"bad_get", badGet},
 		{"set_nomemory", setNomemory},
 		{"remove_mem_hooks", removeMemHooks},
+		{"config_get", configGet},
+		{"config_getint", configGetint},
+		{"config_names", configNames},
 	}
 	for _, w := range wrappers {
 		if err := d.SetItem(objects.NewStr(w.name), objects.NewBuiltinFunction(w.name, w.fn)); err != nil {
