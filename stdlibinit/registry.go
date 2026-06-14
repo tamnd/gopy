@@ -390,6 +390,19 @@ import (
 	// CPython: Modules/arraymodule.c:3225 array_modexec
 	_ "github.com/tamnd/gopy/module/array"
 
+	// Built-in modules: _interpreters / _interpchannels / _interpqueues.
+	// The low-level subinterpreter surface (PEP 734) backing the vendored
+	// concurrent.interpreters package and test.support.channels. gopy is
+	// single-interpreter, so each "interpreter" is a distinct __main__
+	// namespace on the shared VM and channels/queues are in-process FIFOs;
+	// the cross-interpreter contract the standard library exercises still
+	// holds.
+	// CPython: Modules/_interpretersmodule.c, Modules/_interpchannelsmodule.c,
+	// Modules/_interpqueuesmodule.c
+	_ "github.com/tamnd/gopy/module/_interpchannels"
+	_ "github.com/tamnd/gopy/module/_interpqueues"
+	_ "github.com/tamnd/gopy/module/_interpreters"
+
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface
 	// pickle.py reaches for in its C-accelerator try block:
