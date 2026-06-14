@@ -353,6 +353,16 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 		"from importlib import _bootstrap, _bootstrap_external\n" +
 		"_bootstrap._install(sys, _imp)\n" +
 		"_bootstrap_external._install(_bootstrap)\n" +
+		// CPython's C bootstrap freezes _bootstrap / _bootstrap_external and
+		// publishes them under the _frozen_importlib* names; importlib then
+		// aliases those exact objects to importlib._bootstrap[_external]. gopy
+		// loads them as plain .py modules, so re-publish the same objects
+		// under the frozen names to keep sys.modules['_frozen_importlib'] and
+		// importlib._bootstrap identical (issue #15386 / bootstrap tests).
+		//
+		// CPython: Lib/importlib/__init__.py:50 (_bootstrap aliasing)
+		"sys.modules['_frozen_importlib'] = _bootstrap\n" +
+		"sys.modules['_frozen_importlib_external'] = _bootstrap_external\n" +
 		// CPython registers the zipimporter path hook ahead of FileFinder
 		// (C-side, _PyImportZip_Init) so a sys.path entry pointing at a zip
 		// archive is claimed before the directory finder rejects it.
