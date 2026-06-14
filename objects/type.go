@@ -287,6 +287,17 @@ type Type struct {
 	// (CPython sets the __classdictcell__ to tp_dict, not to ns)
 	ClassAttrDict *Dict
 
+	// nonStrDict holds the non-string keys a class namespace carried, e.g.
+	// type('X', (), {MyKey(): 5}). CPython keeps them in tp_dict alongside
+	// the string attributes; gopy stores string attributes in the
+	// typeDescrTable side map, so the rare non-string keys live here. They
+	// are never attributes, but _PyType_Lookup still probes tp_dict for the
+	// looked-up name, and that probe fires a colliding key's __eq__, which
+	// may mutate __bases__ mid-lookup (test_descr.test_type_lookup_mro_reference).
+	//
+	// CPython: Objects/typeobject.c:5121 _PyType_Lookup (find_name_in_mro probe)
+	nonStrDict *Dict
+
 	// subclasses tracks the direct subclasses of this type in
 	// registration order. CPython stores a dict of weak references in
 	// tp_subclasses so the cycle collector can drop dead entries; gopy

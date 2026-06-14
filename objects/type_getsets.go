@@ -519,6 +519,13 @@ func typeSetBases(o Object, v Object) error {
 	// BasesObj is the identity token for reentrancy detection below: a
 	// custom mro() invoked while we recompute the hierarchy may assign
 	// __bases__ again, which overwrites this field with its own tuple.
+	// Take a counted reference: tp_bases owns the tuple, so it must outlive
+	// the caller's transient reference (the VM decrefs the assigned value
+	// once STORE_ATTR completes). Without this the tuple is freed and its
+	// items cleared, so a later __bases__ read sees an empty tuple.
+	//
+	// CPython: Objects/typeobject.c:1837 type_set_bases_unlocked (Py_INCREF(new_bases))
+	Incref(tup)
 	t.BasesObj = tup
 	// Recompute the MRO for t and every transitive subclass, recording the
 	// prior MROs so a C3 conflict deeper in the tree can be rolled back.
@@ -568,6 +575,14 @@ func typeSetBases(o Object, v Object) error {
 	}
 	refixupSlotDispatchers(t)
 	t.InvalidateVersionTag()
+	// Drop the reference tp_bases used to hold; the new tuple has replaced
+	// it. The rollback arm above instead restores oldBasesObj and so never
+	// reaches here.
+	//
+	// CPython: Objects/typeobject.c:1887 type_set_bases_unlocked (Py_DECREF(old_bases))
+	if oldBasesObj != nil {
+		Decref(oldBasesObj)
+	}
 	return nil
 }
 

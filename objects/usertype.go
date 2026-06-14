@@ -363,13 +363,32 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// already stripped above.
 	//
 	// CPython: Objects/typeobject.c:4665 type_new (RuntimeWarning)
-	if RuntimeWarnHook != nil && ns != nil {
+	if ns != nil {
+		warned := false
 		for _, k := range ns.Keys() {
-			if _, isStr := k.(*Unicode); !isStr {
+			if _, isStr := k.(*Unicode); isStr {
+				continue
+			}
+			if !warned && RuntimeWarnHook != nil {
 				if err := RuntimeWarnHook(fmt.Sprintf("non-string key in the __dict__ of class %s", name)); err != nil {
 					return nil, err
 				}
-				break
+				warned = true
+			}
+			// Keep the non-string key in tp_dict so a later _PyType_Lookup
+			// probe collides on it and fires its __eq__. CPython stores it in
+			// the same tp_dict; gopy parks it in t.nonStrDict.
+			//
+			// CPython: Objects/typeobject.c:4665 type_new (ns merged into tp_dict)
+			v, err := ns.GetItem(k)
+			if err != nil {
+				return nil, err
+			}
+			if t.nonStrDict == nil {
+				t.nonStrDict = NewDict()
+			}
+			if err := t.nonStrDict.SetItem(k, v); err != nil {
+				return nil, err
 			}
 		}
 	}

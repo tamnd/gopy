@@ -211,6 +211,21 @@ func LookupDescriptor(t *Type, name string) (Object, *Type) {
 		if base == nil {
 			continue
 		}
+		// A type carrying non-string namespace keys probes them for `name`
+		// first, exactly as CPython's find_name_in_mro probes the whole
+		// tp_dict. A colliding key's __eq__ runs here and may reassign
+		// __bases__, recomputing t.MRO; the Go range still walks the MRO
+		// slice captured at loop entry, matching CPython's strong reference
+		// to the old MRO during the lookup (issue #14199).
+		//
+		// CPython: Objects/typeobject.c:5121 _PyType_Lookup (find_name_in_mro)
+		if base.nonStrDict != nil {
+			if v, err := base.nonStrDict.GetItem(NewStr(name)); err == nil {
+				// A non-string key that compared equal to the name supplies the
+				// attribute, mirroring tp_dict holding both in one table.
+				return v, base
+			}
+		}
 		if d := lookupTypeMember(base, name); d != nil {
 			return d, base
 		}

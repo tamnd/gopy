@@ -325,6 +325,14 @@ func sizeOfObject(obj objects.Object) (int64, error) {
 	if size < 0 {
 		return 0, fmt.Errorf("ValueError: __sizeof__() should return >= 0")
 	}
+	// _PySys_GetSizeOf adds the GC header (sizeof(PyGC_Head) == 16 on a
+	// 64-bit build) for any object its type tracks with the cyclic GC.
+	// __sizeof__ itself never includes the GC head.
+	//
+	// CPython: Python/sysmodule.c:1815 _PySys_GetSizeOf (gc_head)
+	if obj.Type().HasGC() {
+		size += 16
+	}
 	return size, nil
 }
 

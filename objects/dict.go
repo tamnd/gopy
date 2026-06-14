@@ -199,6 +199,88 @@ func init() {
 	AddIterSlotWrappers(DictType)
 	// CPython: Objects/dictobject.c:2498 dict.__hash__ = None
 	SetTypeDescr(DictType, "__hash__", None())
+	// CPython: Objects/dictobject.c:2912 dict.__sizeof__ = dict___sizeof___impl
+	SetTypeDescr(DictType, "__sizeof__", NewMethodDescrConv(DictType, "__sizeof__", MethNoArgs, dictSizeofMethod))
+}
+
+// dictObjectSize is sizeof(PyDictObject) on a 64-bit build: the eight
+// machine words of the struct head (ob_refcnt, ob_type, ma_used,
+// ma_version_tag, ma_keys, ma_values plus padding). CPython reports
+// this through _PyObject_SIZE(Py_TYPE(mp)) inside _PyDict_SizeOf.
+//
+// CPython: Objects/dictobject.c:2880 _PyDict_SizeOf (_PyObject_SIZE)
+const dictObjectSize = 48
+
+// dictKeysObjectSize is sizeof(PyDictKeysObject), the fixed header of a
+// keys table (dk_refcnt, dk_log2_size, dk_log2_index_bytes, dk_kind,
+// dk_version, dk_usable, dk_nentries) on a 64-bit build.
+//
+// CPython: Include/internal/pycore_dict.h PyDictKeysObject
+const dictKeysObjectSize = 32
+
+// dictKeysSize ports _PyDict_KeysSize: the byte cost of a keys table
+// holding nslots (a power of two) entries of the given kind.
+//
+// CPython: Objects/dictobject.c:752 _PyDict_KeysSize
+func dictKeysSize(nslots int, general bool) int {
+	// es is the per-entry size: a general table stores a full
+	// PyDictKeyEntry (hash, key, value = 3 words = 24 bytes); a unicode
+	// (and split) table stores a PyDictUnicodeEntry (key, value = 2
+	// words = 16 bytes).
+	es := 16
+	if general {
+		es = 24
+	}
+	log2Size := 0
+	for (1 << log2Size) < nslots {
+		log2Size++
+	}
+	// dk_log2_index_bytes = dk_log2_size + log2(index entry width). The
+	// index array uses 1/2/4/8-byte slots as the table grows.
+	//
+	// CPython: Objects/dictobject.c:636 new_keys_object (DK_LOG2_IXSIZE)
+	log2Bytes := 0
+	switch {
+	case log2Size >= 32:
+		log2Bytes = 3
+	case log2Size >= 16:
+		log2Bytes = 2
+	case log2Size >= 8:
+		log2Bytes = 1
+	}
+	indexBytes := 1 << (log2Size + log2Bytes)
+	return dictKeysObjectSize + indexBytes + usableFraction(nslots)*es
+}
+
+// dictSizeofMethod ports dict___sizeof___impl / _PyDict_SizeOf. The
+// returned value omits the GC head; sys.getsizeof adds it back for GC
+// types, matching CPython's _PySys_GetSizeOf.
+//
+// CPython: Objects/dictobject.c:2880 _PyDict_SizeOf
+func dictSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	d, ok := args[0].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' requires a 'dict' object")
+	}
+	res := dictObjectSize
+	if d.sharedKeys != nil {
+		// Split dict: the per-instance values array costs
+		// shared_keys_usable_size pointers; the shared keys table is
+		// accounted for once on the owning type, not here.
+		//
+		// CPython: Objects/dictobject.c:2884 _PyDict_SizeOf (ma_values)
+		res += usableFraction(len(d.sharedKeys.entries)) * 8
+		return NewInt(int64(res)), nil
+	}
+	// Combined dict. An empty dict shares the immortal empty keys table
+	// (dk_refcnt > 1), so its keys are not counted; only once a key is
+	// inserted does the dict own a keys table worth charging.
+	//
+	// CPython: Objects/dictobject.c:2886 _PyDict_SizeOf (dk_refcnt == 1)
+	if d.used > 0 || d.fill > 0 {
+		res += dictKeysSize(len(d.entries), d.kind == dictKindGeneral)
+	}
+	return NewInt(int64(res)), nil
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a
@@ -1461,6 +1543,11 @@ func dictPopItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	if d.Len() == 0 {
 		return nil, fmt.Errorf("KeyError: 'popitem(): dictionary is empty'")
 	}
+	// A split table cannot represent the hole popitem leaves behind, so
+	// materialize it into a combined table first, exactly as CPython does.
+	//
+	// CPython: Objects/dictobject.c:3919 dict_popitem_impl (dictresize)
+	d.ensureCombined()
 	lastSlot := d.order[len(d.order)-1]
 	k := d.slotKey(lastSlot)
 	v := d.slotValue(lastSlot)
