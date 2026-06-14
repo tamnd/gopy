@@ -1187,7 +1187,7 @@ func (g *AsyncGenerator) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: async generator already executing")
 	}
 	g.started = true
-	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -1213,7 +1213,7 @@ func (g *AsyncGenerator) Throw(err error) (Object, error) {
 		g.closed = true
 		return nil, err
 	}
-	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -1241,7 +1241,7 @@ func (g *AsyncGenerator) Close() error {
 		_ = GenCloseIter(yf)
 		g.YieldFromTarget = nil
 	}
-	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {

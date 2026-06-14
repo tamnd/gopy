@@ -61,6 +61,19 @@ type GenMsg struct {
 	//
 	// CPython: Objects/genobject.c:248 gen_send_ex2
 	CallerFrame InterpreterFrame
+	// CallerGoid is the goroutine id of the driver issuing this Send/Throw/
+	// Close. The generator body hands the GIL baton back to this goroutine
+	// when it yields so the driver, which resumes holding the lock, is
+	// recorded as the owner. 0 when goroutine identity is unavailable.
+	CallerGoid uint64
+	// CallerHoldsGIL records whether the driver owned the GIL when it
+	// issued this Send/Throw/Close. True is the common case: a generator
+	// resumed from inside running Python code, where the driver holds the
+	// lock and the body just borrows it (baton). False means the driver is
+	// outside Eval (a bare gen.Send() from Go), so the body must take and
+	// release the GIL genuinely instead of handing a phantom baton to a
+	// goroutine that will never release it.
+	CallerHoldsGIL bool
 }
 
 // RaisedError is the Go-level wrapper for a Python exception object
@@ -735,7 +748,7 @@ func (g *Generator) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: generator already executing")
 	}
 	g.started = true
-	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -755,6 +768,16 @@ func callerFrame() InterpreterFrame {
 		return nil
 	}
 	return CurrentFrameHook()
+}
+
+// callerGoid returns the running goroutine id, or 0 when the hook is
+// unset (unit tests that never start the vm). Used to stamp GenMsg so
+// the generator body hands the GIL baton back to its driver on yield.
+func callerGoid() uint64 {
+	if GoidHook == nil {
+		return 0
+	}
+	return GoidHook()
 }
 
 // ownFrame returns the generator body's own interpreter frame, used as
@@ -876,7 +899,7 @@ func (g *Generator) throwWithCaller(err error, caller InterpreterFrame) (Object,
 			}
 		}
 	}
-	g.SendCh <- GenMsg{Err: err, CallerFrame: caller}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -909,7 +932,7 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error, caller Interpret
 	//
 	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
 	g.YieldFromTarget = nil
-	g.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
+	g.SendCh <- GenMsg{Err: ferr, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -1007,7 +1030,7 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 		g.YieldFromTarget = nil
 	}
-	g.SendCh <- GenMsg{Err: throwErr, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: throwErr, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {
