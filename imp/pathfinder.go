@@ -111,6 +111,17 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			}
 			parentMod = pm
 		}
+		// Importing the parent package may have imported this child as a side
+		// effect (e.g. the parent's __init__ ran `from .child import ...`),
+		// caching it in sys.modules and possibly rebinding the parent's
+		// attribute to something other than the submodule. In that case CPython
+		// returns the already-cached child and never reloads or re-binds it, so
+		// the parent's rebinding survives.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1290 _find_and_load_unlocked
+		if cached, ok := GetModule(name); ok {
+			return cached, nil
+		}
 		paths, err := readPackagePath(parentMod)
 		if err != nil {
 			return nil, err

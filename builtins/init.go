@@ -23,6 +23,13 @@ import (
 
 var wireOnce sync.Once
 
+// DefaultImport holds the interpreter's original __import__ builtin so the
+// IMPORT_NAME fast path can recognize it by identity even after user code
+// rebinds builtins.__import__.
+//
+// CPython: pycore_interp.h interp->imports.import_func
+var DefaultImport objects.Object
+
 // Init constructs the builtins dict and stamps the v0.6 surface into
 // it: None / True / False / NotImplemented as named constants, and
 // print as the single callable. defaultFile is the io.Writer the
@@ -151,6 +158,13 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	if err := setBuiltin(dict, "__import__", importFn); err != nil {
 		return nil, err
 	}
+	// Capture the interpreter's original __import__ so the IMPORT_NAME fast
+	// path can compare against it by identity. Re-reading the builtins
+	// module is wrong: a test that swaps builtins.__import__ would make the
+	// swapped callable compare equal to "the default" and never get called.
+	//
+	// CPython: pycore_interp.h interp->imports.import_func (captured at init)
+	DefaultImport = importFn
 
 	// breakpoint() forwards to sys.breakpointhook. Register the builtin
 	// here and hand the default hook to sys so sys.breakpointhook and

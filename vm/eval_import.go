@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
@@ -58,15 +59,7 @@ func optionalImportFunc(builtins objects.Object) (objects.Object, bool, error) {
 //
 // CPython: Python/ceval.c:2820 import_name (fast-path identity check)
 func isDefaultImport(fn objects.Object) bool {
-	bm, ok := imp.GetModule("builtins")
-	if !ok || bm == nil {
-		return false
-	}
-	def, err := bm.Dict().GetItem(objects.NewStr("__import__"))
-	if err != nil || def == nil {
-		return false
-	}
-	return fn == def
+	return builtins.DefaultImport != nil && fn == builtins.DefaultImport
 }
 
 // frameHasExplicitBuiltins reports whether the frame's globals carry an
@@ -196,6 +189,16 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 
 		level := importLevel(levelObj)
+		// A relative import requires __package__ to be a string. CPython's
+		// _sanity_check raises TypeError before any resolution when level>0
+		// and __package__ is set to a non-string (e.g. an object()).
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1390 _sanity_check
+		if level > 0 {
+			if terr := checkPackageType(e.f.Globals); terr != nil {
+				return 0, true, terr
+			}
+		}
 		pkgname := globalName(e.f.Globals)
 
 		exec := &vmExecutor{ts: e.ts, builtins: builtinsNS}
@@ -410,6 +413,27 @@ func importLevel(obj objects.Object) int {
 // module path while __package__ correctly points at the parent.
 //
 // CPython: Python/import.c:1665 import_name (read __package__ first)
+// checkPackageType returns a TypeError when globals carries a __package__
+// that is set (not None) but is not a string. A relative import with such a
+// package is rejected before resolution.
+//
+// CPython: Lib/importlib/_bootstrap.py:1390 _sanity_check ("__package__ not
+// set to a string")
+func checkPackageType(globals objects.Object) error {
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	v, err := d.GetItem(objects.NewStr("__package__"))
+	if err != nil || v == nil || objects.IsNone(v) {
+		return nil
+	}
+	if _, isStr := v.(*objects.Unicode); !isStr {
+		return fmt.Errorf("TypeError: __package__ not set to a string")
+	}
+	return nil
+}
+
 func globalName(globals objects.Object) string {
 	if globals == nil {
 		return ""
@@ -418,20 +442,45 @@ func globalName(globals objects.Object) string {
 	if !ok {
 		return ""
 	}
+	// __package__ takes precedence and is returned verbatim, even when it
+	// is the empty string: an empty package with a relative import is
+	// exactly the "no known parent package" case resolveAbsName rejects.
+	// Only a missing or None __package__ falls through to derivation.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1350 _calc___package__
 	if v, err := d.GetItem(objects.NewStr("__package__")); err == nil && v != nil && !objects.IsNone(v) {
-		if s, serr := objects.Str(v); serr == nil && s != "" {
+		if s, serr := objects.Str(v); serr == nil {
 			return s
 		}
 	}
+	// __spec__.parent is the next anchor when no explicit __package__ is set.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1358 _calc___package__ (spec.parent)
+	if v, err := d.GetItem(objects.NewStr("__spec__")); err == nil && v != nil && !objects.IsNone(v) {
+		if parent, perr := objects.GetAttr(v, objects.NewStr("parent")); perr == nil && parent != nil && !objects.IsNone(parent) {
+			if s, serr := objects.Str(parent); serr == nil {
+				return s
+			}
+		}
+	}
+	// Fall back to __name__. A package (one carrying __path__) anchors at
+	// its own name; a plain module strips its final dotted component. For
+	// __main__ this yields "" so a relative import raises.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1362 _calc___package__ (rpartition)
 	v, err := d.GetItem(objects.NewStr("__name__"))
 	if err != nil || v == nil {
 		return ""
 	}
-	if tp := v.Type(); tp.Str != nil {
-		s, serr := tp.Str(v)
-		if serr == nil {
-			return s
-		}
+	s, serr := objects.Str(v)
+	if serr != nil {
+		return ""
+	}
+	if hp, herr := d.GetItem(objects.NewStr("__path__")); herr == nil && hp != nil {
+		return s
+	}
+	if dot := strings.LastIndex(s, "."); dot >= 0 {
+		return s[:dot]
 	}
 	return ""
 }

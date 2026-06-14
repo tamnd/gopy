@@ -585,6 +585,23 @@ func runFile(path string, stdout, stderr *os.File) int {
 	installPathFinder(path)
 	modName := mainModuleName(path)
 	mainGlobals := newMainGlobals(g, modName)
+	// Anchor relative imports inside a vendored test package. CPython's
+	// import machinery stamps __package__ when it loads the module; a
+	// synthesized main module would otherwise have no anchor and any
+	// `from . import x` inside it would raise "no known parent package".
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1350 _calc___package__
+	if pkg := mainPackageName(path, modName); pkg != "" {
+		_ = mainGlobals.SetItem(objects.NewStr("__package__"), objects.NewStr(pkg))
+		// A package's __init__ also carries __path__ pointing at its dir,
+		// so submodule imports (`from .data import x`) find sibling files.
+		if filepath.Base(path) == "__init__.py" {
+			if abs, absErr := filepath.Abs(filepath.Dir(path)); absErr == nil {
+				_ = mainGlobals.SetItem(objects.NewStr("__path__"),
+					objects.NewList([]objects.Object{objects.NewStr(abs)}))
+			}
+		}
+	}
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
@@ -647,7 +664,12 @@ func runFile(path string, stdout, stderr *os.File) int {
 // CPython: Lib/test/libregrtest/runtest.py unittest.main
 func unittestRunnerSuffix(path string) (string, bool) {
 	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "test_") || !strings.HasSuffix(base, ".py") {
+	// A package test is laid out as test_xxx/__init__.py; accept it too so
+	// the runner fires even though its basename is not test_*.py. The
+	// module runs under "test.test_xxx" (not "__main__"), so its own
+	// `if __name__ == '__main__'` guard never triggers the suite.
+	isPkgInit := base == "__init__.py" && strings.HasPrefix(filepath.Base(filepath.Dir(path)), "test_")
+	if !isPkgInit && (!strings.HasPrefix(base, "test_") || !strings.HasSuffix(base, ".py")) {
 		return "", false
 	}
 	src, err := os.ReadFile(path) //nolint:gosec // reading a caller-supplied test file path is the entire contract
@@ -681,10 +703,40 @@ func unittestRunnerSuffix(path string) (string, bool) {
 // CPython: Lib/test/libregrtest/runtest.py (imports test.<name>)
 func mainModuleName(path string) string {
 	base := filepath.Base(path)
+	// A package laid out as test_xxx/__init__.py runs under the dotted
+	// name "test.test_xxx": regrtest imports the directory as a package, so
+	// the __init__ body sees __name__ == "test.test_xxx" and relative
+	// imports inside it resolve against that anchor.
+	if base == "__init__.py" {
+		parent := filepath.Base(filepath.Dir(path))
+		if strings.HasPrefix(parent, "test_") {
+			return "test." + parent
+		}
+		return "__main__"
+	}
 	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
 		return "test." + strings.TrimSuffix(base, ".py")
 	}
 	return "__main__"
+}
+
+// mainPackageName returns the __package__ anchor for the main module at
+// path. A package __init__ anchors at its own dotted name; a plain module
+// anchors at its parent package. Relative imports inside the file resolve
+// against this value.
+//
+// CPython: Lib/importlib/_bootstrap.py:1350 _calc___package__
+func mainPackageName(path, modName string) string {
+	if modName == "__main__" {
+		return ""
+	}
+	if filepath.Base(path) == "__init__.py" {
+		return modName
+	}
+	if dot := strings.LastIndex(modName, "."); dot >= 0 {
+		return modName[:dot]
+	}
+	return ""
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner
