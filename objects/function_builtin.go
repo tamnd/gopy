@@ -127,12 +127,16 @@ func init() {
 	BuiltinFunctionType.Dealloc = builtinFunctionDealloc
 	BuiltinFunctionType.TpTraverse = builtinFunctionTraverse
 	AddCallSlotWrapper(BuiltinFunctionType)
-	// Identity hash so builtin functions are usable as set/dict keys.
-	// CPython inherits tp_hash from object for cfunction objects.
+	// meth_richcompare: two builtin_function_or_method objects are equal
+	// when they share the same receiver (m_self, by identity) and the same
+	// underlying C function (m_ml). Only ==/!= are defined; ordering yields
+	// NotImplemented. meth_hash combines the receiver's identity hash with
+	// the function's, so l.append == l.append yet hashes don't collapse onto
+	// hash(l).
 	//
-	// CPython: Objects/methodobject.c:357 PyCFunction_Type (tp_hash slot
-	// inherited from object_hash)
-	BuiltinFunctionType.Hash = identityHash
+	// CPython: Objects/methodobject.c:213 meth_richcompare / :245 meth_hash
+	BuiltinFunctionType.RichCmp = builtinFunctionRichCompare
+	BuiltinFunctionType.Hash = builtinFunctionHash
 
 	// meth_getsets: __doc__, __name__, __qualname__, __self__, __module__
 	// CPython: Objects/methodobject.c:286 meth_getsets
@@ -320,6 +324,77 @@ func builtinFunctionDealloc(o Object) {
 	if bf.ownsSelf && bf.Self != nil {
 		Decref(bf.Self)
 	}
+}
+
+// methFuncIdentical decides whether two builtin functions wrap the same
+// underlying callable. CPython compares the m_ml PyMethodDef pointer, which
+// is shared by every binding of a given method. gopy's closest stable proxy
+// is the method_descriptor a bound c-method was minted from (boundDescr,
+// shared across l.append accesses); functions without one (module-level
+// singletons like len) are their own identity.
+//
+// CPython: Objects/methodobject.c:213 meth_richcompare (a->m_ml == b->m_ml)
+func methFuncIdentical(a, b *BuiltinFunction) bool {
+	if a.boundDescr != nil || b.boundDescr != nil {
+		return a.boundDescr == b.boundDescr
+	}
+	return a == b
+}
+
+// builtinFunctionRichCompare ports meth_richcompare: only ==/!= are
+// meaningful, and equality holds when the receiver (m_self, by identity) and
+// the wrapped function match.
+//
+// CPython: Objects/methodobject.c:213 meth_richcompare
+func builtinFunctionRichCompare(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return NotImplemented(), nil
+	}
+	fa, ok := a.(*BuiltinFunction)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	fb, ok := b.(*BuiltinFunction)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	eq := fa.Self == fb.Self && methFuncIdentical(fa, fb)
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
+// builtinFunctionHash ports meth_hash: the identity hash of m_self XORed
+// with the wrapped function's hash, so equal bindings hash alike while the
+// receiver's own hash never leaks in (hash([].append) is not hash([])).
+//
+// CPython: Objects/methodobject.c:245 meth_hash
+func builtinFunctionHash(o Object) (int64, error) {
+	bf := o.(*BuiltinFunction)
+	var x int64
+	if bf.Self != nil {
+		h, err := identityHash(bf.Self)
+		if err != nil {
+			return 0, err
+		}
+		x = h
+	}
+	var y int64
+	var err error
+	if bf.boundDescr != nil {
+		y, err = identityHash(bf.boundDescr)
+	} else {
+		y, err = identityHash(bf)
+	}
+	if err != nil {
+		return 0, err
+	}
+	x ^= y
+	if x == -1 {
+		x = -2
+	}
+	return x, nil
 }
 
 func builtinFunctionRepr(o Object) (string, error) {

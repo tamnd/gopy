@@ -26,14 +26,26 @@ func init() {
 		return d
 	}
 
-	// list.__repr__ slot wrapper. CPython exposes tp_repr via
-	// add_operators -> slotdefs so callers can do `list.__repr__(L)`
-	// and so pprint's dispatch table can key on it (otherwise the
-	// table falls back to object.__repr__, which collides with the
-	// dict/deque entries).
+	// bindWrap installs a slot wrapper (wrapper_descriptor) rather than a
+	// method_descriptor. add_operators produces one for every tp_*/sq_*/mp_*
+	// slot list fills in, so type(list.__add__) is wrapper_descriptor and
+	// l.__add__ binds to a method-wrapper. The closure rebuilds the
+	// (self, *args) stack the existing METH-style helper expects.
+	//
+	// CPython: Objects/typeobject.c add_operators (slotdefs slot wrappers)
+	bindWrap := func(name, sig, doc string, fn func(args []Object, kwargs map[string]Object) (Object, error)) {
+		setWrapperIfAbsent(ListType, name, sig, doc, func(self Object, args []Object) (Object, error) {
+			full := make([]Object, 0, len(args)+1)
+			full = append(full, self)
+			full = append(full, args...)
+			return fn(full, nil)
+		})
+	}
+
+	// list.__repr__ slot wrapper (tp_repr).
 	//
 	// CPython: Objects/typeobject.c add_operators slot wrapper for tp_repr
-	bindConv("__repr__", MethNoArgs, listReprMethod)
+	bindWrap("__repr__", "($self, /)", "Return repr(self).", listReprMethod)
 
 	// METH_O rows: append, extend, remove, count. append additionally
 	// gets registered into the callable cache so the specializer can
@@ -43,7 +55,7 @@ func init() {
 	bindConv("extend", MethO, listExtendMethod)
 	bindConv("remove", MethO, listRemoveMethod)
 	bindConv("count", MethO, listCountMethod)
-	bindConv("__contains__", MethO, listContainsMethod)
+	bindWrap("__contains__", "($self, key, /)", "Return bool(key in self).", listContainsMethod)
 
 	// METH_FASTCALL rows: insert (2 args), index (1-3 args), pop (0-1 args).
 	bindConv("insert", MethFastcall, listInsertMethod)
@@ -53,35 +65,36 @@ func init() {
 	// METH_FASTCALL|METH_KEYWORDS: sort (kwargs key= / reverse=).
 	bindConv("sort", MethFastcall|MethKeywords, listSortMethod)
 
-	// METH_NOARGS rows: clear, reverse, copy, __len__.
+	// METH_NOARGS rows: clear, reverse, copy.
 	bindConv("clear", MethNoArgs, listClearMethod)
 	bindConv("reverse", MethNoArgs, listReverseMethod)
 	bindConv("copy", MethNoArgs, listCopyMethod)
-	bindConv("__len__", MethNoArgs, listLenMethod)
+	bindWrap("__len__", "($self, /)", "Return len(self).", listLenMethod)
 
-	// Slot wrappers for sequence dunders. CPython generates these via
-	// add_operators -> slotdefs so attribute lookup finds list.__add__
-	// etc. without bouncing through type(list).__getattribute__.
+	// Slot wrappers for the sequence/mapping/richcompare dunders. CPython
+	// generates these via add_operators -> slotdefs. __getitem__ and
+	// __reversed__ stay method_descriptors because list defines them as real
+	// METH_O/METH_NOARGS rows, not as bare slots.
 	//
-	// CPython: Objects/typeobject.c add_operators (slotdefs entries
-	// for sq_item, sq_concat, sq_repeat, sq_inplace_concat,
-	// sq_inplace_repeat).
+	// CPython: Objects/typeobject.c add_operators (sq_concat, sq_repeat,
+	// sq_inplace_concat, sq_inplace_repeat, mp_ass_subscript, tp_iter,
+	// tp_richcompare)
 	bindConv("__getitem__", MethO, listGetItemMethod)
-	bindConv("__setitem__", MethFastcall, listSetItemMethod)
-	bindConv("__delitem__", MethO, listDelItemMethod)
-	bindConv("__add__", MethO, listAddMethod)
-	bindConv("__mul__", MethO, listMulMethod)
-	bindConv("__rmul__", MethO, listMulMethod)
-	bindConv("__iadd__", MethO, listIAddMethod)
-	bindConv("__imul__", MethO, listIMulMethod)
-	bindConv("__iter__", MethNoArgs, listIterMethod)
 	bindConv("__reversed__", MethNoArgs, listReversedMethod)
-	bindConv("__eq__", MethO, listEqMethod)
-	bindConv("__ne__", MethO, listNeMethod)
-	bindConv("__lt__", MethO, listLtMethod)
-	bindConv("__le__", MethO, listLeMethod)
-	bindConv("__gt__", MethO, listGtMethod)
-	bindConv("__ge__", MethO, listGeMethod)
+	bindWrap("__setitem__", "($self, key, value, /)", "Set self[key] to value.", listSetItemMethod)
+	bindWrap("__delitem__", "($self, key, /)", "Delete self[key].", listDelItemMethod)
+	bindWrap("__add__", "($self, value, /)", "Return self+value.", listAddMethod)
+	bindWrap("__mul__", "($self, value, /)", "Return self*value.", listMulMethod)
+	bindWrap("__rmul__", "($self, value, /)", "Return value*self.", listMulMethod)
+	bindWrap("__iadd__", "($self, value, /)", "Implement self+=value.", listIAddMethod)
+	bindWrap("__imul__", "($self, value, /)", "Implement self*=value.", listIMulMethod)
+	bindWrap("__iter__", "($self, /)", "Implement iter(self).", listIterMethod)
+	bindWrap("__eq__", "($self, value, /)", "Return self==value.", listEqMethod)
+	bindWrap("__ne__", "($self, value, /)", "Return self!=value.", listNeMethod)
+	bindWrap("__lt__", "($self, value, /)", "Return self<value.", listLtMethod)
+	bindWrap("__le__", "($self, value, /)", "Return self<=value.", listLeMethod)
+	bindWrap("__gt__", "($self, value, /)", "Return self>value.", listGtMethod)
+	bindWrap("__ge__", "($self, value, /)", "Return self>=value.", listGeMethod)
 }
 
 // listGetItemMethod backs list.__getitem__. Routes through
