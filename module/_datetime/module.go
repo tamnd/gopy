@@ -224,6 +224,7 @@ func init() {
 	TimedeltaType.TpNew = timedeltaNew
 	TimedeltaType.Repr = timedeltaRepr
 	TimedeltaType.Str = timedeltaStr
+	installStrRepr(TimedeltaType)
 	TimedeltaType.Hash = timedeltaHash
 	TimedeltaType.RichCmp = timedeltaRichCmp
 	TimedeltaType.Getattro = timedeltaGetattr
@@ -744,6 +745,7 @@ func init() {
 	DateType.Hash = dateHash
 	DateType.RichCmp = dateRichCmp
 	DateType.Getattro = dateGetattr
+	installStrRepr(DateType)
 
 	// __new__ exposes dateNew as a Python-level descriptor so
 	// pickle's load_newobj can do `cls.__new__(cls, state_bytes)`
@@ -1345,6 +1347,7 @@ func init() {
 	TimezoneType.TpNew = timezoneNew
 	TimezoneType.Repr = timezoneRepr
 	TimezoneType.Str = timezoneStr
+	installStrRepr(TimezoneType)
 	TimezoneType.Hash = timezoneHash
 	TimezoneType.RichCmp = timezoneRichCmp
 	TimezoneType.Getattro = timezoneGetattr
@@ -1630,6 +1633,7 @@ func init() {
 	TimeType.TpNew = timeNew
 	TimeType.Repr = timeRepr
 	TimeType.Str = timeStr
+	installStrRepr(TimeType)
 	TimeType.Hash = timeHash
 	TimeType.RichCmp = timeRichCmp
 	TimeType.Getattro = timeGetattr
@@ -2245,6 +2249,7 @@ func init() {
 	DatetimeType.TpNew = datetimeNew
 	DatetimeType.Repr = datetimeRepr
 	DatetimeType.Str = datetimeStr
+	installStrRepr(DatetimeType)
 	DatetimeType.Hash = datetimeHash
 	DatetimeType.RichCmp = datetimeRichCmp
 	DatetimeType.Getattro = datetimeGetattr
@@ -3220,4 +3225,35 @@ func datetimeFormatMethod(args []objects.Object, kwargs map[string]objects.Objec
 		return objects.NewStr(s), nil
 	}
 	return datetimeStrftime(args, kwargs)
+}
+
+// installStrRepr exposes a type's tp_str / tp_repr slots as the
+// __str__ / __repr__ method descriptors that CPython auto-generates for
+// every C type via add_operators. Without these, `SomeDatetimeType.__str__`
+// resolves up the MRO to object.__str__, which breaks code that reads the
+// mixed-in type's __str__ directly (e.g. a date-mixin Enum under ReprEnum,
+// whose members must str() as the date's ISO form).
+//
+// CPython: Objects/typeobject.c:11045 add_operators (tp_str/tp_repr wrappers)
+func installStrRepr(t *objects.Type) {
+	if slot := t.Str; slot != nil {
+		objects.SetTypeDescr(t, "__str__", objects.NewMethodDescrConv(t, "__str__", objects.MethNoArgs,
+			func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				s, err := slot(args[0])
+				if err != nil {
+					return nil, err
+				}
+				return objects.NewStr(s), nil
+			}))
+	}
+	if slot := t.Repr; slot != nil {
+		objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescrConv(t, "__repr__", objects.MethNoArgs,
+			func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				s, err := slot(args[0])
+				if err != nil {
+					return nil, err
+				}
+				return objects.NewStr(s), nil
+			}))
+	}
 }
