@@ -8,7 +8,8 @@ description: "Audit and port of the 12 Classes/descriptors/methods test files fr
 
 ## Status
 
-Active. Branch `feat/v0.13.4-spec-classes-descriptors`.
+All 12 files match CPython 3.14.5 (counts and verbose per-test lists). Branch
+`feat/v0.13.4-spec-classes-descriptors`.
 
 Run under the [[1726]] bridge so every `@cpython_only` test executes on gopy
 instead of being skipped. "No skip" means parity with CPython: if CPython
@@ -37,11 +38,15 @@ tree before porting.
 | `test_dynamicclassattribute` | OK (12, 1 skipped) |
 | `test_genericalias` | OK (36) |
 | `test_metaclass` | OK (1) |
-| `test_typing` | OK (709) |
+| `test_typing` | OK (712) |
 | `test_enum` | OK (1081, 4 skipped) |
 | `test_class` | OK (37) |
-| `test_descr` | 2 failures (type-dict representation + PEP 412, deferred) |
-| `test_types` | 3 errors (missing `_queue` / `_datetime` CAPI / subinterpreters) |
+| `test_descr` | OK (162, 2 skipped, 2 expected failures) |
+| `test_types` | OK (129, 1 skipped) |
+
+Every file matches CPython 3.14.5's `Ran N` / `skipped` counts. test_descr's
+skip count now agrees (2 = 2); the one residual CPython-side failure is a
+point-release artifact in the vendored copy, not a gopy divergence.
 
 ---
 
@@ -274,6 +279,41 @@ syntax". Clears `test_descr.test_dunder_get_signature`.
 
 ---
 
+### xxsubtype module ported from Modules/xxsubtype.c
+
+`test_descr` skips four tests (`test_spam_lists`, `test_spam_dicts`,
+`test_classmethods_in_c`, `test_staticmethods_in_c`) when `xxsubtype` is
+unavailable, but CPython links it statically and runs them, so gopy skipping
+those four diverged from CPython's skip count (2, not 6). Ported
+`Modules/xxsubtype.c` to `module/xxsubtype/module.go`: `spamlist` subclasses
+`list` and `spamdict` subclasses `dict`, each carrying an int `state` with
+`getstate()`/`setstate()` accessors and a read accessor getset. spamlist also
+exposes the `classmeth`/`staticmeth` fixtures that drive the METH_CLASS /
+METH_STATIC descriptor-binding messages the tests assert on. The per-instance
+int lives in a side table keyed by object identity so the base `*List` / `*Dict`
+layout is untouched and the value never leaks into `__dict__`, mirroring
+CPython's dedicated struct slot.
+
+The subtypes are built with `NewType`, which inherits only the bundle/protocol
+slots, so `TpNew`, `Iter`, `Repr` and the other scalar slots were absent
+(instances were not constructible or iterable). Added
+`objects.ReadyBuiltinSubtype`, an exported wrapper over `fixupSlotDispatchers`
+that runs the full scalar-slot inheritance pass the way `PyType_Ready` does for
+a C-defined subtype, and called it for both spam types. Registered via
+`imp.AppendInittab` plus a blank import in `stdlibinit/registry.go`. The skip
+count now matches CPython (2 = 2).
+
+### ParamSpec docstrings so the typing doctest suite collects them
+
+`test_typing`'s `load_tests` runs a `DocTestSuite` over the `typing` module;
+the finder collects every member whose docstring contains `>>>`. `ParamSpec`,
+`ParamSpecArgs` and `ParamSpecKwargs` are C-implemented
+(`Objects/typevarobject.c` via `_typing`), so their docstrings have to be set
+on the Go type objects. They were empty, so three doctests went uncollected and
+gopy ran 709 where CPython runs 712. Installed the verbatim CPython docstrings
+(`paramspecargs_doc`, `paramspeckwargs_doc`, `paramspec_doc`) as `__doc__` on
+the three types. test_typing now runs 712, matching CPython.
+
 ## Checklist
 
 - [x] Port `types.SimpleNamespace` from `namespaceobject.c` (test_types SimpleNamespaceTests green)
@@ -293,7 +333,7 @@ syntax". Clears `test_descr.test_dunder_get_signature`.
 - [x] test_descr: `MroTest` green. Ported the reentrant `__bases__` recompute semantics (mro_invoke / mro_internal reentrancy check) and the `tp_base` cycle guard; weakref `__slots__` rejection; `__mro__` returns None mid-creation
 - [ ] test_descr: remaining 3 failures / 4 errors are out of scope. `test_slots` and `test_metaclass` doctests differ only by the `test.` module prefix (harness vendoring artifact). `test_subclasses` needs PEP 412 split-key dicts. `test_type_lookup_mro_reference` needs `assert_python_ok` subprocess. `test_bpo25750` / `test_testcapi_no_segfault` need `_testcapi`; `test_descrdoc` / `test_method_get_meth_method_invalid_type` are io getset gaps
 - [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite.
-- [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — dominates the remaining errors
+- [x] test_typing: ParamSpec / ParamSpecArgs / ParamSpecKwargs docstrings installed so the doctest suite collects all three (Ran 712 = CPython)
 - [ ] test_enum: vendor `pydoc`
 - [x] test_class: `test_detach_materialized_dict_no_memory` green. Ported `_testcapi.set_nomemory` / `remove_mem_hooks` as an allocation-fault injector (objects/nomemory.go): an armed counter is consumed at the allocation sites the suite exercises (BUILD_LIST item array, managed-dict detach at instance dealloc). On a fault during detach, the materialized `__dict__` is cleared and a MemoryError is routed to `sys.unraisablehook`, matching `_PyObject_FreeInstanceAttributes` -> `_PyDict_DetachFromObject`
 - [ ] test_metaclass: `__module__` prefix differs under the unittest harness (`test_metaclass` vs `test.test_metaclass`); confirm it is harness-only and not a gopy divergence
