@@ -17,6 +17,7 @@ import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
@@ -474,6 +475,24 @@ func (e *evalState) advance() int {
 		return ip + 2
 	}
 	op := compile.Opcode(code[ip])
+	// Under monitoring the live byte at ip may be INSTRUMENTED_LINE (a
+	// marker left in place while dispatch runs the hidden opcode) or an
+	// INSTRUMENTED_<X> variant. Both preserve the base opcode's inline
+	// cache layout, but the cache table is keyed by base opcode, so a
+	// jump computed off the raw instrumented byte would count zero cache
+	// codeunits and land one codeunit short of its target. Resolve to the
+	// base opcode first.
+	//
+	// CPython: the JUMPBY stride is the base arm's compile-time
+	// INLINE_CACHE_ENTRIES_<OP>, independent of the instrumented byte.
+	if op == compile.INSTRUMENTED_LINE {
+		if data := monitor.CoMonitoring(e.f.Code); data != nil {
+			if base := monitor.GetOriginalOpcode(data, ip/2); base != 0 {
+				op = base
+			}
+		}
+	}
+	op = monitor.DeInstrument(op)
 	return ip + 2 + 2*compile.CacheCount(op)
 }
 
