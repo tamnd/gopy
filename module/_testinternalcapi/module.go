@@ -29,6 +29,8 @@ func buildModule() (*objects.Module, error) {
 	}{
 		{"has_inline_values", hasInlineValues},
 		{"has_split_table", hasSplitTable},
+		{"get_static_builtin_types", getStaticBuiltinTypes},
+		{"identify_type_slot_wrappers", identifyTypeSlotWrappers},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {
@@ -78,6 +80,70 @@ func hasInlineValues(args []objects.Object, _ map[string]objects.Object) (object
 		return objects.True(), nil
 	}
 	return objects.False(), nil
+}
+
+// getStaticBuiltinTypes returns gopy's static builtin type objects, the
+// same role _PyStaticType_GetBuiltins fills: the types created at
+// interpreter startup and shared across (sub)interpreters. test.support's
+// iter_builtin_types yields from this list to sweep slot-wrapper
+// inheritance across the static type set.
+//
+// CPython: Modules/_testinternalcapi.c:2334 get_static_builtin_types
+//          (Objects/typeobject.c _PyStaticType_GetBuiltins)
+func getStaticBuiltinTypes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	types := []*objects.Type{
+		objects.ObjectType(), objects.TypeType(),
+		objects.IntType, objects.BoolType, objects.FloatType, objects.ComplexType,
+		objects.StrType(), objects.BytesType, objects.ByteArrayType,
+		objects.ListType, objects.TupleType, objects.RangeType,
+		objects.DictType, objects.SetType, objects.SliceType,
+	}
+	items := make([]objects.Object, len(types))
+	for i, t := range types {
+		items[i] = t
+	}
+	return objects.NewList(items), nil
+}
+
+// slotWrapperNames is every dunder backed by a tp-slot in CPython's
+// slotdefs table, in slotdefs order. _PyType_GetSlotWrapperNames returns
+// exactly this list; test.support.identify_type_slot_wrappers de-dupes it
+// and iter_slot_wrappers walks it per type, keeping only the names that
+// resolve to a wrapper_descriptor on that type.
+//
+// CPython: Objects/typeobject.c:11494 _PyType_GetSlotWrapperNames
+//          (Objects/typeobject.c:10952 slotdefs)
+var slotWrapperNames = []string{
+	"__getattribute__", "__getattr__", "__setattr__", "__delattr__",
+	"__repr__", "__hash__", "__call__", "__str__",
+	"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__",
+	"__iter__", "__next__", "__get__", "__set__", "__delete__",
+	"__init__", "__new__", "__del__", "__await__", "__aiter__", "__anext__",
+	"__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__",
+	"__mod__", "__rmod__", "__divmod__", "__rdivmod__", "__pow__", "__rpow__",
+	"__neg__", "__pos__", "__abs__", "__bool__", "__invert__",
+	"__lshift__", "__rlshift__", "__rshift__", "__rrshift__",
+	"__and__", "__rand__", "__xor__", "__rxor__", "__or__", "__ror__",
+	"__int__", "__float__",
+	"__iadd__", "__isub__", "__imul__", "__imod__", "__ipow__",
+	"__ilshift__", "__irshift__", "__iand__", "__ixor__", "__ior__",
+	"__floordiv__", "__rfloordiv__", "__truediv__", "__rtruediv__",
+	"__ifloordiv__", "__itruediv__", "__index__",
+	"__matmul__", "__rmatmul__", "__imatmul__",
+	"__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+}
+
+// identifyTypeSlotWrappers returns the slot-wrapper dunder names from the
+// slotdefs table.
+//
+// CPython: Modules/_testinternalcapi.c:2341 identify_type_slot_wrappers
+//          (Objects/typeobject.c:11494 _PyType_GetSlotWrapperNames)
+func identifyTypeSlotWrappers(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	items := make([]objects.Object, len(slotWrapperNames))
+	for i, n := range slotWrapperNames {
+		items[i] = objects.NewStr(n)
+	}
+	return objects.NewList(items), nil
 }
 
 // hasSplitTable reports whether obj's __dict__ shares its keys table with
