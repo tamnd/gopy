@@ -512,8 +512,11 @@ func zlibCRC32(args []objects.Object, kwargs map[string]objects.Object) (objects
 	}
 
 	result := crc32.Update(prev, crc32.IEEETable, data)
-	// CPython returns a signed 32-bit integer widened to Python int.
-	return objects.NewInt(int64(int32(result))), nil
+	// CPython returns the checksum as an unsigned 32-bit value widened to
+	// a Python int (PyLong_FromUnsignedLong(value & 0xffffffffU)).
+	//
+	// CPython: Modules/zlibmodule.c:1901 zlib_crc32_impl
+	return objects.NewInt(int64(uint64(result))), nil
 }
 
 // zlibAdler32 computes the Adler-32 checksum, optionally updating a previous value.
@@ -545,7 +548,11 @@ func zlibAdler32(args []objects.Object, kwargs map[string]objects.Object) (objec
 	}
 
 	result := adler32Update(prev, data)
-	return objects.NewInt(int64(int32(result))), nil
+	// CPython returns the checksum as an unsigned 32-bit value widened to
+	// a Python int (PyLong_FromUnsignedLong(value & 0xffffffffU)).
+	//
+	// CPython: Modules/zlibmodule.c:1901 zlib_adler32_impl
+	return objects.NewInt(int64(uint64(result))), nil
 }
 
 // zlibCompressobj returns a streaming Compress object.
