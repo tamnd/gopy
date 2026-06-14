@@ -1159,6 +1159,25 @@ type DefaultDictObject struct {
 	objects.Header
 	Dict           *objects.Dict
 	DefaultFactory objects.Object
+	// attrs is the managed __dict__ for user-defined defaultdict
+	// subclasses. type_new stamps a tp_dictoffset on a Python subclass
+	// of defaultdict, so its instances carry per-instance attributes;
+	// the base defaultdict type leaves this nil.
+	attrs *objects.Dict
+}
+
+// AttrDict implements objects.AttrDictHolder so defaultdict subclasses
+// can carry instance attributes through generic_attr's HasDict path.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (defaultdict-subclass path)
+func (dd *DefaultDictObject) AttrDict() *objects.Dict { return dd.attrs }
+
+// EnsureAttrDict allocates the instance attrs dict on first store.
+func (dd *DefaultDictObject) EnsureAttrDict() *objects.Dict {
+	if dd.attrs == nil {
+		dd.attrs = objects.NewDict()
+	}
+	return dd.attrs
 }
 
 // DefaultDictType is the type singleton for defaultdict.
@@ -1654,18 +1673,13 @@ func defaultDictGetattr(o objects.Object, name objects.Object) (objects.Object, 
 		}
 		return dd.DefaultFactory, nil
 	}
-	// Forward dict methods.
-	dd := o.(*DefaultDictObject)
-	v, err2 := objects.GenericGetAttr(o, name)
-	if err2 == nil {
-		return v, nil
-	}
-	// Try dict.
-	v, err2 = dd.Dict.Type().Getattro(dd.Dict, name)
-	if err2 == nil {
-		return objects.NewBoundMethod(v, o), nil
-	}
-	return nil, fmt.Errorf("AttributeError: 'defaultdict' object has no attribute '%s'", n)
+	// GenericGetAttr walks the type MRO (so inherited dict methods and the
+	// default_factory descriptor resolve) and falls through to the managed
+	// __dict__ exposed via AttrDictHolder, which is what carries instance
+	// attributes on a Python subclass of defaultdict.
+	//
+	// CPython: Objects/typeobject.c slot_tp_getattr_hook (defaultdict path)
+	return objects.GenericGetAttr(o, name)
 }
 
 // defaultDictSetattr sets default_factory and generic attributes.
@@ -1685,8 +1699,12 @@ func defaultDictSetattr(o objects.Object, name objects.Object, value objects.Obj
 		}
 		return nil
 	}
-	_, err2 := objects.GenericGetAttr(o, name)
-	return err2
+	// GenericSetAttr stores through the managed __dict__ (AttrDictHolder)
+	// for Python subclasses of defaultdict, matching CPython where
+	// type_new stamps a tp_dictoffset on such subclasses.
+	//
+	// CPython: Objects/object.c PyObject_GenericSetAttr (defaultdict path)
+	return objects.GenericSetAttr(o, name, value)
 }
 
 // ---------------------------------------------------------------------------
