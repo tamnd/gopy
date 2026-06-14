@@ -171,8 +171,38 @@ var TimedeltaType = objects.NewType("datetime.timedelta", []*objects.Type{object
 // kept in normalized form.
 //
 // CPython: Modules/_datetimemodule.c:2452 PyDateTime_Delta
+// attrHolder carries the per-instance attribute dict that a Python
+// subclass of a datetime type needs. CPython's type_new adds a
+// tp_dictoffset to any heap subclass that does not declare __slots__, so
+// `class D(date): pass` instances gain a managed __dict__ even though the
+// base date object has none. The datetime structs embed attrHolder and
+// satisfy objects.AttrDictHolder / objects.AttrDictSetter so
+// GenericGetAttr / GenericSetAttr route subclass attribute stores through
+// this dict once the subclass type advertises HasDict.
+//
+// CPython: Objects/typeobject.c:4153 type_new (add_dict / tp_dictoffset)
+type attrHolder struct {
+	attrs *objects.Dict
+}
+
+// AttrDict returns the per-instance dict, or nil before the first store.
+func (a *attrHolder) AttrDict() *objects.Dict { return a.attrs }
+
+// EnsureAttrDict lazily allocates the dict on first write, mirroring
+// CPython's lazy materialization of the managed dict slot.
+func (a *attrHolder) EnsureAttrDict() *objects.Dict {
+	if a.attrs == nil {
+		a.attrs = objects.NewDict()
+	}
+	return a.attrs
+}
+
+// SetAttrDict rebinds the managed __dict__ wholesale for `obj.__dict__ = d`.
+func (a *attrHolder) SetAttrDict(d *objects.Dict) { a.attrs = d }
+
 type Timedelta struct {
 	objects.Header
+	attrHolder
 	Days         int64
 	Seconds      int64
 	Microseconds int64
@@ -699,6 +729,7 @@ var DateType = objects.NewType("datetime.date", []*objects.Type{objects.ObjectTy
 // CPython: Modules/_datetimemodule.c:2945 PyDateTime_Date
 type Date struct {
 	objects.Header
+	attrHolder
 	Year  int64
 	Month int64
 	Day   int64
@@ -1293,6 +1324,7 @@ var TimezoneType = objects.NewType("datetime.timezone", []*objects.Type{objects.
 // CPython: Modules/_datetimemodule.c:3690 PyDateTime_TimeZone
 type Timezone struct {
 	objects.Header
+	attrHolder
 	// Offset is in microseconds (stored as Timedelta).
 	Offset *Timedelta
 	// Name is the optional name override. Empty means auto-generate.
@@ -1584,6 +1616,7 @@ var TimeType = objects.NewType("datetime.time", []*objects.Type{objects.ObjectTy
 // CPython: Modules/_datetimemodule.c:2900 PyDateTime_Time
 type Time struct {
 	objects.Header
+	attrHolder
 	Hour        int64
 	Minute      int64
 	Second      int64
