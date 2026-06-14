@@ -1,14 +1,21 @@
 // Package _imp is the gopy port of CPython's Modules/_imp module (the
-// builtin half lives in Python/import.c). Only the slice consumed by
-// the vendored importlib._bootstrap_external is materialized:
+// builtin half lives in Python/import.c). It materializes the surface
+// the vendored importlib._bootstrap / _bootstrap_external drive:
 //
 //   - source_hash(key, source)           Python/import.c:4869
 //   - pyc_magic_number_token (int)       Python/import.c:4926
 //   - check_hash_based_pycs (str)        Python/import.c:4920
+//   - extension_suffixes()               Python/import.c:4807
+//   - find_frozen / get_frozen_object    Python/import.c:4660 / 4592
+//   - is_frozen / is_frozen_package      Python/import.c:4720 / 4700
+//   - create_builtin / exec_builtin      Python/import.c:4488 / 4540
+//   - create_dynamic / exec_dynamic      Python/import.c:4380 / 4440
+//   - _fix_co_filename                   Python/import.c:4318
 //
-// The rest of the C module (lock_held, find_frozen, create_builtin,
-// ...) is intentionally absent — gopy's own imp package already serves
-// those roles and importlib does not need _imp to reach them.
+// The frozen / builtin entries bridge to gopy's own imp package (the
+// frozen table and the inittab), which is the real store for those
+// modules. create_dynamic / exec_dynamic raise ImportError: gopy cannot
+// load CPython C extension shared objects.
 //
 // CPython: Python/import.c:4943 imp_module
 package _imp
@@ -70,20 +77,92 @@ func buildModule() (*objects.Module, error) {
 		})); err != nil {
 		return nil, err
 	}
-	// is_builtin / is_frozen: gopy has no frozen/builtin import path, so
-	// both report negative.
+	// is_builtin(name): 1 when name is in the inittab, else 0. (-1 for a
+	// loaded-builtin-on-the-frozen-path edge case never arises here.)
 	//
-	// CPython: Python/import.c:4943 imp_module
+	// CPython: Python/import.c:4720 _imp_is_builtin_impl
 	if err := d.SetItem(objects.NewStr("is_builtin"),
-		objects.NewBuiltinFunction("is_builtin", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		objects.NewBuiltinFunction("is_builtin", isBuiltin)); err != nil {
+		return nil, err
+	}
+	// is_frozen(name): True when name is a frozen module with embedded
+	// bytecode.
+	//
+	// CPython: Python/import.c:4740 _imp_is_frozen_impl
+	if err := d.SetItem(objects.NewStr("is_frozen"),
+		objects.NewBuiltinFunction("is_frozen", isFrozen)); err != nil {
+		return nil, err
+	}
+	// extension_suffixes(): gopy cannot dynamically load CPython C
+	// extension shared objects, so the list of extension suffixes is
+	// empty. ExtensionFileLoader is therefore never wired to any suffix
+	// in _bootstrap_external._setup.
+	//
+	// CPython: Python/import.c:4807 _imp_extension_suffixes_impl
+	if err := d.SetItem(objects.NewStr("extension_suffixes"),
+		objects.NewBuiltinFunction("extension_suffixes", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return objects.NewList(nil), nil
+		})); err != nil {
+		return nil, err
+	}
+	// find_frozen / get_frozen_object / is_frozen_package bridge to
+	// gopy's frozen module table (imp/frozen.go).
+	//
+	// CPython: Python/import.c:4660 _imp_find_frozen_impl
+	// CPython: Python/import.c:4592 _imp_get_frozen_object_impl
+	// CPython: Python/import.c:4700 _imp_is_frozen_package_impl
+	if err := d.SetItem(objects.NewStr("find_frozen"),
+		objects.NewBuiltinFunction("find_frozen", findFrozen)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("get_frozen_object"),
+		objects.NewBuiltinFunction("get_frozen_object", getFrozenObject)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("is_frozen_package"),
+		objects.NewBuiltinFunction("is_frozen_package", isFrozenPackage)); err != nil {
+		return nil, err
+	}
+	// create_builtin / exec_builtin bridge to the inittab. gopy's
+	// initfunc builds a fully-initialized module in one step, so
+	// create_builtin runs it and exec_builtin is a no-op.
+	//
+	// CPython: Python/import.c:4488 _imp_create_builtin
+	// CPython: Python/import.c:4540 _imp_exec_builtin_impl
+	if err := d.SetItem(objects.NewStr("create_builtin"),
+		objects.NewBuiltinFunction("create_builtin", createBuiltin)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("exec_builtin"),
+		objects.NewBuiltinFunction("exec_builtin", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			return objects.NewInt(0), nil
 		})); err != nil {
 		return nil, err
 	}
-	if err := d.SetItem(objects.NewStr("is_frozen"),
-		objects.NewBuiltinFunction("is_frozen", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewBool(false), nil
+	// create_dynamic / exec_dynamic: gopy cannot load CPython C
+	// extension shared objects. Match CPython's failure shape with an
+	// ImportError rather than silently succeeding.
+	//
+	// CPython: Python/import.c:4380 _imp_create_dynamic_impl
+	// CPython: Python/import.c:4440 _imp_exec_dynamic_impl
+	if err := d.SetItem(objects.NewStr("create_dynamic"),
+		objects.NewBuiltinFunction("create_dynamic", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
 		})); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("exec_dynamic"),
+		objects.NewBuiltinFunction("exec_dynamic", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
+		})); err != nil {
+		return nil, err
+	}
+	// _fix_co_filename(code, path): rewrite co_filename on a code object
+	// (and its nested code consts) in place.
+	//
+	// CPython: Python/import.c:4318 _imp__fix_co_filename_impl
+	if err := d.SetItem(objects.NewStr("_fix_co_filename"),
+		objects.NewBuiltinFunction("_fix_co_filename", fixCoFilename)); err != nil {
 		return nil, err
 	}
 	// _override_frozen_modules_for_tests / _override_multi_interp_extensions_check:
@@ -106,6 +185,150 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// nameArg pulls a single str positional out of args for the frozen /
+// builtin query functions, which all take exactly one module name.
+func nameArg(fn string, args []objects.Object) (string, error) {
+	if len(args) < 1 {
+		return "", fmt.Errorf("TypeError: %s() missing required argument", fn)
+	}
+	u, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return "", fmt.Errorf("TypeError: %s() argument must be str, not '%T'", fn, args[0])
+	}
+	return u.Value(), nil
+}
+
+// isBuiltin implements _imp.is_builtin(name).
+//
+// CPython: Python/import.c:4720 _imp_is_builtin_impl
+func isBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	name, err := nameArg("is_builtin", args)
+	if err != nil {
+		return nil, err
+	}
+	if imp.FindInitFunc(name) != nil {
+		return objects.NewInt(1), nil
+	}
+	return objects.NewInt(0), nil
+}
+
+// isFrozen implements _imp.is_frozen(name): True only when the name has
+// embedded bytecode (a placeholder entry with nil Code is not frozen).
+//
+// CPython: Python/import.c:4740 _imp_is_frozen_impl
+func isFrozen(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	name, err := nameArg("is_frozen", args)
+	if err != nil {
+		return nil, err
+	}
+	fm, ok := imp.FindFrozen(name)
+	return objects.NewBool(ok && fm.Code != nil), nil
+}
+
+// isFrozenPackage implements _imp.is_frozen_package(name).
+//
+// CPython: Python/import.c:4700 _imp_is_frozen_package_impl
+func isFrozenPackage(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	name, err := nameArg("is_frozen_package", args)
+	if err != nil {
+		return nil, err
+	}
+	fm, ok := imp.FindFrozen(name)
+	if !ok || fm.Code == nil {
+		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
+	}
+	return objects.NewBool(fm.IsPackage), nil
+}
+
+// findFrozen implements _imp.find_frozen(name, *, withdata=False). It
+// returns a 3-tuple (data, is_package, origname) or None. gopy stores
+// frozen modules as code objects, not marshalled blobs, so the data
+// slot is always None (FrozenImporter.find_spec discards it and fetches
+// the code later via get_frozen_object).
+//
+// CPython: Python/import.c:4660 _imp_find_frozen_impl
+func findFrozen(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	name, err := nameArg("find_frozen", args)
+	if err != nil {
+		return nil, err
+	}
+	fm, ok := imp.FindFrozen(name)
+	if !ok || fm.Code == nil {
+		return objects.None(), nil
+	}
+	return objects.NewTuple([]objects.Object{
+		objects.None(),
+		objects.NewBool(fm.IsPackage),
+		objects.NewStr(name),
+	}), nil
+}
+
+// getFrozenObject implements _imp.get_frozen_object(name, data=None). It
+// returns the frozen module's code object.
+//
+// CPython: Python/import.c:4592 _imp_get_frozen_object_impl
+func getFrozenObject(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	name, err := nameArg("get_frozen_object", args)
+	if err != nil {
+		return nil, err
+	}
+	fm, ok := imp.FindFrozen(name)
+	if !ok || fm.Code == nil {
+		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
+	}
+	return fm.Code, nil
+}
+
+// createBuiltin implements _imp.create_builtin(spec). It reads spec.name
+// and runs the matching inittab initializer, which builds a fully
+// initialized module (gopy has no separate exec phase for builtins).
+//
+// CPython: Python/import.c:4488 _imp_create_builtin
+func createBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: create_builtin() missing required argument 'spec'")
+	}
+	nameObj, err := objects.GetAttr(args[0], objects.NewStr("name"))
+	if err != nil {
+		return nil, err
+	}
+	u, ok := nameObj.(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: spec.name must be str, not '%T'", nameObj)
+	}
+	name := u.Value()
+	initFn := imp.FindInitFunc(name)
+	if initFn == nil {
+		return nil, fmt.Errorf("ImportError: no built-in module named %s", name)
+	}
+	mod, err := initFn()
+	if err != nil {
+		return nil, err
+	}
+	mod.StampBuiltinModule()
+	return mod, nil
+}
+
+// fixCoFilename implements _imp._fix_co_filename(code, path). It rewrites
+// co_filename on the code object in place.
+//
+// CPython: Python/import.c:4318 _imp__fix_co_filename_impl
+func fixCoFilename(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: _fix_co_filename() takes exactly 2 arguments")
+	}
+	code, ok := args[0].(*objects.Code)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: _fix_co_filename() argument 1 must be code, not '%T'", args[0])
+	}
+	path, ok := args[1].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: _fix_co_filename() argument 2 must be str, not '%T'", args[1])
+	}
+	code.Filename = path.Value()
+	return objects.None(), nil
 }
 
 // sourceHash mirrors _imp.source_hash(key, source). It hashes the

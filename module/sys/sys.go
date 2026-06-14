@@ -132,6 +132,13 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "dont_write_bytecode", objects.NewBool(true)); err != nil {
 		return nil, err
 	}
+	// pycache_prefix controls where the import machinery writes .pyc
+	// caches; None means alongside the source. cache_from_source reads it.
+	//
+	// CPython: Python/sysmodule.c sets sys.pycache_prefix from PyConfig
+	if err := setItem(d, "pycache_prefix", objects.None()); err != nil {
+		return nil, err
+	}
 	if err := setItem(d, "path_hooks", objects.NewList(nil)); err != nil {
 		return nil, err
 	}

@@ -246,6 +246,44 @@ func installPathFinder(scriptPath string) {
 //
 // CPython: Python/codecs.c:1690 _PyCodec_Init (PyImport_ImportModule "encodings")
 func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File) int {
+	// Initialize the importlib bootstrap before any Python-level import.
+	// CPython freezes importlib._bootstrap / _bootstrap_external and runs
+	// init_importlib well before _PyCodec_Init. gopy loads them as regular
+	// .py modules on first reference; the encodings preload below pulls
+	// _bootstrap_external in transitively (encodings -> codecs ->
+	// importlib.util -> _bootstrap_external). Importing it here first means
+	// it is fully cached before encodings runs, so its own load does not
+	// re-enter the import system while the encodings package is still
+	// half-initialized (which would strand `from . import aliases`).
+	//
+	// CPython: Python/pylifecycle.c:1041 init_importlib_external
+	// Two-phase importlib install, mirroring init_importlib /
+	// init_importlib_external. importlib/__init__.py self-bootstraps via
+	// its `except ImportError` branch (gopy has no frozen _frozen_importlib),
+	// which runs _bootstrap._setup(sys, _imp) and binds _bootstrap_external.
+	// Phase 2 then calls _bootstrap_external._install(_bootstrap) directly
+	// (CPython's _install_external_importers imports _frozen_importlib_external,
+	// which gopy lacks), appending PathFinder to sys.meta_path and the
+	// FileFinder path hook to sys.path_hooks.
+	//
+	// CPython: Python/pylifecycle.c:1041 init_importlib_external
+	install := "import importlib, sys, _imp\n" +
+		"from importlib import _bootstrap, _bootstrap_external\n" +
+		"_bootstrap._install(sys, _imp)\n" +
+		"_bootstrap_external._install(_bootstrap)\n" +
+		// CPython registers the zipimporter path hook ahead of FileFinder
+		// (C-side, _PyImportZip_Init) so a sys.path entry pointing at a zip
+		// archive is claimed before the directory finder rejects it.
+		// CPython: Python/pylifecycle.c init_importlib_external (zipimport)
+		"try:\n" +
+		" import zipimport\n" +
+		" sys.path_hooks.insert(0, zipimport.zipimporter)\n" +
+		"except ImportError:\n" +
+		" pass\n"
+	if _, err := pythonrun.RunString(ts, install, "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
+		fmt.Fprintln(stderr, "preload importlib:", err)
+		return 1
+	}
 	if _, err := pythonrun.RunString(ts, "import encodings", "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
 		fmt.Fprintln(stderr, "preload encodings:", err)
 		return 1
