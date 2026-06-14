@@ -12,9 +12,17 @@ import "fmt"
 
 func init() {
 	typeType.Repr = typeRepr
-	typeType.Str = typeRepr
-	// Register __repr__ and __str__ as descriptors so ABCMeta subclasses
-	// (whose metaclass is a user-level Python class) inherit them via
+	// type does not define its own tp_str: it inherits object_str, which
+	// dispatches to the object's own tp_repr. That fallback is what lets a
+	// metaclass override take effect for str(cls) too: when EnumType only
+	// defines __repr__, str(SomeEnum) routes object.__str__ -> __repr__ and
+	// prints "<enum 'Name'>" rather than the default "<class 'Name'>".
+	// Giving typeType its own __str__ here would shadow that fallback.
+	//
+	// CPython: Objects/typeobject.c:6735 PyType_Type tp_str = 0 (inherits object_str)
+	//
+	// Register __repr__ as a descriptor so ABCMeta subclasses (whose
+	// metaclass is a user-level Python class) inherit it via the
 	// callDunderNoArgObject MRO walk.
 	//
 	// CPython: Objects/typeobject.c:8230 slotdefs TPSLOT __repr__
@@ -22,18 +30,6 @@ func init() {
 		func(args []Object, _ map[string]Object) (Object, error) {
 			if len(args) == 0 {
 				return nil, fmt.Errorf("TypeError: descriptor '__repr__' requires a 'type' argument")
-			}
-			s, err := typeRepr(args[0])
-			if err != nil {
-				return nil, err
-			}
-			return NewStr(s), nil
-		},
-	))
-	SetTypeDescr(typeType, "__str__", NewMethodDescr(typeType, "__str__",
-		func(args []Object, _ map[string]Object) (Object, error) {
-			if len(args) == 0 {
-				return nil, fmt.Errorf("TypeError: descriptor '__str__' requires a 'type' argument")
 			}
 			s, err := typeRepr(args[0])
 			if err != nil {
