@@ -158,8 +158,12 @@ func bufferOf(o objects.Object) ([]byte, error) {
 		return v.Bytes(), nil
 	case *objects.ByteArray:
 		return v.Bytes(), nil
+	case *objects.MemoryView:
+		// Tobytes() serializes the exposed view (honoring offset/length),
+		// matching how marshal.loads consumes any bytes-like buffer.
+		return v.Tobytes().Bytes(), nil
 	}
-	return nil, fmt.Errorf("TypeError: a bytes-like object is required, not '%T'", o)
+	return nil, fmt.Errorf("TypeError: a bytes-like object is required, not '%s'", o.Type().Name)
 }
 
 // unwrap converts a Python objects.Object into the native Go form the
