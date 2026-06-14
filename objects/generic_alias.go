@@ -340,18 +340,27 @@ func gaRichCompare(a, b Object, op CompareOp) (Object, error) {
 		bArgs = bb.args
 	} else {
 		// Slow path: b might be a Python-level _GenericAlias from typing.py.
-		// Read __origin__ and __args__ via attribute lookup.
+		// Read __origin__ and __args__ via the optional-attribute protocol so
+		// an AttributeError raised by a Python __getattr__ (e.g. _SpecialForm,
+		// which raises for __origin__) is cleared rather than left lingering in
+		// thread-state to surface in the next operation.
 		//
-		// CPython: Objects/genericaliasobject.c:706 ga_richcompare (handles
-		// both ga_type and _GenericAlias via __origin__/__args__ duck-typing)
+		// CPython: Objects/genericaliasobject.c:706 ga_richcompare (uses
+		// PyObject_GetOptionalAttr for both ga_type and _GenericAlias)
 		var err error
-		bOrigin, err = GetAttr(b, NewStr("__origin__"))
+		bOrigin, err = LookupAttr(b, NewStr("__origin__"))
 		if err != nil {
-			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+			return nil, err
 		}
-		bArgs, err = GetAttr(b, NewStr("__args__"))
+		if bOrigin == nil {
+			return NotImplemented(), nil
+		}
+		bArgs, err = LookupAttr(b, NewStr("__args__"))
 		if err != nil {
-			return NotImplemented(), nil //nolint:nilerr // mirrors Py_NotImplemented return on missing attr
+			return nil, err
+		}
+		if bArgs == nil {
+			return NotImplemented(), nil
 		}
 	}
 
