@@ -416,10 +416,35 @@ func runFile(path string, stdout, stderr *os.File) int {
 		return 1
 	}
 	installPathFinder(path)
-	mainGlobals := newMainGlobals(g, mainModuleName(path))
+	modName := mainModuleName(path)
+	mainGlobals := newMainGlobals(g, modName)
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
+	}
+	// A vendored test runs under "test.<name>"; regrtest imports it as a
+	// normal module, so its __spec__ is a real ModuleSpec. Build the same
+	// file-location spec here so code that resolves the module by name and
+	// reads __spec__ (pyclbr, runpy, inspect) matches CPython. The plain
+	// "__main__" run keeps __spec__ None, like `python script.py`. The
+	// snippet runs through pythonrun so importlib.util loads under a real
+	// Executor, the same way bootstrapEncodings drives the encodings import.
+	//
+	// CPython: Lib/test/libregrtest/runtest.py (imports test.<name>)
+	if modName != "__main__" {
+		abs, absErr := filepath.Abs(path)
+		if absErr != nil {
+			abs = path
+		}
+		src := fmt.Sprintf("import importlib.util as _u, sys as _s\n"+
+			"_m = _s.modules.get(%q)\n"+
+			"if _m is not None and getattr(_m, '__spec__', None) is None:\n"+
+			"    _m.__spec__ = _u.spec_from_file_location(%q, %q)\n"+
+			"    _m.__loader__ = _m.__spec__.loader\n"+
+			"del _u, _s, _m\n", modName, modName, abs)
+		if _, err := pythonrun.RunString(ts, src, "<spec>", parser.ModeFile, mainGlobals, nil); err != nil {
+			fmt.Fprintln(stderr, "attach main spec:", err)
+		}
 	}
 	var rc int
 	if suffix, ok := unittestRunnerSuffix(path); ok {
@@ -557,6 +582,12 @@ func newMainGlobals(builtinsDict *objects.Dict, name string) *objects.Dict {
 	mainDict := objects.NewDict()
 	_ = mainDict.SetItem(objects.NewStr("__name__"), objects.NewStr(name))
 	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsDict)
+	// CPython always binds __main__.__spec__: None for `-c`/script runs,
+	// a real ModuleSpec under `-m`. runFile overwrites this with a
+	// file-location spec for vendored "test.<name>" runs.
+	//
+	// CPython: Python/pylifecycle.c init_interp_main (sets __main__.__spec__)
+	_ = mainDict.SetItem(objects.NewStr("__spec__"), objects.None())
 	mod := objects.NewModuleWithDict(name, mainDict)
 	if _, ok := imp.GetModule(name); !ok {
 		imp.AddModule(name, mod)

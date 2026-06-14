@@ -309,9 +309,27 @@ func (e *evalState) importStar(from objects.Object) error {
 		if skipUnder && name != "" && name[0] == '_' {
 			continue
 		}
-		val, verr := objects.GetAttr(from, objects.NewStr(name))
-		if verr != nil {
-			return verr
+		var val objects.Object
+		if skipUnder {
+			// __dict__ fallback: the attribute is already bound.
+			v, verr := objects.GetAttr(from, objects.NewStr(name))
+			if verr != nil {
+				return verr
+			}
+			val = v
+		} else {
+			// An __all__ entry may name a submodule that no IMPORT_NAME
+			// has pulled in yet. CPython runs _handle_fromlist over the
+			// fromlist before import_all_from copies the attributes;
+			// gopy lacks that pass, so force-import here the same way
+			// evalImportFrom does for named `from pkg import sub`.
+			//
+			// CPython: Lib/importlib/_bootstrap.py:1463 _handle_fromlist
+			v, verr := evalImportFrom(e, from, name)
+			if verr != nil {
+				return verr
+			}
+			val = v
 		}
 		serr := dst.SetItem(objects.NewStr(name), val)
 		// CPython: Python/ceval.c import_star_from — always releases the

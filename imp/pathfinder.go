@@ -264,6 +264,7 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, err)
 	}
+	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so an `__init__.py` that reassigns its own entry
 	// (rare for packages, but the same shape as decimal/_pydecimal).
@@ -304,6 +305,7 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, err)
 	}
+	attachSpecAttrs(exec, mod, name, file, nil)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so a module body that reassigns its own entry
 	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
@@ -311,6 +313,188 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		return final, nil
 	}
 	return mod, nil
+}
+
+// attachSpecAttrs populates the module-namespace surface CPython's
+// _init_module_attrs fills from a ModuleSpec: __spec__, __loader__,
+// __cached__ and a default __doc__. gopy's import runs Go-side, so the
+// spec is built by calling importlib.util.spec_from_file_location once
+// the body has run (the same shape CPython's FileFinder produces).
+//
+// importlib.util is itself a .py module, so the modules loaded before
+// (and during) its own import cannot have their spec built yet. Those
+// are queued in pendingSpecs and flushed the moment util becomes
+// available, so importlib and its early dependencies still end up with
+// a __spec__.
+//
+// CPython: Lib/importlib/_bootstrap.py:516 _init_module_attrs
+func attachSpecAttrs(exec Executor, mod *objects.Module, name, origin string, searchLocations []string) {
+	d := mod.Dict()
+	// __doc__ defaults to None when the body stored no docstring.
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	p := pendingSpec{mod: mod, name: name, origin: origin, search: searchLocations}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+// AttachBuiltinSpec gives a built-in (inittab) module the __spec__ /
+// __loader__ surface CPython's BuiltinImporter installs: origin
+// "built-in", no source, no file. It is deferred just like the
+// file-based path when importlib.util is not importable yet.
+//
+// CPython: Lib/importlib/_bootstrap.py:736 BuiltinImporter.exec_module
+func AttachBuiltinSpec(exec Executor, mod *objects.Module, name string) {
+	d := mod.Dict()
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	p := pendingSpec{mod: mod, name: name, builtin: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+// pendingSpec records a module whose spec could not be built yet because
+// importlib.util was not importable at the time.
+type pendingSpec struct {
+	mod     *objects.Module
+	name    string
+	origin  string
+	search  []string
+	builtin bool
+}
+
+var (
+	pendingMu    sync.Mutex
+	pendingSpecs []pendingSpec
+)
+
+// flushPendingSpecs drains the deferred-spec queue, building each
+// module's spec now that importlib.util is available.
+func flushPendingSpecs(util *objects.Module) {
+	pendingMu.Lock()
+	queue := pendingSpecs
+	pendingSpecs = nil
+	pendingMu.Unlock()
+	for _, p := range queue {
+		applySpec(util, p)
+	}
+}
+
+// applySpec builds a ModuleSpec for p via importlib.util and binds the
+// resulting __spec__/__loader__/__cached__ onto the module dict.
+// Built-in modules use spec_from_loader with a "built-in" origin; file
+// modules use spec_from_file_location.
+//
+// CPython: Lib/importlib/_bootstrap.py:516 _init_module_attrs
+func applySpec(util *objects.Module, p pendingSpec) {
+	spec := buildSpec(util, p)
+	if spec == nil {
+		return
+	}
+	d := p.mod.Dict()
+	_ = d.SetItem(objects.NewStr("__spec__"), spec)
+	if loader, lerr := objects.GetAttr(spec, objects.NewStr("loader")); lerr == nil {
+		_ = d.SetItem(objects.NewStr("__loader__"), loader)
+	}
+	// __cached__ mirrors spec.cached (None for gopy's bytecode-less load).
+	if cached, cerr := objects.GetAttr(spec, objects.NewStr("cached")); cerr == nil {
+		_ = d.SetItem(objects.NewStr("__cached__"), cached)
+	} else {
+		_ = d.SetItem(objects.NewStr("__cached__"), objects.None())
+	}
+}
+
+// buildSpec calls the appropriate importlib.util constructor for p.
+func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
+	if p.builtin {
+		fn, err := util.Dict().GetItem(objects.NewStr("spec_from_loader"))
+		if err != nil {
+			return nil
+		}
+		kwargs := objects.NewDict()
+		_ = kwargs.SetItem(objects.NewStr("origin"), objects.NewStr("built-in"))
+		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
+		spec, cerr := objects.Call(fn, args, kwargs)
+		if cerr != nil || spec == objects.None() {
+			return nil
+		}
+		return spec
+	}
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	if p.search != nil {
+		items := make([]objects.Object, len(p.search))
+		for i, s := range p.search {
+			items[i] = objects.NewStr(s)
+		}
+		_ = kwargs.SetItem(objects.NewStr("submodule_search_locations"),
+			objects.NewList(items))
+	}
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)})
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
+}
+
+var (
+	specBootstrapMu  sync.Mutex
+	specBootstrapped bool
+)
+
+// ensureImportlibUtil returns the importlib.util module, importing it on
+// first use. The lazy import is guarded by specBootstrapped so the
+// modules pulled in by importlib.util's own load (os, types,
+// importlib._bootstrap_external) do not re-enter and recurse while that
+// import is still in flight.
+func ensureImportlibUtil(exec Executor) (*objects.Module, bool) {
+	if util, ok := GetModule("importlib.util"); ok {
+		// util is registered before its body runs, so a mid-import
+		// lookup sees the module without spec_from_file_location yet.
+		// Treat that partial state as "not ready" so the caller defers
+		// rather than flushing the pending queue against a stub.
+		if _, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location")); err == nil {
+			return util, true
+		}
+		return nil, false
+	}
+	specBootstrapMu.Lock()
+	if specBootstrapped {
+		specBootstrapMu.Unlock()
+		return nil, false
+	}
+	specBootstrapped = true
+	specBootstrapMu.Unlock()
+	util, err := ImportModule(exec, "importlib.util")
+	specBootstrapMu.Lock()
+	specBootstrapped = false
+	specBootstrapMu.Unlock()
+	if err != nil {
+		return nil, false
+	}
+	return util, true
 }
 
 // isFile reports whether path exists and is a regular file. It is the

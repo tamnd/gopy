@@ -84,6 +84,12 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		// CPython: Objects/moduleobject.c:606 PyModule_AddFunctions
 		mod.StampBuiltinModule()
 		AddModule(absName, mod)
+		// CPython's BuiltinImporter sets __spec__/__loader__ on every
+		// built-in module; gopy's inittab path mirrors that so tools
+		// (pyclbr, runpy, inspect) that read module.__spec__ work.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:736 BuiltinImporter.exec_module
+		AttachBuiltinSpec(exec, mod, absName)
 		return mod, nil
 	}
 
