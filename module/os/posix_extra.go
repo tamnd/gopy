@@ -197,10 +197,19 @@ func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		return nil, fmt.Errorf("TypeError: an integer is required")
 	}
 	fdVal, _ := fdObj.Int64()
+	// The fd is owned by the caller (a live file, socket, or one of the
+	// std streams); this wrapper only borrows it to Stat. Clear Go's
+	// runtime finalizer so a later GC of the throwaway *os.File never
+	// closes a descriptor we do not own. Without this, a GC mid-run
+	// closes a borrowed fd and unrelated writes fail with EBADF.
+	//
+	// CPython: Modules/posixmodule.c:11947 os_isatty_impl borrows the fd
+	// and never closes it.
 	f := goos.NewFile(uintptr(fdVal), "")
 	if f == nil {
 		return objects.NewBool(false), nil
 	}
+	runtime.SetFinalizer(f, nil)
 	info, err := f.Stat()
 	if err != nil {
 		// CPython os.isatty returns False on any error rather than

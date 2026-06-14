@@ -439,6 +439,7 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
 		}
+		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	} else {
 		f, err := os.OpenFile(a.file, flag, 0o600)

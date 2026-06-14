@@ -38,3 +38,6 @@ junk*/
 
 ziptestmodule
 ziptestmodule.py
+
+# test_module_with_large_stack writes this into the cwd
+longlist.py

@@ -14,9 +14,26 @@ import (
 	"fmt"
 	"io"
 	stdos "os"
+	"runtime"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// clearGoFinalizer drops the Go runtime finalizer that os.NewFile arms on a
+// borrowed descriptor. gopy owns the lifecycle of these fds through
+// FileIO.Close and the closefd flag, so the descriptor is released
+// deterministically when Python closes the file. Leaving Go's finalizer in
+// place lets a later GC close a descriptor whose integer was already freed
+// and reused by another open file, surfacing as a spurious EBADF
+// ("bad file descriptor") on the unrelated file's next write.
+//
+// CPython: Modules/_io/fileio.c:159 _io_FileIO_close_impl owns the close;
+// there is no background reclaim of the fd.
+func clearGoFinalizer(f *stdos.File) {
+	if f != nil {
+		runtime.SetFinalizer(f, nil)
+	}
+}
 
 // SMALLCHUNK / DEFAULT_BUFFER_SIZE / LARGE_BUFFER_CUTOFF_SIZE mirror the
 // growth-policy constants used by readall() in CPython.
@@ -245,6 +262,7 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor")
 		}
+		clearGoFinalizer(f)
 		fi := &FileIO{
 			f:         f,
 			nameIsInt: true,
@@ -295,8 +313,12 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
 		}
+		clearGoFinalizer(f)
 	} else {
 		f, err = stdos.OpenFile(name, flag, 0o666)
+		if err == nil {
+			clearGoFinalizer(f)
+		}
 		if err != nil {
 			// Preserve the os.PathError chain (errno + filename) with %w
 			// so the unwind path can build a FileNotFoundError /
