@@ -52,6 +52,12 @@ func init() {
 		Or: unionTypeOr,
 	}
 	GenericAliasType.TpTraverse = gaTraverse
+	// types.GenericAlias is weak-referenceable: ga_object carries a
+	// weakreflist and the type sets tp_weaklistoffset. Subclasses such as
+	// _collections_abc._CallableGenericAlias inherit it through the MRO.
+	//
+	// CPython: Objects/genericaliasobject.c:1014 Py_GenericAliasType (tp_weaklistoffset)
+	GenericAliasType.HasWeakref = true
 }
 
 // NewGenericAlias constructs an alias for origin with the given args.
