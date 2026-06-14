@@ -1697,25 +1697,3 @@ func typevarCallerModule() string {
 	return ""
 }
 
-var noDefaultSingleton Object
-
-// NoDefault returns the singleton placeholder a TypeVar exposes via
-// __default__ when no default was supplied (typing.NoDefault in
-// CPython 3.13+). Identity comparison is the contract.
-//
-// CPython: Objects/typevarobject.c typing_NoDefault
-func NoDefault() Object {
-	if noDefaultSingleton == nil {
-		noDefaultSingleton = newSingleton("typing.NoDefault")
-	}
-	return noDefaultSingleton
-}
-
-func newSingleton(name string) Object {
-	t := NewType(name, []*Type{objectType})
-	o := &simpleObject{}
-	o.Init(t)
-	return o
-}
-
-type simpleObject struct{ Header }
