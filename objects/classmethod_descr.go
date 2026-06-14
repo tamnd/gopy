@@ -105,11 +105,12 @@ func classMethodDescrGet2(descr Object, obj Object, ownerType *Type) (Object, er
 	}
 	Incref(t)
 	bf := &BuiltinFunction{
-		Name:     d.def.Name,
-		Conv:     MethVarargs | MethKeywords,
-		Self:     t,
-		ownsSelf: true,
-		Doc:      d.def.Doc,
+		Name:       d.def.Name,
+		Conv:       MethVarargs | MethKeywords,
+		Self:       t,
+		ownsSelf:   true,
+		methOrigin: d,
+		Doc:        d.def.Doc,
 		Fn: func(args []Object, kwargs map[string]Object) (Object, error) {
 			return cfunctionCall(cf, args, kwargs)
 		},

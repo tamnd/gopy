@@ -73,6 +73,16 @@ type BuiltinFunction struct {
 	// CPython: Objects/descrobject.c:230 method_get (PyCMethod_New)
 	boundDescr *MethodDescr
 
+	// methOrigin is the stable descriptor a builtin method was minted from
+	// when no *MethodDescr drives its call path: classmethod_get binds a
+	// classmethod_descriptor (PyCMethod_New) into a builtin_function_or_method
+	// whose m_ml is the descriptor's PyMethodDef, shared across every binding.
+	// methFuncIdentical / builtinFunctionHash use it as the m_ml proxy so
+	// int.from_bytes == int.from_bytes even though the bindings are distinct.
+	//
+	// CPython: Objects/descrobject.c:95 classmethod_get (a->m_ml == b->m_ml)
+	methOrigin Object
+
 	// kwParams, when non-nil, names every keyword the Argument Clinic
 	// signature accepts. builtinFunctionVectorcall runs the AC
 	// extraneous-keyword scan over the original kwnames objects before
@@ -338,6 +348,9 @@ func methFuncIdentical(a, b *BuiltinFunction) bool {
 	if a.boundDescr != nil || b.boundDescr != nil {
 		return a.boundDescr == b.boundDescr
 	}
+	if a.methOrigin != nil || b.methOrigin != nil {
+		return a.methOrigin == b.methOrigin
+	}
 	return a == b
 }
 
@@ -384,6 +397,8 @@ func builtinFunctionHash(o Object) (int64, error) {
 	var err error
 	if bf.boundDescr != nil {
 		y, err = identityHash(bf.boundDescr)
+	} else if bf.methOrigin != nil {
+		y, err = identityHash(bf.methOrigin)
 	} else {
 		y, err = identityHash(bf)
 	}

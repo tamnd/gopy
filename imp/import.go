@@ -62,6 +62,20 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		}
 	}
 
+	// 1b. Custom sys.meta_path finders. CPython's _find_spec walks
+	// sys.meta_path in order; the BuiltinImporter, FrozenImporter and
+	// PathFinder entries are realized by the Go steps below, so here we
+	// consult only the additional finders a program (or a test) inserts.
+	// A finder inserted at meta_path[0] therefore wins over the built-in
+	// and frozen lookups, matching CPython's ordering.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:912 _find_spec
+	if mod, found, err := metaPathFind(exec, absName); err != nil {
+		return nil, err
+	} else if found {
+		return mod, nil
+	}
+
 	// 2. Frozen module.
 	// CPython: Python/import.c:L1632 import_find_and_load
 	if fm, ok := FindFrozen(absName); ok && fm.Code != nil {
@@ -111,6 +125,88 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 	}
 
 	return nil, fmt.Errorf("%w: No module named %q", ErrModuleNotFound, absName)
+}
+
+// metaPathFind consults the custom finders on sys.meta_path for absName.
+// It skips the BuiltinImporter, FrozenImporter and PathFinder entries
+// (identified by their class __name__), which gopy realizes in Go, and
+// calls find_spec(name, path, None) on every other finder. The first
+// finder that returns a spec drives loadFromSpec; a None return means the
+// finder declined and the walk continues.
+//
+// CPython: Lib/importlib/_bootstrap.py:912 _find_spec
+func metaPathFind(exec Executor, absName string) (*objects.Module, bool, error) {
+	sysMod, ok := GetModule("sys")
+	if !ok {
+		return nil, false, nil
+	}
+	mpObj, _ := sysMod.Dict().GetItem(objects.NewStr("meta_path"))
+	mp, _ := mpObj.(*objects.List)
+	if mp == nil || mp.Len() == 0 {
+		return nil, false, nil
+	}
+	// The parent package's __path__ becomes the `path` argument for a
+	// submodule import, mirroring _find_and_load's parent.__path__ read.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1227 path = parent_module.__path__
+	pathArg := objects.None()
+	if parent, _ := splitParent(absName); parent != "" {
+		if pm, ok := GetModule(parent); ok {
+			if pp, err := pm.Dict().GetItem(objects.NewStr("__path__")); err == nil && pp != nil {
+				pathArg = pp
+			}
+		}
+	}
+	nameObj := objects.NewStr(absName)
+	for i := 0; i < mp.Len(); i++ {
+		finder := mp.Item(i)
+		if isBuiltinFinder(finder) {
+			continue
+		}
+		findSpec, err := objects.GetAttr(finder, objects.NewStr("find_spec"))
+		if err != nil {
+			// A legacy finder without find_spec does not participate;
+			// CPython's _find_spec skips it the same way.
+			continue
+		}
+		spec, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{nameObj, pathArg, objects.None()}), nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if spec == nil || objects.IsNone(spec) {
+			continue
+		}
+		mod, err := loadFromSpec(exec, absName, spec)
+		if err != nil {
+			return nil, false, err
+		}
+		parent, tail := splitParent(absName)
+		bindOnParent(parent, tail, mod)
+		return mod, true, nil
+	}
+	return nil, false, nil
+}
+
+// isBuiltinFinder reports whether finder is one of the three importers
+// gopy realizes in Go (BuiltinImporter, FrozenImporter, PathFinder).
+// Those are class objects exposing __name__; the custom finders programs
+// install on meta_path are instances that do not.
+//
+// CPython: Lib/importlib/_bootstrap.py:736 BuiltinImporter / :976 PathFinder
+func isBuiltinFinder(finder objects.Object) bool {
+	nameAttr, err := objects.GetAttr(finder, objects.NewStr("__name__"))
+	if err != nil {
+		return false
+	}
+	name, ok := nameAttr.(*objects.Unicode)
+	if !ok {
+		return false
+	}
+	switch name.Value() {
+	case "BuiltinImporter", "FrozenImporter", "PathFinder", "WindowsRegistryFinder":
+		return true
+	}
+	return false
 }
 
 // resolveAbsName converts a relative import (level > 0) to an
