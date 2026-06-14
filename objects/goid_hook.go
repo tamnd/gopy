@@ -12,3 +12,19 @@ package objects
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET reads the
 // current thread state from TLS; this is the Go-runtime equivalent.
 var GoidHook func() uint64
+
+// CurrentHoldsGILHook reports whether the running goroutine currently
+// owns the interpreter GIL. The vm installs it; nil until the eval loop
+// is wired (and in unit tests that never start the interpreter), in
+// which case the generator protocol treats the driver as not holding the
+// lock and the body takes/releases it genuinely.
+//
+// CPython: Python/ceval_gil.c current_thread_holds_gil
+var CurrentHoldsGILHook func() bool
+
+func callerHoldsGIL() bool {
+	if CurrentHoldsGILHook == nil {
+		return false
+	}
+	return CurrentHoldsGILHook()
+}
