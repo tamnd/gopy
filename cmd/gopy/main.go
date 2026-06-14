@@ -253,6 +253,24 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 	return 0
 }
 
+// bootstrapSite imports the site module, which runs site.main() at import
+// time (the no_site flag is clear) to install the interpreter builtins
+// exit / quit / help / copyright / credits / license via setquit /
+// setcopyright / sethelper. CPython drives this from init_import_site
+// during Py_Initialize after the import system is online; without it
+// sys.flags.no_site reads 0 (claiming site loaded) while the builtins it
+// installs are missing, so code.InteractiveConsole(local_exit=True) and
+// other site-dependent paths diverge.
+//
+// CPython: Python/pylifecycle.c:1255 init_import_site (PyImport_ImportModule "site")
+func bootstrapSite(ts *state.Thread, globals *objects.Dict, stderr *os.File) int {
+	if _, err := pythonrun.RunString(ts, "import site", "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
+		fmt.Fprintln(stderr, "preload site:", err)
+		return 1
+	}
+	return 0
+}
+
 // findStdlibRoot locates the vendored gopy stdlib tree. CPython's
 // equivalent is Modules/getpath.py's prefix discovery; the gopy port
 // (pathconfig/) targets the CPython install layout, not the gopy
@@ -383,6 +401,9 @@ func runSource(src string, stdout, stderr *os.File) int {
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
+	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
@@ -407,6 +428,9 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	mainGlobals := newMainGlobals(g, "__main__")
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
+	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
 	// Equivalent of CPython's pymain_run_module which calls
@@ -441,6 +465,9 @@ func runFile(path string, stdout, stderr *os.File) int {
 	mainGlobals := newMainGlobals(g, modName)
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
+	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
 	// A vendored test runs under "test.<name>"; regrtest imports it as a
@@ -553,6 +580,9 @@ func runInteractive(stdout, stderr *os.File) int {
 	mainGlobals := newMainGlobals(g, "__main__")
 	ts := state.NewThread()
 	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
+	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
 	rc := pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals)

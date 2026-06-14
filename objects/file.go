@@ -397,7 +397,14 @@ func fileGetattr(o Object, name Object) (Object, error) {
 	if fn := fileMethod(fi, n.v); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", FileType.Name, n.v)
+	// Anything the custom table does not handle (dunders such as
+	// __class__, __hash__, __eq__, the rich-compare set) resolves through
+	// the type the way PyObject_GenericGetAttr walks the MRO. Without this
+	// fallback, isinstance()/abc.__instancecheck__ probes against a file
+	// object raise spuriously because __class__ is missing.
+	//
+	// CPython: Objects/object.c:1430 _PyObject_GenericGetAttrWithDict
+	return GenericGetAttr(o, name)
 }
 
 // fileSetattr supports a single mutable attribute today: the mode
