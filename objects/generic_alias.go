@@ -970,6 +970,18 @@ func init() {
 		}
 		return NewInt(h), nil
 	}))
+	// Expose the mp_subscript slot as a __getitem__ wrapper so a Python
+	// subclass can reach it through super().__getitem__(item). CPython reflects
+	// types.GenericAlias's mp_subscript as a slot wrapper in the type dict;
+	// _collections_abc._CallableGenericAlias.__getitem__ relies on it.
+	//
+	// CPython: Objects/genericaliasobject.c:820 (mp_subscript slot wrapper)
+	SetTypeDescr(GenericAliasType, "__getitem__", NewMethodDescr(GenericAliasType, "__getitem__", func(args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 2 {
+			return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+		}
+		return gaSubscript(args[0], args[1])
+	}))
 	SetTypeDescr(GenericAliasType, "__origin__", NewGetSetDescr("__origin__", gaGetOrigin, nil))
 	SetTypeDescr(GenericAliasType, "__args__", NewGetSetDescr("__args__", gaGetArgs, nil))
 	SetTypeDescr(GenericAliasType, "__unpacked__", NewGetSetDescr("__unpacked__", gaGetUnpacked, nil))

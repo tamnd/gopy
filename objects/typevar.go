@@ -150,6 +150,25 @@ func NewThunkEvaluator(thunk Object) *ConstEvaluator {
 }
 
 func init() {
+	// TypeVar, ParamSpec and TypeVarTuple are built from Py_TPFLAGS_DEFAULT
+	// alone, so they omit Py_TPFLAGS_BASETYPE and cannot be subclassed:
+	// class C(TypeVar) raises "type 'TypeVar' is not an acceptable base type".
+	// CPython: Objects/typevarobject.c:118 typevar_spec .tp_flags = Py_TPFLAGS_DEFAULT
+	TypeVarType.TpFlags &^= TpFlagBasetype
+	ParamSpecType.TpFlags &^= TpFlagBasetype
+	TypeVarTupleType.TpFlags &^= TpFlagBasetype
+	ParamSpecArgsType.TpFlags &^= TpFlagBasetype
+	ParamSpecKwargsType.TpFlags &^= TpFlagBasetype
+
+	// Subclassing an *instance* (class C(T) for a TypeVar T) is rejected by
+	// each object's __mro_entries__, not by the base-type flag.
+	// CPython: Objects/typevarobject.c:853 typevar_mro_entries
+	mroEntriesReject(TypeVarType, "TypeVar")
+	mroEntriesReject(ParamSpecType, "ParamSpec")
+	mroEntriesReject(TypeVarTupleType, "TypeVarTuple")
+	mroEntriesReject(ParamSpecArgsType, "ParamSpecArgs")
+	mroEntriesReject(ParamSpecKwargsType, "ParamSpecKwargs")
+
 	// The type itself is immutable: ConstEvaluator.attribute = 1 raises TypeError.
 	// CPython: Objects/typevarobject.c constevaluator_spec Py_TPFLAGS_IMMUTABLETYPE
 	ConstEvaluatorType.TpFlags |= TpFlagImmutable
@@ -261,8 +280,10 @@ func init() {
 	ParamSpecType.Str = ParamSpecType.Repr
 	// CPython: Objects/typevarobject.c:1247 paramspec_tp_hash (id-based)
 	ParamSpecType.Hash = identityHash
+	// TypeVarTuple has no variance, so its repr is the bare name (no ~/+/-).
+	// CPython: Objects/typevarobject.c:1553 typevartuple_repr
 	TypeVarTupleType.Repr = func(o Object) (string, error) {
-		return "~" + o.(*TypeVarTuple).NameStr, nil
+		return o.(*TypeVarTuple).NameStr, nil
 	}
 	TypeVarTupleType.Str = TypeVarTupleType.Repr
 	// CPython: Objects/typevarobject.c:1567 typevartuple_tp_hash (id-based)
@@ -348,6 +369,9 @@ func init() {
 			}
 			tv.Default = v
 		}
+		// Return a fresh reference so the caller cannot decref the stored
+		// default to zero. CPython: Objects/typevarobject.c:760 typevar_default
+		Incref(tv.Default)
 		return tv.Default, nil
 	}, nil))
 	SetTypeDescr(TypeVarType, "has_default", NewMethodDescr(TypeVarType, "has_default", func(args []Object, _ map[string]Object) (Object, error) {
@@ -406,23 +430,22 @@ func init() {
 	}, nil))
 
 	// CPython: Objects/typevarobject.c:755 typevar_typing_subst_impl
+	// Delegates to typing._typevar_subst(self, arg), which runs _type_check and
+	// rejects unpacked TypeVarTuple/tuple arguments. Returning arg unchanged
+	// skipped that check, so substituting *tuple[str, ...] into a plain TypeVar
+	// silently succeeded instead of raising TypeError.
 	SetTypeDescr(TypeVarType, "__typing_subst__", NewMethodDescr(TypeVarType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 2 {
 			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
 		}
-		return args[1], nil
+		return callTypingFunc("_typevar_subst", args[0], args[1])
 	}))
 	// CPython: Objects/typevarobject.c:780 typevar_typing_prepare_subst_impl
 	SetTypeDescr(TypeVarType, "__typing_prepare_subst__", NewMethodDescr(TypeVarType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 3 {
 			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
 		}
-		// alias is args[1], subst_args is args[2]; just return the args tuple unchanged.
-		// CPython returns Py_NewRef(args): the result is a new reference, so the
-		// borrowed input must be increffed before it is handed back, otherwise the
-		// caller's arg-drop over-decrefs the tuple (now caught by tuple_dealloc).
-		Incref(args[2])
-		return args[2], nil
+		return typevarPrepareSubst(args[0], args[1], args[2])
 	}))
 	// TypeVar and ParamSpec implement `|` as typing.Union rather than
 	// types.UnionType, to preserve string forward-reference support.
@@ -475,6 +498,12 @@ func init() {
 			}
 			ps.Default = v
 		}
+		// Hand back a fresh reference. ParamSpec defaults are usually a
+		// mutable list ([str, int]); returning ps.Default borrowed lets the
+		// caller decref it to zero, run listDealloc, and nil the items of the
+		// very list ps still holds, so the next read sees []. CPython getters
+		// return Py_NewRef. CPython: Objects/typevarobject.c:1244 paramspec_default
+		Incref(ps.Default)
 		return ps.Default, nil
 	}, nil))
 	// CPython: Objects/typevarobject.c:1262 paramspec_evaluate_default
@@ -511,18 +540,25 @@ func init() {
 	}, nil))
 
 	// CPython: Objects/typevarobject.c:1365 paramspec_typing_subst_impl
+	// Delegates to typing._paramspec_subst(self, arg), which validates that the
+	// argument is a list/tuple of types, an ellipsis, a ParamSpec, or a
+	// Concatenate, and raises TypeError otherwise.
 	SetTypeDescr(ParamSpecType, "__typing_subst__", NewMethodDescr(ParamSpecType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 2 {
 			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
 		}
-		return args[1], nil
+		return callTypingFunc("_paramspec_subst", args[0], args[1])
 	}))
-	// CPython: Objects/typevarobject.c:1385 paramspec_typing_prepare_subst_impl
+	// CPython: Objects/typevarobject.c:1383 paramspec_typing_prepare_subst_impl
+	// Delegates to typing._paramspec_prepare_subst(self, alias, args), which
+	// appends the ParamSpec default when one slot short and folds bare lists into
+	// tuples. Returning args unchanged skipped default-filling, so A[()] over a
+	// class whose trailing ParamSpec has a default raised "Too few arguments".
 	SetTypeDescr(ParamSpecType, "__typing_prepare_subst__", NewMethodDescr(ParamSpecType, "__typing_prepare_subst__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) < 3 {
 			return nil, fmt.Errorf("TypeError: __typing_prepare_subst__() missing arguments")
 		}
-		return args[2], nil
+		return callTypingFunc("_paramspec_prepare_subst", args[0], args[1], args[2])
 	}))
 	SetTypeDescr(ParamSpecType, "__or__", NewMethodDescr(ParamSpecType, "__or__", typevarOr))
 	SetTypeDescr(ParamSpecType, "__ror__", NewMethodDescr(ParamSpecType, "__ror__", typevarRor))
@@ -571,6 +607,9 @@ func init() {
 			}
 			tvt.Default = v
 		}
+		// Return a fresh reference so the caller cannot decref the stored
+		// default to zero. CPython: Objects/typevarobject.c:1620 typevartuple_default
+		Incref(tvt.Default)
 		return tvt.Default, nil
 	}, nil))
 	// CPython: Objects/typevarobject.c typevartuple_evaluate_default
@@ -596,11 +635,10 @@ func init() {
 		return NewBool(tvt.HasDefault), nil
 	}))
 	// CPython: Objects/typevarobject.c:1619 typevartuple_typing_subst_impl
+	// A bare TypeVarTuple cannot be substituted directly; substitution always
+	// goes through __typing_prepare_subst__ which groups the variadic args.
 	SetTypeDescr(TypeVarTupleType, "__typing_subst__", NewMethodDescr(TypeVarTupleType, "__typing_subst__", func(args []Object, _ map[string]Object) (Object, error) {
-		if len(args) < 2 {
-			return nil, fmt.Errorf("TypeError: __typing_subst__() missing argument")
-		}
-		return args[1], nil
+		return nil, fmt.Errorf("TypeError: Substitution of bare TypeVarTuple is not supported")
 	}))
 	// CPython: Objects/typevarobject.c:1640 typevartuple_typing_prepare_subst_impl
 	// Delegates to typing._typevartuple_prepare_subst(self, alias, args) which
@@ -664,6 +702,103 @@ func init() {
 	SetTypeDescr(GenericType, "__init_subclass__", NewClassMethod(
 		NewBuiltinFunction("__init_subclass__", genericInitSubclass),
 	))
+}
+
+// callTypingFunc looks up a function in the typing module via sys.modules and
+// calls it with the given positional arguments. Mirrors CPython's
+// call_typing_func_object, which routes the C-level __typing_subst__ slots back
+// into their Python implementations in Lib/typing.py.
+//
+// CPython: Objects/typevarobject.c:60 call_typing_func_object
+func callTypingFunc(name string, args ...Object) (Object, error) {
+	if SysModulesGetter == nil {
+		return nil, fmt.Errorf("TypeError: typing module unavailable for %s", name)
+	}
+	sysmod := SysModulesGetter()
+	if sysmod == nil {
+		return nil, fmt.Errorf("TypeError: typing module unavailable for %s", name)
+	}
+	typingMod, err := sysmod.GetItem(NewStr("typing"))
+	if err != nil || typingMod == nil {
+		return nil, fmt.Errorf("TypeError: typing module not loaded for %s", name)
+	}
+	fn, err := GetAttr(typingMod, NewStr(name))
+	if err != nil || fn == nil {
+		return nil, fmt.Errorf("TypeError: typing.%s unavailable", name)
+	}
+	return Call(fn, NewTuple(args), nil)
+}
+
+// typevarPrepareSubst ports typevar_typing_prepare_subst_impl. When a generic
+// alias is specialized, the TypeVar checks its own slot: if an argument was
+// supplied it passes through, if exactly one slot short and the TypeVar carries
+// a default the default is appended, otherwise it is a "too few arguments"
+// error. Returning args unchanged (the old shim) skipped default-filling, so
+// A[int] over class A(Generic[T, U, *Ts]) with U/Ts defaults raised instead of
+// expanding the trailing defaults.
+//
+// CPython: Objects/typevarobject.c:772 typevar_typing_prepare_subst_impl
+func typevarPrepareSubst(self, alias, args Object) (Object, error) {
+	params, err := GetAttr(alias, NewStr("__parameters__"))
+	if err != nil {
+		return nil, err
+	}
+	// CPython works through PySequence_Index / PySequence_Length, so params
+	// and args may be any sequence (alias.__getitem__ passes the list that
+	// _unpack_args returns, not a tuple). Materialize copies to index by
+	// position without assuming tuple identity.
+	paramsList, err := SequenceList(params)
+	if err != nil {
+		return nil, err
+	}
+	i := -1
+	for k := 0; k < paramsList.Len(); k++ {
+		if paramsList.Item(k) == self {
+			i = k
+			break
+		}
+	}
+	if i == -1 {
+		return nil, fmt.Errorf("ValueError: %s is not in sequence", self.Type().Name)
+	}
+	argsList, err := SequenceList(args)
+	if err != nil {
+		return nil, err
+	}
+	argsLen := argsList.Len()
+	if i < argsLen {
+		// We already have a value for our TypeVar.
+		Incref(args)
+		return args, nil
+	}
+	if i == argsLen {
+		// One slot short: if the TypeVar has a default, fill it in.
+		dflt, derr := GetAttr(self, NewStr("__default__"))
+		if derr != nil {
+			return nil, derr
+		}
+		if dflt != NoDefault() {
+			return SequenceConcat(args, NewTuple([]Object{dflt}))
+		}
+	}
+	aliasStr, err := Repr(alias)
+	if err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("TypeError: Too few arguments for %s; actual %d, expected at least %d",
+		aliasStr, argsLen, i+1)
+}
+
+// mroEntriesReject builds an __mro_entries__ method descriptor that always
+// raises "Cannot subclass an instance of <name>". TypeVar, ParamSpec,
+// TypeVarTuple and the ParamSpec args/kwargs objects each install one so that
+// `class C(T)` over an instance is rejected during base resolution.
+//
+// CPython: Objects/typevarobject.c:853 typevar_mro_entries
+func mroEntriesReject(t *Type, name string) {
+	SetTypeDescr(t, "__mro_entries__", NewMethodDescr(t, "__mro_entries__", func(_ []Object, _ map[string]Object) (Object, error) {
+		return nil, fmt.Errorf("TypeError: Cannot subclass an instance of %s", name)
+	}))
 }
 
 // typevarOr implements `self | other` for TypeVar and ParamSpec, building
