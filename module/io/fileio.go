@@ -759,7 +759,8 @@ func fileIOGetattr(o objects.Object, name objects.Object) (objects.Object, error
 	if fn := fileIOMethod(fi, n.Value()); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.FileIO' object has no attribute '%s'", n.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(o, name)
 }
 
 // fileIOSetattr handles attribute assignment on FileIO. Only .name is

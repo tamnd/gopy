@@ -346,6 +346,9 @@ func bufferedIOBaseGetattr(self objects.Object, nameObj objects.Object) (objects
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
+	if v, ok, err := ioUserInstanceAttr(self, nameObj); ok || err != nil {
+		return v, err
+	}
 	switch name.Value() {
 	case "detach":
 		return objects.NewBuiltinFunction("detach", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -372,7 +375,8 @@ func bufferedIOBaseGetattr(self objects.Object, nameObj objects.Object) (objects
 			return nil, fmt.Errorf("UnsupportedOperation: write")
 		}), nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io._BufferedIOBase' object has no attribute '%s'", name.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(self, nameObj)
 }
 
 // bufferedIOBaseReadintoGeneric implements the shared concrete fallback for
@@ -1446,7 +1450,8 @@ func bufferedGetattr(self objects.Object, nameObj objects.Object) (objects.Objec
 			return objects.NewStr(s), nil
 		}), nil
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", typeName, name.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(self, nameObj)
 }
 
 // --- constructors ------------------------------------------------------------
@@ -1775,7 +1780,8 @@ func rwPairGetattr(self objects.Object, nameObj objects.Object) (objects.Object,
 		// CPython: Modules/_io/bufferedio.c:2441 bufferedrwpair_closed_get
 		return objects.NewBool(p.writer.closed), nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.BufferedRWPair' object has no attribute '%s'", name.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(self, nameObj)
 }
 
 func init() {

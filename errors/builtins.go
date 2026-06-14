@@ -117,6 +117,11 @@ func init() {
 	// CPython: Objects/exceptions.c:684 StopIteration_init
 	objects.SetTypeDescr(PyExc_StopIteration, "value",
 		objects.NewGetSetDescr("value", stopIterValueGet, stopIterValueSet))
+	// SystemExit exposes a dedicated `code` member seeded by SystemExit_init.
+	//
+	// CPython: Objects/exceptions.c:880 SystemExit_members
+	objects.SetTypeDescr(PyExc_SystemExit, "code",
+		objects.NewGetSetDescr("code", sysExitCodeGet, sysExitCodeSet))
 	// AsyncGenStopIterationHook lets objects/async_gen.go raise a typed
 	// StopIteration(value) without importing this package. Mirrors
 	// _PyGen_SetStopIterationValue in the async_gen_unwrap_value path.
@@ -278,6 +283,50 @@ func excTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]object
 		}
 	}
 	return exc, nil
+}
+
+// sysExitCodeGet returns SystemExit's `code`. An explicit assignment is
+// preserved in the dedicated slot; otherwise the value is derived from the
+// constructor args exactly as SystemExit_init seeds it (args[0] for one
+// arg, the args tuple for several, None for none).
+//
+// CPython: Objects/exceptions.c:866 SystemExit_init
+// CPython: Objects/exceptions.c:880 SystemExit_members (code)
+func sysExitCodeGet(owner objects.Object) (objects.Object, error) {
+	e, ok := owner.(*Exception)
+	if !ok {
+		return objects.None(), nil
+	}
+	if e.SysExitCode != nil {
+		return e.SysExitCode, nil
+	}
+	if e.Args == nil {
+		return objects.None(), nil
+	}
+	switch e.Args.Len() {
+	case 0:
+		return objects.None(), nil
+	case 1:
+		return e.Args.Item(0), nil
+	default:
+		return e.Args, nil
+	}
+}
+
+// sysExitCodeSet writes only the dedicated SysExitCode slot, leaving
+// args untouched. Mirrors the _Py_T_OBJECT member on PySystemExitObject.
+//
+// CPython: Objects/exceptions.c:880 SystemExit_members (code)
+func sysExitCodeSet(owner objects.Object, value objects.Object) error {
+	e, ok := owner.(*Exception)
+	if !ok {
+		return stderrors.New("TypeError: descriptor 'code' requires SystemExit")
+	}
+	if value == nil {
+		value = objects.None()
+	}
+	e.SysExitCode = value
+	return nil
 }
 
 // excStr ports BaseException_str: empty for no args, str(args[0]) for

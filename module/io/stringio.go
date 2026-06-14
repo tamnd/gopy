@@ -59,6 +59,10 @@ func init() {
 	StringIOType.Iter = stringIOIter
 	StringIOType.IterNext = stringIOIterNext
 	StringIOType.Getattro = stringIOGetattr
+	// StringIO defines no __eq__, so it keeps object's identity-based hash.
+	//
+	// CPython: Modules/_io/stringio.c:1056 PyStringIO_Type (tp_hash inherited)
+	StringIOType.Hash = objects.IdentityHash
 	registerStringIODescrs()
 	objects.AddIterSlotWrappers(StringIOType)
 }

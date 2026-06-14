@@ -25,19 +25,49 @@ func osChmod(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: chmod() missing required arguments")
 	}
-	path, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: chmod() path must be str")
+	p, err := pathStringArg(args[0], "chmod")
+	if err != nil {
+		return nil, err
 	}
 	mode, ok := args[1].(*objects.Int)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: chmod() mode must be int")
 	}
 	m, _ := mode.Int64()
-	if err := goos.Chmod(path.Value(), goos.FileMode(m)); err != nil {
+	if err := goos.Chmod(p, goos.FileMode(m)); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
+}
+
+// pathStringArg coerces a path argument the way CPython's path_converter
+// does: a str is taken verbatim, bytes are decoded, and any other object is
+// run through os.fspath (__fspath__) so pathlib.Path and other PathLike
+// objects are accepted.
+//
+// CPython: Modules/posixmodule.c:1093 path_converter
+func pathStringArg(o objects.Object, fname string) (string, error) {
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	m, err := objects.GetAttr(o, objects.NewStr("__fspath__"))
+	if err != nil {
+		return "", fmt.Errorf("TypeError: %s: path should be string, bytes or os.PathLike, not %s", fname, o.Type().Name)
+	}
+	r, err := objects.Call(m, objects.NewTuple(nil), nil)
+	if err != nil {
+		return "", err
+	}
+	switch v := r.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	return "", fmt.Errorf("TypeError: expected __fspath__ to return str or bytes, not %s", r.Type().Name)
 }
 
 // osSymlink creates a symbolic link at link_name pointing at src.

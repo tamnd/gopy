@@ -62,6 +62,16 @@ type Exception struct {
 	// CPython: Objects/exceptions.c:867 PyBaseExceptionGroupObject
 	EG *ExceptionGroupState
 
+	// SysExitCode stores SystemExit's separate `code` member per
+	// PySystemExitObject. SystemExit_init seeds it from the positional
+	// args (args[0] for one arg, the args tuple for several, None for
+	// none); assigning exc.code rewrites only this slot, leaving args
+	// untouched. Meaningful only when ExcType is SystemExit or a subclass.
+	//
+	// CPython: Objects/exceptions.c:854 PySystemExitObject
+	// CPython: Objects/exceptions.c:866 SystemExit_init
+	SysExitCode objects.Object
+
 	// NotesObj holds a __notes__ value that is not a plain list. CPython
 	// stores __notes__ as an ordinary instance attribute that may hold any
 	// object; add_note only requires a list when it appends. The common

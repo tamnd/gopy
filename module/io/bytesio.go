@@ -45,6 +45,10 @@ func init() {
 	BytesIOType.Iter = bytesIOIter
 	BytesIOType.IterNext = bytesIOIterNext
 	BytesIOType.Getattro = bytesIOGetattr
+	// BytesIO defines no __eq__, so it keeps object's identity-based hash.
+	//
+	// CPython: Modules/_io/bytesio.c:1062 PyBytesIO_Type (tp_hash inherited)
+	BytesIOType.Hash = objects.IdentityHash
 	// LOAD_SPECIAL walks the type MRO for __enter__ / __exit__.
 	//
 	// CPython: Modules/_io/iobase.c:391 iobase_enter / :409 iobase_exit
@@ -446,7 +450,10 @@ func bytesIOGetattr(o objects.Object, name objects.Object) (objects.Object, erro
 	if fn := bytesIOMethod(b, n.Value()); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.BytesIO' object has no attribute '%s'", n.Value())
+	// Anything the custom dispatch above does not serve (dunders such as
+	// __class__, __dict__, __reduce_ex__) resolves through the normal MRO
+	// walk against BytesIOType's bases (object), matching stringIOGetattr.
+	return objects.GenericGetAttr(o, name)
 }
 
 // bytesIOMethod maps method names to BuiltinFunctions.
