@@ -130,6 +130,23 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		if dir == "" {
 			dir = "."
 		}
+		// A sys.path entry that is not a directory (a zip archive, or a
+		// path that points inside one) is handled by a custom importer
+		// registered on sys.path_hooks, exactly as CPython's PathFinder
+		// routes such entries through zipimport.zipimporter. Only consult
+		// the hooks for non-directories so the directory scan below stays
+		// the fast path for the common case.
+		//
+		// CPython: Lib/importlib/_bootstrap_external.py:1236 _path_importer_cache
+		if !isDir(dir) {
+			if mod, handled, herr := tryPathHook(exec, entry, name); herr != nil {
+				return nil, herr
+			} else if handled {
+				bindOnParent(parent, tail, mod)
+				return mod, nil
+			}
+			continue
+		}
 		// Package case: <dir>/<tail>/__init__.py.
 		// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
 		pkgDir := filepath.Join(dir, tail)
@@ -163,6 +180,138 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		return mod, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
+}
+
+// tryPathHook consults sys.path_hooks for a custom importer able to load
+// modules out of entry (zipimport.zipimporter for a .zip archive), asks
+// that importer for name's spec, and loads the module from it.
+//
+// handled is false when no hook claims entry, or when the importer
+// claims entry but has no spec for name, so FindModule keeps scanning the
+// remaining path entries. herr carries a real loader failure (compile or
+// exec error) that must propagate.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+// CPython: Lib/importlib/_bootstrap.py:921 _load_unlocked
+func tryPathHook(exec Executor, entry, name string) (mod *objects.Module, handled bool, herr error) {
+	importer, ok := pathHookImporter(entry)
+	if !ok {
+		return nil, false, nil
+	}
+	findSpec, err := objects.GetAttr(importer, objects.NewStr("find_spec"))
+	if err != nil {
+		return nil, false, nil
+	}
+	spec, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+	if err != nil {
+		return nil, true, err
+	}
+	if spec == nil || objects.IsNone(spec) {
+		// The archive exists but does not contain name: a miss, not an
+		// error. CPython's PathFinder moves on to the next path entry.
+		return nil, false, nil
+	}
+	m, lerr := loadFromSpec(exec, name, spec)
+	if lerr != nil {
+		return nil, true, lerr
+	}
+	return m, true, nil
+}
+
+// pathHookImporter returns the importer object responsible for entry,
+// consulting sys.path_importer_cache first and then sys.path_hooks. A
+// hook that raises (ImportError) declines entry, so the next hook is
+// tried; when none claim it the result is cached as None and ok is false.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1236 PathFinder._path_importer_cache
+func pathHookImporter(entry string) (objects.Object, bool) {
+	sysMod, ok := GetModule("sys")
+	if !ok {
+		return nil, false
+	}
+	key := objects.NewStr(entry)
+	cacheObj, _ := sysMod.Dict().GetItem(objects.NewStr("path_importer_cache"))
+	cache, _ := cacheObj.(*objects.Dict)
+	if cache != nil {
+		if v, err := cache.GetItem(key); err == nil && v != nil {
+			if objects.IsNone(v) {
+				return nil, false
+			}
+			return v, true
+		}
+	}
+	hooksObj, _ := sysMod.Dict().GetItem(objects.NewStr("path_hooks"))
+	hooks, _ := hooksObj.(*objects.List)
+	if hooks == nil {
+		return nil, false
+	}
+	for i := 0; i < hooks.Len(); i++ {
+		importer, err := objects.Call(hooks.Item(i), objects.NewTuple([]objects.Object{key}), nil)
+		if err != nil {
+			// ImportError from a hook means "I do not handle this entry".
+			continue
+		}
+		if importer != nil && !objects.IsNone(importer) {
+			if cache != nil {
+				_ = cache.SetItem(key, importer)
+			}
+			return importer, true
+		}
+	}
+	if cache != nil {
+		_ = cache.SetItem(key, objects.None())
+	}
+	return nil, false
+}
+
+// loadFromSpec builds a module from spec via importlib.util.module_from_spec,
+// registers it in sys.modules, and runs spec.loader.exec_module, mirroring
+// the body of _bootstrap._load_unlocked. gopy cannot call _load itself
+// because that path enters the import lock machinery, which needs the
+// _weakref injection CPython performs in _setup and gopy does not run.
+//
+// CPython: Lib/importlib/_bootstrap.py:921 _load_unlocked
+func loadFromSpec(exec Executor, name string, spec objects.Object) (*objects.Module, error) {
+	util, ok := GetModule("importlib.util")
+	if !ok {
+		util, ok = ensureImportlibUtil(exec)
+		if !ok {
+			return nil, fmt.Errorf("imp: loadFromSpec %q: importlib.util unavailable", name)
+		}
+	}
+	mfs, err := util.Dict().GetItem(objects.NewStr("module_from_spec"))
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec missing: %w", name, err)
+	}
+	modObj, err := objects.Call(mfs, objects.NewTuple([]objects.Object{spec}), nil)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec: %w", name, err)
+	}
+	module, ok := modObj.(*objects.Module)
+	if !ok {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec returned %T", name, modObj)
+	}
+	AddModule(name, module)
+	loader, err := objects.GetAttr(spec, objects.NewStr("loader"))
+	if err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: spec.loader: %w", name, err)
+	}
+	execMod, err := objects.GetAttr(loader, objects.NewStr("exec_module"))
+	if err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: loader.exec_module: %w", name, err)
+	}
+	if _, err := objects.Call(execMod, objects.NewTuple([]objects.Object{module}), nil); err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: exec_module: %w", name, err)
+	}
+	// exec_module may reassign sys.modules[name]; re-read it the way
+	// CPython's _load_unlocked returns sys.modules[spec.name].
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return module, nil
 }
 
 // bindOnParent installs child as an attribute on the parent package's

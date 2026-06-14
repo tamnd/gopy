@@ -133,6 +133,16 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "path_hooks", objects.NewList(nil)); err != nil {
 		return nil, err
 	}
+	// meta_path is the meta-path finder list. CPython seeds it with
+	// BuiltinImporter, FrozenImporter and PathFinder; gopy resolves those
+	// three Go-side, so the list starts empty. It still has to exist as a
+	// real list: import_helper saves and restores it around every test,
+	// and user code is free to append custom finders.
+	//
+	// CPython: Python/pylifecycle.c init_importlib (sys.meta_path)
+	if err := setItem(d, "meta_path", objects.NewList(nil)); err != nil {
+		return nil, err
+	}
 	if err := setItem(d, "path_importer_cache", objects.NewDict()); err != nil {
 		return nil, err
 	}

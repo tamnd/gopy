@@ -155,6 +155,16 @@ def _install_path_hooks():
     import sys
     if getattr(sys, '_gopy_file_finder_installed', False):
         return
+    # CPython orders the path hooks zipimport.zipimporter first, then the
+    # FileFinder hook, so a sys.path entry pointing at a zip archive is
+    # claimed by zipimport before the directory finder rejects it.
+    #
+    # CPython: Lib/importlib/_bootstrap_external.py:1648 _install (path_hooks)
+    try:
+        import zipimport
+        sys.path_hooks.append(zipimport.zipimporter)
+    except ImportError:
+        pass
     _loader_details = (SourceFileLoader, SOURCE_SUFFIXES)
     sys.path_hooks.append(FileFinder.path_hook(_loader_details))
     sys._gopy_file_finder_installed = True

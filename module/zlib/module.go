@@ -151,7 +151,14 @@ func compressObjFlush(args []objects.Object, _ map[string]objects.Object) (objec
 		return nil, fmt.Errorf("ValueError: compressor has already been flushed")
 	}
 
-	mode := zSyncFlush
+	// flush()'s mode argument defaults to Z_FINISH, not Z_SYNC_FLUSH:
+	// the common `compressobj().compress(x) + flush()` idiom must emit a
+	// complete stream (final deflate block) so a one-shot decompressor can
+	// read it back. zipfile relies on this when it stores compressed
+	// members, and zipimport then decompresses them with raw inflate.
+	//
+	// CPython: Modules/zlibmodule.c:478 zlib_Compress_flush_impl (mode=Z_FINISH)
+	mode := zFinish
 	if len(args) >= 2 {
 		m, err := intFromObj(args[1])
 		if err != nil {
