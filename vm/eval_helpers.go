@@ -1389,6 +1389,17 @@ func (e *evalState) listFromStackRef(values []stackref.Ref, n uint32) objects.Ob
 		e.pendingErr = errors.New("BUILD_LIST: count exceeds values slice")
 		return nil
 	}
+	// Allocating the list object and its item array is a tracked allocation
+	// for the _testcapi.set_nomemory fault injector. CPython's BUILD_LIST
+	// goes through _PyList_FromStackRefStealOnSuccess -> PyList_New, whose
+	// allocation the armed PyMem hook can fail; gopy consumes the same fault
+	// counter here so test_list.test_no_memory sees a real MemoryError.
+	//
+	// CPython: Objects/listobject.c:160 PyList_New (PyMem_Calloc failure)
+	if objects.ConsumeAllocFault() {
+		e.pendingErr = fmt.Errorf("MemoryError")
+		return nil
+	}
 	// NewList takes its own counted reference per item (PyList_SET_ITEM +
 	// Py_INCREF), so the items are read borrowed here; the dispatch arm's
 	// following drop(oparg) Closes each stack slot. No extra Incref.

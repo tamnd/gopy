@@ -39,7 +39,7 @@ tree before porting.
 | `test_metaclass` | OK (1) |
 | `test_typing` | OK (709) |
 | `test_enum` | OK (1081, 4 skipped) |
-| `test_class` | 1 failure (`test_detach_materialized_dict_no_memory`, deferred) |
+| `test_class` | OK (37) |
 | `test_descr` | 2 failures (type-dict representation + PEP 412, deferred) |
 | `test_types` | 3 errors (missing `_queue` / `_datetime` CAPI / subinterpreters) |
 
@@ -295,12 +295,5 @@ syntax". Clears `test_descr.test_dunder_get_signature`.
 - [x] test_typing: runner no longer aborts. Root cause was optional dunder probes leaking a pending `AttributeError` (see above), not a malformed suite.
 - [ ] test_typing: port PEP 646 `TypeVarTuple` / PEP 612 `ParamSpec` substitution (`subsParameters`) — dominates the remaining errors
 - [ ] test_enum: vendor `pydoc`
-- [ ] test_class: `test_detach_materialized_dict_no_memory` needs `_testcapi.set_nomemory` (allocator fault injection, infeasible on the Go runtime; deferred)
+- [x] test_class: `test_detach_materialized_dict_no_memory` green. Ported `_testcapi.set_nomemory` / `remove_mem_hooks` as an allocation-fault injector (objects/nomemory.go): an armed counter is consumed at the allocation sites the suite exercises (BUILD_LIST item array, managed-dict detach at instance dealloc). On a fault during detach, the materialized `__dict__` is cleared and a MemoryError is routed to `sys.unraisablehook`, matching `_PyObject_FreeInstanceAttributes` -> `_PyDict_DetachFromObject`
 - [ ] test_metaclass: `__module__` prefix differs under the unittest harness (`test_metaclass` vs `test.test_metaclass`); confirm it is harness-only and not a gopy divergence
-
-## Deferred / out of scope
-
-- `test_class.test_detach_materialized_dict_no_memory` drives
-  `_testcapi.set_nomemory`, which faults the C allocator. Go's runtime has no
-  equivalent injection point; this is an environmental gap, not a behaviour
-  divergence.

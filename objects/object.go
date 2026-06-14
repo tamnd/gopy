@@ -997,6 +997,14 @@ func objectGetDict(o Object) (Object, error) {
 			// CPython: Objects/typeobject.c:6776 subtype_dict
 			v.dict = NewDict()
 		}
+		// A Python-visible mapping now aliases the instance's attribute
+		// storage; the detach owed at dealloc (and the fault it may take)
+		// is gated on this flag.
+		//
+		// CPython: Objects/dictobject.c:6776 subtype_dict materializes the
+		// managed dict over the inline values, leaving them to be detached
+		// in _PyObject_FreeInstanceAttributes at dealloc.
+		v.dictExposed = true
 		return v.dict, nil
 	case *Int:
 		// The builtin int type has no tp_dictoffset, so (42).__dict__

@@ -114,6 +114,19 @@ type Instance struct {
 	// CPython: Include/internal/pycore_dict.h PyDictValues.valid
 	inlineValid bool
 
+	// dictExposed records that Python code has fetched this instance's
+	// __dict__ (via objectGetDict), so a live mapping object aliases the
+	// instance's attribute storage. CPython materializes such a dict over
+	// the inline-values array and, at dealloc, must detach it (copy the
+	// values into dict-owned storage) before the inline array is freed. The
+	// detach allocates, so it is the point _testcapi.set_nomemory can fault.
+	// gopy's dict already owns its storage, so the detach is a no-op on
+	// success; the flag exists only to know whether a detach (and its
+	// fault-prone allocation) is owed at dealloc.
+	//
+	// CPython: Objects/dictobject.c:7530 _PyDict_DetachFromObject
+	dictExposed bool
+
 	// typeReleased guards the single _Py_DECREF_TYPE that instanceDealloc
 	// performs. CPython's refcounting is exact, so subtype_dealloc runs
 	// exactly once per object; gopy's VM still under-counts some borrowed
@@ -260,6 +273,31 @@ func instanceDealloc(o Object) {
 	}
 	if inst.typeReleased {
 		return
+	}
+	// Detach a materialized __dict__ before the instance storage goes away.
+	// CPython's dealloc path copies the inline values into dict-owned
+	// storage (_PyObject_FreeInstanceAttributes -> _PyDict_DetachFromObject),
+	// an allocation that the _testcapi.set_nomemory injector can fail. On
+	// failure CPython cannot complete the copy, so it clears the dict and
+	// reports the MemoryError through the unraisable hook (the dealloc path
+	// has no caller to propagate to). gopy's dict already owns its storage,
+	// so a successful detach is a no-op; only the fault path has observable
+	// effect, and it must match CPython exactly: empty the dict and route a
+	// MemoryError to sys.unraisablehook.
+	//
+	// CPython: Objects/dictobject.c:7530 _PyDict_DetachFromObject
+	//          Objects/typeobject.c:2782 subtype_dealloc (clear_dict branch)
+	if inst.dictExposed && inst.dict != nil && inst.inlineValid {
+		inst.dictExposed = false
+		if ConsumeAllocFault() {
+			inst.dict.lock()
+			inst.dict.clearContents()
+			inst.dict.unlock()
+			inst.inlineValid = false
+			if WriteUnraisableHook != nil {
+				WriteUnraisableHook(inst, "Exception ignored while detaching the instance dictionary", fmt.Errorf("MemoryError"))
+			}
+		}
 	}
 	t := inst.Type()
 	if t != nil && t.IsUser {
