@@ -756,7 +756,19 @@ func bootstrapBuiltins(stdout, stderr *os.File) (*objects.Dict, error) {
 func newMainGlobals(builtinsDict *objects.Dict, name string) *objects.Dict {
 	mainDict := objects.NewDict()
 	_ = mainDict.SetItem(objects.NewStr("__name__"), objects.NewStr(name))
-	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsDict)
+	// CPython binds __main__.__builtins__ to the builtins *module* object;
+	// every other module receives the builtins dict instead. The frame
+	// builder unwraps the module back to its dict for LOAD_GLOBAL, so the
+	// only observable difference is that `del __builtins__.__import__`
+	// reaches a module attribute, after which the import machinery raises
+	// ImportError (test_import.test_delete_builtins_import).
+	//
+	// CPython: Python/pylifecycle.c init_interp_main (binds __main__.__builtins__)
+	var builtinsBinding objects.Object = builtinsDict
+	if bm, ok := imp.GetModule("builtins"); ok {
+		builtinsBinding = bm
+	}
+	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsBinding)
 	// CPython always binds __main__.__spec__: None for `-c`/script runs,
 	// a real ModuleSpec under `-m`. runFile overwrites this with a
 	// file-location spec for vendored "test.<name>" runs.
