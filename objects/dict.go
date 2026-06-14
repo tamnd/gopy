@@ -173,7 +173,7 @@ func init() {
 	SetTypeDescr(DictType, "__eq__", NewMethodDescr(DictType, "__eq__", dictEqMethod))
 	SetTypeDescr(DictType, "clear", NewMethodDescrConv(DictType, "clear", MethNoArgs, dictClearMethod))
 	SetTypeDescr(DictType, "pop", NewMethodDescr(DictType, "pop", dictPopMethod))
-	SetTypeDescr(DictType, "update", NewMethodDescr(DictType, "update", dictUpdateMethod))
+	SetTypeDescr(DictType, "update", NewMethodDescrKwOrdered(DictType, "update", dictUpdateMethod))
 	SetTypeDescr(DictType, "copy", NewMethodDescrConv(DictType, "copy", MethNoArgs, dictCopyMethod))
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
 	// fromkeys is a METH_CLASS PyMethodDef, so it surfaces as a
@@ -1022,7 +1022,7 @@ func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
 // pairs, plus keyword arguments.
 //
 // CPython: Objects/dictobject.c:3795 dict_update_common
-func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
+func dictUpdateMethod(args []Object, kwargs *Dict) (Object, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return nil, fmt.Errorf("TypeError: update expected at most 1 argument, got %d", len(args)-1)
 	}
@@ -1032,9 +1032,18 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 			return nil, err
 		}
 	}
-	for k, v := range kwargs {
-		if err := d.SetItem(NewStr(k), v); err != nil {
-			return nil, err
+	// Keyword updates land in caller order, matching dict_update_common.
+	//
+	// CPython: Objects/dictobject.c:3795 dict_update_common
+	if kwargs != nil {
+		for _, k := range kwargs.Keys() {
+			v, err := kwargs.GetItem(k)
+			if err != nil {
+				return nil, err
+			}
+			if err := d.SetItem(k, v); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return None(), nil

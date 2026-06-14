@@ -997,7 +997,7 @@ func DictCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.
 func bindDictCtor(t *objects.Type) {
 	// TpNew is already set in objects/dict.go to allocate a bare *Dict.
 	// __init__ populates it from an optional mapping/iterable + kwargs.
-	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescrKwOrdered(t, "__init__", func(args []objects.Object, kwargs *objects.Dict) (objects.Object, error) {
 		if len(args) < 1 || len(args) > 2 {
 			return nil, fmt.Errorf("TypeError: dict expected at most 1 argument, got %d", len(args)-1)
 		}
@@ -1017,9 +1017,19 @@ func bindDictCtor(t *objects.Type) {
 				}
 			}
 		}
-		for k, v := range kwargs {
-			if err := d.SetItem(objects.NewStr(k), v); err != nil {
-				return nil, err
+		// Merge the keyword dict in caller order, mirroring dict_init's
+		// PyDict_Merge(self, kwds, 1) so dict(a=1, b=2) keeps insertion order.
+		//
+		// CPython: Objects/dictobject.c:3795 dict_update_common
+		if kwargs != nil {
+			for _, k := range kwargs.Keys() {
+				v, err := kwargs.GetItem(k)
+				if err != nil {
+					return nil, err
+				}
+				if err := d.SetItem(k, v); err != nil {
+					return nil, err
+				}
 			}
 		}
 		return objects.None(), nil

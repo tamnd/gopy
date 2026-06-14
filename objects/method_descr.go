@@ -32,6 +32,16 @@ type MethodDescr struct {
 	fn      func(args []Object, kwargs map[string]Object) (Object, error)
 	owner   *Type
 
+	// fnOrdered, when non-nil, supersedes fn for order-sensitive builtins
+	// (dict(), dict.update()) whose CPython impl walks the keyword dict in
+	// caller order. The vectorcall arm rebuilds an insertion-ordered *Dict
+	// from the kwnames tuple and hands it here instead of flattening to the
+	// unordered map. kwargs is nil when no keywords were passed.
+	//
+	// CPython: Objects/dictobject.c:3795 dict_update_common (merges the
+	// ordered kwds dict, so dict(a=1, b=2) preserves call-site order)
+	fnOrdered func(args []Object, kwargs *Dict) (Object, error)
+
 	// kwParams, when non-nil, names every keyword the underlying impl
 	// accepts. methodDescrVectorcall walks the kwnames tuple in caller
 	// order and rejects the first keyword absent from this list, exactly
@@ -101,6 +111,18 @@ func (d *MethodDescr) Owner() *Type { return d.owner }
 // CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
 func NewMethodDescr(owner *Type, name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
 	d := &MethodDescr{name: name, conv: MethVarargs | MethKeywords, fn: fn, owner: owner}
+	d.init(MethodDescrType)
+	return d
+}
+
+// NewMethodDescrKwOrdered builds a method descriptor whose impl needs the
+// keyword arguments in caller order. The vectorcall arm passes them as an
+// insertion-ordered *Dict (nil when none) rather than the unordered map, so
+// constructors like dict() observe the same key order CPython does.
+//
+// CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
+func NewMethodDescrKwOrdered(owner *Type, name string, fn func(args []Object, kwargs *Dict) (Object, error)) *MethodDescr {
+	d := &MethodDescr{name: name, conv: MethVarargs | MethKeywords, fnOrdered: fn, owner: owner}
 	d.init(MethodDescrType)
 	return d
 }
@@ -250,6 +272,21 @@ func methodDescrCall(o Object, args []Object, kwargs map[string]Object) (Object,
 	if err := methodDescrCheckArity(d, len(args)-1, len(kwargs)); err != nil {
 		return nil, err
 	}
+	if d.fnOrdered != nil {
+		// The legacy tp_call path already flattened keywords to an unordered
+		// map upstream, so order cannot be recovered here; rebuild a *Dict
+		// best-effort. Callers needing order use the vectorcall arm.
+		var kwd *Dict
+		if len(kwargs) > 0 {
+			kwd = NewDict()
+			for k, v := range kwargs {
+				if err := kwd.SetItem(NewStr(k), v); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return d.fnOrdered(args, kwd)
+	}
 	return d.fn(args, kwargs)
 }
 
@@ -276,6 +313,29 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	}
 	pos := make([]Object, nargs)
 	copy(pos, args[:nargs])
+	// Order-sensitive impls take the keywords as an insertion-ordered *Dict
+	// built straight from the kwnames tuple, bypassing the unordered map.
+	if d.fnOrdered != nil {
+		var kwd *Dict
+		if nkw > 0 {
+			kwd = NewDict()
+			order := make([]string, 0, nkw)
+			for i := 0; i < nkw; i++ {
+				name, err := Str(kwnames.Item(i))
+				if err != nil {
+					return nil, err
+				}
+				if err := kwd.SetItem(NewStr(name), args[nargs+i]); err != nil {
+					return nil, err
+				}
+				order = append(order, name)
+			}
+			if err := d.checkKwParams(order); err != nil {
+				return nil, err
+			}
+		}
+		return d.fnOrdered(pos, kwd)
+	}
 	var kwargs map[string]Object
 	if nkw > 0 {
 		kwargs = make(map[string]Object, nkw)
