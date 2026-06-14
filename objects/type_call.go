@@ -384,7 +384,12 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 			if entries != nil {
 				return nil, fmt.Errorf("TypeError: type() doesn't support MRO entry resolution; use types.new_class()")
 			}
-			return nil, fmt.Errorf("TypeError: type() bases must contain types, got %s", typeNameOf(basesT.Item(i)))
+			// best_base rejects any non-type base with this exact wording,
+			// which is what the class statement surfaces once __build_class__
+			// has already resolved __mro_entries__.
+			//
+			// CPython: Objects/typeobject.c best_base "bases must be types"
+			return nil, fmt.Errorf("TypeError: bases must be types")
 		}
 		bases = append(bases, t)
 	}

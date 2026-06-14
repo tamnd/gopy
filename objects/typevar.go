@@ -17,6 +17,7 @@ package objects
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -860,7 +861,7 @@ func typevarRor(args []Object, _ map[string]Object) (Object, error) {
 // cls.__parameters__, mirroring typing._generic_init_subclass.
 //
 // CPython: Lib/typing.py:1174 _generic_init_subclass
-func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
+func genericInitSubclass(args []Object, kwargs map[string]Object) (Object, error) {
 	if len(args) < 1 {
 		return None(), nil
 	}
@@ -868,12 +869,64 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return None(), nil
 	}
+	// Chain to the next __init_subclass__ in the MRO first, exactly as
+	// typing.py does with `super(Generic, cls).__init_subclass__(...)`. A
+	// sibling base further down the MRO (e.g. a Final mixin) relies on this
+	// to run its hook and, say, raise on disallowed subclassing.
+	//
+	// CPython: Lib/typing.py:1188 super(Generic, cls).__init_subclass__()
+	if su, serr := NewSuper(GenericType, cls); serr == nil {
+		if callable, lerr := LookupAttrString(su, "__init_subclass__"); lerr == nil && callable != nil {
+			var kwd *Dict
+			if len(kwargs) > 0 {
+				kwd = NewDict()
+				for k, v := range kwargs {
+					if err := kwd.SetItem(NewStr(k), v); err != nil {
+						Decref(callable)
+						return nil, err
+					}
+				}
+			}
+			_, cerr := Call(callable, NewTuple(nil), kwd)
+			Decref(callable)
+			if cerr != nil {
+				return nil, cerr
+			}
+		}
+	}
+	// Reject `class X(Generic)` (plain, unsubscripted). When the class has
+	// its own __orig_bases__, plain Generic appears there directly; otherwise
+	// look at __bases__, exempting Protocol and TypedDict whose own machinery
+	// re-bases onto Generic deliberately.
+	//
+	// CPython: Lib/typing.py:1190 _generic_init_subclass plain-Generic guard
+	ownOrig := TypeOwnDescrs(cls)["__orig_bases__"]
+	plainGeneric := false
+	if ownOrig != nil {
+		if ob, ok := ownOrig.(*Tuple); ok {
+			for i := 0; i < ob.Len(); i++ {
+				if ob.Item(i) == Object(GenericType) {
+					plainGeneric = true
+					break
+				}
+			}
+		}
+	} else {
+		plainGeneric = slices.Contains(cls.Bases, GenericType)
+		if plainGeneric && (cls.Name == "Protocol" || cls.Type().Name == "_TypedDictMeta") {
+			plainGeneric = false
+		}
+	}
+	if plainGeneric {
+		return nil, fmt.Errorf("TypeError: Cannot inherit from plain Generic")
+	}
+
 	// CPython gates parameter collection on `'__orig_bases__' in cls.__dict__`,
 	// not getattr: a plain subclass (class D(C)) without its own subscripted
 	// bases must reset __parameters__ to (), never inherit C's __orig_bases__.
 	//
 	// CPython: Lib/typing.py:1198 if '__orig_bases__' in cls.__dict__
-	origBases := TypeOwnDescrs(cls)["__orig_bases__"]
+	origBases := ownOrig
 	if origBases == nil {
 		SetTypingParameters(cls, NewTuple(nil))
 		return None(), nil
