@@ -1071,6 +1071,18 @@ func fixupSlotDispatchers(t *Type) {
 	fixupFinalize(t)
 }
 
+// ReadyBuiltinSubtype runs the full slot-inheritance and fixup pass on a
+// type built in Go via NewType with a built-in base (e.g. a list or dict
+// subtype defined by an extension module). It mirrors the PyType_Ready
+// path that user `class C(list)` statements take, copying scalar slots
+// (tp_iter, tp_repr, tp_new, ...) from the base so instances behave like
+// the base type. Call it after installing the subtype's own descriptors.
+//
+// CPython: Objects/typeobject.c:8499 type_ready (inherit_slots + fixups)
+func ReadyBuiltinSubtype(t *Type) {
+	fixupSlotDispatchers(t)
+}
+
 // fixupAsyncSlots wires tp_as_async (am_aiter / am_anext / am_await)
 // when the class body (or any user-defined base on the MRO) provides
 // __aiter__ / __anext__ / __await__. Without this, async for / async

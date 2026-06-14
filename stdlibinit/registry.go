@@ -390,6 +390,14 @@ import (
 	// CPython: Modules/arraymodule.c:3225 array_modexec
 	_ "github.com/tamnd/gopy/module/array"
 
+	// Built-in module: xxsubtype. Registers itself via
+	// module/xxsubtype/module.go init(). Ports Modules/xxsubtype.c: the
+	// spamlist (list subtype) and spamdict (dict subtype) example types
+	// test.test_descr drives for its spam_lists/spam_dicts/classmethods_in_c/
+	// staticmethods_in_c cases.
+	// CPython: Modules/xxsubtype.c:1
+	_ "github.com/tamnd/gopy/module/xxsubtype"
+
 	// Built-in modules: _interpreters / _interpchannels / _interpqueues.
 	// The low-level subinterpreter surface (PEP 734) backing the vendored
 	// concurrent.interpreters package and test.support.channels. gopy is
