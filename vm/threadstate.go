@@ -44,8 +44,8 @@ var threadVMs sync.Map // map[*state.Thread]*threadVM
 // interpreter contends for. CPython hangs the GIL off PyInterpreterState;
 // gopy has a single interpreter today, so one package-level lock backs
 // every PyThreadState. Each threadVM points its gil field here so the
-// eval loop serialises bytecode across goroutine-backed Python threads,
-// the way the GIL serialises OS threads in CPython's default build.
+// eval loop serializes bytecode across goroutine-backed Python threads,
+// the way the GIL serializes OS threads in CPython's default build.
 //
 // CPython: Include/internal/pycore_interp.h _gil_runtime_state
 var sharedGIL = gil.New()

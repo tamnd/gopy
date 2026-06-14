@@ -603,7 +603,7 @@ func (e *evalState) handleEvalBreaker() error {
 			}
 		}
 	}
-	// Honour a GIL-drop request from another thread: release the lock,
+	// Honor a GIL-drop request from another thread: release the lock,
 	// let the Go scheduler hand it to a waiter, then re-take it. Only the
 	// goroutine that actually owns the lock yields; a generator body
 	// running under its driver's hold (different goroutine, same

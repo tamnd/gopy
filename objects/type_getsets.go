@@ -46,7 +46,8 @@ func init() {
 // __subclasscheck__ override so it can serve as the base implementation.
 //
 // CPython: Objects/typeobject.c:5995 type___subclasscheck___impl
-//          (_PyObject_RealIsSubclass -> recursive_issubclass)
+//
+//	(_PyObject_RealIsSubclass -> recursive_issubclass)
 func typeSubclasscheckMeth(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __subclasscheck__() takes exactly one argument (%d given)", len(args)-1)
@@ -67,7 +68,8 @@ func typeSubclasscheckMeth(args []Object, _ map[string]Object) (Object, error) {
 // bypassing any metaclass __instancecheck__ override.
 //
 // CPython: Objects/typeobject.c:5982 type___instancecheck___impl
-//          (_PyObject_RealIsInstance -> recursive_isinstance)
+//
+//	(_PyObject_RealIsInstance -> recursive_isinstance)
 func typeInstancecheckMeth(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("TypeError: __instancecheck__() takes exactly one argument (%d given)", len(args)-1)

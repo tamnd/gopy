@@ -1719,4 +1719,3 @@ func typevarCallerModule() string {
 	}
 	return ""
 }
-

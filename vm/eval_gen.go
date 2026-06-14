@@ -495,7 +495,7 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			g.MarkFinished()
 		}
 		// Body has finished. Release the GIL the body owned before
-		// signalling completion on yieldCh. In baton mode the lock is
+		// signaling completion on yieldCh. In baton mode the lock is
 		// handed back to the driver that last resumed us (it wakes from
 		// <-YieldCh holding the lock, exactly as before the Send); in
 		// genuine mode the lock is released outright.
@@ -559,7 +559,23 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 //
 // CPython: Python/bytecodes.c:1370 YIELD_VALUE
 //
-//nolint:gocognit // single block mirrors CPython's YIELD_VALUE arm: gen/coro/async-gen split + send-channel handshake
+// setRunningFlag flips the gi_running / cr_running / ag_running atomic on
+// whichever suspendable is driving the frame. CPython sets gi_frame_state to
+// FRAME_EXECUTING on resume and back to FRAME_SUSPENDED on yield; gopy tracks
+// the equivalent with the Running atomic per suspendable type.
+//
+// CPython: Objects/genobject.c:248 gen_send_ex2 (gi_frame_state transitions)
+func setRunningFlag(running objects.Object, v int32) {
+	switch r := running.(type) {
+	case *objects.Generator:
+		r.Running.Store(v)
+	case *objects.Coroutine:
+		r.Running.Store(v)
+	case *objects.AsyncGenerator:
+		r.Running.Store(v)
+	}
+}
+
 func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	if e.genYield == nil {
 		return genResult{ok: true}, fmt.Errorf("vm: YIELD_VALUE outside generator context")
@@ -574,15 +590,7 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	//
 	// CPython: Python/bytecodes.c:1383 YIELD_VALUE (tstate->exc_info restore)
 	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
-	if gen, ok := e.genRunning.(*objects.Generator); ok {
-		gen.Running.Store(0)
-	}
-	if c, ok := e.genRunning.(*objects.Coroutine); ok {
-		c.Running.Store(0)
-	}
-	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
-		ag.Running.Store(0)
-	}
+	setRunningFlag(e.genRunning, 0)
 	// Save this suspendable's own exc_info and restore the caller's, the
 	// same swap gen_send_ex2 does for generators, coroutines, and async
 	// generators alike. Without it a coroutine / async generator that
@@ -671,15 +679,7 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	//
 	// CPython: Objects/genobject.c:248 gen_send_ex2 (exc_info push)
 	// CPython: Python/errors.c:116 _PyErr_GetTopmostException (chain walk)
-	if gen, ok := e.genRunning.(*objects.Generator); ok {
-		gen.Running.Store(1)
-	}
-	if c, ok := e.genRunning.(*objects.Coroutine); ok {
-		c.Running.Store(1)
-	}
-	if ag, ok := e.genRunning.(*objects.AsyncGenerator); ok {
-		ag.Running.Store(1)
-	}
+	setRunningFlag(e.genRunning, 1)
 	// Stash the new caller's exc_info, then re-push this suspendable's own
 	// handled exception. When ExcHandled is nil (no active own except
 	// block) we leave ts.HandledException as the caller's value, the

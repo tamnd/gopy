@@ -130,7 +130,7 @@ func (g *GIL) ReleaseGoid(ts holderID, goid uint64) {
 // holds the lock.
 //
 // CPython: generators run on the driver's OS thread, so there is no
-// analogue; this models gopy's goroutine-per-generator divergence.
+// analog; this models gopy's goroutine-per-generator divergence.
 func (g *GIL) Handoff(ts holderID, toGoid uint64) {
 	g.mu.Lock()
 	if g.locked && g.holder == ts {

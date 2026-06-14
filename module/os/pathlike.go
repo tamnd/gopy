@@ -1,7 +1,7 @@
 // PathLike: the abstract base class for the os.fspath protocol.
 //
 // CPython ships PathLike in Lib/os.py as `class PathLike(abc.ABC)` whose
-// metaclass is therefore abc.ABCMeta and whose __subclasshook__ recognises
+// metaclass is therefore abc.ABCMeta and whose __subclasshook__ recognizes
 // any class exposing __fspath__. gopy's os module is a Go inittab module, so
 // Lib/os.py never runs on top of it. We reproduce the class faithfully by
 // constructing it through the real abc.ABCMeta the first time os.PathLike is
@@ -73,7 +73,7 @@ func buildPathLike() (objects.Object, error) {
 	if err := ns.SetItem(objects.NewStr("__fspath__"), fspathDescr); err != nil {
 		return nil, err
 	}
-	// __subclasshook__: recognise any class exposing __fspath__ so
+	// __subclasshook__: recognize any class exposing __fspath__ so
 	// isinstance/issubclass work like CPython's _check_methods-based hook.
 	//
 	// CPython: Lib/os.py:1134 def __subclasshook__
