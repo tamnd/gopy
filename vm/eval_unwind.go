@@ -14,6 +14,7 @@ package vm
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -599,6 +600,28 @@ func (e *evalState) handleEvalBreaker() error {
 		if p := PendingFor(e.ts); p != nil {
 			if err := p.Drain(); err != nil {
 				return err
+			}
+		}
+	}
+	// Honour a GIL-drop request from another thread: release the lock,
+	// let the Go scheduler hand it to a waiter, then re-take it. Only the
+	// goroutine that actually owns the lock yields; a generator body
+	// running under its driver's hold (different goroutine, same
+	// PyThreadState) leaves the bit set for the driver to service when it
+	// resumes.
+	//
+	// CPython: Python/ceval_gil.c eval_breaker GIL_DROP_REQUEST branch
+	if b.IsSet(gil.BreakerGILDropRequest) {
+		b.Clear(gil.BreakerGILDropRequest)
+		if e.gil != nil {
+			g := goid()
+			if e.gil.HeldByGoid(g) {
+				e.gil.ReleaseGoid(e.ts, g)
+				runtime.Gosched()
+				e.gil.AcquireReentrant(e.ts, g)
+				if e.gilTimer != nil {
+					e.gilTimer.reset()
+				}
 			}
 		}
 	}

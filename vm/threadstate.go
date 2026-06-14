@@ -40,6 +40,16 @@ type threadVM struct {
 
 var threadVMs sync.Map // map[*state.Thread]*threadVM
 
+// sharedGIL is the one global interpreter lock every thread in the main
+// interpreter contends for. CPython hangs the GIL off PyInterpreterState;
+// gopy has a single interpreter today, so one package-level lock backs
+// every PyThreadState. Each threadVM points its gil field here so the
+// eval loop serialises bytecode across goroutine-backed Python threads,
+// the way the GIL serialises OS threads in CPython's default build.
+//
+// CPython: Include/internal/pycore_interp.h _gil_runtime_state
+var sharedGIL = gil.New()
+
 func vmFor(ts *state.Thread) *threadVM {
 	if v, ok := threadVMs.Load(ts); ok {
 		return v.(*threadVM)
@@ -48,6 +58,7 @@ func vmFor(ts *state.Thread) *threadVM {
 		breaker: &gil.Breaker{},
 		frames:  frame.New(),
 		pending: &gil.Pending{},
+		gil:     sharedGIL,
 	}
 	v.gilTimer.reset()
 	actual, _ := threadVMs.LoadOrStore(ts, v)

@@ -134,6 +134,22 @@ func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
 	// queue, so the Go runtime finalizer goroutine can hand its Python
 	// teardown off instead of racing the eval loop. Idempotent.
 	enableFinalizerDeferral()
+	// Take the GIL when this goroutine is entering Python from the
+	// outside (prev == nil means it was not already running a frame).
+	// AcquireReentrant no-ops when ts already holds the lock, which is
+	// exactly the generator/coroutine body case: the body runs on its
+	// own goroutine but shares its driver's PyThreadState, and the
+	// driver holds the GIL while blocked on the yield channel, so the
+	// body is already covered. Nested calls keep prev != nil and never
+	// re-take.
+	//
+	// CPython: Python/pystate.c PyThreadState_Swap (gil take on attach)
+	if prev == nil {
+		v := vmFor(ts)
+		if v.gil != nil && v.gil.AcquireReentrant(ts, g) {
+			v.gilTimer.reset()
+		}
+	}
 	return prev, g
 }
 
@@ -148,7 +164,19 @@ var enableFinalizerDeferral = func() func() {
 // cached goid from setActiveThread so we avoid a second goid() call
 // per Eval; runtime.Stack is the bench-dominant cost otherwise.
 func restoreActiveThread(prev *state.Thread, g uint64) {
+	// Drop the GIL when this goroutine leaves its outermost frame. Only
+	// the goroutine that actually took the lock releases it (ReleaseGoid
+	// no-ops otherwise), so a generator body that shared its driver's
+	// hold never drops it out from under the driver.
+	//
+	// CPython: Python/pystate.c PyThreadState_Swap (gil drop on detach)
 	if prev == nil {
+		if v, ok := activeThreads.Load(g); ok {
+			ts := v.(*state.Thread)
+			if gl := vmFor(ts).gil; gl != nil {
+				gl.ReleaseGoid(ts, g)
+			}
+		}
 		activeThreads.Delete(g)
 		return
 	}

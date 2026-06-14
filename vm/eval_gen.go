@@ -19,7 +19,45 @@ import (
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
+	"github.com/tamnd/gopy/state"
 )
+
+// genGILResume gives the running generator body ownership of the GIL as
+// it wakes from a Send. In baton mode (the driver held the lock and
+// shares ts with the body) the hold is simply reassigned to this
+// goroutine. In genuine mode (the driver is outside Eval, e.g. a bare
+// gen.Send() from Go) the body acquires the lock for real, blocking if
+// another thread holds it. No-op when no GIL is attached (unit tests).
+func genGILResume(ts *state.Thread, bodyGoid uint64, driverHolds bool) {
+	g := vmFor(ts).gil
+	if g == nil {
+		return
+	}
+	if driverHolds {
+		g.Handoff(ts, bodyGoid)
+	} else {
+		g.AcquireReentrant(ts, bodyGoid)
+	}
+}
+
+// genGILSuspend releases the GIL the body owns before it parks on a
+// yield (or finishes). In baton mode the lock is handed back to the
+// driver goroutine, which resumes from <-YieldCh already recorded as the
+// owner. In genuine mode the lock is released outright so other threads,
+// or a later bare Send, can take it; handing a phantom baton to a driver
+// that never re-enters Eval would pin the lock forever. No-op when no GIL
+// is attached.
+func genGILSuspend(ts *state.Thread, bodyGoid, driverGoid uint64, driverHolds bool) {
+	g := vmFor(ts).gil
+	if g == nil {
+		return
+	}
+	if driverHolds {
+		g.Handoff(ts, driverGoid)
+	} else {
+		g.ReleaseGoid(ts, bodyGoid)
+	}
+}
 
 // genResult bundles the dispatch outcome for the generator / coroutine
 // / with panel. ok=false means tryGen did not match the opcode and the
@@ -315,8 +353,17 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		// the generator body begins from the frame's IP, not a yield
 		// point, so there is no stack slot waiting for the sent value.
 		msg := <-sendCh
+		// Acquire the GIL for the running body. In baton mode the driver
+		// holds the lock (parked in Send on <-YieldCh) and shares savedTS
+		// with this body, so the handoff just reassigns the owning
+		// goroutine; in genuine mode (a bare gen.Send() from Go outside any
+		// Eval frame) the body acquires the lock for real. Either way the
+		// body genuinely holds the GIL while it runs and can release it
+		// around a blocking primitive (a nested thread join, lock, sleep).
+		genGILResume(savedTS, g, msg.CallerHoldsGIL)
 		if msg.Err != nil {
 			// close() before first next(): just signal StopIteration.
+			genGILSuspend(savedTS, g, msg.CallerGoid, msg.CallerHoldsGIL)
 			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 			return
 		}
@@ -390,13 +437,17 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		// Run the generator body. yieldCh/sendCh are threaded through
 		// evalState so YIELD_VALUE can reach them.
 		ge := &evalState{
-			ts:         savedTS,
-			f:          savedFrame,
-			breaker:    breakerFor(savedTS),
-			genYield:   yieldCh,
-			genSend:    sendCh,
-			code:       savedFrame.Code.Code,
-			genRunning: genObj,
+			ts:             savedTS,
+			f:              savedFrame,
+			breaker:        breakerFor(savedTS),
+			gil:            vmFor(savedTS).gil,
+			gilTimer:       &vmFor(savedTS).gilTimer,
+			genYield:       yieldCh,
+			genSend:        sendCh,
+			code:           savedFrame.Code.Code,
+			genRunning:     genObj,
+			genDriverGoid:  msg.CallerGoid,
+			genDriverHolds: msg.CallerHoldsGIL,
 		}
 		retVal, runErr := ge.run()
 		// Clear f_back on exhaustion: a finished generator frame is detached
@@ -443,6 +494,12 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			g.Running.Store(0)
 			g.MarkFinished()
 		}
+		// Body has finished. Release the GIL the body owned before
+		// signalling completion on yieldCh. In baton mode the lock is
+		// handed back to the driver that last resumed us (it wakes from
+		// <-YieldCh holding the lock, exactly as before the Send); in
+		// genuine mode the lock is released outright.
+		genGILSuspend(savedTS, g, ge.genDriverGoid, ge.genDriverHolds)
 		switch {
 		case runErr != nil && !errors.Is(runErr, objects.ErrStopIteration):
 			// Preserve Python exception identity so callers can check
@@ -553,9 +610,22 @@ func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	savedPrev := e.f.Previous
 	e.f.Previous = nil
 
+	// Release the GIL before parking. In baton mode the lock is handed
+	// back to the driver, which resumes from <-YieldCh holding it while
+	// this body sleeps on <-genSend; in genuine mode the lock is released
+	// outright. Without this the lock would stay pinned to this
+	// (now-parked) goroutine and starve every other Python thread.
+	genGILSuspend(e.ts, gID, e.genDriverGoid, e.genDriverHolds)
 	e.genYield <- objects.GenMsg{Val: val}
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
+	// Resumed: refresh the driver identity and GIL mode, then reacquire so
+	// this body owns the GIL again while it runs.
+	if msg.CallerGoid != 0 {
+		e.genDriverGoid = msg.CallerGoid
+	}
+	e.genDriverHolds = msg.CallerHoldsGIL
+	genGILResume(e.ts, gID, e.genDriverHolds)
 
 	// Re-register frame and re-link f_back on resume. CPython unconditionally
 	// sets frame->previous = tstate->current_frame on every resume, not just

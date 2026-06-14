@@ -362,24 +362,30 @@ func lockAcquire(lk *lockObject, args []objects.Object, kwargs map[string]object
 	}
 
 	if timeoutSecs < 0 {
-		// Block indefinitely.
-		lk.mu.Lock()
+		// Block indefinitely. Release the GIL while parked so the holder can
+		// run to release this lock; otherwise the two threads deadlock.
+		objects.AllowThreads(func() { lk.mu.Lock() })
 		atomic.StoreInt32(&lk.locked, 1)
 		return objects.True(), nil
 	}
 
 	// Timed wait using a poll loop (no native timed mutex in Go stdlib).
 	deadline := time.Now().Add(time.Duration(timeoutSecs * float64(time.Second)))
-	for {
-		if lk.mu.TryLock() {
-			atomic.StoreInt32(&lk.locked, 1)
-			return objects.True(), nil
+	acquired := false
+	objects.AllowThreads(func() {
+		for {
+			if lk.mu.TryLock() {
+				atomic.StoreInt32(&lk.locked, 1)
+				acquired = true
+				return
+			}
+			if time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
 		}
-		if time.Now().After(deadline) {
-			return objects.False(), nil
-		}
-		time.Sleep(100 * time.Microsecond)
-	}
+	})
+	return objects.NewBool(acquired), nil
 }
 
 // lockRelease implements lock.release().

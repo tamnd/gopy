@@ -42,6 +42,54 @@ func init() {
 		return int64(ts.ID())
 	}
 
+	// Py_BEGIN_ALLOW_THREADS: release the GIL while the current goroutine
+	// blocks in Go (thread join, lock wait, sleep, blocking I/O) so other
+	// Python threads can run, then re-take it. A no-op when this goroutine
+	// does not own the GIL (e.g. a generator body running under its
+	// driver's hold, where the driver, not this goroutine, owns the lock).
+	//
+	// CPython: Include/internal/pycore_ceval.h Py_BEGIN_ALLOW_THREADS
+	objects.BeginAllowThreads = func() func() {
+		ts := currentThread()
+		if ts == nil {
+			return func() {}
+		}
+		v := vmFor(ts)
+		if v.gil == nil {
+			return func() {}
+		}
+		g := goid()
+		if !v.gil.HeldByGoid(g) {
+			return func() {}
+		}
+		v.gil.ReleaseGoid(ts, g)
+		return func() {
+			v.gil.AcquireReentrant(ts, g)
+			v.gilTimer.reset()
+		}
+	}
+
+	// Report whether the running goroutine currently owns the GIL. The
+	// generator protocol reads this on every Send/Throw/Close to pick its
+	// resume mode: when the driver holds the lock the body borrows it via
+	// a baton handoff (driver and body share a thread and never run
+	// concurrently); when the driver holds nothing (a bare gen.Send() from
+	// Go outside any Eval frame) the body acquires and releases the lock
+	// for real. Returns false when no thread or GIL is active (unit tests).
+	//
+	// CPython: Python/ceval_gil.c current_thread_holds_gil
+	objects.CurrentHoldsGILHook = func() bool {
+		ts := currentThread()
+		if ts == nil {
+			return false
+		}
+		v := vmFor(ts)
+		if v.gil == nil {
+			return false
+		}
+		return v.gil.HeldByGoid(goid())
+	}
+
 	// Resolve the active Python thread's identity for the running
 	// goroutine. Returns 0 when no thread is active so _thread falls back
 	// to the goroutine id.
