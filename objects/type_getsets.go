@@ -183,7 +183,14 @@ func typeGetName(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__name__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if t.IsUser {
-		return NewStr(t.Name), nil
+		// Return the same str object on every access so identity holds,
+		// matching CPython's Py_NewRef(ht_name). inspect.classify_class_attrs
+		// compares getattr(cls, '__name__') by identity to locate the home
+		// class of __name__/__qualname__.
+		if t.nameObj == nil {
+			t.nameObj = NewStr(t.Name)
+		}
+		return t.nameObj, nil
 	}
 	return NewStr(tailName(t.Name)), nil
 }
@@ -231,6 +238,7 @@ func typeSetName(o Object, v Object) error {
 		return err
 	}
 	t.Name = s.v
+	t.nameObj = nil
 	t.InvalidateVersionTag()
 	return nil
 }
@@ -246,10 +254,14 @@ func typeGetQualname(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__qualname__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if t.IsUser {
-		if t.Qualname != "" {
-			return NewStr(t.Qualname), nil
+		if t.qualnameObj == nil {
+			if t.Qualname != "" {
+				t.qualnameObj = NewStr(t.Qualname)
+			} else {
+				t.qualnameObj = NewStr(t.Name)
+			}
 		}
-		return NewStr(t.Name), nil
+		return t.qualnameObj, nil
 	}
 	return NewStr(tailName(t.Name)), nil
 }
@@ -274,6 +286,7 @@ func typeSetQualname(o Object, v Object) error {
 		return fmt.Errorf("TypeError: can only assign string to %s.__qualname__, not '%s'", t.Name, typeNameOf(v))
 	}
 	t.Qualname = s.v
+	t.qualnameObj = nil
 	t.InvalidateVersionTag()
 	return nil
 }

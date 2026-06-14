@@ -55,6 +55,18 @@ type Type struct {
 	BaseSize int
 	ItemSize int
 
+	// nameObj / qualnameObj cache the str objects that __name__ and
+	// __qualname__ hand back. CPython stores ht_name / ht_qualname as a
+	// single str per type and returns Py_NewRef on each access, so
+	// `cls.__name__ is cls.__name__` holds (inspect.classify_class_attrs
+	// relies on that identity). gopy's getsets used to wrap t.Name in a
+	// fresh str every call; cache the object and invalidate it whenever
+	// the name is reassigned.
+	//
+	// CPython: Objects/typeobject.c:975 type_name (Py_NewRef(et->ht_name))
+	nameObj     Object
+	qualnameObj Object
+
 	Bases []*Type
 	MRO   []*Type
 
