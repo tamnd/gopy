@@ -22,6 +22,7 @@ from importlib._bootstrap_external import (
     source_from_cache,
     source_hash,
 )
+from importlib.machinery import ModuleSpec
 
 
 class _SourceFileLoader:
@@ -48,22 +49,6 @@ class _SourceFileLoader:
     def get_code(self, fullname):
         source = self.get_source(fullname)
         return compile(source, self.path, "exec")
-
-
-class _ModuleSpec:
-    """Stripped-down ModuleSpec mirroring importlib.machinery.ModuleSpec.
-
-    CPython: Lib/importlib/_bootstrap.py:392 ModuleSpec
-    """
-
-    def __init__(self, name, loader, *, origin=None, is_package=False):
-        self.name = name
-        self.loader = loader
-        self.origin = origin
-        self.submodule_search_locations = [] if is_package else None
-        self.has_location = origin is not None
-        self.cached = None
-        self.parent = name.rpartition(".")[0] if is_package else name.rpartition(".")[0]
 
 
 def _resolve_search_paths(name):
@@ -97,14 +82,14 @@ def _spec_from_search(name, search):
         directory = entry if entry else "."
         pkg_init = os.path.join(directory, tail, "__init__.py")
         if os.path.isfile(pkg_init):
-            loader = _SourceFileLoader(name, pkg_init)
-            spec = _ModuleSpec(name, loader, origin=pkg_init, is_package=True)
-            spec.submodule_search_locations = [os.path.join(directory, tail)]
-            return spec
+            return spec_from_file_location(
+                name, pkg_init,
+                loader=_SourceFileLoader(name, pkg_init),
+                submodule_search_locations=[os.path.join(directory, tail)])
         mod_file = os.path.join(directory, tail + ".py")
         if os.path.isfile(mod_file):
-            return _ModuleSpec(name, _SourceFileLoader(name, mod_file),
-                               origin=mod_file)
+            return spec_from_file_location(
+                name, mod_file, loader=_SourceFileLoader(name, mod_file))
     return None
 
 
@@ -190,24 +175,42 @@ def spec_from_loader(name, loader, *, origin=None, is_package=None):
                 is_package = False
         else:
             is_package = False
-    return _ModuleSpec(name, loader, origin=origin, is_package=bool(is_package))
+    return ModuleSpec(name, loader, origin=origin, is_package=bool(is_package))
 
 
 def spec_from_file_location(name, location=None, *, loader=None,
                             submodule_search_locations=None):
     """Return a ModuleSpec for the specified module, using file location.
 
-    CPython: Lib/importlib/util.py:132 spec_from_file_location
+    CPython: Lib/importlib/_bootstrap_external.py:560 spec_from_file_location
     """
     if location is None and loader is None:
         return None
     if loader is None and location is not None:
         loader = _SourceFileLoader(name, str(location))
-    origin = str(location) if location is not None else getattr(loader, 'path', None)
-    is_package = submodule_search_locations is not None
-    spec = _ModuleSpec(name, loader, origin=origin, is_package=is_package)
+    if location is not None:
+        location = os.fspath(location)
+        try:
+            location = os.path.abspath(location)
+        except (OSError, AttributeError):
+            # AttributeError: os.path (posixpath) can still be mid-import
+            # when a deferred spec is flushed during interpreter bootstrap,
+            # so abspath is not bound yet. The unnormalized path is fine.
+            pass
+    origin = location if location is not None else getattr(loader, 'path', None)
+    spec = ModuleSpec(name, loader, origin=origin)
+    spec._set_fileattr = True
     if submodule_search_locations is not None:
         spec.submodule_search_locations = list(submodule_search_locations)
+    elif submodule_search_locations is None and hasattr(loader, 'is_package'):
+        try:
+            if loader.is_package(name):
+                spec.submodule_search_locations = []
+        except ImportError:
+            pass
+    if spec.submodule_search_locations == []:
+        if origin:
+            spec.submodule_search_locations.append(os.path.split(origin)[0])
     return spec
 
 

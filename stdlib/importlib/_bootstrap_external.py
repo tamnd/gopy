@@ -351,6 +351,19 @@ def cache_from_source(path, debug_override=None, *, optimization=None):
     return _path_join(head, _PYCACHE, filename)
 
 
+# CPython: Lib/importlib/_bootstrap_external.py:369 _get_cached
+def _get_cached(filename):
+    if filename.endswith(tuple(SOURCE_SUFFIXES)):
+        try:
+            return cache_from_source(filename)
+        except NotImplementedError:
+            pass
+    elif filename.endswith(tuple(BYTECODE_SUFFIXES)):
+        return filename
+    else:
+        return None
+
+
 # CPython: Lib/importlib/_bootstrap_external.py:310 source_from_cache
 def source_from_cache(path):
     """Given the path to a .pyc. file, return the path to its .py file.
