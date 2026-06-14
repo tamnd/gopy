@@ -421,9 +421,6 @@ func buildOS() (*objects.Module, error) {
 		// recursed into during rmtree.
 		// CPython: Lib/os.py:295 _walk_symlinks_as_files = object()
 		{"_walk_symlinks_as_files", objects.NewInstance(objects.ObjectType())},
-		// PathLike is the abstract base class for the os.fspath protocol.
-		// CPython: Lib/os.py:1123 class PathLike(abc.ABC)
-		{"PathLike", pathLikeType},
 	}
 	// geteuid / getegid / getgid / getgroups: posixmodule.c gates these
 	// on HAVE_GETEUID. On Windows the C build does not register them, so
@@ -471,6 +468,21 @@ func buildOS() (*objects.Module, error) {
 func osModuleGetattr(m *objects.Module) func([]objects.Object, map[string]objects.Object) (objects.Object, error) {
 	return func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		name, _ := objects.Str(args[0])
+		// PathLike is built lazily on the real abc.ABCMeta, deferred for
+		// the same reason os.path is: abc is not importable while the os
+		// module is first constructed.
+		//
+		// CPython: Lib/os.py:1123 class PathLike(abc.ABC)
+		if name == "PathLike" {
+			cls, err := buildPathLike()
+			if err != nil {
+				return nil, err
+			}
+			if err := m.Dict().SetItem(objects.NewStr("PathLike"), cls); err != nil {
+				return nil, err
+			}
+			return cls, nil
+		}
 		if name != "path" {
 			return nil, fmt.Errorf("AttributeError: module 'os' has no attribute %q", name)
 		}
