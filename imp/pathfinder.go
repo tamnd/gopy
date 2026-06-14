@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/marshal"
 	"github.com/tamnd/gopy/objects"
 )
@@ -428,16 +429,63 @@ func loadFromSpec(exec Executor, name string, spec objects.Object) (*objects.Mod
 // resolve as an attribute on `a`. Errors are swallowed to match
 // CPython, which also catches AttributeError around the setattr.
 //
-// CPython: Lib/importlib/_bootstrap.py:1234 setattr(parent_module, child, module)
+// CPython: Lib/importlib/_bootstrap.py:1350 setattr(parent_module, child, module)
 func bindOnParent(parent, tail string, child *objects.Module) {
 	if parent == "" {
 		return
 	}
-	pm, ok := GetModule(parent)
-	if !ok {
+	// CPython reads parent_module = sys.modules[parent] verbatim, so a test
+	// (or pathological code) that swaps in a non-module object still receives
+	// the setattr; GetModuleRaw preserves that object, GetModule would drop it.
+	pm, ok := GetModuleRaw(parent)
+	if !ok || objects.IsNone(pm) {
 		return
 	}
-	_ = pm.Dict().SetItem(objects.NewStr(tail), child)
+	// CPython binds `module = sys.modules.pop(spec.name)`, i.e. the object the
+	// body left in sys.modules, not the module shell the loader created. An
+	// __init__ that reassigns sys.modules[__name__] to a custom object is bound
+	// in that swapped form, so re-read the entry by full name and fall back to
+	// the loader's module only when nothing replaced it.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:931 module = sys.modules.pop(spec.name)
+	bound := objects.Object(child)
+	if raw, present := GetModuleRaw(parent + "." + tail); present && !objects.IsNone(raw) {
+		bound = raw
+	}
+	// setattr(parent_module, child, module) runs the parent's real __setattr__
+	// so a custom or unwritable parent participates. An AttributeError is
+	// caught and reported as an ImportWarning, exactly as
+	// _find_and_load_unlocked does.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1350 try: setattr(...) except AttributeError
+	if err := objects.SetAttr(pm, objects.NewStr(tail), bound); err != nil {
+		if isAttributeError(err) && ImportWarnHook != nil {
+			// CPython: Lib/importlib/_bootstrap.py:1352 msg = f"Cannot set ..."
+			msg := fmt.Sprintf("Cannot set an attribute on '%s' for child module '%s'",
+				parent, tail)
+			_ = ImportWarnHook(msg)
+		}
+	}
+}
+
+// isAttributeError reports whether a Go error raised by SetAttr carries a
+// Python AttributeError. SetAttr surfaces the exception wrapped in a
+// RaisedError; an entry that is not an AttributeError propagates as a
+// non-match so it is not silently turned into a warning.
+func isAttributeError(err error) bool {
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		if exc, ok := re.Exc.(*pyerrors.Exception); ok {
+			return pyerrors.Match(exc, pyerrors.PyExc_AttributeError)
+		}
+	}
+	// SetAttr also surfaces a missing-slot failure as a plain Go error whose
+	// text leads with the exception name, so match that shape too.
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "vm: "); ok {
+		msg = rest
+	}
+	return strings.HasPrefix(msg, "AttributeError:")
 }
 
 // splitParent splits a dotted module name into (parent, tail).

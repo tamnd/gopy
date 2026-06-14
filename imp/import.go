@@ -18,6 +18,15 @@ import (
 // ErrModuleNotFound is returned when no finder can locate the named module.
 var ErrModuleNotFound = fmt.Errorf("imp: ModuleNotFoundError")
 
+// ImportWarnHook routes an ImportWarning through the live _warnings
+// machinery so it walks the filter list and any recording context
+// manager (catch_warnings / assertWarns). It is nil until module
+// _warnings wires it during init; the imp package cannot import
+// _warnings directly because _warnings imports imp.
+//
+// CPython: Lib/importlib/_bootstrap.py:1353 _warnings.warn(msg, ImportWarning)
+var ImportWarnHook func(message string) error
+
 // ErrModuleExecFailed tags a load failure that happened while executing a
 // located module's body (rather than failing to locate it). The real Python
 // exception is already live on the thread state with its own traceback, so
