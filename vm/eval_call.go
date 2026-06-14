@@ -153,6 +153,35 @@ func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
 	return prev, g
 }
 
+// registerGenThread registers savedTS on the current goroutine so
+// currentThread() (used by sys.exc_info and friends inside the body)
+// resolves, WITHOUT touching the GIL. Generator / coroutine / async-gen
+// bodies own their GIL explicitly through genGILResume on resume and
+// genGILSuspend on yield. They must not take the lock at startup: an
+// orphaned (never-awaited) body would otherwise park on its send channel
+// still holding the GIL and deadlock the next goroutine to enter Eval.
+// Mirrors setActiveThread minus the AcquireReentrant arm.
+func registerGenThread(ts *state.Thread) (prev *state.Thread, g uint64) {
+	g = goid()
+	if v, ok := activeThreads.Load(g); ok {
+		prev = v.(*state.Thread)
+	}
+	activeThreads.Store(g, ts)
+	enableFinalizerDeferral()
+	return prev, g
+}
+
+// unregisterGenThread is the defer-side of registerGenThread. It drops
+// the registration without releasing the GIL, which the body already
+// handed back via genGILSuspend before signaling completion.
+func unregisterGenThread(prev *state.Thread, g uint64) {
+	if prev == nil {
+		activeThreads.Delete(g)
+		return
+	}
+	activeThreads.Store(g, prev)
+}
+
 // enableFinalizerDeferral flips on the deferred finalizer queue exactly
 // once, the first time any goroutine enters Eval.
 var enableFinalizerDeferral = func() func() {
