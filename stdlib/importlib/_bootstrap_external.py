@@ -14,6 +14,15 @@ import marshal
 import os as _os
 import sys
 
+# CPython freezes _bootstrap and wires it through _set_bootstrap_module
+# during _install. gopy resolves imports Go-side and never runs that
+# install, so bind the companion module directly. _bootstrap does not
+# import _bootstrap_external at load time (it keeps a lazily-populated
+# global), so this top-level import does not create a cycle.
+#
+# CPython: Lib/importlib/_bootstrap_external.py:1553 _set_bootstrap_module
+import importlib._bootstrap as _bootstrap
+
 
 _MS_WINDOWS = (sys.platform == 'win32')
 if _MS_WINDOWS:
@@ -263,6 +272,89 @@ class SourceFileLoader(FileLoader):
         exec(code, module.__dict__)
 
 
+# CPython: Lib/importlib/_bootstrap_external.py:145 _path_stat
+def _path_stat(path):
+    """Stat the path.
+
+    Made a separate function to make it easier to override in experiments
+    (e.g. cache stat results).
+    """
+    return _os.stat(path)
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:737 _LoaderBasics
+class _LoaderBasics:
+    """Base class of common code needed by both SourceLoader and
+    SourcelessFileLoader, and the base class zipimport.zipimporter
+    derives from."""
+
+    def is_package(self, fullname):
+        """Concrete implementation of InspectLoader.is_package by checking if
+        the path returned by get_filename has a filename of '__init__.py'."""
+        filename = _path_split(self.get_filename(fullname))[1]
+        filename_base = filename.rsplit('.', 1)[0]
+        tail_name = fullname.rpartition('.')[2]
+        return filename_base == '__init__' and tail_name != '__init__'
+
+    def create_module(self, spec):
+        """Use default semantics for module creation."""
+
+    def exec_module(self, module):
+        """Execute the module."""
+        code = self.get_code(module.__name__)
+        if code is None:
+            raise ImportError(f'cannot load module {module.__name__!r} when '
+                              'get_code() returns None')
+        _bootstrap._call_with_frames_removed(exec, code, module.__dict__)
+
+    def load_module(self, fullname):
+        """This method is deprecated."""
+        # Warning implemented in _load_module_shim().
+        return _bootstrap._load_module_shim(self, fullname)
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:509 _compile_bytecode
+def _compile_bytecode(data, name=None, bytecode_path=None, source_path=None):
+    """Compile bytecode as found in a pyc."""
+    code = marshal.loads(data)
+    if isinstance(code, _code_type):
+        _bootstrap._verbose_message('code object from {!r}', bytecode_path)
+        if source_path is not None:
+            _imp._fix_co_filename(code, source_path)
+        return code
+    else:
+        raise ImportError(f'Non-code object in {bytecode_path!r}',
+                          name=name, path=bytecode_path)
+
+
+_code_type = type(_compile_bytecode.__code__)
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:1007 SourcelessFileLoader
+class SourcelessFileLoader(FileLoader, _LoaderBasics):
+    """Loader which handles sourceless file imports."""
+
+    def get_code(self, fullname):
+        path = self.get_filename(fullname)
+        data = self.get_data(path)
+        # Call _classify_pyc to do basic validation of the pyc but ignore the
+        # result. There's no source to check against.
+        exc_details = {
+            'name': fullname,
+            'path': path,
+        }
+        _classify_pyc(data, fullname, exc_details)
+        return _compile_bytecode(
+            memoryview(data)[16:],
+            name=fullname,
+            bytecode_path=path,
+        )
+
+    def get_source(self, fullname):
+        """Return None as there is no source code."""
+        return None
+
+
 # CPython: Lib/importlib/_bootstrap_external.py:101 _path_join
 def _path_join(*path_parts):
     """Replacement for os.path.join()."""
@@ -296,6 +388,120 @@ def _path_abspath(path):
         return _path_join(_os.getcwd(), path)
     else:
         return path
+
+
+# A sentinel telling spec_from_file_location to populate
+# submodule_search_locations from the loader.
+_POPULATE = object()
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:560 spec_from_file_location
+def spec_from_file_location(name, location=None, *, loader=None,
+                            submodule_search_locations=_POPULATE):
+    """Return a module spec based on a file location.
+
+    To indicate that the module is a package, set
+    submodule_search_locations to a list of directory paths.  An
+    empty list is sufficient, though its not otherwise useful to the
+    import system.
+
+    The loader must take a spec as its only __init__() arg.
+    """
+    if location is None:
+        # The caller may simply want a partially populated location-
+        # oriented spec.  So we set the location to a bogus value and
+        # fill in as much as we can.
+        location = '<unknown>'
+        if hasattr(loader, 'get_filename'):
+            # ExecutionLoader
+            try:
+                location = loader.get_filename(name)
+            except ImportError:
+                pass
+    else:
+        location = _os.fspath(location)
+        try:
+            location = _path_abspath(location)
+        except OSError:
+            pass
+
+    # If the location is on the filesystem, but doesn't actually exist,
+    # we could return None here, indicating that the location is not
+    # valid.  However, we don't have a good way of testing since an
+    # indirect location (e.g. a zip file or URL) will look like a
+    # non-existent file relative to the filesystem.
+
+    spec = _bootstrap.ModuleSpec(name, loader, origin=location)
+    spec._set_fileattr = True
+
+    # Pick a loader if one wasn't provided.
+    if loader is None:
+        for loader_class, suffixes in _get_supported_file_loaders():
+            if location.endswith(tuple(suffixes)):
+                loader = loader_class(name, location)
+                spec.loader = loader
+                break
+        else:
+            return None
+
+    # Set submodule_search_paths appropriately.
+    if submodule_search_locations is _POPULATE:
+        # Check the loader.
+        if hasattr(loader, 'is_package'):
+            try:
+                is_package = loader.is_package(name)
+            except ImportError:
+                pass
+            else:
+                if is_package:
+                    spec.submodule_search_locations = []
+    else:
+        spec.submodule_search_locations = submodule_search_locations
+    if spec.submodule_search_locations == []:
+        if location:
+            dirname = _path_split(location)[0]
+            spec.submodule_search_locations.append(dirname)
+
+    return spec
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:1534 _get_supported_file_loaders
+def _get_supported_file_loaders():
+    """Returns a list of file-based module loaders.
+
+    Each item is a tuple (loader, suffixes). gopy's import system is
+    Go-side and exposes no extension loader, so the list carries only
+    the source and sourceless file loaders.
+    """
+    source = SourceFileLoader, SOURCE_SUFFIXES
+    bytecode = SourcelessFileLoader, BYTECODE_SUFFIXES
+    return [source, bytecode]
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:1509 _fix_up_module
+def _fix_up_module(ns, name, pathname, cpathname=None):
+    # This function is used by PyImport_ExecCodeModuleObject().
+    loader = ns.get('__loader__')
+    spec = ns.get('__spec__')
+    if not loader:
+        if spec:
+            loader = spec.loader
+        elif pathname == cpathname:
+            loader = SourcelessFileLoader(name, pathname)
+        else:
+            loader = SourceFileLoader(name, pathname)
+    if not spec:
+        spec = spec_from_file_location(name, pathname, loader=loader)
+        if cpathname:
+            spec.cached = _path_abspath(cpathname)
+    try:
+        ns['__spec__'] = spec
+        ns['__loader__'] = loader
+        ns['__file__'] = pathname
+        ns['__cached__'] = cpathname
+    except Exception:
+        # Not important enough to report.
+        pass
 
 
 # CPython: Lib/importlib/_bootstrap_external.py:239 cache_from_source
@@ -515,3 +721,14 @@ class NamespaceLoader:
 
 # We use this exclusively in module_from_spec() for backward-compatibility.
 _NamespaceLoader = NamespaceLoader
+
+
+# CPython wires this module into _bootstrap during
+# _install_external_importers (_bootstrap_external = _frozen_importlib_external).
+# gopy imports the bootstrap modules normally and never runs that install,
+# so publish ourselves to _bootstrap here. This is what lets
+# _bootstrap.spec_from_loader reach spec_from_file_location and lets
+# _module_repr_from_spec recognise NamespaceLoader.
+#
+# CPython: Lib/importlib/_bootstrap.py:1565 _install_external_importers
+_bootstrap._bootstrap_external = sys.modules[__name__]

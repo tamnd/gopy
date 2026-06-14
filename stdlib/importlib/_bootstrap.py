@@ -28,6 +28,13 @@ def _object_name(obj):
 
 # Bootstrap-related code ######################################################
 
+# CPython freezes this module and injects sys / _imp through _setup()
+# during interpreter start. gopy imports it like any other module and
+# never runs _setup(), so bind the two modules the bootstrap code needs
+# (sys.modules access, _imp for built-in queries) at import time.
+import sys
+import _imp
+
 # Modules injected manually by _setup()
 _thread = None
 _warnings = None
