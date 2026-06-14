@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -169,7 +170,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
 		pkgDir := filepath.Join(dir, tail)
 		pkgInit := filepath.Join(pkgDir, "__init__.py")
-		if isFile(pkgInit) {
+		if isFile(pkgInit) && caseOK(pkgDir) {
 			mod, err := loadAsPackage(exec, p.Compiler, pkgInit, pkgDir, name)
 			if err != nil {
 				return nil, err
@@ -182,7 +183,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		// bytecode loader is tried after the source loader.
 		// CPython: Lib/importlib/_bootstrap_external.py:1424 __init__ suffix loop
 		pkgInitPyc := filepath.Join(pkgDir, "__init__.pyc")
-		if isFile(pkgInitPyc) {
+		if isFile(pkgInitPyc) && caseOK(pkgDir) {
 			mod, err := loadAsPackageBytecode(exec, pkgInitPyc, pkgDir, name)
 			if err != nil {
 				return nil, err
@@ -193,7 +194,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		// Module case: <dir>/<tail>.py.
 		// CPython: Lib/importlib/_bootstrap_external.py:1391 suffix loop
 		modFile := filepath.Join(dir, tail+".py")
-		if isFile(modFile) {
+		if isFile(modFile) && caseOK(modFile) {
 			mod, err := loadAsModule(exec, p.Compiler, modFile, name, parent)
 			if err != nil {
 				return nil, err
@@ -205,7 +206,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		// loader once the source suffix has missed.
 		// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
 		modPyc := filepath.Join(dir, tail+".pyc")
-		if isFile(modPyc) {
+		if isFile(modPyc) && caseOK(modPyc) {
 			mod, err := loadAsModuleBytecode(exec, modPyc, name, parent)
 			if err != nil {
 				return nil, err
@@ -213,7 +214,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			bindOnParent(parent, tail, mod)
 			return mod, nil
 		}
-		if isDir(pkgDir) {
+		if isDir(pkgDir) && caseOK(pkgDir) {
 			namespacePortions = append(namespacePortions, pkgDir)
 		}
 	}
@@ -977,6 +978,49 @@ func isDir(path string) bool {
 		return false
 	}
 	return info.IsDir()
+}
+
+// caseOK reports whether the final component of an existing candidate path
+// matches a real on-disk directory entry with exact case. On a
+// case-insensitive but case-preserving filesystem (macOS, Windows) os.Stat
+// succeeds for any case spelling, so a plain existence probe would let
+// `import RAnDoM` resolve random.py. CPython's FileFinder guards against
+// this by testing membership in set(os.listdir(dir)), the exact-case path
+// cache, unless _relax_case() is true. caseOK reproduces that membership
+// test by scanning the directory for an exact-case name match.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
+func caseOK(path string) bool {
+	if relaxCase() {
+		return true
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	base := filepath.Base(path)
+	for _, e := range entries {
+		if e.Name() == base {
+			return true
+		}
+	}
+	return false
+}
+
+// relaxCase mirrors importlib's _relax_case: case folding is relaxed only
+// on case-insensitive platforms (Windows, macOS) and only when PYTHONCASEOK
+// is present in the environment. Case-sensitive platforms are always
+// strict, where caseOK's directory scan is a redundant but harmless match.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:50 _relax_case
+func relaxCase() bool {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		_, ok := os.LookupEnv("PYTHONCASEOK")
+		return ok
+	default:
+		return false
+	}
 }
 
 var (
