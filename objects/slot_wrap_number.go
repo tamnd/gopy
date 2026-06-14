@@ -52,6 +52,14 @@ func init() {
 	WrapperDescrType.DescrGet = wrapperDescrGet
 	WrapperDescrType.Call = wrapperDescrCall
 	WrapperDescrType.Hash = identityHash
+	// PyWrapperDescr_Type exposes __get__ (wrapperdescr_get) so slot
+	// wrappers bind through the descriptor protocol the same way
+	// method descriptors do. Installed as a plain method_descriptor,
+	// matching how add_operators wires the C-level slots.
+	//
+	// CPython: Objects/descrobject.c:451 wrapperdescr_get
+	SetTypeDescr(WrapperDescrType, "__get__", NewMethodDescr(WrapperDescrType, "__get__", wrapperDescrDunderGet).
+		WithTextSignature("($self, instance, owner=None, /)"))
 	addDescrIntrospectionDescriptors(WrapperDescrType)
 	SetTypeDescr(WrapperDescrType, "__text_signature__", NewGetSetDescr("__text_signature__",
 		func(o Object) (Object, error) {
@@ -70,10 +78,20 @@ func (d *WrapperDescr) Name() string { return d.name }
 func (d *WrapperDescr) Owner() *Type { return d.owner }
 func (d *WrapperDescr) Doc() string  { return d.doc }
 
+// slotWrapperLike is the shared shape of the two concrete descriptors
+// that report as wrapper_descriptor: the numeric/protocol WrapperDescr
+// and the slot-wrapper-flagged MethodDescr (object.__init__, __eq__,
+// the descr_get/set/iter/call wrappers). Both expose the dunder name
+// and owning type the slot-wrapper repr reads.
+type slotWrapperLike interface {
+	Name() string
+	Owner() *Type
+}
+
 // CPython: Objects/descrobject.c:234 wrapperdescr_repr
 func wrapperDescrRepr(o Object) (string, error) {
-	d := o.(*WrapperDescr)
-	return "<slot wrapper '" + d.name + "' of '" + d.owner.Name + "' objects>", nil
+	d := o.(slotWrapperLike)
+	return "<slot wrapper '" + d.Name() + "' of '" + d.Owner().Name + "' objects>", nil
 }
 
 // wrapperDescrGet binds the slot wrapper to an instance. Class-level
@@ -82,7 +100,13 @@ func wrapperDescrRepr(o Object) (string, error) {
 // producing a method-wrapper.
 //
 // CPython: Objects/descrobject.c:451 wrapperdescr_get
-func wrapperDescrGet(descr Object, obj Object, _ *Type) (Object, error) {
+func wrapperDescrGet(descr Object, obj Object, typ *Type) (Object, error) {
+	// A slot-wrapper-flagged MethodDescr keeps its own descr_check +
+	// method-wrapper binding; delegate so e.g. object.__init__.__get__
+	// enforces the owning-type check exactly as method_get does.
+	if md, ok := descr.(*MethodDescr); ok {
+		return methodDescrGet(md, obj, typ)
+	}
 	if obj == nil {
 		return descr, nil
 	}
@@ -95,6 +119,12 @@ func wrapperDescrGet(descr Object, obj Object, _ *Type) (Object, error) {
 //
 // CPython: Objects/descrobject.c:392 wrapperdescr_call
 func wrapperDescrCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
+	// Slot-wrapper-flagged MethodDescrs run their own arity/keyword
+	// machinery (the C-level slot semantics they stand in for), so route
+	// the unbound call straight to methodDescrCall.
+	if md, ok := o.(*MethodDescr); ok {
+		return methodDescrCall(md, args, kwargs)
+	}
 	d := o.(*WrapperDescr)
 	if len(args) == 0 {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' of '%s' object needs an argument", d.name, d.owner.Name)
@@ -106,6 +136,32 @@ func wrapperDescrCall(o Object, args []Object, kwargs map[string]Object) (Object
 		return nil, fmt.Errorf("TypeError: wrapper %s() takes no keyword arguments", d.name)
 	}
 	return d.fn(args[0], args[1:])
+}
+
+// wrapperDescrDunderGet is the Python-level __get__(self, instance,
+// owner=None) for slot wrappers. Class access (instance is None) returns
+// the descriptor itself; instance access binds to a method-wrapper.
+//
+// CPython: Objects/descrobject.c:451 wrapperdescr_get
+func wrapperDescrDunderGet(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: expected 1 or 2 arguments, got %d", len(args)-1)
+	}
+	descr := args[0]
+	obj := args[1]
+	if IsNone(obj) {
+		obj = nil
+	}
+	var typ *Type
+	if len(args) == 3 {
+		if tp, ok := args[2].(*Type); ok {
+			typ = tp
+		}
+	}
+	if obj == nil {
+		return descr, nil
+	}
+	return wrapperDescrGet(descr, obj, typ)
 }
 
 // newWrapperDescr builds a slot wrapper. doc is the human-readable

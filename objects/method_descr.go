@@ -70,10 +70,20 @@ type MethodDescr struct {
 }
 
 // AsSlotWrapper marks the descriptor as a slot_wrapper stand-in so its
-// bound form is a method-wrapper rather than a PyCMethod. Returns the
-// receiver for chaining at registration time.
+// bound form is a method-wrapper rather than a PyCMethod. It also retypes
+// the descriptor to wrapper_descriptor so type(object.__init__) and
+// repr(object.__init__) match CPython: every dunder backed by a C-level
+// type slot is a PyWrapperDescr_Type (`<slot wrapper '__init__' of
+// 'object' objects>`), not a PyMethodDescr_Type. The Go concrete type
+// stays *MethodDescr, so all runtime code that type-asserts the
+// descriptor keeps working; only the Python-visible class/repr change.
+// WrapperDescrType's tp slots delegate back to the MethodDescr handlers
+// for these instances.
+//
+// CPython: Objects/descrobject.c:1471 PyWrapperDescr_Type
 func (d *MethodDescr) AsSlotWrapper() *MethodDescr {
 	d.slotWrapper = true
+	d.Header.typ = WrapperDescrType
 	return d
 }
 
