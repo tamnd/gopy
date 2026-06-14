@@ -103,6 +103,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		modName     string
 		hasC, hasM  bool
 		xOptions    []string
+		safePath    bool
 	)
 
 opts:
@@ -128,6 +129,18 @@ opts:
 			break opts
 		case 'X':
 			xOptions = append(xOptions, st.OptArg)
+		case 'P':
+			// -P sets safe_path: the script directory / cwd / '' is not
+			// prepended to sys.path[0].
+			//
+			// CPython: Python/initconfig.c:2098 config_parse_cmdline ('P')
+			safePath = true
+		case 'I':
+			// -I (isolated) implies -P plus -E/-s; the safe_path effect on
+			// sys.path[0] is what the shadowing tests exercise.
+			//
+			// CPython: Python/initconfig.c:2080 config_parse_cmdline ('I')
+			safePath = true
 		default:
 			// Other CPython flags (-b, -B, -O, -W, ...) are accepted for
 			// option-set parity. Wiring each to the runtime config lands
@@ -142,6 +155,17 @@ opts:
 	// CPython: Python/preconfig.c:253 _PyPreCmdline_SetConfig dev_mode block
 	if hasXOption(xOptions, "dev") || os.Getenv("PYTHONDEVMODE") != "" {
 		codecs.SetDevMode(true)
+	}
+
+	// safe_path: -P, -I, or PYTHONSAFEPATH suppresses prepending the
+	// script directory / cwd / "" to sys.path[0], and is exposed as
+	// sys.flags.safe_path. installPathFinder reads safePathMode to skip
+	// the unsafe leading entry.
+	//
+	// CPython: Python/initconfig.c:1828 config_init_safe_path
+	if safePath || os.Getenv("PYTHONSAFEPATH") != "" {
+		safePathMode = true
+		sys.SetSafePath(true)
 	}
 
 	switch {
@@ -163,6 +187,25 @@ opts:
 	sys.SetArgv([]string{""})
 	return runInteractive(stdout, stderr)
 }
+
+// safePathMode records whether -P / -I / PYTHONSAFEPATH was supplied, so
+// installPathFinder omits the unsafe leading sys.path[0] entry.
+//
+// CPython: Python/initconfig.c:1828 config_init_safe_path
+var safePathMode bool
+
+// sysPath0Entry / sysPath0Present hold the leading sys.path entry
+// (script directory, or "" for -c / -m / interactive). CPython prepends
+// config->sys_path_0 to sys.path AFTER site.main() runs, so
+// site.removeduppaths() never rewrites a "" entry into an absolute cwd.
+// gopy mirrors that: installPathFinder records the entry here, and
+// prependSysPath0 inserts it once site has run.
+//
+// CPython: Modules/main.c:pymain_run_python (sys.path[0] insertion)
+var (
+	sysPath0Entry   string
+	sysPath0Present bool
+)
 
 // hasXOption reports whether the -X option named key was supplied,
 // matching against the part before any '=' so "-X dev" and "-X dev=1"
@@ -189,12 +232,37 @@ func hasXOption(xOptions []string, key string) bool {
 // CPython: Python/initconfig.c:1734 _PyConfig_InitPathConfig
 // CPython: Lib/importlib/_bootstrap_external.py:1196 PathFinder
 func installPathFinder(scriptPath string) {
+	// The leading sys.path entry (script dir, or "" for -c / -m /
+	// interactive) is NOT placed in `paths` here: CPython inserts
+	// config->sys_path_0 after site.main() runs, so site.removeduppaths()
+	// does not rewrite a "" entry into an absolute cwd. prependSysPath0
+	// adds it once site has run.
 	var paths []string
 	switch {
+	case safePathMode:
+		// safe_path drops the leading script-dir / cwd / "" entry so an
+		// importable name is resolved only from PYTHONPATH and the stdlib.
+		// CPython leaves config->sys_path_0 unset, which disables the
+		// module-shadowing heuristic.
+		//
+		// CPython: Python/initconfig.c:1828 config_init_safe_path
+		sysPath0Present = false
+		imp.SetConfigSysPath0("", false)
 	case scriptPath != "":
-		paths = append(paths, filepath.Dir(scriptPath))
+		// config->sys_path_0 for a script is the ABSOLUTE directory of the
+		// script file (CPython resolves it), so the shadowing check and the
+		// live sys.path[0] both use an absolute path.
+		dir := filepath.Dir(scriptPath)
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		sysPath0Entry = dir
+		sysPath0Present = true
+		imp.SetConfigSysPath0(dir, true)
 	default:
-		paths = append(paths, "")
+		sysPath0Entry = ""
+		sysPath0Present = true
+		imp.SetConfigSysPath0("", true)
 	}
 	if env := os.Getenv("PYTHONPATH"); env != "" {
 		for _, p := range strings.Split(env, string(os.PathListSeparator)) {
@@ -229,6 +297,20 @@ func installPathFinder(scriptPath string) {
 	//
 	// CPython: Lib/importlib/_bootstrap_external.py:1290 path = sys.path
 	imp.SetLivePathHook(sys.LivePath)
+}
+
+// prependSysPath0 inserts the leading sys.path entry (config->sys_path_0)
+// recorded by installPathFinder. CPython does this after site.main()
+// runs, so the entry (notably "" for -c) is never absolutized by
+// site.removeduppaths(). Call it once the site bootstrap has completed.
+//
+// CPython: Modules/main.c:pymain_run_python (sys.path[0] insertion)
+func prependSysPath0() {
+	if !sysPath0Present {
+		return
+	}
+	cur := sys.LivePath()
+	sys.SetPath(append([]string{sysPath0Entry}, cur...))
 }
 
 // bootstrapEncodings imports the encodings package so its
@@ -442,6 +524,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
+	prependSysPath0()
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
@@ -471,6 +554,7 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
+	prependSysPath0()
 	// Equivalent of CPython's pymain_run_module which calls
 	// runpy._run_module_as_main(modName) on the Python side.
 	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
@@ -508,6 +592,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
+	prependSysPath0()
 	// A vendored test runs under "test.<name>"; regrtest imports it as a
 	// normal module, so its __spec__ is a real ModuleSpec. Build the same
 	// file-location spec here so code that resolves the module by name and
@@ -623,6 +708,7 @@ func runInteractive(stdout, stderr *os.File) int {
 	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
 		return rc
 	}
+	prependSysPath0()
 	rc := pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals)
 	pythonrun.FlushStdFiles()
 	if rc != 0 {

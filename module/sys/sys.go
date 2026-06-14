@@ -76,7 +76,15 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "builtin_module_names", builtinModuleNames()); err != nil {
 		return nil, err
 	}
-	if err := setItem(d, "stdlib_module_names", objects.NewTuple(nil)); err != nil {
+	stdlibNames := make([]objects.Object, len(stdlibModuleNames))
+	for i, n := range stdlibModuleNames {
+		stdlibNames[i] = objects.NewStr(n)
+	}
+	stdlibSet, err := objects.NewFrozenset(stdlibNames)
+	if err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "stdlib_module_names", stdlibSet); err != nil {
 		return nil, err
 	}
 	if err := setItem(d, "hash_info", hashInfo()); err != nil {

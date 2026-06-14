@@ -26,6 +26,32 @@ func ImportModule(exec Executor, name string) (*objects.Module, error) {
 	return ImportModuleLevel(exec, name, "", 0)
 }
 
+// ImportModuleLevelObject imports name relative to pkgname at the given
+// level and returns whatever sys.modules holds, which need not be a
+// module: a test (or pathological code) can inject an arbitrary object
+// under a name, and CPython's import returns it unchanged so the
+// IMPORT_FROM / _handle_fromlist that follows operates through plain
+// attribute access. Normal imports always yield a real module, in which
+// case this behaves exactly like ImportModuleLevel.
+//
+// CPython: Python/import.c:1561 PyImport_ImportModuleLevelObject
+func ImportModuleLevelObject(exec Executor, name, pkgname string, level int) (objects.Object, error) {
+	absName, err := resolveAbsName(name, pkgname, level)
+	if err != nil {
+		return nil, err
+	}
+	if raw, present := GetModuleRaw(absName); present {
+		if objects.IsNone(raw) {
+			return nil, fmt.Errorf("ImportError: import of %q halted; None in sys.modules", absName)
+		}
+		if _, ok := raw.(*objects.Module); !ok {
+			// A non-module cached entry: return it verbatim.
+			return raw, nil
+		}
+	}
+	return ImportModuleLevel(exec, name, pkgname, level)
+}
+
 // ImportModuleLevel imports name relative to pkgname at the given
 // level. level=0 is an absolute import; level>0 is relative.
 //

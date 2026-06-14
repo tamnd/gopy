@@ -88,6 +88,30 @@ func SetPath(path []string) {
 	}
 }
 
+// pendingSafePath records the safe_path flag supplied on the command
+// line (-P / -I / PYTHONSAFEPATH) before sys is built. buildModule
+// reads it when stamping sys.flags; SetSafePath also refreshes the live
+// flags struct-sequence when sys is already imported.
+//
+// CPython: Python/initconfig.c:1828 config_init_safe_path
+var pendingSafePath bool
+
+// SetSafePath records safe_path and, when sys is already live, rebuilds
+// sys.flags so sys.flags.safe_path reads True.
+//
+// CPython: Python/sysmodule.c:3478 set_flags_from_config (safe_path)
+func SetSafePath(on bool) {
+	pendingSafePath = on
+	if md := liveSysDict(); md != nil {
+		cfg := &initconfig.PyConfig{}
+		cfg.InitPythonConfig()
+		if on {
+			cfg.SafePath = 1
+		}
+		_ = md.SetItem(objects.NewStr("flags"), makeFlags(cfg))
+	}
+}
+
 // LivePath returns the current sys.path entries as a Go slice, or nil
 // when sys has not been imported yet (PathFinder then falls back to
 // its static Paths snapshot, which is what unit tests that drive
@@ -302,6 +326,9 @@ func buildModule() (*objects.Module, error) {
 	// CPython: Python/sysmodule.c:3478 set_flags_from_config
 	defaultCfg := &initconfig.PyConfig{}
 	defaultCfg.InitPythonConfig()
+	if pendingSafePath {
+		defaultCfg.SafePath = 1
+	}
 	if err := setItem(md, "flags", makeFlags(defaultCfg)); err != nil {
 		return nil, err
 	}

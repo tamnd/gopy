@@ -502,6 +502,12 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		return nil, fmt.Errorf("imp: loadAsPackage %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
+	// CPython attaches __spec__ before exec_module; do the same so an
+	// __init__.py that imports from its own package during init reads
+	// spec.has_location / spec.origin.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
 
 	src, err := os.ReadFile(initFile) //nolint:gosec // initFile is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
@@ -511,11 +517,13 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, err)
 	}
-	if _, err := exec.ExecCode(code, mod); err != nil {
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, err)
+		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, execErr)
 	}
-	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so an `__init__.py` that reassigns its own entry
 	// (rare for packages, but the same shape as decimal/_pydecimal).
@@ -553,11 +561,14 @@ func loadAsPackageBytecode(exec Executor, initFile, pkgDir, name string) (*objec
 		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
-	if _, err := exec.ExecCode(code, mod); err != nil {
-		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w", name, err)
-	}
 	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w", name, execErr)
+	}
 	if final, ok := GetModule(name); ok {
 		return final, nil
 	}
@@ -585,11 +596,14 @@ func loadAsModuleBytecode(exec Executor, file, name, parent string) (*objects.Mo
 		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
-	if _, err := exec.ExecCode(code, mod); err != nil {
-		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w", name, err)
-	}
 	attachSpecAttrs(exec, mod, name, file, nil)
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w", name, execErr)
+	}
 	if final, ok := GetModule(name); ok {
 		return final, nil
 	}
@@ -660,6 +674,12 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		return nil, fmt.Errorf("imp: loadAsModule %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
+	// CPython sets __spec__ in module_from_spec before exec_module runs the
+	// body, so a module that imports from itself during initialization can
+	// read spec.has_location / spec.origin. Attach before exec.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+	attachSpecAttrs(exec, mod, name, file, nil)
 
 	src, err := os.ReadFile(file) //nolint:gosec // file is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
@@ -669,11 +689,13 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, err)
 	}
-	if _, err := exec.ExecCode(code, mod); err != nil {
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, err)
+		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, execErr)
 	}
-	attachSpecAttrs(exec, mod, name, file, nil)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so a module body that reassigns its own entry
 	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
@@ -713,6 +735,26 @@ func attachSpecAttrs(exec Executor, mod *objects.Module, name, origin string, se
 	}
 	applySpec(util, p)
 	flushPendingSpecs(util)
+}
+
+// setSpecInitializing flips mod.__spec__._initializing. CPython's
+// module_from_spec wraps exec_module in `spec._initializing = True` /
+// `finally: spec._initializing = False`, so a module that imports from
+// itself during its own body sees a partially-initialized spec. gopy
+// mirrors that around ExecCode so the circular-import and shadowing
+// hints in _Py_module_getattro_impl / _PyEval_ImportFrom fire correctly.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+func setSpecInitializing(mod *objects.Module, on bool) {
+	spec, err := mod.Dict().GetItem(objects.NewStr("__spec__"))
+	if err != nil || spec == nil || objects.IsNone(spec) {
+		return
+	}
+	var v objects.Object = objects.False()
+	if on {
+		v = objects.True()
+	}
+	_ = objects.SetAttr(spec, objects.NewStr("_initializing"), v)
 }
 
 // attachNamespaceSpec binds a PEP 420 namespace ModuleSpec (loader None,

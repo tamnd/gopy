@@ -489,7 +489,12 @@ func osModuleGetattr(m *objects.Module) func([]objects.Object, map[string]object
 			return cls, nil
 		}
 		if name != "path" {
-			return nil, fmt.Errorf("AttributeError: module 'os' has no attribute %q", name)
+			// Match the standard module-getattro miss message (single
+			// quotes). CPython's os.py has no __getattr__, so a missing
+			// attribute raises "module 'os' has no attribute 'X'".
+			//
+			// CPython: Objects/moduleobject.c:1024 _Py_module_getattro_impl
+			return nil, fmt.Errorf("AttributeError: module 'os' has no attribute '%s'", name)
 		}
 		pathMod := osPathModule()
 		if err := m.Dict().SetItem(objects.NewStr("path"), pathMod); err != nil {

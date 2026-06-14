@@ -48,6 +48,30 @@ func SetModuleNotFound(ts *state.Thread, name string) {
 	Raise(ts, exc)
 }
 
+// SetImportErrorWithNameFrom raises ImportError(msg, name=modName,
+// path=origin, name_from=nameFrom), stamping the three members the
+// IMPORT_FROM diagnostic promises so a caught exception exposes
+// exc.name / exc.path / exc.name_from. Empty modName/origin leave the
+// corresponding member unset (read back as None), matching the NULL
+// arguments _PyErr_SetImportErrorWithNameFrom forwards to new_importerror.
+//
+// CPython: Python/errors.c:1152 _PyErr_SetImportErrorWithNameFrom
+func SetImportErrorWithNameFrom(ts *state.Thread, msg, modName, origin, nameFrom string) {
+	exc := New(PyExc_ImportError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	d := exc.EnsureAttrDict()
+	_ = d.SetItem(objects.NewStr("msg"), objects.NewStr(msg))
+	if modName != "" {
+		_ = d.SetItem(objects.NewStr("name"), objects.NewStr(modName))
+	}
+	if origin != "" {
+		_ = d.SetItem(objects.NewStr("path"), objects.NewStr(origin))
+	}
+	if nameFrom != "" {
+		_ = d.SetItem(objects.NewStr("name_from"), objects.NewStr(nameFrom))
+	}
+	Raise(ts, exc)
+}
+
 // Format raises an exception built from a printf-style template.
 // Returns nil so callers can `return errors.Format(ts, ...)`.
 //

@@ -286,6 +286,16 @@ func (m *Module) State() any { return m.state }
 // CPython: Objects/moduleobject.c:486 PyModule_SetState (gopy analog)
 func (m *Module) SetState(s any) { m.state = s }
 
+// ModuleAttrErrorHook, when set, builds the AttributeError raised for a
+// module attribute miss. The import system (package imp) installs it so
+// the message can surface the stdlib-shadowing and circular-import hints
+// from _Py_module_getattro_impl, which depend on sys state the objects
+// package cannot reach directly. Nil in unit tests that exercise objects
+// in isolation; module.go then falls back to the plain message.
+//
+// CPython: Objects/moduleobject.c:1024 _Py_module_getattro_impl
+var ModuleAttrErrorHook func(m *Module, name string) error
+
 // moduleGetattr implements __getattr__ for module objects. It checks
 // __dict__ first, then falls back to the PEP 562 __getattr__ callable
 // stored in __dict__ under "__getattr__".
@@ -368,9 +378,16 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	if gaErr == nil {
 		return callOneArg(gaObj, name)
 	}
-	// Best-effort error message mirroring module_getattro's tail.
+	// Best-effort error message mirroring module_getattro's tail. The
+	// import system registers ModuleAttrErrorHook to surface the
+	// stdlib-shadowing and circular-import hints (_Py_module_getattro_impl),
+	// which need sys.path / sys.flags / sys.stdlib_module_names access the
+	// objects package cannot reach without an import cycle.
 	//
-	// CPython: Objects/moduleobject.c:1042 PyErr_Format module has no attribute
+	// CPython: Objects/moduleobject.c:1024 _Py_module_getattro_impl (error tail)
+	if ModuleAttrErrorHook != nil {
+		return nil, ModuleAttrErrorHook(m, key)
+	}
 	if modName := moduleStrAttr(m, "__name__"); modName != "" {
 		return nil, fmt.Errorf("AttributeError: module '%s' has no attribute '%s'", modName, key)
 	}
