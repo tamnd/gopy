@@ -730,11 +730,16 @@ func typeGetParameters(o Object) (Object, error) {
 		Incref(t.TypingParameters)
 		return t.TypingParameters, nil
 	}
-	if t.TypeParams != nil {
-		Incref(t.TypeParams)
-		return t.TypeParams, nil
-	}
-	return NewTuple(nil), nil
+	// CPython stores __parameters__ as a plain instance attribute set only by
+	// typing.Generic.__init_subclass__. A class where that hook never ran (a
+	// non-generic class, or one whose __init_subclass__ forgot to call super)
+	// has no __parameters__, so reading it must raise AttributeError. typing's
+	// _generic_class_getitem relies on this: it adds the "did you forget
+	// super().__init_subclass__()" note to that AttributeError. __type_params__
+	// (PEP 695) is a separate attribute and must not stand in for it.
+	//
+	// CPython: Lib/typing.py:1151 parameters = cls.__parameters__ (AttributeError path)
+	return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__parameters__'", t.Name)
 }
 
 // typeSetParameters stores a __parameters__ tuple assigned by user code
