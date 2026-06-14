@@ -134,6 +134,12 @@ import (
 	// CPython: Modules/_randommodule.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_random"
 
+	// Built-in module: _queue. Registers itself via module/_queue/module.go
+	// init(). Provides SimpleQueue and the Empty exception backing
+	// Lib/queue.py.
+	// CPython: Modules/_queuemodule.c:1 (module init)
+	_ "github.com/tamnd/gopy/module/_queue"
+
 	// Built-in module: _struct. Registers itself via
 	// module/_struct/module.go init(). Provides pack/unpack of binary
 	// data per a format string; backs the Lib/struct.py wrapper.

@@ -55,6 +55,19 @@ func buildModule() (*objects.Module, error) {
 			return nil, err
 		}
 	}
+	// datetime_CAPI exposes the C-API vtable to extensions via a capsule.
+	// The Go port has no C vtable to share, but the capsule object itself
+	// must exist and be a PyCapsule so that introspection (e.g.
+	// types.CapsuleType checks) works.
+	//
+	// CPython: Modules/_datetimemodule.c:7469 PyCapsule_New(capi, PyDateTime_CAPSULE_NAME, NULL)
+	capsule, err := objects.NewCapsule(m, "datetime.datetime_CAPI", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("datetime_CAPI"), capsule); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
