@@ -58,7 +58,21 @@ func unicodeFormat(o Object, spec string) (string, error) {
 			o.Type().Name)
 	}
 	if spec == "" {
-		return u.v, nil
+		// Empty spec is equivalent to str(obj). For an exact str that is the
+		// value itself; for a subclass CPython routes through format_obj,
+		// which calls PyObject_Str so an overridden __str__ takes effect
+		// (e.g. a StrEnum member whose __str__ uppercases its name).
+		//
+		// CPython: Python/formatter_unicode.c:1571 _PyUnicode_FormatAdvancedWriter
+		// (start == end: PyUnicode_CheckExact ? write obj : format_obj)
+		if o.Type() == strType {
+			return u.v, nil
+		}
+		s, err := Str(o)
+		if err != nil {
+			return "", err
+		}
+		return s, nil
 	}
 	parsed, err := format.ParseSpec(spec)
 	if err != nil {
