@@ -14,6 +14,7 @@ CPython: Lib/importlib/machinery.py
 
 from importlib._bootstrap_external import (
     FileLoader,
+    NamespaceLoader,
     SourceFileLoader,
 )
 

@@ -20,6 +20,52 @@ func init() {
 	objects.BuiltinLookup = builtinLookup
 	objects.CurrentBuiltinsHook = currentBuiltins
 	objects.ImportModuleHook = importModuleByName
+	objects.ModuleReprHook = moduleReprViaImportlib
+}
+
+// moduleReprViaImportlib renders a module's repr by calling
+// importlib._bootstrap._module_repr, the same delegation CPython's C
+// module_repr performs through _PyImport_ImportlibModuleRepr. Any
+// failure to reach importlib falls back to the minimal Go rendering so
+// repr() never raises.
+//
+// CPython: Python/import.c:3346 _PyImport_ImportlibModuleRepr
+func moduleReprViaImportlib(m objects.Object) (string, error) {
+	bootstrap, ok := imp.GetModule("importlib._bootstrap")
+	if !ok || bootstrap == nil {
+		mod, err := importModuleByName("importlib._bootstrap")
+		if err != nil || mod == nil {
+			return objects.ModuleReprFallback(m)
+		}
+		var modOk bool
+		if bootstrap, modOk = mod.(*objects.Module); !modOk {
+			return objects.ModuleReprFallback(m)
+		}
+	}
+	// importlib._bootstrap caches the _bootstrap_external module in a
+	// module global, normally wired by _install_external_importers during
+	// the frozen bootstrap. gopy resolves imports Go-side and never runs
+	// that hook, so _module_repr_from_spec's isinstance(loader,
+	// NamespaceLoader) check would always miss. Wire the global the way
+	// _install_external_importers does so the namespace-package repr (and
+	// the other consumers of the cached module) behave like CPython.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1565 _install_external_importers
+	if cur, _ := bootstrap.Dict().GetItem(objects.NewStr("_bootstrap_external")); cur == nil || cur == objects.None() {
+		ext, err := importModuleByName("importlib._bootstrap_external")
+		if err == nil && ext != nil {
+			_ = bootstrap.Dict().SetItem(objects.NewStr("_bootstrap_external"), ext)
+		}
+	}
+	fn, err := bootstrap.Dict().GetItem(objects.NewStr("_module_repr"))
+	if err != nil || fn == nil {
+		return objects.ModuleReprFallback(m)
+	}
+	res, err := objects.Call(fn, objects.NewTuple([]objects.Object{m}), nil)
+	if err != nil {
+		return objects.ModuleReprFallback(m)
+	}
+	return objects.Str(res)
 }
 
 // importModuleByName imports an absolute module name, returning the

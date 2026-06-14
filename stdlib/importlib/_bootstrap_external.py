@@ -402,3 +402,116 @@ def source_from_cache(path):
                              "alphanumeric value")
     base_filename = pycache_filename.partition('.')[0]
     return _path_join(head, base_filename + SOURCE_SUFFIXES[0])
+
+
+# CPython: Lib/importlib/_bootstrap_external.py:1085 _NamespacePath
+class _NamespacePath:
+    """Represents a namespace package's path.  It uses the module name
+    to find its parent module, and from there it looks up the parent's
+    __path__.  When this changes, the module's own path is recomputed,
+    using path_finder.  For top-level modules, the parent module's path
+    is sys.path."""
+
+    # When invalidate_caches() is called, this epoch is incremented
+    # https://bugs.python.org/issue45703
+    _epoch = 0
+
+    def __init__(self, name, path, path_finder):
+        self._name = name
+        self._path = path
+        self._last_parent_path = tuple(self._get_parent_path())
+        self._last_epoch = self._epoch
+        self._path_finder = path_finder
+
+    def _find_parent_path_names(self):
+        """Returns a tuple of (parent-module-name, parent-path-attr-name)"""
+        parent, dot, me = self._name.rpartition('.')
+        if dot == '':
+            # This is a top-level module. sys.path contains the parent path.
+            return 'sys', 'path'
+        # Not a top-level module. parent-module.__path__ contains the
+        #  parent path.
+        return parent, '__path__'
+
+    def _get_parent_path(self):
+        parent_module_name, path_attr_name = self._find_parent_path_names()
+        return getattr(sys.modules[parent_module_name], path_attr_name)
+
+    def _recalculate(self):
+        # If the parent's path has changed, recalculate _path
+        parent_path = tuple(self._get_parent_path())  # Make a copy
+        if parent_path != self._last_parent_path or self._epoch != self._last_epoch:
+            spec = self._path_finder(self._name, parent_path)
+            # Note that no changes are made if a loader is returned, but we
+            #  do remember the new parent path
+            if spec is not None and spec.loader is None:
+                if spec.submodule_search_locations:
+                    self._path = spec.submodule_search_locations
+            self._last_parent_path = parent_path     # Save the copy
+            self._last_epoch = self._epoch
+        return self._path
+
+    def __iter__(self):
+        return iter(self._recalculate())
+
+    def __getitem__(self, index):
+        return self._recalculate()[index]
+
+    def __setitem__(self, index, path):
+        self._path[index] = path
+
+    def __len__(self):
+        return len(self._recalculate())
+
+    def __repr__(self):
+        return f'_NamespacePath({self._path!r})'
+
+    def __contains__(self, item):
+        return item in self._recalculate()
+
+    def append(self, item):
+        self._path.append(item)
+
+
+# This class is actually exposed publicly in a namespace package's __loader__
+# attribute, so it should be available through a non-private name.
+# https://github.com/python/cpython/issues/92054
+# CPython: Lib/importlib/_bootstrap_external.py:1156 NamespaceLoader
+class NamespaceLoader:
+    def __init__(self, name, path, path_finder):
+        self._path = _NamespacePath(name, path, path_finder)
+
+    def is_package(self, fullname):
+        return True
+
+    def get_source(self, fullname):
+        return ''
+
+    def get_code(self, fullname):
+        return compile('', '<string>', 'exec', dont_inherit=True)
+
+    def create_module(self, spec):
+        """Use default semantics for module creation."""
+
+    def exec_module(self, module):
+        pass
+
+    def load_module(self, fullname):
+        """Load a namespace module.
+
+        This method is deprecated.  Use exec_module() instead.
+
+        """
+        # The import system never calls this method.
+        _bootstrap._verbose_message('namespace module loaded with path {!r}',
+                                    self._path)
+        # Warning implemented in _load_module_shim().
+        return _bootstrap._load_module_shim(self, fullname)
+
+    def get_resource_reader(self, module):
+        from importlib.readers import NamespaceReader
+        return NamespaceReader(self._path)
+
+
+# We use this exclusively in module_from_spec() for backward-compatibility.
+_NamespaceLoader = NamespaceLoader

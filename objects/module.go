@@ -50,6 +50,15 @@ func init() {
 	ModuleType.HasWeakref = true
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
+	// A module owns its md_dict, so the cycle collector must follow that
+	// edge: a module whose __dict__ holds functions whose __globals__ is
+	// that same dict forms a reference cycle (the common case for any
+	// executed module). Without tp_traverse the collector treats md_dict
+	// as externally rooted and never reclaims the cycle, so __del__ of a
+	// cyclic object defined in the module body would never run.
+	//
+	// CPython: Objects/moduleobject.c:739 module_traverse
+	ModuleType.TpTraverse = moduleTraverse
 	// Modules are hashable by identity in CPython (tp_hash = PyObject_GenericHash).
 	// CPython: Objects/moduleobject.c:766 PyModule_Type (tp_hash not overridden → id-based)
 	ModuleType.Hash = IdentityHash
@@ -62,6 +71,9 @@ func init() {
 	ModuleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 		m := &Module{dict: NewDict()}
 		m.init(cls)
+		if h := GCTrackHook; h != nil {
+			h(m)
+		}
 		return m, nil
 	}
 
@@ -162,6 +174,9 @@ func NewModule(name string) *Module {
 	m := &Module{dict: NewDict()}
 	m.init(ModuleType)
 	_ = m.dict.SetItem(NewStr("__name__"), NewStr(name))
+	if h := GCTrackHook; h != nil {
+		h(m)
+	}
 	return m
 }
 
@@ -180,7 +195,25 @@ func NewModuleWithDict(name string, d *Dict) *Module {
 	if has, _ := d.Contains(NewStr("__name__")); !has {
 		_ = d.SetItem(NewStr("__name__"), NewStr(name))
 	}
+	if h := GCTrackHook; h != nil {
+		h(m)
+	}
 	return m
+}
+
+// moduleTraverse visits the module's __dict__ (md_dict) and per-module
+// state so the cycle collector can account for the references a module
+// holds. CPython's module_traverse also visits md_dict.
+//
+// CPython: Objects/moduleobject.c:739 module_traverse
+func moduleTraverse(o Object, visit Visitor) error {
+	m := o.(*Module)
+	if m.dict != nil {
+		if err := visit(m.dict); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Dict returns the module's attribute dict (__dict__).
@@ -418,30 +451,41 @@ func moduleSetattr(o Object, name, value Object) error {
 	return m.dict.SetItem(name, value)
 }
 
-// moduleRepr returns the canonical module repr.
-// Four forms mirror CPython:
-//   - <module 'name' from 'file'> when __file__ is set
-//   - <module 'name' (built-in)> when __spec__.origin == 'built-in'
-//   - <module 'name' (frozen)> when __spec__.origin == 'frozen'
-//   - <module 'name'> otherwise
+// moduleRepr returns a module's repr by forwarding to the vendored
+// importlib._bootstrap._module_repr, exactly as CPython's C module_repr
+// delegates through _PyImport_ImportlibModuleRepr. The Python
+// implementation handles the __spec__, __loader__ and __file__ variants
+// (including namespace packages and the '?' name fallback) so the
+// rendering matches CPython byte-for-byte.
 //
-// CPython: Objects/moduleobject.c:228 module_repr
+// During early bootstrap (before vm.init wires the hook) the importlib
+// machinery is not yet usable, so fall back to a minimal Go rendering
+// that mirrors the catch-all branch of _module_repr.
+//
+// CPython: Objects/moduleobject.c:848 module_repr
+// CPython: Python/import.c:3346 _PyImport_ImportlibModuleRepr
 func moduleRepr(o Object) (string, error) {
+	if ModuleReprHook != nil {
+		return ModuleReprHook(o)
+	}
+	return ModuleReprFallback(o)
+}
+
+// ModuleReprFallback renders the catch-all branch of
+// importlib._bootstrap._module_repr without importing anything, for use
+// before the import machinery is available.
+//
+// CPython: Lib/importlib/_bootstrap.py:544 _module_repr
+func ModuleReprFallback(o Object) (string, error) {
 	m := o.(*Module)
-	name := moduleStrAttr(m, "__name__")
+	name := "?"
+	if n, err := m.dict.GetItem(NewStr("__name__")); err == nil && n != nil {
+		if s, ok := n.(*Unicode); ok {
+			name = s.v
+		}
+	}
 	if file := moduleStrAttr(m, "__file__"); file != "" {
 		return fmt.Sprintf("<module '%s' from '%s'>", name, file), nil
-	}
-	if spec, err := m.dict.GetItem(NewStr("__spec__")); err == nil && spec != nil {
-		if sm, ok := spec.(*Module); ok {
-			origin := moduleStrAttr(sm, "origin")
-			if origin == "built-in" {
-				return fmt.Sprintf("<module '%s' (built-in)>", name), nil
-			}
-			if origin == "frozen" {
-				return fmt.Sprintf("<module '%s' (frozen)>", name), nil
-			}
-		}
 	}
 	return fmt.Sprintf("<module '%s'>", name), nil
 }

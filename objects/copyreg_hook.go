@@ -38,3 +38,12 @@ var CurrentBuiltinsHook func() Object
 //
 // CPython: Python/import.c:1450 PyImport_ImportModule
 var ImportModuleHook func(name string) (Object, error)
+
+// ModuleReprHook formats a module's repr by delegating to the vendored
+// importlib._bootstrap._module_repr, exactly as CPython's C
+// module_repr forwards to _PyImport_ImportlibModuleRepr. Wired by
+// vm.init(); nil during early bootstrap, where moduleRepr falls back to
+// a minimal Go rendering.
+//
+// CPython: Python/import.c:3346 _PyImport_ImportlibModuleRepr
+var ModuleReprHook func(m Object) (string, error)
