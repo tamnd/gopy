@@ -91,12 +91,20 @@ func getFrameModuleName(args []objects.Object, _ map[string]objects.Object) (obj
 		return objects.None(), nil
 	}
 	fn := f.FrameFunc()
-	if fn == nil {
-		return objects.None(), nil
+	if fobj, ok := fn.(*objects.Function); ok && fobj.Module != nil {
+		return fobj.Module, nil
 	}
-	if fobj, ok := fn.(*objects.Function); ok {
-		if fobj.Module != nil {
-			return fobj.Module, nil
+	// A module-level (or exec) frame has no backing function object, so
+	// CPython reads func_module off the frame's own function, which was
+	// initialized from f_globals['__name__']. gopy does not wrap module
+	// code in a Function, so resolve the same value straight from the
+	// frame globals to match PyFunction_GetModule.
+	//
+	// CPython: Objects/funcobject.c PyFunction_GetModule (func_module
+	// seeded from globals['__name__'] at frame setup)
+	if g, ok := f.FrameGlobals().(*objects.Dict); ok {
+		if name, err := g.GetItem(objects.NewStr("__name__")); err == nil && name != nil {
+			return name, nil
 		}
 	}
 	return objects.None(), nil

@@ -745,8 +745,22 @@ func (p *pickler) saveTypeGlobal(t *objects.Type) error {
 	if name == "" {
 		name = t.Name
 	}
-	module := t.Module
-	// When Name embeds the module (e.g. "typing.TypeVar"), split it.
+	// Prefer the live __module__ attribute over the cached t.Module field:
+	// a class can have __module__ rewritten after creation (enum's
+	// _make_class_unpicklable points it at '<unknown>' to force a
+	// PicklingError), and save_global must honor that.
+	//
+	// CPython: Modules/_pickle.c:3015 whichmodule (reads obj.__module__)
+	module := liveModuleAttr(t)
+	if module == "" {
+		module = t.Module
+	}
+	// t.Qualname can embed the module (e.g. "typing.TypeVar"); strip a
+	// leading "<module>." so the reachability walk uses the bare name.
+	if module != "" && strings.HasPrefix(name, module+".") {
+		name = name[len(module)+1:]
+	}
+	// When the module is still unknown but Name embeds it, split it out.
 	if module == "" && strings.Contains(name, ".") {
 		parts := strings.SplitN(name, ".", 2)
 		module = parts[0]
@@ -758,10 +772,34 @@ func (p *pickler) saveTypeGlobal(t *objects.Type) error {
 	if module == "" {
 		return fmt.Errorf("PicklingError: can't pickle type %q: failed to determine module", name)
 	}
+	// save_global re-imports the module and verifies the type round-trips
+	// to the same object, raising PicklingError otherwise. This rejects a
+	// class whose __module__ no longer resolves (e.g. '<unknown>').
+	//
+	// CPython: Modules/_pickle.c:3191 save_global (get_deep_attribute identity check)
+	if !objReachableAsGlobal(t, module, name) {
+		return fmt.Errorf("PicklingError: Can't pickle %s: it's not found as %s.%s", name, module, name)
+	}
 	if err := p.saveGlobal(module, name); err != nil {
 		return err
 	}
 	return p.memoPut(t)
+}
+
+// liveModuleAttr reads the object's current __module__ attribute as a
+// string, or "" when it is missing or not a str. Unlike the cached
+// type/function Module field this reflects post-creation rewrites.
+//
+// CPython: Modules/_pickle.c:3015 whichmodule
+func liveModuleAttr(obj objects.Object) string {
+	modAttr, err := objects.GetAttr(obj, objects.NewStr("__module__"))
+	if err != nil || modAttr == nil {
+		return ""
+	}
+	if s, ok := modAttr.(*objects.Unicode); ok {
+		return s.Value()
+	}
+	return ""
 }
 
 // saveViaReduce obtains a reduction callable the way CPython's save()

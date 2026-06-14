@@ -110,6 +110,15 @@ func Init() (*objects.Dict, error) {
 	if err := setStr(d, "filesystemencodeerrors", "surrogateescape"); err != nil {
 		return nil, err
 	}
+	// The interpreter's default string encoding. Since 3.0 this is fixed
+	// at utf-8 and getdefaultencoding takes no arguments.
+	//
+	// CPython: Python/sysmodule.c sys_getdefaultencoding_impl
+	if err := setItem(d, "getdefaultencoding", objects.NewBuiltinFunction("getdefaultencoding", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.NewStr("utf-8"), nil
+	})); err != nil {
+		return nil, err
+	}
 
 	return d, nil
 }
