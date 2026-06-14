@@ -738,6 +738,16 @@ func funcGetAttr(o Object, name Object) (Object, error) {
 	if fn.Dict != nil {
 		v, err := fn.Dict.GetItem(name)
 		if err == nil && v != nil {
+			// func_getattro reads the attribute out of the function's
+			// __dict__ through PyDict_GetItemWithError and then Py_XINCREFs
+			// it before returning, so the caller owns the reference. Without
+			// the Incref the caller's arg-drop decrefs a value still held by
+			// __dict__ toward zero; a stored list then gets emptied by
+			// list_dealloc, so a second read of the same attribute sees an
+			// empty list (this is what drained mock's patched.patchings).
+			//
+			// CPython: Objects/funcobject.c:705 func_getattro (Py_XINCREF)
+			Incref(v)
 			return v, nil
 		}
 	}
