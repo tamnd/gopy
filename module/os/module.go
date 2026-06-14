@@ -299,10 +299,14 @@ func buildOS() (*objects.Module, error) {
 	linesep := "\n"
 	pathsep := ":"
 	osName := "posix"
+	// altsep is the alternate path separator: None on POSIX, '/' on Windows.
+	// CPython: Modules/posixmodule.c / Lib/ntpath.py:altsep
+	altsep := objects.None()
 	if runtime.GOOS == "windows" {
 		linesep = "\r\n"
 		pathsep = ";"
 		osName = "nt"
+		altsep = objects.NewStr("/")
 	}
 
 	entries := []struct {
@@ -310,6 +314,7 @@ func buildOS() (*objects.Module, error) {
 		val  objects.Object
 	}{
 		{"sep", objects.NewStr(sep)},
+		{"altsep", altsep},
 		{"extsep", objects.NewStr(".")},
 		{"pardir", objects.NewStr("..")},
 		{"curdir", objects.NewStr(".")},
