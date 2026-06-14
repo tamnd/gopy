@@ -219,16 +219,26 @@ func toStringSlice(obj objects.Object) ([]string, error) {
 	return out, nil
 }
 
-// objectToString converts a Python str or bytes object to a Go string.
+// objectToString converts a Python str, bytes, or os.PathLike object to a
+// Go string. CPython runs each argv member through fsconvert_strdup, which
+// is PyUnicode_FSConverter, so pathlib.Path arguments are accepted too.
+//
+// CPython: Modules/_posixsubprocess.c:130 fsconvert_strdup
 func objectToString(obj objects.Object) (string, error) {
 	switch v := obj.(type) {
 	case *objects.Unicode:
 		return v.Value(), nil
 	case *objects.Bytes:
 		return string(v.Bytes()), nil
-	default:
-		return "", fmt.Errorf("expected str, got %s", obj.Type().Name)
 	}
+	if fspath, err := objects.GetAttr(obj, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return objectToString(result)
+	}
+	return "", fmt.Errorf("expected str, got %s", obj.Type().Name)
 }
 
 // fsConvert mirrors PyUnicode_FSConverter: it accepts a str, bytes, or

@@ -50,8 +50,10 @@ func importErrorMember(o objects.Object, field string) (objects.Object, error) {
 	if d == nil {
 		return objects.None(), nil
 	}
-	v, err := d.GetItem(objects.NewStr(field))
-	if err != nil || v == nil {
+	// A missing member reads back as None (Py_T_OBJECT NULL->None), so a
+	// lookup miss is not an error here; discard it deliberately.
+	v, _ := d.GetItem(objects.NewStr(field))
+	if v == nil {
 		return objects.None(), nil
 	}
 	return v, nil
