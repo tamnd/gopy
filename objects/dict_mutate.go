@@ -303,6 +303,18 @@ func dictResize(d *Dict, minNew int) error {
 			return err
 		}
 	}
+	// A resize rebuilds the table, so a key's slot index changes even
+	// though no key was added or removed. CPython hands the resized dict
+	// a freshly allocated PyDictKeysObject whose dk_version starts at 0,
+	// which invalidates every inline cache stamped against the old keys.
+	// gopy reuses the same *Dict, so reset the version here; otherwise a
+	// value-replacement that triggers a resize (the load check runs
+	// before the replace-vs-insert branch in dictInsert) would leave the
+	// stale dk_version in place and LOAD_ATTR_INSTANCE_VALUE would read
+	// the wrong slot.
+	//
+	// CPython: Objects/dictobject.c:2065 dictresize (new_keys->dk_version = 0)
+	d.invalidateKeysVersion()
 	return nil
 }
 
