@@ -373,9 +373,12 @@ func unionTypeOr(self, other Object) (Object, error) {
 //
 // CPython: Objects/unionobject.c:397 union_nb_or
 func unionNbOr(self, other Object) (Object, error) {
-	if !isUnionable(self) || !isUnionable(other) {
-		return NotImplemented(), nil
-	}
+	// Unlike _Py_union_type_or, the union's own nb_or does not gate on
+	// is_unionable: it builds in checked mode so each operand goes through
+	// type_check, which accepts the wider set type_check allows (strings
+	// become forward refs, etc.). gh-140348.
+	//
+	// CPython: Objects/unionobject.c:397 union_nb_or
 	ub := newUnionBuilder(true)
 	if err := ub.addSingle(self); err != nil {
 		return nil, err
