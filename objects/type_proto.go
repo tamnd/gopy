@@ -103,14 +103,23 @@ func TypeGetFlags(t *Type) uint64 {
 	return t.TpFlags
 }
 
-// TypeSupportsWeakrefs mirrors PyType_SUPPORTS_WEAKREFS. In CPython
-// the answer is "tp_weaklistoffset != 0"; in gopy every object can
-// be weakref'd because the Header carries the weakref list head
-// directly, so this is always true for a non-nil type.
+// TypeSupportsWeakrefs mirrors PyType_SUPPORTS_WEAKREFS, whose answer is
+// "tp_weaklistoffset != 0". gopy backs the weakref list on every Header,
+// so the built-in types are uniformly weakref'able; the one case CPython
+// rejects that gopy must honor is a heap class declaring __slots__ that
+// omits __weakref__ (and inheriting none from its bases), which leaves
+// tp_weaklistoffset at 0. type_new records that as HasWeakref, so defer
+// to it for user types and stay permissive for everything else.
 //
 // CPython: Objects/typeobject.c:3913 PyType_SUPPORTS_WEAKREFS
 func TypeSupportsWeakrefs(t *Type) bool {
-	return t != nil
+	if t == nil {
+		return false
+	}
+	if t.IsUser {
+		return t.HasWeakref
+	}
+	return true
 }
 
 // TypeGenericAlloc mirrors PyType_GenericAlloc: the tp_alloc default

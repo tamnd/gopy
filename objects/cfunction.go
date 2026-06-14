@@ -88,6 +88,10 @@ func init() {
 	//
 	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
 	CFunctionType.TpFlags |= TpFlagHaveVectorcall
+	// PyCFunction_Type omits Py_TPFLAGS_BASETYPE, so it cannot be subclassed.
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
+	CFunctionType.TpFlags &^= TpFlagBasetype
 	CFunctionType.Repr = cfunctionRepr
 	CFunctionType.Str = cfunctionRepr
 	CFunctionType.Vectorcall = cfunctionVectorcall

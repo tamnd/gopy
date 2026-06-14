@@ -33,8 +33,8 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/imp"
-	"github.com/tamnd/gopy/objects"
 	sys "github.com/tamnd/gopy/module/sys"
+	"github.com/tamnd/gopy/objects"
 )
 
 // pickler holds the in-progress write buffer for a single dump cycle.
@@ -553,9 +553,61 @@ func (p *pickler) save(obj objects.Object) error {
 		return p.saveTypeGlobal(v)
 	}
 
+	// Before __reduce_ex__, consult copyreg.dispatch_table keyed on the
+	// object's exact type, the way CPython's save() does. This is how a
+	// super object reaches copyreg.pickle_super (registered via
+	// copyreg.pickle(super, ...)) instead of falling through to
+	// object.__reduce_ex__.
+	//
+	// CPython: Modules/_pickle.c:4490 save (get_dispatch_table_entry)
+	if reductor := dispatchReductor(obj.Type()); reductor != nil {
+		reduceValue, err := objects.Call(reductor, objects.NewTuple([]objects.Object{obj}), nil)
+		if err != nil {
+			return err
+		}
+		rv, ok := reduceValue.(*objects.Tuple)
+		if !ok {
+			return fmt.Errorf("PicklingError: dispatch_table reductor must return a tuple, got %s", reduceValue.Type().Name)
+		}
+		return p.saveReduceTuple(rv, obj)
+	}
+
 	// Fall back to __reduce__ for objects that define it.
 	// CPython: Modules/_pickle.c:4425 save -> __reduce_ex__ fallback
 	return p.saveViaReduce(obj)
+}
+
+// dispatchReductor returns copyreg.dispatch_table[t], or nil when copyreg
+// is not imported or holds no entry for t. This is the global table; the
+// per-Pickler dispatch_table override is not modeled here.
+//
+// CPython: Modules/_pickle.c:585 get_dispatch_table_entry
+func dispatchReductor(t *objects.Type) objects.Object {
+	sysmod := imp.SysModules()
+	if sysmod == nil {
+		return nil
+	}
+	modObj, err := sysmod.GetItem(objects.NewStr("copyreg"))
+	if err != nil || modObj == nil {
+		return nil
+	}
+	mod, ok := modObj.(*objects.Module)
+	if !ok {
+		return nil
+	}
+	tableObj, err := mod.Dict().GetItem(objects.NewStr("dispatch_table"))
+	if err != nil || tableObj == nil {
+		return nil
+	}
+	table, ok := tableObj.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	reductor, err := table.GetItem(t)
+	if err != nil || reductor == nil {
+		return nil
+	}
+	return reductor
 }
 
 var errUnsupportedType = errors.New("PicklingError: unsupported type in encoder")
@@ -693,8 +745,22 @@ func (p *pickler) saveTypeGlobal(t *objects.Type) error {
 	if name == "" {
 		name = t.Name
 	}
-	module := t.Module
-	// When Name embeds the module (e.g. "typing.TypeVar"), split it.
+	// Prefer the live __module__ attribute over the cached t.Module field:
+	// a class can have __module__ rewritten after creation (enum's
+	// _make_class_unpicklable points it at '<unknown>' to force a
+	// PicklingError), and save_global must honor that.
+	//
+	// CPython: Modules/_pickle.c:3015 whichmodule (reads obj.__module__)
+	module := liveModuleAttr(t)
+	if module == "" {
+		module = t.Module
+	}
+	// t.Qualname can embed the module (e.g. "typing.TypeVar"); strip a
+	// leading "<module>." so the reachability walk uses the bare name.
+	if module != "" && strings.HasPrefix(name, module+".") {
+		name = name[len(module)+1:]
+	}
+	// When the module is still unknown but Name embeds it, split it out.
 	if module == "" && strings.Contains(name, ".") {
 		parts := strings.SplitN(name, ".", 2)
 		module = parts[0]
@@ -706,10 +772,34 @@ func (p *pickler) saveTypeGlobal(t *objects.Type) error {
 	if module == "" {
 		return fmt.Errorf("PicklingError: can't pickle type %q: failed to determine module", name)
 	}
+	// save_global re-imports the module and verifies the type round-trips
+	// to the same object, raising PicklingError otherwise. This rejects a
+	// class whose __module__ no longer resolves (e.g. '<unknown>').
+	//
+	// CPython: Modules/_pickle.c:3191 save_global (get_deep_attribute identity check)
+	if !objReachableAsGlobal(t, module, name) {
+		return fmt.Errorf("PicklingError: Can't pickle %s: it's not found as %s.%s", name, module, name)
+	}
 	if err := p.saveGlobal(module, name); err != nil {
 		return err
 	}
 	return p.memoPut(t)
+}
+
+// liveModuleAttr reads the object's current __module__ attribute as a
+// string, or "" when it is missing or not a str. Unlike the cached
+// type/function Module field this reflects post-creation rewrites.
+//
+// CPython: Modules/_pickle.c:3015 whichmodule
+func liveModuleAttr(obj objects.Object) string {
+	modAttr, err := objects.GetAttr(obj, objects.NewStr("__module__"))
+	if err != nil || modAttr == nil {
+		return ""
+	}
+	if s, ok := modAttr.(*objects.Unicode); ok {
+		return s.Value()
+	}
+	return ""
 }
 
 // saveViaReduce obtains a reduction callable the way CPython's save()

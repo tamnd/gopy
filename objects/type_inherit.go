@@ -114,13 +114,28 @@ func inheritBundleSlotsFromAncestor(t, base *Type) {
 		}
 		copyNumberSlots(t.Number, base.Number)
 	}
-	if t.Async != nil && base.Async != nil {
+	// Sequence / Mapping / Async are lazily allocated for the same reason
+	// as Number above: a class whose only protocol slot comes from a
+	// non-primary base across a mixed MRO (e.g. IntFlag inheriting
+	// Flag.__contains__ while int is the layout base) would otherwise
+	// never pick the slot up, because inheritProtocolPointers only copies
+	// the bundle from the single primary base.
+	if base.Async != nil {
+		if t.Async == nil {
+			t.Async = &AsyncMethods{}
+		}
 		copyAsyncSlots(t.Async, base.Async)
 	}
-	if t.Sequence != nil && base.Sequence != nil {
+	if base.Sequence != nil {
+		if t.Sequence == nil {
+			t.Sequence = &SequenceMethods{}
+		}
 		copySequenceSlots(t.Sequence, base.Sequence)
 	}
-	if t.Mapping != nil && base.Mapping != nil {
+	if base.Mapping != nil {
+		if t.Mapping == nil {
+			t.Mapping = &MappingMethods{}
+		}
 		copyMappingSlots(t.Mapping, base.Mapping)
 	}
 }

@@ -55,6 +55,19 @@ func buildModule() (*objects.Module, error) {
 			return nil, err
 		}
 	}
+	// datetime_CAPI exposes the C-API vtable to extensions via a capsule.
+	// The Go port has no C vtable to share, but the capsule object itself
+	// must exist and be a PyCapsule so that introspection (e.g.
+	// types.CapsuleType checks) works.
+	//
+	// CPython: Modules/_datetimemodule.c:7469 PyCapsule_New(capi, PyDateTime_CAPSULE_NAME, NULL)
+	capsule, err := objects.NewCapsule(m, "datetime.datetime_CAPI", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("datetime_CAPI"), capsule); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -171,8 +184,38 @@ var TimedeltaType = objects.NewType("datetime.timedelta", []*objects.Type{object
 // kept in normalized form.
 //
 // CPython: Modules/_datetimemodule.c:2452 PyDateTime_Delta
+// attrHolder carries the per-instance attribute dict that a Python
+// subclass of a datetime type needs. CPython's type_new adds a
+// tp_dictoffset to any heap subclass that does not declare __slots__, so
+// `class D(date): pass` instances gain a managed __dict__ even though the
+// base date object has none. The datetime structs embed attrHolder and
+// satisfy objects.AttrDictHolder / objects.AttrDictSetter so
+// GenericGetAttr / GenericSetAttr route subclass attribute stores through
+// this dict once the subclass type advertises HasDict.
+//
+// CPython: Objects/typeobject.c:4153 type_new (add_dict / tp_dictoffset)
+type attrHolder struct {
+	attrs *objects.Dict
+}
+
+// AttrDict returns the per-instance dict, or nil before the first store.
+func (a *attrHolder) AttrDict() *objects.Dict { return a.attrs }
+
+// EnsureAttrDict lazily allocates the dict on first write, mirroring
+// CPython's lazy materialization of the managed dict slot.
+func (a *attrHolder) EnsureAttrDict() *objects.Dict {
+	if a.attrs == nil {
+		a.attrs = objects.NewDict()
+	}
+	return a.attrs
+}
+
+// SetAttrDict rebinds the managed __dict__ wholesale for `obj.__dict__ = d`.
+func (a *attrHolder) SetAttrDict(d *objects.Dict) { a.attrs = d }
+
 type Timedelta struct {
 	objects.Header
+	attrHolder
 	Days         int64
 	Seconds      int64
 	Microseconds int64
@@ -194,6 +237,7 @@ func init() {
 	TimedeltaType.TpNew = timedeltaNew
 	TimedeltaType.Repr = timedeltaRepr
 	TimedeltaType.Str = timedeltaStr
+	installStrRepr(TimedeltaType)
 	TimedeltaType.Hash = timedeltaHash
 	TimedeltaType.RichCmp = timedeltaRichCmp
 	TimedeltaType.Getattro = timedeltaGetattr
@@ -699,6 +743,7 @@ var DateType = objects.NewType("datetime.date", []*objects.Type{objects.ObjectTy
 // CPython: Modules/_datetimemodule.c:2945 PyDateTime_Date
 type Date struct {
 	objects.Header
+	attrHolder
 	Year  int64
 	Month int64
 	Day   int64
@@ -713,6 +758,7 @@ func init() {
 	DateType.Hash = dateHash
 	DateType.RichCmp = dateRichCmp
 	DateType.Getattro = dateGetattr
+	installStrRepr(DateType)
 
 	// __new__ exposes dateNew as a Python-level descriptor so
 	// pickle's load_newobj can do `cls.__new__(cls, state_bytes)`
@@ -1293,6 +1339,7 @@ var TimezoneType = objects.NewType("datetime.timezone", []*objects.Type{objects.
 // CPython: Modules/_datetimemodule.c:3690 PyDateTime_TimeZone
 type Timezone struct {
 	objects.Header
+	attrHolder
 	// Offset is in microseconds (stored as Timedelta).
 	Offset *Timedelta
 	// Name is the optional name override. Empty means auto-generate.
@@ -1313,6 +1360,7 @@ func init() {
 	TimezoneType.TpNew = timezoneNew
 	TimezoneType.Repr = timezoneRepr
 	TimezoneType.Str = timezoneStr
+	installStrRepr(TimezoneType)
 	TimezoneType.Hash = timezoneHash
 	TimezoneType.RichCmp = timezoneRichCmp
 	TimezoneType.Getattro = timezoneGetattr
@@ -1584,6 +1632,7 @@ var TimeType = objects.NewType("datetime.time", []*objects.Type{objects.ObjectTy
 // CPython: Modules/_datetimemodule.c:2900 PyDateTime_Time
 type Time struct {
 	objects.Header
+	attrHolder
 	Hour        int64
 	Minute      int64
 	Second      int64
@@ -1597,6 +1646,7 @@ func init() {
 	TimeType.TpNew = timeNew
 	TimeType.Repr = timeRepr
 	TimeType.Str = timeStr
+	installStrRepr(TimeType)
 	TimeType.Hash = timeHash
 	TimeType.RichCmp = timeRichCmp
 	TimeType.Getattro = timeGetattr
@@ -2212,6 +2262,7 @@ func init() {
 	DatetimeType.TpNew = datetimeNew
 	DatetimeType.Repr = datetimeRepr
 	DatetimeType.Str = datetimeStr
+	installStrRepr(DatetimeType)
 	DatetimeType.Hash = datetimeHash
 	DatetimeType.RichCmp = datetimeRichCmp
 	DatetimeType.Getattro = datetimeGetattr
@@ -3187,4 +3238,35 @@ func datetimeFormatMethod(args []objects.Object, kwargs map[string]objects.Objec
 		return objects.NewStr(s), nil
 	}
 	return datetimeStrftime(args, kwargs)
+}
+
+// installStrRepr exposes a type's tp_str / tp_repr slots as the
+// __str__ / __repr__ method descriptors that CPython auto-generates for
+// every C type via add_operators. Without these, `SomeDatetimeType.__str__`
+// resolves up the MRO to object.__str__, which breaks code that reads the
+// mixed-in type's __str__ directly (e.g. a date-mixin Enum under ReprEnum,
+// whose members must str() as the date's ISO form).
+//
+// CPython: Objects/typeobject.c:11045 add_operators (tp_str/tp_repr wrappers)
+func installStrRepr(t *objects.Type) {
+	if slot := t.Str; slot != nil {
+		objects.SetTypeDescr(t, "__str__", objects.NewMethodDescrConv(t, "__str__", objects.MethNoArgs,
+			func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				s, err := slot(args[0])
+				if err != nil {
+					return nil, err
+				}
+				return objects.NewStr(s), nil
+			}))
+	}
+	if slot := t.Repr; slot != nil {
+		objects.SetTypeDescr(t, "__repr__", objects.NewMethodDescrConv(t, "__repr__", objects.MethNoArgs,
+			func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+				s, err := slot(args[0])
+				if err != nil {
+					return nil, err
+				}
+				return objects.NewStr(s), nil
+			}))
+	}
 }

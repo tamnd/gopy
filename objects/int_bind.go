@@ -43,6 +43,14 @@ func init() {
 	bind("__str__", intReprDescr)
 	bindNoArgs("__sizeof__", intSizeofMethod)
 	bindNoArgs("__getnewargs__", intGetNewArgsMethod)
+	// Install int.__hash__ as a descriptor so int.__hash__ resolves to
+	// long_hash rather than object.__hash__, and so fixupHashAndIter
+	// (which keys off LookupDescriptor(t, "__hash__")) installs long_hash
+	// as the tp_hash slot on int subclasses. Without it, hash(hexint(x))
+	// fell back to the identity hash.
+	//
+	// CPython: Objects/typeobject.c:8230 slotdefs (TPSLOT __hash__)
+	bindNoArgs("__hash__", intHashMethod)
 
 	// long_getset (Objects/longobject.c:6466): real/numerator return
 	// self as int, imag returns 0, denominator returns 1.
@@ -51,9 +59,40 @@ func init() {
 	SetTypeDescr(IntType, "numerator", NewGetSetDescr("numerator", intRealGetter, nil))
 	SetTypeDescr(IntType, "denominator", NewGetSetDescr("denominator", intDenominatorGetter, nil))
 
-	SetTypeDescr(IntType, "from_bytes", NewClassMethod(
-		NewBuiltinFunction("from_bytes", intFromBytesMethod),
-	))
+	// int.from_bytes is METH_CLASS, so its type-level descriptor is a
+	// classmethod_descriptor (PyClassMethodDescr_Type). Binding it yields
+	// a builtin_function_or_method whose m_self is the class, matching
+	// int.__dict__['from_bytes'] being a classmethod_descriptor and
+	// int.from_bytes being a builtin method.
+	//
+	// CPython: Objects/longobject.c:6500 int_methods (from_bytes METH_CLASS)
+	SetTypeDescr(IntType, "from_bytes", NewClassMethodDescr(IntType, &MethodDef{
+		Name:  "from_bytes",
+		Flags: MethVarargs | MethKeywords | MethClass,
+		VarargsKw: func(self Object, args *Tuple, kwargs *Dict) (Object, error) {
+			full := make([]Object, 0, args.Len()+1)
+			full = append(full, self)
+			for i := 0; i < args.Len(); i++ {
+				full = append(full, args.Item(i))
+			}
+			var kw map[string]Object
+			if kwargs != nil && kwargs.Len() > 0 {
+				kw = make(map[string]Object, kwargs.Len())
+				for _, k := range kwargs.Keys() {
+					ks, err := Str(k)
+					if err != nil {
+						return nil, err
+					}
+					v, err := kwargs.GetItem(k)
+					if err != nil {
+						return nil, err
+					}
+					kw[ks] = v
+				}
+			}
+			return intFromBytesMethod(full, kw)
+		},
+	}))
 }
 
 // intRoundMethod implements int.__round__(ndigits=None). Rounding an
@@ -211,6 +250,23 @@ func intReprDescr(args []Object, _ map[string]Object) (Object, error) {
 // digit even when the value is zero.
 //
 // CPython: Objects/longobject.c:6176 int___sizeof___impl
+// intHashMethod ports int.__hash__: hashes self through long_hash and
+// returns the result as a plain int. Registering it as a descriptor keeps
+// int.__hash__ from resolving to object.__hash__ and lets fixupHashAndIter
+// install long_hash as the tp_hash slot on int subclasses.
+//
+// CPython: Objects/longobject.c:3287 long_hash
+func intHashMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __hash__() takes no arguments (%d given)", len(args)-1)
+	}
+	h, err := intHash(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewInt(h), nil
+}
+
 func intSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __sizeof__() takes no arguments (%d given)", len(args)-1)

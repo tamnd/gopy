@@ -299,8 +299,15 @@ func getSizeof(args []objects.Object, kwargs map[string]objects.Object) (objects
 //
 // CPython: Python/sysmodule.c:1791 _PySys_GetSizeOf
 func sizeOfObject(obj objects.Object) (int64, error) {
-	method, err := objects.GetAttr(obj, objects.NewStr("__sizeof__"))
+	// _PySys_GetSizeOf fetches __sizeof__ through _PyObject_LookupSpecial,
+	// a TYPE-level MRO lookup that bypasses the instance __getattribute__.
+	//
+	// CPython: Python/sysmodule.c:1791 _PySys_GetSizeOf (_PyObject_LookupSpecial)
+	method, err := objects.LookupSpecial(obj, "__sizeof__")
 	if err != nil {
+		return 0, err
+	}
+	if method == nil {
 		return 0, fmt.Errorf("TypeError: Type %.100s doesn't define __sizeof__", obj.Type().Name)
 	}
 	res, err := objects.CallNoArgs(method)
@@ -317,6 +324,14 @@ func sizeOfObject(obj objects.Object) (int64, error) {
 	}
 	if size < 0 {
 		return 0, fmt.Errorf("ValueError: __sizeof__() should return >= 0")
+	}
+	// _PySys_GetSizeOf adds the GC header (sizeof(PyGC_Head) == 16 on a
+	// 64-bit build) for any object its type tracks with the cyclic GC.
+	// __sizeof__ itself never includes the GC head.
+	//
+	// CPython: Python/sysmodule.c:1815 _PySys_GetSizeOf (gc_head)
+	if obj.Type().HasGC() {
+		size += 16
 	}
 	return size, nil
 }

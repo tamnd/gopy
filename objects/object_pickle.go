@@ -104,7 +104,7 @@ func reduceNewobj(self Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7503 _PyObject_GetNewArguments
 func objectGetNewArguments(self Object) (*Tuple, *Dict, error) {
-	if v, err := LookupAttrString(self, "__getnewargs_ex__"); err != nil {
+	if v, err := LookupSpecial(self, "__getnewargs_ex__"); err != nil {
 		return nil, nil, err
 	} else if v != nil {
 		out, err := Call(v, NewTuple(nil), nil)
@@ -128,7 +128,7 @@ func objectGetNewArguments(self Object) (*Tuple, *Dict, error) {
 		}
 		return a, k, nil
 	}
-	if v, err := LookupAttrString(self, "__getnewargs__"); err != nil {
+	if v, err := LookupSpecial(self, "__getnewargs__"); err != nil {
 		return nil, nil, err
 	} else if v != nil {
 		out, err := Call(v, NewTuple(nil), nil)
@@ -231,27 +231,94 @@ func objectGetStateDefault(self Object, required bool) (Object, error) {
 	if required && self.Type().OpaqueCState {
 		return nil, fmt.Errorf("TypeError: cannot pickle '%s' object", self.Type().Name)
 	}
-	// Collect slot values from __slots__ declared across the MRO.
+	// Collect slot values for the names copyreg._slotnames computes (or
+	// the cached __slotnames__ list), reading each through normal getattr
+	// so a class __getattr__ participates the way CPython's
+	// PyObject_GetOptionalAttr does.
+	//
 	// CPython: Objects/typeobject.c:7389 object_getstate_default (slot loop)
+	slotnamesObj, err := typeGetSlotNames(self.Type())
+	if err != nil {
+		return nil, err
+	}
+	slotnames, ok := slotnamesObj.(*List)
+	if !ok || slotnames.Len() == 0 {
+		return state, nil
+	}
 	slots := NewDict()
-	for _, t := range self.Type().MRO {
-		for _, name := range t.Slots {
-			v, err := GetAttr(self, NewStr(name))
-			if err != nil {
-				if isAttributeError(err) {
-					continue // slot not set on this instance
-				}
-				return nil, err
+	slotnamesSize := slotnames.Len()
+	for i := range slotnamesSize {
+		name := slotnames.Item(i)
+		v, err := GetAttr(self, name)
+		if err != nil {
+			if isAttributeError(err) {
+				continue // slot not set on this instance, not an error
 			}
-			if setErr := slots.SetItem(NewStr(name), v); setErr != nil {
-				return nil, setErr
-			}
+			return nil, err
+		}
+		if setErr := slots.SetItem(name, v); setErr != nil {
+			return nil, setErr
+		}
+		// The list lives on the class, so it may mutate while we iterate.
+		// CPython: Objects/typeobject.c:7421 object_getstate_default
+		if slotnames.Len() != slotnamesSize {
+			return nil, fmt.Errorf("RuntimeError: __slotnames__ changed size during iteration")
 		}
 	}
 	if slots.Len() > 0 {
 		return NewTuple([]Object{state, slots}), nil
 	}
 	return state, nil
+}
+
+// typeGetSlotNames mirrors _PyType_GetSlotNames: return the type's
+// cached __slotnames__ when present (own dict only, no MRO walk), else
+// ask copyreg._slotnames to compute and cache it. The result is either
+// None or a list of slot-attribute names.
+//
+// CPython: Objects/typeobject.c:7287 _PyType_GetSlotNames
+func typeGetSlotNames(t *Type) (Object, error) {
+	if sn := typeOwnDictItem(t, "__slotnames__"); sn != nil {
+		if sn != None() {
+			if _, ok := sn.(*List); !ok {
+				return nil, fmt.Errorf("TypeError: %s.__slotnames__ should be a list or None, not %s", t.Name, sn.Type().Name)
+			}
+		}
+		return sn, nil
+	}
+	if CopyregLookup == nil {
+		return None(), nil
+	}
+	fn, err := CopyregLookup("_slotnames")
+	if err != nil {
+		return nil, err
+	}
+	sn, err := Call(fn, NewTuple([]Object{t}), nil)
+	if err != nil {
+		return nil, err
+	}
+	if sn != None() {
+		if _, ok := sn.(*List); !ok {
+			return nil, fmt.Errorf("TypeError: copyreg._slotnames didn't return a list or None")
+		}
+	}
+	return sn, nil
+}
+
+// typeOwnDictItem reads name from t's own attribute dict without walking
+// the MRO, the way CPython's lookup_tp_dict + PyDict_GetItemRef do.
+func typeOwnDictItem(t *Type, name string) Object {
+	if t.ClassAttrDict != nil {
+		if v, err := t.ClassAttrDict.GetItem(NewStr(name)); err == nil {
+			return v
+		}
+	}
+	if descrs, ok := typeDescrTable[t]; ok {
+		if v, ok := descrs[name]; ok {
+			return v
+		}
+	}
+	return nil
 }
 
 // isListInstance reports whether self is exactly a list or a subclass

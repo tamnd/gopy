@@ -102,6 +102,14 @@ func init() {
 	SetTypeDescr(BoundMethodType, "__reduce__",
 		NewMethodDescrConv(BoundMethodType, "__reduce__", MethNoArgs, boundMethodReduceMethod))
 	AddCallSlotWrapper(BoundMethodType)
+	// add_operators installs a __get__ wrapper for every type with a
+	// tp_descr_get slot. Without it, a.meth.__get__ would fall through
+	// boundMethodGetattro to the wrapped function's __get__ and rebind
+	// the method to a new self (gh-113157); the wrapper routes to
+	// method_descr_get, which returns the binding unchanged.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	addDescriptorSlotWrappers(BoundMethodType)
 }
 
 // boundMethodGetattro looks for name on the method type first (so
@@ -237,15 +245,12 @@ func boundMethodRichCompare(a, b Object, op CompareOp) (Object, error) {
 		return nil, err
 	}
 	if eq {
-		switch {
-		case ma.imSelf == nil || mb.imSelf == nil:
-			eq = ma.imSelf == mb.imSelf
-		default:
-			eq, err = RichCmpBool(ma.imSelf, mb.imSelf, CompareEQ)
-			if err != nil {
-				return nil, err
-			}
-		}
+		// im_self is compared by identity, never through __eq__: two
+		// methods bound off distinct instances differ even when those
+		// instances compare equal.
+		//
+		// CPython: Objects/classobject.c:226 method_richcompare
+		eq = ma.imSelf == mb.imSelf
 	}
 	if op == CompareNE {
 		eq = !eq
@@ -444,27 +449,32 @@ func init() {
 	ClassMethodType.DescrGet = classMethodDescrGet
 	ClassMethodType.TpTraverse = classMethodTraverse
 	ClassMethodType.Getattro = classMethodGetattro
-	// classmethod(fn): wrap fn so attribute access binds to the class.
+	// classmethod inherits object's tp_setattro (generic) and carries a
+	// real tp_dictoffset, so attribute writes/deletes route through the
+	// installed getsets (__annotations__, __dict__) or land in cm_dict.
 	//
-	// CPython: Objects/funcobject.c:1487 cm_init
-	ClassMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-		if len(kwargs) != 0 {
-			return nil, fmt.Errorf("TypeError: classmethod() takes no keyword arguments")
-		}
-		if err := CheckPositional("classmethod", len(args), 1, 1); err != nil {
-			return nil, err
-		}
-		return NewClassMethod(args[0]), nil
+	// CPython: Objects/funcobject.c:1594 PyClassMethod_Type
+	ClassMethodType.Setattro = GenericSetAttr
+	ClassMethodType.HasDict = true
+	// classmethod(fn): cm_new allocates with cm_callable preset to None;
+	// cm_init then validates the args and stores the real callable. The
+	// split matters for subclasses that override __init__ without calling
+	// super().__init__: the callable stays None, so repr and __func__
+	// report None rather than the constructor argument.
+	//
+	// CPython: Objects/funcobject.c:1474 cm_new / cm_init
+	ClassMethodType.TpNew = func(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+		cm := &ClassMethod{cmCallable: None()}
+		cm.init(cls)
+		return cm, nil
 	}
-	StaticMethodType.TpNew = func(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
-		if len(kwargs) != 0 {
-			return nil, fmt.Errorf("TypeError: staticmethod() takes no keyword arguments")
-		}
-		if err := CheckPositional("staticmethod", len(args), 1, 1); err != nil {
-			return nil, err
-		}
-		return NewStaticMethod(args[0]), nil
+	SetTypeDescr(ClassMethodType, "__init__", NewMethodDescr(ClassMethodType, "__init__", classMethodInit))
+	StaticMethodType.TpNew = func(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+		sm := &StaticMethod{smCallable: None()}
+		sm.init(cls)
+		return sm, nil
 	}
+	SetTypeDescr(StaticMethodType, "__init__", NewMethodDescr(StaticMethodType, "__init__", staticMethodInit))
 
 	// cm_memberlist + cm_getsetlist + cm_methodlist, all in one
 	// init pass. __func__ and __wrapped__ both expose cm_callable; the
@@ -496,8 +506,28 @@ func init() {
 		func(o Object, v Object) error {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "classmethod")
 		}))
+	// Expose tp_repr as __repr__ so a subclass of classmethod resolves the
+	// classmethod repr through the slot wrapper rather than falling back to
+	// object.__repr__ during fixup_slot_dispatchers.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr -> __repr__)
+	SetTypeDescr(ClassMethodType, "__repr__", NewMethodDescr(ClassMethodType, "__repr__", classMethodReprDescr))
 	bindClassGetitem(ClassMethodType)
 	addDescriptorSlotWrappers(ClassMethodType)
+}
+
+// classMethodReprDescr backs classmethod.__dict__["__repr__"].
+//
+// CPython: Objects/funcobject.c:1565 cm_repr
+func classMethodReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	s, err := classMethodRepr(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 // classMethodTraverse visits the wrapped callable and instance dict.
@@ -531,8 +561,45 @@ func NewClassMethod(fn Object) *ClassMethod {
 	return cm
 }
 
+// classMethodInit is classmethod's tp_init: it validates the single
+// positional callable and stores it, then runs functools_wraps. A
+// subclass that overrides __init__ without chaining here leaves
+// cm_callable at the None preset from cm_new.
+//
+// CPython: Objects/funcobject.c:1487 cm_init
+func classMethodInit(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: classmethod() takes no keyword arguments")
+	}
+	if err := CheckPositional("classmethod", len(args)-1, 1, 1); err != nil {
+		return nil, err
+	}
+	cm, ok := args[0].(*ClassMethod)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'classmethod' object but received a '%s'", typeNameOf(args[0]))
+	}
+	cm.cmCallable = args[1]
+	functoolsWraps(cm, cm.cmCallable)
+	return None(), nil
+}
+
 // Func returns the wrapped callable.
 func (cm *ClassMethod) Func() Object { return cm.cmCallable }
+
+// AttrDict and EnsureAttrDict expose cm_dict through the AttrDictHolder
+// interface so PyObject_GenericSetAttr can store and delete attributes
+// on a classmethod, matching CPython where classmethod inherits
+// object's tp_setattro and carries a real tp_dictoffset.
+//
+// CPython: Objects/funcobject.c:1594 PyClassMethod_Type (tp_dictoffset)
+func (cm *ClassMethod) AttrDict() *Dict { return cm.cmDict }
+
+func (cm *ClassMethod) EnsureAttrDict() *Dict {
+	if cm.cmDict == nil {
+		cm.cmDict = NewDict()
+	}
+	return cm.cmDict
+}
 
 // classMethodRepr formats the classmethod the way CPython does:
 // `<classmethod(REPR_OF_CALLABLE)>`. The earlier `<classmethod object>`
@@ -754,6 +821,12 @@ func init() {
 	StaticMethodType.DescrGet = staticMethodDescrGet
 	StaticMethodType.TpTraverse = staticMethodTraverse
 	StaticMethodType.Getattro = staticMethodGetattro
+	// staticmethod inherits object's tp_setattro (generic) and carries a
+	// real tp_dictoffset, mirroring classmethod.
+	//
+	// CPython: Objects/funcobject.c:1842 PyStaticMethod_Type
+	StaticMethodType.Setattro = GenericSetAttr
+	StaticMethodType.HasDict = true
 	// sm_dealloc releases the owned reference to sm_callable that sm_init acquired.
 	//
 	// CPython: Objects/funcobject.c:1676 sm_dealloc Py_XDECREF(im->sm_callable)
@@ -796,8 +869,27 @@ func init() {
 		func(o Object, v Object) error {
 			return descriptorSetWrappedAttribute(o, "__annotate__", v, "staticmethod")
 		}))
+	// Expose tp_repr as __repr__ so subclasses resolve the staticmethod
+	// repr rather than object.__repr__ during fixup_slot_dispatchers.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_repr -> __repr__)
+	SetTypeDescr(StaticMethodType, "__repr__", NewMethodDescr(StaticMethodType, "__repr__", staticMethodReprDescr))
 	bindClassGetitem(StaticMethodType)
 	addDescriptorSlotWrappers(StaticMethodType)
+}
+
+// staticMethodReprDescr backs staticmethod.__dict__["__repr__"].
+//
+// CPython: Objects/funcobject.c:1815 sm_repr
+func staticMethodReprDescr(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __repr__() takes no arguments (%d given)", len(args)-1)
+	}
+	s, err := staticMethodRepr(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(s), nil
 }
 
 // staticMethodTraverse visits the wrapped callable and instance dict.
@@ -833,8 +925,42 @@ func NewStaticMethod(fn Object) *StaticMethod {
 	return sm
 }
 
+// staticMethodInit is staticmethod's tp_init, mirroring sm_init.
+//
+// CPython: Objects/funcobject.c:1636 sm_init
+func staticMethodInit(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: staticmethod() takes no keyword arguments")
+	}
+	if err := CheckPositional("staticmethod", len(args)-1, 1, 1); err != nil {
+		return nil, err
+	}
+	sm, ok := args[0].(*StaticMethod)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'staticmethod' object but received a '%s'", typeNameOf(args[0]))
+	}
+	sm.smCallable = args[1]
+	functoolsWraps(sm, sm.smCallable)
+	return None(), nil
+}
+
 // Func returns the wrapped callable.
 func (sm *StaticMethod) Func() Object { return sm.smCallable }
+
+// AttrDict and EnsureAttrDict expose sm_dict through the AttrDictHolder
+// interface so PyObject_GenericSetAttr can store and delete attributes
+// on a staticmethod, matching CPython where staticmethod inherits
+// object's tp_setattro and carries a real tp_dictoffset.
+//
+// CPython: Objects/funcobject.c:1842 PyStaticMethod_Type (tp_dictoffset)
+func (sm *StaticMethod) AttrDict() *Dict { return sm.smDict }
+
+func (sm *StaticMethod) EnsureAttrDict() *Dict {
+	if sm.smDict == nil {
+		sm.smDict = NewDict()
+	}
+	return sm.smDict
+}
 
 // staticMethodRepr matches CPython's <staticmethod(REPR_OF_CALLABLE)>.
 //

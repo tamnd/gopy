@@ -105,6 +105,8 @@ var CoroAwaitType *Type
 
 func init() {
 	CoroutineType = NewType("coroutine", []*Type{objectType})
+	// CPython: Objects/genobject.c coro_methods ("__class_getitem__")
+	bindClassGetitem(CoroutineType)
 	CoroutineType.Repr = coroRepr
 	CoroutineType.Str = coroRepr
 	CoroutineType.Getattro = GenericGetAttr
@@ -545,7 +547,7 @@ func (c *Coroutine) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: coroutine already executing")
 	}
 	c.started = true
-	c.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
+	c.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -640,7 +642,7 @@ func (c *Coroutine) throwWithCaller(err error, caller InterpreterFrame) (Object,
 			return c.forwardThrowResult(fval, ferr, caller)
 		}
 	}
-	c.SendCh <- GenMsg{Err: err, CallerFrame: caller}
+	c.SendCh <- GenMsg{Err: err, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -674,7 +676,7 @@ func (c *Coroutine) forwardThrowResult(fval Object, ferr error, caller Interpret
 	//
 	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
 	c.YieldFromTarget = nil
-	c.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
+	c.SendCh <- GenMsg{Err: ferr, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-c.YieldCh
 	if msg.Err != nil {
 		c.closed = true
@@ -705,7 +707,7 @@ func (c *Coroutine) Close() error {
 		_ = GenCloseIter(yf)
 		c.YieldFromTarget = nil
 	}
-	c.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
+	c.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-c.YieldCh
 	c.closed = true
 	if msg.Err == nil {

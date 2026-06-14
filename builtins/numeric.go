@@ -183,10 +183,15 @@ func formatIntBase(args []objects.Object, name string, base int, prefix string) 
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: %s() takes exactly one argument (%d given)", name, len(args))
 	}
-	i, ok := args[0].(*objects.Int)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: %s argument must be an integer, not '%s'", name, args[0].Type().Name)
+	// PyNumber_ToBase runs the argument through _PyNumber_Index first, so
+	// any object implementing __index__ (not just int) is formatted.
+	//
+	// CPython: Objects/abstract.c:1564 PyNumber_ToBase
+	idx, err := objects.NumberIndex(args[0])
+	if err != nil {
+		return nil, err
 	}
+	i := idx.(*objects.Int)
 	bi := i.BigInt()
 	sign := ""
 	if bi.Sign() < 0 {

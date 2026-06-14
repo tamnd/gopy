@@ -30,6 +30,74 @@ func init() {
 	SetTypeDescr(typeType, "mro", NewMethodDescr(typeType, "mro", typeMroMeth))
 	// CPython: Objects/typeobject.c:5862 type___dir___impl
 	SetTypeDescr(typeType, "__dir__", NewMethodDescr(typeType, "__dir__", typeDirMeth))
+	// type.__subclasscheck__ / type.__instancecheck__ run the "real" check
+	// (recursive_issubclass / recursive_isinstance) without re-dispatching
+	// through a metaclass __subclasscheck__, so subclasses like typing's
+	// _ProtocolMeta can delegate to them via super()/type.__subclasscheck__.
+	//
+	// CPython: Objects/typeobject.c:5995 type___subclasscheck___impl
+	// CPython: Objects/typeobject.c:5982 type___instancecheck___impl
+	SetTypeDescr(typeType, "__subclasscheck__", NewMethodDescr(typeType, "__subclasscheck__", typeSubclasscheckMeth))
+	SetTypeDescr(typeType, "__instancecheck__", NewMethodDescr(typeType, "__instancecheck__", typeInstancecheckMeth))
+}
+
+// typeSubclasscheckMeth implements type.__subclasscheck__(cls, subclass):
+// the structural (MRO / __bases__) subclass test, bypassing any metaclass
+// __subclasscheck__ override so it can serve as the base implementation.
+//
+// CPython: Objects/typeobject.c:5995 type___subclasscheck___impl
+//
+//	(_PyObject_RealIsSubclass -> recursive_issubclass)
+func typeSubclasscheckMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __subclasscheck__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	cls, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__subclasscheck__' requires a 'type' object")
+	}
+	ok2, err := realIsSubclass(args[1], cls)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok2), nil
+}
+
+// typeInstancecheckMeth implements type.__instancecheck__(cls, instance):
+// the structural isinstance test (type(instance) is a subclass of cls),
+// bypassing any metaclass __instancecheck__ override.
+//
+// CPython: Objects/typeobject.c:5982 type___instancecheck___impl
+//
+//	(_PyObject_RealIsInstance -> recursive_isinstance)
+func typeInstancecheckMeth(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __instancecheck__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	cls, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__instancecheck__' requires a 'type' object")
+	}
+	ok2, err := realIsSubclass(args[1].Type(), cls)
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok2), nil
+}
+
+// realIsSubclass is the metaclass-bypassing subclass test used by
+// type.__subclasscheck__/__instancecheck__: direct PyType_IsSubtype when
+// both operands are real types, otherwise the abstract __bases__ walk.
+//
+// CPython: Objects/abstract.c:2742 recursive_issubclass
+func realIsSubclass(sub Object, cls *Type) (bool, error) {
+	if st, ok := sub.(*Type); ok {
+		return IsSubtype(st, cls), nil
+	}
+	if err := checkClass(sub, "issubclass() arg 1 must be a class"); err != nil {
+		return false, err
+	}
+	return abstractIsSubclass(sub, cls, 1)
 }
 
 // typeDirMeth implements type.__dir__(): the names reachable by merging
@@ -80,10 +148,13 @@ func typeSubclassesMeth(args []Object, _ map[string]Object) (Object, error) {
 	return NewList(items), nil
 }
 
-// typeMroMeth implements type.mro() -> list. Returns the same content as
-// __mro__ but as a Python list rather than a tuple.
+// typeMroMeth implements type.mro() -> list. Like mro_implementation, it
+// recomputes the C3 linearization from tp_bases rather than echoing the
+// stored tp_mro: a custom metaclass mro() calls type.mro(cls) while the
+// type is mid-creation and tp_mro is still NULL, so reading t.MRO would
+// hand back an empty list. Recomputing keeps it correct in that window.
 //
-// CPython: Objects/typeobject.c:1254 type_mro
+// CPython: Objects/typeobject.c:3434 type_mro_impl (mro_implementation)
 func typeMroMeth(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("TypeError: descriptor 'mro' of 'type' object needs an argument")
@@ -92,8 +163,12 @@ func typeMroMeth(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor 'mro' for 'type' objects doesn't apply to a '%s' object", typeNameOf(args[0]))
 	}
-	items := make([]Object, len(t.MRO))
-	for i, b := range t.MRO {
+	mro, err := c3Linearize(t)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Object, len(mro))
+	for i, b := range mro {
 		items[i] = b
 	}
 	return NewList(items), nil
@@ -110,7 +185,14 @@ func typeGetName(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__name__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if t.IsUser {
-		return NewStr(t.Name), nil
+		// Return the same str object on every access so identity holds,
+		// matching CPython's Py_NewRef(ht_name). inspect.classify_class_attrs
+		// compares getattr(cls, '__name__') by identity to locate the home
+		// class of __name__/__qualname__.
+		if t.nameObj == nil {
+			t.nameObj = NewStr(t.Name)
+		}
+		return t.nameObj, nil
 	}
 	return NewStr(tailName(t.Name)), nil
 }
@@ -158,6 +240,7 @@ func typeSetName(o Object, v Object) error {
 		return err
 	}
 	t.Name = s.v
+	t.nameObj = nil
 	t.InvalidateVersionTag()
 	return nil
 }
@@ -173,10 +256,14 @@ func typeGetQualname(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__qualname__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if t.IsUser {
-		if t.Qualname != "" {
-			return NewStr(t.Qualname), nil
+		if t.qualnameObj == nil {
+			if t.Qualname != "" {
+				t.qualnameObj = NewStr(t.Qualname)
+			} else {
+				t.qualnameObj = NewStr(t.Name)
+			}
 		}
-		return NewStr(t.Name), nil
+		return t.qualnameObj, nil
 	}
 	return NewStr(tailName(t.Name)), nil
 }
@@ -201,6 +288,7 @@ func typeSetQualname(o Object, v Object) error {
 		return fmt.Errorf("TypeError: can only assign string to %s.__qualname__, not '%s'", t.Name, typeNameOf(v))
 	}
 	t.Qualname = s.v
+	t.qualnameObj = nil
 	t.InvalidateVersionTag()
 	return nil
 }
@@ -285,6 +373,14 @@ func typeGetBases(o Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__bases__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
+	// A type built via type(name, bases, ns) keeps the original bases
+	// object so a tuple subclass survives as the type of __bases__.
+	//
+	// CPython: Objects/typeobject.c:1083 type_get_bases (returns tp_bases)
+	if t.BasesObj != nil {
+		Incref(t.BasesObj)
+		return t.BasesObj, nil
+	}
 	items := make([]Object, len(t.Bases))
 	for i, b := range t.Bases {
 		items[i] = b
@@ -317,11 +413,17 @@ func typeGetBase(o Object) (Object, error) {
 }
 
 // shapeDiffers reports whether two types lay their instances out
-// differently. CPython compares tp_basicsize and tp_itemsize.
+// differently. CPython compares tp_basicsize and tp_itemsize, which are
+// always concrete on a finished type. gopy leaves the raw BaseSize /
+// ItemSize fields at zero on user types and resolves the inherited size
+// by walking the MRO, so the comparison must go through typeBasicSize /
+// typeItemSize too. Comparing the raw fields would report a spurious
+// difference (0 vs object's 16) for a plain user class against object
+// and wrongly make it its own solid base.
 //
 // CPython: Objects/typeobject.c:2962 shape_differs
 func shapeDiffers(t1, t2 *Type) bool {
-	return t1.BaseSize != t2.BaseSize || t1.ItemSize != t2.ItemSize
+	return typeBasicSize(t1) != typeBasicSize(t2) || typeItemSize(t1) != typeItemSize(t2)
 }
 
 // solidBase returns the most-derived ancestor of t whose instance
@@ -394,34 +496,217 @@ func typeSetBases(o Object, v Object) error {
 	if tup.Len() == 0 {
 		return fmt.Errorf("TypeError: can only assign non-empty tuple to %s.__bases__", t.Name)
 	}
+	newBases, err := validateNewBases(t, tup)
+	if err != nil {
+		return err
+	}
+	// The new best base must lay its instances out compatibly with the old
+	// one, the same gate object.__class__ assignment uses.
+	//
+	// CPython: Objects/typeobject.c:1847 type_set_bases_unlocked
+	newBase, err := bestBase(newBases)
+	if err != nil {
+		return err
+	}
+	oldBase, _ := bestBase(t.Bases)
+	if oldBase != nil && newBase != nil && !compatibleForAssignment(oldBase, newBase) {
+		return fmt.Errorf("TypeError: __bases__ assignment: '%s' object layout differs from '%s'", newBase.Name, oldBase.Name)
+	}
+
+	oldBases := t.Bases
+	oldBasesObj := t.BasesObj
+	t.Bases = newBases
+	// BasesObj is the identity token for reentrancy detection below: a
+	// custom mro() invoked while we recompute the hierarchy may assign
+	// __bases__ again, which overwrites this field with its own tuple.
+	// Take a counted reference: tp_bases owns the tuple, so it must outlive
+	// the caller's transient reference (the VM decrefs the assigned value
+	// once STORE_ATTR completes). Without this the tuple is freed and its
+	// items cleared, so a later __bases__ read sees an empty tuple.
+	//
+	// CPython: Objects/typeobject.c:1837 type_set_bases_unlocked (Py_INCREF(new_bases))
+	Incref(tup)
+	t.BasesObj = tup
+	// Recompute the MRO for t and every transitive subclass, recording the
+	// prior MROs so a C3 conflict deeper in the tree can be rolled back.
+	//
+	// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
+	var saved []mroSnapshot
+	if err := mroHierarchy(t, &saved, map[*Type]bool{}); err != nil {
+		// Roll the MROs back, but skip any type a reentrant assignment
+		// recomputed in the meantime: that newer MRO must survive.
+		//
+		// CPython: Objects/typeobject.c:1895 type_set_bases_unlocked (undo)
+		for i := len(saved) - 1; i >= 0; i-- {
+			if sameMRO(saved[i].cls.MRO, saved[i].newMRO) {
+				saved[i].cls.MRO = saved[i].oldMRO
+			}
+		}
+		// Only restore __bases__ if a reentrant assignment has not already
+		// replaced it; otherwise the reentrant result is the live one.
+		//
+		// CPython: Objects/typeobject.c:1912 type_set_bases_unlocked (bail)
+		if t.BasesObj == tup {
+			t.Bases = oldBases
+			t.BasesObj = oldBasesObj
+		}
+		return err
+	}
+	// Take no action if tp_bases was replaced through reentrance: the
+	// reentrant call already moved t between the subclass lists and
+	// updated slots, and redoing it here would re-add t to bases it no
+	// longer has.
+	//
+	// CPython: Objects/typeobject.c:1869 type_set_bases_unlocked
+	//
+	//	(if (lookup_tp_bases(type) == new_bases))
+	if t.BasesObj != tup {
+		return nil
+	}
+	// Move t between the old and new bases' subclass lists, then re-derive
+	// the inherited slots for t and its subclasses.
+	//
+	// CPython: Objects/typeobject.c:1878 remove_all_subclasses / add_all_subclasses / update_all_slots
+	for _, b := range oldBases {
+		b.removeSubclass(t)
+	}
+	for _, b := range newBases {
+		b.addSubclass(t)
+	}
+	refixupSlotDispatchers(t)
+	t.InvalidateVersionTag()
+	// Drop the reference tp_bases used to hold; the new tuple has replaced
+	// it. The rollback arm above instead restores oldBasesObj and so never
+	// reaches here.
+	//
+	// CPython: Objects/typeobject.c:1887 type_set_bases_unlocked (Py_DECREF(old_bases))
+	if oldBasesObj != nil {
+		Decref(oldBasesObj)
+	}
+	return nil
+}
+
+// sameMRO reports whether two MRO slices hold the same types in the same
+// order. type_set_bases_unlocked compares tp_mro by pointer identity to
+// decide whether a reentrant assignment recomputed it; gopy stores the
+// MRO as a fresh slice each pass, so element-wise equality stands in for
+// that identity check.
+func sameMRO(a, b []*Type) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateNewBases converts the assigned __bases__ tuple into a slice of
+// types, rejecting non-type entries and any base that would close an
+// inheritance cycle through t.
+//
+// CPython: Objects/typeobject.c:1812 type_set_bases_unlocked (argument loop)
+func validateNewBases(t *Type, tup *Tuple) ([]*Type, error) {
 	newBases := make([]*Type, 0, tup.Len())
 	for i := 0; i < tup.Len(); i++ {
 		b, ok := tup.Item(i).(*Type)
 		if !ok {
-			return fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
+			return nil, fmt.Errorf("TypeError: %s.__bases__ must be tuple of classes, not '%s'", t.Name, typeNameOf(tup.Item(i)))
 		}
-		if b == t {
-			return fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
+		// A base that already has t in its ancestry (or is t itself) would
+		// close an inheritance cycle. The MRO scan alone misses a cycle that
+		// a reentrant custom mro() forms through the primary base before the
+		// MRO is refreshed, so basesCauseCycle also walks the tp_base chain.
+		//
+		// CPython: Objects/typeobject.c:1823 type_set_bases_unlocked
+		if b == t || basesCauseCycle(b, t) {
+			return nil, fmt.Errorf("TypeError: a __bases__ item causes an inheritance cycle")
 		}
 		newBases = append(newBases, b)
 	}
-	t.Bases = newBases
-	mro, err := c3Linearize(t)
+	return newBases, nil
+}
+
+// mroSnapshot pairs a type with the MRO it had before a __bases__
+// assignment (oldMRO) and the MRO this pass installed (newMRO), so the
+// whole hierarchy can be rolled back on a later failure. The rollback
+// only restores a type whose MRO is still the one this pass set: a
+// reentrant __bases__ assignment fired from a custom mro() may have
+// recomputed it, and that fresher MRO must survive.
+//
+// CPython: Objects/typeobject.c:1895 type_set_bases_unlocked
+//
+//	(undo loop: "Do not rollback if cls has a newer version of MRO")
+type mroSnapshot struct {
+	cls    *Type
+	oldMRO []*Type
+	newMRO []*Type
+}
+
+// mroHierarchy recomputes t's MRO and then recurses into every direct
+// subclass, appending each (type, old MRO) pair to saved as it goes.
+//
+// CPython: Objects/typeobject.c:1724 mro_hierarchy_for_complete_type
+func mroHierarchy(t *Type, saved *[]mroSnapshot, visited map[*Type]bool) error {
+	if visited[t] {
+		return nil
+	}
+	visited[t] = true
+	old := t.MRO
+	// mro_invoke computes the new MRO, dispatching to a metaclass mro()
+	// override (e.g. test_descr's WorkOnce/DebugHelperMeta). It does not
+	// install the result; a custom mro() may reassign t.__bases__
+	// reentrantly, which installs a fresh t.MRO deeper in the stack.
+	//
+	// CPython: Objects/typeobject.c:3563 mro_internal_unlocked
+	newMRO, err := mroInvoke(t)
+	// Reentrancy check against the value captured before the call: a
+	// changed slice header means a reentrant assignment already recomputed
+	// t and its whole subtree.
+	//
+	// CPython: Objects/typeobject.c:3564 mro_internal_unlocked (reent)
+	reent := !sameSliceIdentity(t.MRO, old)
 	if err != nil {
+		// On error mro_internal returns -1 without touching tp_mro, leaving
+		// whatever a reentrant assignment installed. Do not restore old.
+		//
+		// CPython: Objects/typeobject.c:3569 mro_internal_unlocked (return -1)
 		return err
 	}
-	t.MRO = mro
-	t.InvalidateVersionTag()
+	if reent {
+		// The reentrant assignment already recomputed t and every subclass;
+		// installing newMRO here would clobber it. Stop without recording a
+		// snapshot, exactly as mro_internal returning 0 short-circuits
+		// mro_hierarchy_for_complete_type.
+		//
+		// CPython: Objects/typeobject.c:3573 mro_internal_unlocked (return 0)
+		return nil
+	}
+	t.MRO = newMRO
+	*saved = append(*saved, mroSnapshot{cls: t, oldMRO: old, newMRO: newMRO})
+	for _, sub := range t.Subclasses() {
+		if err := mroHierarchy(sub, saved, visited); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// typeGetMRO returns a tuple of t.MRO. Mirrors type_mro.
+// typeGetMRO returns a tuple of t.MRO, or None when tp_mro has not been
+// set yet. A custom metaclass mro() runs while the type is mid-creation
+// with tp_mro still NULL, and test code reads cls.__mro__ to detect that
+// window, so an unset MRO must surface as None rather than an empty tuple.
 //
-// CPython: Objects/typeobject.c:1183 type_get_mro
+// CPython: Objects/typeobject.c:1697 type_get_mro
 func typeGetMRO(o Object) (Object, error) {
 	t, ok := o.(*Type)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__mro__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
+	}
+	if t.MRO == nil {
+		return None(), nil
 	}
 	items := make([]Object, len(t.MRO))
 	for i, b := range t.MRO {
@@ -463,13 +748,28 @@ func typeGetParameters(o Object) (Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("TypeError: descriptor '__parameters__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
+	// __parameters__ hands back a stored tuple, so it must return an owned
+	// reference the way CPython's getset getters do (a dict-entry read goes
+	// through _PyDict_GetItemRef which increfs). Without the Incref the
+	// caller's arg-drop decrefs the pinned tuple toward zero and tuple_dealloc
+	// empties it, so the second cls[...] subscription reads an empty tuple and
+	// raises "is not a generic class".
+	//
+	// CPython: Lib/typing.py:1209 cls.__parameters__ as a counted dict entry
 	if t.TypingParameters != nil {
+		Incref(t.TypingParameters)
 		return t.TypingParameters, nil
 	}
-	if t.TypeParams != nil {
-		return t.TypeParams, nil
-	}
-	return NewTuple(nil), nil
+	// CPython stores __parameters__ as a plain instance attribute set only by
+	// typing.Generic.__init_subclass__. A class where that hook never ran (a
+	// non-generic class, or one whose __init_subclass__ forgot to call super)
+	// has no __parameters__, so reading it must raise AttributeError. typing's
+	// _generic_class_getitem relies on this: it adds the "did you forget
+	// super().__init_subclass__()" note to that AttributeError. __type_params__
+	// (PEP 695) is a separate attribute and must not stand in for it.
+	//
+	// CPython: Lib/typing.py:1151 parameters = cls.__parameters__ (AttributeError path)
+	return nil, fmt.Errorf("AttributeError: type object '%s' has no attribute '__parameters__'", t.Name)
 }
 
 // typeSetParameters stores a __parameters__ tuple assigned by user code
@@ -502,6 +802,15 @@ func typeGetDoc(o Object) (Object, error) {
 		return nil, fmt.Errorf("TypeError: descriptor '__doc__' for 'type' objects doesn't apply to a '%s' object", typeNameOf(o))
 	}
 	if v, ok2 := typeDescrTable[t]["__doc__"]; ok2 {
+		// A docstring stored as a descriptor (e.g. a class that sets
+		// __doc__ = SomeDescriptor()) is fetched through its __get__
+		// with a NULL instance, exactly as type_get_doc does before
+		// handing the result back.
+		//
+		// CPython: Objects/typeobject.c:1213 type_get_doc (tp_descr_get)
+		if dg := v.Type().DescrGet; dg != nil {
+			return dg(v, nil, t)
+		}
 		return v, nil
 	}
 	return None(), nil
@@ -517,6 +826,11 @@ func typeSetDoc(o Object, v Object) error {
 	}
 	if !t.IsUser {
 		return fmt.Errorf("TypeError: cannot set '__doc__' attribute of immutable type '%s'", t.Name)
+	}
+	// check_set_special_type_attr rejects deletion (NULL value) with a
+	// message that, by CPython's own wording, still says "immutable type".
+	if v == nil {
+		return fmt.Errorf("TypeError: cannot delete '__doc__' attribute of immutable type '%s'", t.Name)
 	}
 	SetTypeDescr(t, "__doc__", v)
 	return nil

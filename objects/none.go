@@ -24,6 +24,9 @@ func init() {
 	noneType.Hash = func(_ Object) (int64, error) { return 0, nil }
 	noneType.Getattro = GenericGetAttr
 	noneType.Setattro = GenericSetAttr
+	// NoneType is not subclassable. CPython: Objects/object.c PyNone_Type
+	// does not set Py_TPFLAGS_BASETYPE.
+	noneType.TpFlags &^= TpFlagBasetype
 	// NoneType() returns the singleton and rejects any argument.
 	//
 	// CPython: Objects/object.c:2218 none_new

@@ -173,10 +173,19 @@ func init() {
 	SetTypeDescr(DictType, "__eq__", NewMethodDescr(DictType, "__eq__", dictEqMethod))
 	SetTypeDescr(DictType, "clear", NewMethodDescrConv(DictType, "clear", MethNoArgs, dictClearMethod))
 	SetTypeDescr(DictType, "pop", NewMethodDescr(DictType, "pop", dictPopMethod))
-	SetTypeDescr(DictType, "update", NewMethodDescr(DictType, "update", dictUpdateMethod))
+	SetTypeDescr(DictType, "update", NewMethodDescrKwOrdered(DictType, "update", dictUpdateMethod))
 	SetTypeDescr(DictType, "copy", NewMethodDescrConv(DictType, "copy", MethNoArgs, dictCopyMethod))
 	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
-	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
+	// fromkeys is a METH_CLASS PyMethodDef, so it surfaces as a
+	// classmethod_descriptor (not a Python classmethod): binding it
+	// validates the bound type is a dict subtype via classmethod_get.
+	//
+	// CPython: Objects/dictobject.c:3869 dict_fromkeys / mapp_methods
+	SetTypeDescr(DictType, "fromkeys", NewClassMethodDescr(DictType, &MethodDef{
+		Name:    "fromkeys",
+		Flags:   MethVarargs | MethClass,
+		Varargs: dictFromKeysMethod,
+	}))
 	SetTypeDescr(DictType, "popitem", NewMethodDescrConv(DictType, "popitem", MethNoArgs, dictPopItemMethod))
 	SetTypeDescr(DictType, "__or__", NewMethodDescr(DictType, "__or__", dictOrMethod))
 	SetTypeDescr(DictType, "__ior__", NewMethodDescr(DictType, "__ior__", dictIOrMethod))
@@ -190,6 +199,88 @@ func init() {
 	AddIterSlotWrappers(DictType)
 	// CPython: Objects/dictobject.c:2498 dict.__hash__ = None
 	SetTypeDescr(DictType, "__hash__", None())
+	// CPython: Objects/dictobject.c:2912 dict.__sizeof__ = dict___sizeof___impl
+	SetTypeDescr(DictType, "__sizeof__", NewMethodDescrConv(DictType, "__sizeof__", MethNoArgs, dictSizeofMethod))
+}
+
+// dictObjectSize is sizeof(PyDictObject) on a 64-bit build: the eight
+// machine words of the struct head (ob_refcnt, ob_type, ma_used,
+// ma_version_tag, ma_keys, ma_values plus padding). CPython reports
+// this through _PyObject_SIZE(Py_TYPE(mp)) inside _PyDict_SizeOf.
+//
+// CPython: Objects/dictobject.c:2880 _PyDict_SizeOf (_PyObject_SIZE)
+const dictObjectSize = 48
+
+// dictKeysObjectSize is sizeof(PyDictKeysObject), the fixed header of a
+// keys table (dk_refcnt, dk_log2_size, dk_log2_index_bytes, dk_kind,
+// dk_version, dk_usable, dk_nentries) on a 64-bit build.
+//
+// CPython: Include/internal/pycore_dict.h PyDictKeysObject
+const dictKeysObjectSize = 32
+
+// dictKeysSize ports _PyDict_KeysSize: the byte cost of a keys table
+// holding nslots (a power of two) entries of the given kind.
+//
+// CPython: Objects/dictobject.c:752 _PyDict_KeysSize
+func dictKeysSize(nslots int, general bool) int {
+	// es is the per-entry size: a general table stores a full
+	// PyDictKeyEntry (hash, key, value = 3 words = 24 bytes); a unicode
+	// (and split) table stores a PyDictUnicodeEntry (key, value = 2
+	// words = 16 bytes).
+	es := 16
+	if general {
+		es = 24
+	}
+	log2Size := 0
+	for (1 << log2Size) < nslots {
+		log2Size++
+	}
+	// dk_log2_index_bytes = dk_log2_size + log2(index entry width). The
+	// index array uses 1/2/4/8-byte slots as the table grows.
+	//
+	// CPython: Objects/dictobject.c:636 new_keys_object (DK_LOG2_IXSIZE)
+	log2Bytes := 0
+	switch {
+	case log2Size >= 32:
+		log2Bytes = 3
+	case log2Size >= 16:
+		log2Bytes = 2
+	case log2Size >= 8:
+		log2Bytes = 1
+	}
+	indexBytes := 1 << (log2Size + log2Bytes)
+	return dictKeysObjectSize + indexBytes + usableFraction(nslots)*es
+}
+
+// dictSizeofMethod ports dict___sizeof___impl / _PyDict_SizeOf. The
+// returned value omits the GC head; sys.getsizeof adds it back for GC
+// types, matching CPython's _PySys_GetSizeOf.
+//
+// CPython: Objects/dictobject.c:2880 _PyDict_SizeOf
+func dictSizeofMethod(args []Object, _ map[string]Object) (Object, error) {
+	d, ok := args[0].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__sizeof__' requires a 'dict' object")
+	}
+	res := dictObjectSize
+	if d.sharedKeys != nil {
+		// Split dict: the per-instance values array costs
+		// shared_keys_usable_size pointers; the shared keys table is
+		// accounted for once on the owning type, not here.
+		//
+		// CPython: Objects/dictobject.c:2884 _PyDict_SizeOf (ma_values)
+		res += usableFraction(len(d.sharedKeys.entries)) * 8
+		return NewInt(int64(res)), nil
+	}
+	// Combined dict. An empty dict shares the immortal empty keys table
+	// (dk_refcnt > 1), so its keys are not counted; only once a key is
+	// inserted does the dict own a keys table worth charging.
+	//
+	// CPython: Objects/dictobject.c:2886 _PyDict_SizeOf (dk_refcnt == 1)
+	if d.used > 0 || d.fill > 0 {
+		res += dictKeysSize(len(d.entries), d.kind == dictKindGeneral)
+	}
+	return NewInt(int64(res)), nil
 }
 
 // dictReprMethod is the slot wrapper for tp_repr. Binding it as a
@@ -594,6 +685,13 @@ func (d *Dict) EnsureAttrDict() *Dict {
 	return d.attrs
 }
 
+// SetAttrDict rebinds the managed __dict__ for `obj.__dict__ = d`. A dict
+// subclass that does `self.__dict__ = self` routes its attribute store
+// straight into its own items, matching CPython's bug #1469629 case.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (d *Dict) SetAttrDict(nd *Dict) { d.attrs = nd }
+
 // dictSubclassGetAttr is the tp_getattro slot for user-defined dict
 // subclasses. The instance is a *Dict (not *Instance), so we look in
 // d.attrs for per-instance attributes before walking the type MRO.
@@ -649,6 +747,19 @@ func dictSubclassSetAttr(o Object, name Object, value Object) error {
 		if dset := descr.Type().DescrSet; dset != nil {
 			return dset(descr, o, value)
 		}
+	}
+	// A dict subclass that declares __slots__ (and inherits no __dict__)
+	// has no instance namespace for arbitrary attributes. Slot names were
+	// handled by the data-descriptor branch above, so any name reaching here
+	// is a non-slot attribute: reject it with the same message
+	// GenericSetAttr raises rather than silently storing it.
+	//
+	// CPython: Objects/object.c:2040 PyObject_GenericSetAttr (no tp_dictoffset)
+	if !tp.HasDict {
+		if value == nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+		}
+		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, nameStr)
 	}
 	// Store in instance attrs.
 	if d.attrs == nil {
@@ -852,7 +963,14 @@ func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
 	}
-	d := args[0].(*Dict)
+	// dict.clear is inherited by dict subclasses whose storage is a separate
+	// backing *Dict (collections.defaultdict). Resolve through DictBacking so
+	// the bound method operates on that storage instead of assuming the
+	// receiver is a plain *Dict.
+	d, ok := asDictBacking(args[0])
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'clear' requires a 'dict' object but received a '%s'", typeNameOf(args[0]))
+	}
 	// CPython's PyDict_Clear atomically swaps in a fresh empty keys
 	// table without touching __eq__ or __hash__. The iter-then-DelItem
 	// approach previously used here triggered __eq__ on each probe,
@@ -986,7 +1104,7 @@ func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
 // pairs, plus keyword arguments.
 //
 // CPython: Objects/dictobject.c:3795 dict_update_common
-func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
+func dictUpdateMethod(args []Object, kwargs *Dict) (Object, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return nil, fmt.Errorf("TypeError: update expected at most 1 argument, got %d", len(args)-1)
 	}
@@ -996,9 +1114,18 @@ func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
 			return nil, err
 		}
 	}
-	for k, v := range kwargs {
-		if err := d.SetItem(NewStr(k), v); err != nil {
-			return nil, err
+	// Keyword updates land in caller order, matching dict_update_common.
+	//
+	// CPython: Objects/dictobject.c:3795 dict_update_common
+	if kwargs != nil {
+		for _, k := range kwargs.Keys() {
+			v, err := kwargs.GetItem(k)
+			if err != nil {
+				return nil, err
+			}
+			if err := d.SetItem(k, v); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return None(), nil
@@ -1344,23 +1471,24 @@ func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
 // This is a classmethod: args[0] is the class (dict or subclass).
 //
 // CPython: Objects/dictobject.c:3869 dict_fromkeys_impl
-func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
-	if err := CheckPositional("fromkeys", len(args)-1, 1, 2); err != nil {
+func dictFromKeysMethod(self Object, args *Tuple) (Object, error) {
+	if err := CheckPositional("fromkeys", args.Len(), 1, 2); err != nil {
 		return nil, err
 	}
 	var value Object
-	if len(args) == 3 {
-		value = args[2]
+	if args.Len() == 2 {
+		value = args.Item(1)
 	} else {
 		value = None()
 	}
+	iterable := args.Item(0)
 	// _PyDict_FromKeys builds the result by calling cls(), so a dict
 	// subclass produces an instance of that subclass and a class whose
 	// __new__ returns a foreign mapping (collections.UserDict) is honored
 	// too. The set/dict fast paths only fire on an empty exact dict.
 	//
 	// CPython: Objects/dictobject.c:3924 _PyDict_FromKeys
-	cls := args[0]
+	cls := self
 	d, err := CallNoArgs(cls)
 	if err != nil {
 		return nil, err
@@ -1372,7 +1500,7 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 		// __hash__ on each key again.
 		//
 		// CPython: Objects/dictobject.c:3885 dict_fromkeys_impl (PySet_CheckExact)
-		if ss, ok := args[1].(*Set); ok {
+		if ss, ok := iterable.(*Set); ok {
 			for _, e := range ss.Entries() {
 				if err := out.SetItemKnownHash(e.Key, value, e.Hash); err != nil {
 					return nil, err
@@ -1381,7 +1509,7 @@ func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
 			return out, nil
 		}
 	}
-	it, err := Iter(args[1])
+	it, err := Iter(iterable)
 	if err != nil {
 		return nil, err
 	}
@@ -1415,6 +1543,11 @@ func dictPopItemMethod(args []Object, _ map[string]Object) (Object, error) {
 	if d.Len() == 0 {
 		return nil, fmt.Errorf("KeyError: 'popitem(): dictionary is empty'")
 	}
+	// A split table cannot represent the hole popitem leaves behind, so
+	// materialize it into a combined table first, exactly as CPython does.
+	//
+	// CPython: Objects/dictobject.c:3919 dict_popitem_impl (dictresize)
+	d.ensureCombined()
 	lastSlot := d.order[len(d.order)-1]
 	k := d.slotKey(lastSlot)
 	v := d.slotValue(lastSlot)

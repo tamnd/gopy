@@ -32,7 +32,6 @@ from types import GenericAlias
 from _typing import (
     _idfunc,
     _set_union_type_check,
-    _set_generic_class_getitem,
     TypeVar,
     ParamSpec,
     TypeVarTuple,
@@ -1176,12 +1175,6 @@ def _generic_class_getitem(cls, args):
         args = tuple(new_args)
 
     return _GenericAlias(cls, args)
-
-
-# Wire _generic_class_getitem as the hook for Generic[...] subscriptions
-# so that string arguments go through _type_convert -> _make_forward_ref ->
-# eager __forward_code__ validation (SyntaxError for invalid expressions).
-_set_generic_class_getitem(_generic_class_getitem)
 
 
 def _generic_init_subclass(cls, *args, **kwargs):

@@ -66,18 +66,29 @@ func buildModule() (*objects.Module, error) {
 // Type singletons.
 
 var (
-	PatternType = objects.NewType("SRE_Pattern", []*objects.Type{objects.ObjectType()})
-	MatchType   = objects.NewType("SRE_Match", []*objects.Type{objects.ObjectType()})
-	ScannerType = objects.NewType("SRE_Scanner", []*objects.Type{objects.ObjectType()})
+	PatternType = objects.NewType("re.Pattern", []*objects.Type{objects.ObjectType()})
+	MatchType   = objects.NewType("re.Match", []*objects.Type{objects.ObjectType()})
+	ScannerType = objects.NewType("_sre.SRE_Scanner", []*objects.Type{objects.ObjectType()})
 )
 
 func init() {
 	PatternType.HasDict = true
 	MatchType.HasDict = true
 	ScannerType.HasDict = true
+	// re.Pattern and re.Match are built with Py_TPFLAGS_DEFAULT only (plus
+	// IMMUTABLE / DISALLOW_INSTANTIATION / HAVE_GC), so they omit
+	// Py_TPFLAGS_BASETYPE: class A(re.Match) raises "not an acceptable base type".
+	// CPython: Modules/_sre/sre.c:3220 pattern_type_spec .flags
+	PatternType.TpFlags &^= objects.TpFlagBasetype
+	MatchType.TpFlags &^= objects.TpFlagBasetype
+	ScannerType.TpFlags &^= objects.TpFlagBasetype
 	PatternType.Getattro = objects.GenericGetAttr
 	MatchType.Getattro = objects.GenericGetAttr
 	ScannerType.Getattro = objects.GenericGetAttr
+	// SRE_Pattern and SRE_Match are subscriptable via __class_getitem__.
+	// CPython: Modules/_sre/sre.c pattern_methods / match_methods
+	objects.BindClassGetitem(PatternType)
+	objects.BindClassGetitem(MatchType)
 	// Compiled patterns and match objects are hashable by identity in CPython.
 	// CPython: Modules/_sre.c SRE_Pattern_Type (tp_hash not overridden)
 	PatternType.Hash = objects.IdentityHash

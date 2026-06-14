@@ -51,6 +51,95 @@ func init() {
 	SetTypeDescr(MappingProxyType, "items", NewMethodDescrConv(MappingProxyType, "items", MethNoArgs, mappingProxyForwardNoArgs("items")))
 	SetTypeDescr(MappingProxyType, "copy", NewMethodDescrConv(MappingProxyType, "copy", MethNoArgs, mappingProxyForwardNoArgs("copy")))
 	SetTypeDescr(MappingProxyType, "__reversed__", NewMethodDescrConv(MappingProxyType, "__reversed__", MethNoArgs, mappingProxyForwardNoArgs("__reversed__")))
+
+	// CPython surfaces the as_mapping / as_sequence / as_number slots as
+	// `__getitem__` / `__contains__` / `__len__` / `__iter__` / `__or__` /
+	// `__ror__` / `__ior__` slot wrappers through add_operators. gopy does
+	// not run that loop (task #647), so wire them explicitly off the same
+	// slot functions; `dir(mappingproxy)` must list them (test_methods).
+	//
+	// CPython: Objects/typeobject.c add_operators over mappingproxy_as_*
+	SetTypeDescr(MappingProxyType, "__getitem__", NewMethodDescrConv(MappingProxyType, "__getitem__", MethO, mappingProxyGetItemMethod))
+	SetTypeDescr(MappingProxyType, "__contains__", NewMethodDescrConv(MappingProxyType, "__contains__", MethO, mappingProxyContainsMethod))
+	SetTypeDescr(MappingProxyType, "__len__", NewMethodDescrConv(MappingProxyType, "__len__", MethNoArgs, mappingProxyLenMethod))
+	SetTypeDescr(MappingProxyType, "__iter__", NewMethodDescrConv(MappingProxyType, "__iter__", MethNoArgs, mappingProxyIterMethod))
+	SetTypeDescr(MappingProxyType, "__or__", NewMethodDescrConv(MappingProxyType, "__or__", MethO, mappingProxyOrMethod))
+	SetTypeDescr(MappingProxyType, "__ror__", NewMethodDescrConv(MappingProxyType, "__ror__", MethO, mappingProxyROrMethod))
+	SetTypeDescr(MappingProxyType, "__ior__", NewMethodDescrConv(MappingProxyType, "__ior__", MethO, mappingProxyIOrMethod))
+}
+
+// mappingProxyGetItemMethod backs mappingproxy.__getitem__(key).
+//
+// CPython: Objects/descrobject.c:1051 mappingproxy_getitem
+func mappingProxyGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	mp, ok := args[0].(*MappingProxy)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__getitem__' requires a 'mappingproxy' object but received a '%s'", args[0].Type().Name)
+	}
+	return GetItem(mp.mapping, args[1])
+}
+
+// mappingProxyContainsMethod backs mappingproxy.__contains__(key).
+//
+// CPython: Objects/descrobject.c:1088 mappingproxy_contains
+func mappingProxyContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	mp, ok := args[0].(*MappingProxy)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__contains__' requires a 'mappingproxy' object but received a '%s'", args[0].Type().Name)
+	}
+	found, err := Contains(mp.mapping, args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(found), nil
+}
+
+// mappingProxyLenMethod backs mappingproxy.__len__().
+//
+// CPython: Objects/descrobject.c:1044 mappingproxy_len
+func mappingProxyLenMethod(args []Object, _ map[string]Object) (Object, error) {
+	mp, ok := args[0].(*MappingProxy)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__len__' requires a 'mappingproxy' object but received a '%s'", args[0].Type().Name)
+	}
+	n, err := Length(mp.mapping)
+	if err != nil {
+		return nil, err
+	}
+	return NewInt(int64(n)), nil
+}
+
+// mappingProxyIterMethod backs mappingproxy.__iter__().
+//
+// CPython: Objects/descrobject.c:1196 mappingproxy_getiter
+func mappingProxyIterMethod(args []Object, _ map[string]Object) (Object, error) {
+	mp, ok := args[0].(*MappingProxy)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__iter__' requires a 'mappingproxy' object but received a '%s'", args[0].Type().Name)
+	}
+	return Iter(mp.mapping)
+}
+
+// mappingProxyOrMethod backs mappingproxy.__or__(other): self | other.
+//
+// CPython: Objects/descrobject.c:1065 mappingproxy_or
+func mappingProxyOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	return mappingProxyOr(args[0], args[1])
+}
+
+// mappingProxyROrMethod backs mappingproxy.__ror__(other): other | self.
+//
+// CPython: Objects/descrobject.c:1065 mappingproxy_or
+func mappingProxyROrMethod(args []Object, _ map[string]Object) (Object, error) {
+	return mappingProxyOr(args[1], args[0])
+}
+
+// mappingProxyIOrMethod backs mappingproxy.__ior__(other), always a
+// TypeError since the proxy is read-only.
+//
+// CPython: Objects/descrobject.c:1077 mappingproxy_ior
+func mappingProxyIOrMethod(args []Object, _ map[string]Object) (Object, error) {
+	return mappingProxyIOr(args[0], args[1])
 }
 
 // mappingProxyForwardNoArgs returns a closure that forwards a no-arg

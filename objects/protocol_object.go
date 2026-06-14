@@ -168,6 +168,14 @@ func Iter(o Object) (Object, error) {
 	//
 	// CPython: Objects/typeobject.c slot_tp_iter (analogous path)
 	if descr, _ := LookupDescriptor(tp, "__iter__"); descr != nil {
+		// __iter__ explicitly set to None blocks iteration without making the
+		// type duck-type compatible with Iterable. typing._NotIterable relies on
+		// this: iter() must raise "object is not iterable", not call None.
+		//
+		// CPython: Objects/typeobject.c slot_tp_iter (func == Py_None branch)
+		if descr == None() {
+			return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
+		}
 		iterFn, err := bindDescriptor(descr, o)
 		if err == nil && iterFn != nil {
 			return CallObject(iterFn, nil)
@@ -223,9 +231,17 @@ func LengthHint(o Object, defaultVal int64) (int64, error) {
 	} else if !strings.HasPrefix(err.Error(), "TypeError") {
 		return 0, err
 	}
-	hint, hintErr := GetAttr(o, NewStr("__length_hint__"))
+	// _PyObject_LookupSpecial does a TYPE-level MRO lookup that bypasses the
+	// instance __getattribute__, so a per-instance __length_hint__ never
+	// satisfies the slot and a custom __getattribute__ is not invoked.
+	//
+	// CPython: Objects/abstract.c:113 PyObject_LengthHint (_PyObject_LookupSpecial)
+	hint, hintErr := LookupSpecial(o, "__length_hint__")
 	if hintErr != nil {
-		return defaultVal, nil //nolint:nilerr // CPython: missing __length_hint__ → default
+		return 0, hintErr
+	}
+	if hint == nil {
+		return defaultVal, nil
 	}
 	res, callErr := Call(hint, NewTuple(nil), nil)
 	if callErr != nil {

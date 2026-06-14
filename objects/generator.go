@@ -61,6 +61,19 @@ type GenMsg struct {
 	//
 	// CPython: Objects/genobject.c:248 gen_send_ex2
 	CallerFrame InterpreterFrame
+	// CallerGoid is the goroutine id of the driver issuing this Send/Throw/
+	// Close. The generator body hands the GIL baton back to this goroutine
+	// when it yields so the driver, which resumes holding the lock, is
+	// recorded as the owner. 0 when goroutine identity is unavailable.
+	CallerGoid uint64
+	// CallerHoldsGIL records whether the driver owned the GIL when it
+	// issued this Send/Throw/Close. True is the common case: a generator
+	// resumed from inside running Python code, where the driver holds the
+	// lock and the body just borrows it (baton). False means the driver is
+	// outside Eval (a bare gen.Send() from Go), so the body must take and
+	// release the GIL genuinely instead of handing a phantom baton to a
+	// goroutine that will never release it.
+	CallerHoldsGIL bool
 }
 
 // RaisedError is the Go-level wrapper for a Python exception object
@@ -95,6 +108,18 @@ type Generator struct {
 	Header
 	Name     string
 	Qualname string
+
+	// nameObj / qualnameObj cache the PyObject form of Name / Qualname.
+	// CPython stores gi_name / gi_qualname as PyObject* set once from the
+	// function's __name__ / __qualname__ (Py_NewRef), so repeated reads of
+	// gen.__name__ return the very same object. _GeneratorWrapper in
+	// types.py captures gen.__name__ at init and later asserts identity
+	// (wrapper.__name__ is gen.__name__), which only holds if the getset
+	// hands back a stable object instead of a fresh str each access.
+	//
+	// CPython: Objects/genobject.c:867 gen_new_with_qualname (gi_name = Py_NewRef)
+	nameObj     Object
+	qualnameObj Object
 
 	// YieldCh carries values from the generator to the caller.
 	YieldCh chan GenMsg
@@ -192,6 +217,8 @@ var GeneratorType *Type
 
 func init() {
 	GeneratorType = NewType("generator", []*Type{objectType})
+	// CPython: Objects/genobject.c gen_methods ("__class_getitem__")
+	bindClassGetitem(GeneratorType)
 	GeneratorType.Repr = genRepr
 	GeneratorType.Str = genRepr
 	GeneratorType.Iter = func(o Object) (Object, error) { Incref(o); return o, nil }
@@ -299,44 +326,81 @@ func init() {
 	// __name__: writable string name of the generator.
 	//
 	// CPython: Objects/genobject.c gen_name getter/setter (PyGetSetDef)
-	SetTypeDescr(GeneratorType, "__name__", NewGetSetDescr("__name__",
-		func(o Object) (Object, error) {
-			return NewStr(o.(*Generator).Name), nil
-		},
-		func(o Object, v Object) error {
-			if v == nil {
-				return fmt.Errorf("TypeError: __name__ attribute cannot be deleted")
-			}
-			s, ok := v.(*Unicode)
-			if !ok {
-				return fmt.Errorf("TypeError: __name__ must be a string, not %s", v.Type().Name)
-			}
-			o.(*Generator).Name = s.Value()
-			return nil
-		}))
+	SetTypeDescr(GeneratorType, "__name__", NewGetSetDescr("__name__", genGetName, genSetName))
 	// __qualname__: writable qualified name of the generator.
 	//
 	// CPython: Objects/genobject.c gen_qualname getter/setter (PyGetSetDef)
-	SetTypeDescr(GeneratorType, "__qualname__", NewGetSetDescr("__qualname__",
-		func(o Object) (Object, error) {
-			g := o.(*Generator)
-			if g.Qualname != "" {
-				return NewStr(g.Qualname), nil
-			}
-			return NewStr(g.Name), nil
-		},
-		func(o Object, v Object) error {
-			if v == nil {
-				return fmt.Errorf("TypeError: __qualname__ attribute cannot be deleted")
-			}
-			s, ok := v.(*Unicode)
-			if !ok {
-				return fmt.Errorf("TypeError: __qualname__ must be a string, not %s", v.Type().Name)
-			}
-			o.(*Generator).Qualname = s.Value()
-			return nil
-		}))
+	SetTypeDescr(GeneratorType, "__qualname__", NewGetSetDescr("__qualname__", genGetQualname, genSetQualname))
 	AddIterSlotWrappers(GeneratorType)
+}
+
+// genGetName returns gi_name, lazily caching the PyObject form so repeated
+// reads of gen.__name__ hand back the same object. _GeneratorWrapper in
+// types.py pins gen.__name__ at init and later asserts identity against a
+// fresh read, which only holds when the getset is stable.
+//
+// CPython: Objects/genobject.c gen_get_name
+func genGetName(o Object) (Object, error) {
+	g := o.(*Generator)
+	if g.nameObj == nil {
+		g.nameObj = NewStr(g.Name)
+	}
+	Incref(g.nameObj)
+	return g.nameObj, nil
+}
+
+// genSetName backs gen.__name__ = value, replacing both the cached object
+// and the string mirror used by repr.
+//
+// CPython: Objects/genobject.c gen_set_name
+func genSetName(o Object, v Object) error {
+	if v == nil {
+		return fmt.Errorf("TypeError: __name__ attribute cannot be deleted")
+	}
+	s, ok := v.(*Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: __name__ must be a string, not %s", v.Type().Name)
+	}
+	g := o.(*Generator)
+	Incref(v)
+	g.nameObj = v
+	g.Name = s.Value()
+	return nil
+}
+
+// genGetQualname mirrors genGetName for gi_qualname, falling back to the
+// plain name when no qualified name was recorded.
+//
+// CPython: Objects/genobject.c gen_get_qualname
+func genGetQualname(o Object) (Object, error) {
+	g := o.(*Generator)
+	if g.qualnameObj == nil {
+		if g.Qualname != "" {
+			g.qualnameObj = NewStr(g.Qualname)
+		} else {
+			g.qualnameObj = NewStr(g.Name)
+		}
+	}
+	Incref(g.qualnameObj)
+	return g.qualnameObj, nil
+}
+
+// genSetQualname backs gen.__qualname__ = value.
+//
+// CPython: Objects/genobject.c gen_set_qualname
+func genSetQualname(o Object, v Object) error {
+	if v == nil {
+		return fmt.Errorf("TypeError: __qualname__ attribute cannot be deleted")
+	}
+	s, ok := v.(*Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: __qualname__ must be a string, not %s", v.Type().Name)
+	}
+	g := o.(*Generator)
+	Incref(v)
+	g.qualnameObj = v
+	g.Qualname = s.Value()
+	return nil
 }
 
 // genReduceReject implements __reduce__ / __reduce_ex__ for generator,
@@ -684,7 +748,7 @@ func (g *Generator) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: generator already executing")
 	}
 	g.started = true
-	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -704,6 +768,16 @@ func callerFrame() InterpreterFrame {
 		return nil
 	}
 	return CurrentFrameHook()
+}
+
+// callerGoid returns the running goroutine id, or 0 when the hook is
+// unset (unit tests that never start the vm). Used to stamp GenMsg so
+// the generator body hands the GIL baton back to its driver on yield.
+func callerGoid() uint64 {
+	if GoidHook == nil {
+		return 0
+	}
+	return GoidHook()
 }
 
 // ownFrame returns the generator body's own interpreter frame, used as
@@ -825,7 +899,7 @@ func (g *Generator) throwWithCaller(err error, caller InterpreterFrame) (Object,
 			}
 		}
 	}
-	g.SendCh <- GenMsg{Err: err, CallerFrame: caller}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -858,7 +932,7 @@ func (g *Generator) forwardThrowResult(fval Object, ferr error, caller Interpret
 	//
 	// CPython: Objects/genobject.c:536 _gen_throw (gen_send_ex exc=1)
 	g.YieldFromTarget = nil
-	g.SendCh <- GenMsg{Err: ferr, CallerFrame: caller}
+	g.SendCh <- GenMsg{Err: ferr, CallerFrame: caller, CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -956,7 +1030,7 @@ func (g *Generator) closeWith(ignoredMsg string) error {
 		}
 		g.YieldFromTarget = nil
 	}
-	g.SendCh <- GenMsg{Err: throwErr, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: throwErr, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {

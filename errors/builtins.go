@@ -57,7 +57,12 @@ func init() {
 	//
 	// CPython: Objects/object.c:843 _PyObject_SetAttributeError
 	objects.AttributeErrorFactory = func(obj objects.Object, attrName string) error {
-		msg := "'" + obj.Type().FullyQualifiedName() + "' object has no attribute '" + attrName + "'"
+		// CPython's generic getattr error formats the bare tp_name (the
+		// short class name), not the module-qualified name that member_get
+		// uses via %T. Keep both faithful: this path stays short.
+		//
+		// CPython: Objects/object.c:1662 _PyObject_GenericGetAttrWithDict
+		msg := "'" + obj.Type().Name + "' object has no attribute '" + attrName + "'"
 		exc := New(PyExc_AttributeError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
 		d := exc.EnsureAttrDict()
 		_ = d.SetItem(objects.NewStr("name"), objects.NewStr(attrName))

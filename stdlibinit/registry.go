@@ -134,6 +134,12 @@ import (
 	// CPython: Modules/_randommodule.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_random"
 
+	// Built-in module: _queue. Registers itself via module/_queue/module.go
+	// init(). Provides SimpleQueue and the Empty exception backing
+	// Lib/queue.py.
+	// CPython: Modules/_queuemodule.c:1 (module init)
+	_ "github.com/tamnd/gopy/module/_queue"
+
 	// Built-in module: _struct. Registers itself via
 	// module/_struct/module.go init(). Provides pack/unpack of binary
 	// data per a format string; backs the Lib/struct.py wrapper.
@@ -152,6 +158,14 @@ import (
 	// to drive PyObject_*/PyMapping_*/PySequence_* directly.
 	// CPython: Modules/_testlimitedcapi/abstract.c:1 abstract-protocol tests
 	_ "github.com/tamnd/gopy/module/_testlimitedcapi"
+
+	// Built-in module: _testinternalcapi. Registers itself via
+	// module/_testinternalcapi/module.go init(). Ports the internal-API
+	// probes the standard-library test suite drives directly, starting
+	// with the inline-values / split-keys dict introspection test_class.py
+	// imports at module scope.
+	// CPython: Modules/_testinternalcapi.c:1 internal-API test probes
+	_ "github.com/tamnd/gopy/module/_testinternalcapi"
 
 	// Built-in module: _testcapi. Registers itself via
 	// module/_testcapi/module.go init(). Ports the PEP 590 vectorcall and
@@ -264,8 +278,6 @@ import (
 	// Each registers itself via an init() that calls imp.AppendInittab.
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/atexit"
-
-	_ "github.com/tamnd/gopy/module/contextlib" // built-in so traceback tests find it without a PathFinder
 	_ "github.com/tamnd/gopy/module/dataclasses"
 	_ "github.com/tamnd/gopy/module/fnmatch"
 	_ "github.com/tamnd/gopy/module/functools"
@@ -377,6 +389,27 @@ import (
 	// the module-level typecodes constant.
 	// CPython: Modules/arraymodule.c:3225 array_modexec
 	_ "github.com/tamnd/gopy/module/array"
+
+	// Built-in module: xxsubtype. Registers itself via
+	// module/xxsubtype/module.go init(). Ports Modules/xxsubtype.c: the
+	// spamlist (list subtype) and spamdict (dict subtype) example types
+	// test.test_descr drives for its spam_lists/spam_dicts/classmethods_in_c/
+	// staticmethods_in_c cases.
+	// CPython: Modules/xxsubtype.c:1
+	_ "github.com/tamnd/gopy/module/xxsubtype"
+
+	// Built-in modules: _interpreters / _interpchannels / _interpqueues.
+	// The low-level subinterpreter surface (PEP 734) backing the vendored
+	// concurrent.interpreters package and test.support.channels. gopy is
+	// single-interpreter, so each "interpreter" is a distinct __main__
+	// namespace on the shared VM and channels/queues are in-process FIFOs;
+	// the cross-interpreter contract the standard library exercises still
+	// holds.
+	// CPython: Modules/_interpretersmodule.c, Modules/_interpchannelsmodule.c,
+	// Modules/_interpqueuesmodule.c
+	_ "github.com/tamnd/gopy/module/_interpchannels"
+	_ "github.com/tamnd/gopy/module/_interpqueues"
+	_ "github.com/tamnd/gopy/module/_interpreters"
 
 	// Built-in module: _pickle. Registers itself via
 	// module/_pickle/module.go init(). Publishes the full surface

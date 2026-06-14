@@ -33,6 +33,21 @@ var ModuleType = NewType("module", []*Type{objectType})
 func init() {
 	ModuleType.Getattro = moduleGetattr
 	ModuleType.Setattro = moduleSetattr
+	// A module carries its namespace in md_dict, the moral equivalent of a
+	// non-zero tp_dictoffset. Marking HasDict lets a ModuleType subclass
+	// inherit the dict slot (type_new_descriptors then skips adding a fresh
+	// __dict__ getset, since the base already provides one) and routes the
+	// generic object.__setattr__ path through md_dict for module instances.
+	//
+	// CPython: Objects/moduleobject.c:1416 PyModule_Type (tp_dictoffset set)
+	ModuleType.HasDict = true
+	// A module also carries md_weaklist (a non-zero tp_weaklistoffset), so
+	// a subclass inherits the weakref slot rather than adding its own. This
+	// keeps a ModuleType subclass layout-compatible with module, which
+	// object.__class__ assignment between the two requires.
+	//
+	// CPython: Objects/moduleobject.c:1416 PyModule_Type (tp_weaklistoffset)
+	ModuleType.HasWeakref = true
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
 	// Modules are hashable by identity in CPython (tp_hash = PyObject_GenericHash).
@@ -49,6 +64,22 @@ func init() {
 		m.init(cls)
 		return m, nil
 	}
+
+	// module.__new__: surface tp_new so M.__new__(M) allocates a real
+	// *Module rather than inheriting object.__new__ (which would build a
+	// generic *Instance whose Str slot then crashes module_repr).
+	//
+	// CPython: Objects/moduleobject.c module_new (tp_new)
+	SetTypeDescr(ModuleType, "__new__", NewBuiltinFunction("module.__new__", func(args []Object, kwargs map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: module.__new__(): not enough arguments")
+		}
+		cls, ok := args[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: module.__new__(X): X is not a type object (%s)", typeNameOf(args[0]))
+		}
+		return ModuleType.TpNew(cls, args[1:], kwargs)
+	}))
 
 	// module.__init__(name, doc=None): set __name__ and optionally __doc__
 	// in the module's __dict__. Called by typeCallViaTpNew with self as
@@ -67,12 +98,33 @@ func init() {
 		if !ok {
 			return nil, fmt.Errorf("TypeError: module.__init__() argument 'name' must be str, not '%s'", typeNameOf(args[1]))
 		}
-		_ = m.dict.SetItem(NewStr("__name__"), nameObj)
-		if len(args) >= 3 && args[2] != None() {
-			_ = m.dict.SetItem(NewStr("__doc__"), args[2])
+		// module_init_dict seeds the namespace with __name__, __doc__,
+		// __package__, __loader__ and __spec__. __doc__ defaults to None when
+		// no doc argument is supplied, and the other three are always None;
+		// this keeps an initialized module distinct from one built via
+		// __new__ alone (whose empty namespace lets __doc__ fall through to
+		// the type's docstring).
+		//
+		// CPython: Objects/moduleobject.c:66 module_init_dict
+		doc := None()
+		if len(args) >= 3 {
+			doc = args[2]
 		}
+		_ = m.dict.SetItem(NewStr("__name__"), nameObj)
+		_ = m.dict.SetItem(NewStr("__doc__"), doc)
+		_ = m.dict.SetItem(NewStr("__package__"), None())
+		_ = m.dict.SetItem(NewStr("__loader__"), None())
+		_ = m.dict.SetItem(NewStr("__spec__"), None())
 		return None(), nil
 	}))
+
+	// PyModule_Type carries its own tp_doc. Recording it means both
+	// ModuleType.__doc__ and an uninitialized module instance's __doc__
+	// resolve to this string rather than inheriting object's docstring
+	// through the MRO.
+	//
+	// CPython: Objects/moduleobject.c:1380 module_doc
+	SetTypeDescr(ModuleType, "__doc__", NewStr("Create a module object.\n\nThe name must be a string; the optional doc argument can have any type."))
 
 	// module.__dir__(): the keys of the module's __dict__, unless the
 	// dict itself defines __dir__. A __dict__ that is not a dictionary
@@ -135,6 +187,18 @@ func NewModuleWithDict(name string, d *Dict) *Module {
 //
 // CPython: Objects/moduleobject.c:459 PyModule_GetDict
 func (m *Module) Dict() *Dict { return m.dict }
+
+// AttrDict and EnsureAttrDict implement AttrDictHolder so the generic
+// attribute machinery treats md_dict as the module's instance dict. This
+// lets object.__setattr__/object.__getattribute__ store and read module
+// attributes (e.g. a ModuleType subclass calling MT.__setattr__), matching
+// CPython where module attribute access flows through tp_dictoffset.
+//
+// CPython: Objects/moduleobject.c:1416 PyModule_Type (tp_dictoffset)
+func (m *Module) AttrDict() *Dict { return m.dict }
+
+// EnsureAttrDict returns the module namespace; it is always present.
+func (m *Module) EnsureAttrDict() *Dict { return m.dict }
 
 // StampBuiltinModule walks the module's dict and sets the owning
 // module name on every BuiltinFunction whose Module field is still
@@ -253,8 +317,51 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	if key == "__annotate__" {
 		return moduleGetAnnotate(m)
 	}
-	v, err := m.dict.GetItem(name)
-	if err == nil {
+	// Generic attribute resolution against the type MRO with md_dict as
+	// the instance dict: data descriptors (e.g. __class__) win, then the
+	// module namespace, then non-data descriptors and plain class
+	// attributes a subclass defines. Only on AttributeError do we fall
+	// through to the PEP 562 __getattr__ hook.
+	//
+	// CPython: Objects/moduleobject.c:991 _Py_module_getattro_impl
+	//          (_PyObject_GenericGetAttrWithDict first)
+	if v, err := moduleGenericGetAttr(m, name); err == nil {
+		return v, nil
+	} else if !isAttributeError(err) {
+		return nil, err
+	}
+	// PEP 562: look for __getattr__ in the module dict.
+	gaObj, gaErr := m.dict.GetItem(NewStr("__getattr__"))
+	if gaErr == nil {
+		return callOneArg(gaObj, name)
+	}
+	// Best-effort error message mirroring module_getattro's tail.
+	//
+	// CPython: Objects/moduleobject.c:1042 PyErr_Format module has no attribute
+	if modName := moduleStrAttr(m, "__name__"); modName != "" {
+		return nil, fmt.Errorf("AttributeError: module '%s' has no attribute '%s'", modName, key)
+	}
+	return nil, fmt.Errorf("AttributeError: module has no attribute '%s'", key)
+}
+
+// moduleGenericGetAttr resolves name against the module type's MRO using
+// the module namespace (md_dict) as the instance dict, mirroring
+// _PyObject_GenericGetAttrWithDict. It lets __class__ and the methods or
+// class attributes a ModuleType subclass declares resolve, which the
+// dict-only lookup would miss.
+//
+// CPython: Objects/object.c:1809 _PyObject_GenericGetAttrWithDict
+func moduleGenericGetAttr(m *Module, name Object) (Object, error) {
+	tp := m.Type()
+	nameStr := attrNameStr(name)
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		dt := descr.Type()
+		if dt.DescrGet != nil && dt.DescrSet != nil {
+			return dt.DescrGet(descr, m, tp)
+		}
+	}
+	if v, err := m.dict.GetItem(name); err == nil {
 		// dict.GetItem returns a borrowed reference; callers in the eval
 		// loop (pushObject) treat the return as a new strong ref and
 		// will Decref it later. Incref so the borrowed dict slot stays
@@ -264,12 +371,15 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 		Incref(v)
 		return v, nil
 	}
-	// PEP 562: look for __getattr__ in the module dict.
-	gaObj, gaErr := m.dict.GetItem(NewStr("__getattr__"))
-	if gaErr == nil {
-		return callOneArg(gaObj, name)
+	if descr != nil {
+		dt := descr.Type()
+		if dt.DescrGet != nil {
+			return dt.DescrGet(descr, m, tp)
+		}
+		Incref(descr)
+		return descr, nil
 	}
-	return nil, fmt.Errorf("AttributeError: module has no attribute %q", key)
+	return nil, fmt.Errorf("AttributeError: module has no attribute '%s'", nameStr)
 }
 
 // callOneArg calls a callable with a single argument.
@@ -292,6 +402,15 @@ func moduleSetattr(o Object, name, value Object) error {
 	}
 	if key == "__annotations__" {
 		return moduleSetAnnotations(m, value)
+	}
+	// A data descriptor on the type (e.g. __class__, or a property a
+	// ModuleType subclass declares) takes precedence over the namespace.
+	//
+	// CPython: Objects/object.c:1693 _PyObject_GenericSetAttrWithDict
+	if descr, _ := LookupDescriptor(m.Type(), key); descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
 	}
 	if value == nil {
 		return m.dict.DelItem(name)

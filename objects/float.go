@@ -33,6 +33,11 @@ func (f *Float) EnsureAttrDict() *Dict {
 	return f.attrs
 }
 
+// SetAttrDict rebinds the managed __dict__ for `obj.__dict__ = d`.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (f *Float) SetAttrDict(d *Dict) { f.attrs = d }
+
 // FloatType is the type singleton for float. Mirrors PyFloat_Type.
 // Slots are wired in init() because floatHash transitively constructs
 // Ints which would otherwise close the dep cycle.
@@ -59,10 +64,10 @@ func init() {
 		Remainder:   floatMod,
 		Divmod:      floatDivmod,
 		Negative:    floatNeg,
-		Positive:    func(o Object) (Object, error) { return o, nil },
+		Positive:    floatPos,
 		Absolute:    floatAbs,
 		Bool:        floatBool,
-		Float:       func(o Object) (Object, error) { return o, nil },
+		Float:       floatPos,
 		Power:       floatPower,
 	}
 	// float.__getformat__(typestr) is a classmethod that returns the
@@ -108,6 +113,8 @@ func init() {
 		}
 		return NewInt(h), nil
 	}))
+	// CPython: Objects/typeobject.c:11025 add_operators over the numeric slotdefs.
+	AddNumberSlotWrappers(FloatType)
 }
 
 // floatRealGetter backs float.real: returns self.
@@ -608,6 +615,18 @@ func floatMul(a, b Object) (Object, error) {
 
 func floatNeg(o Object) (Object, error) {
 	return NewFloat(-o.(*Float).v), nil
+}
+
+// floatPos ports float_float, which backs both float.__float__ and
+// nb_positive. An exact float is returned unchanged; a subclass instance
+// is collapsed to a fresh plain float carrying the same value.
+//
+// CPython: Objects/floatobject.c:1602 float_float
+func floatPos(o Object) (Object, error) {
+	if o.Type() == FloatType {
+		return o, nil
+	}
+	return NewFloat(o.(*Float).v), nil
 }
 
 // floatAbs ports float_abs.

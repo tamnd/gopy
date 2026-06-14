@@ -210,6 +210,8 @@ func buildModule() (*objects.Module, error) {
 		"MethClass":    methClass,
 		"MethStatic":   methStatic,
 		"awaitType":    awaitType,
+		"Generic":      genericType,
+		"GenericAlias": genericAliasType,
 	} {
 		if err := d.SetItem(objects.NewStr(name), t); err != nil {
 			return nil, err
@@ -234,6 +236,10 @@ func buildModule() (*objects.Module, error) {
 		{"make_vectorcall_class", makeVectorcallClass},
 		{"has_vectorcall_flag", hasVectorcallFlag},
 		{"function_setvectorcall", functionSetvectorcall},
+		{"test_with_docstring", testWithDocstring},
+		{"bad_get", badGet},
+		{"set_nomemory", setNomemory},
+		{"remove_mem_hooks", removeMemHooks},
 	}
 	for _, w := range wrappers {
 		if err := d.SetItem(objects.NewStr(w.name), objects.NewBuiltinFunction(w.name, w.fn)); err != nil {
@@ -304,6 +310,56 @@ func buildModule() (*objects.Module, error) {
 	}
 
 	return m, nil
+}
+
+// setNomemory ports _testcapi.set_nomemory(start[, stop]). It arms the
+// allocation-fault injector so the allocation request at ordinal start
+// (counting from the call) begins failing, continuing until ordinal stop;
+// a missing or non-positive stop leaves the window open-ended. CPython
+// installs a PyMem hook that counts every raw request; gopy consumes the
+// same counter at the allocation sites the suite exercises (list-literal
+// build-up, managed-dict detach at dealloc).
+//
+// CPython: Modules/_testcapimodule.c:2050 set_nomemory
+func setNomemory(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: set_nomemory expected 1 or 2 arguments, got %d", len(args))
+	}
+	start, err := asSsizeT(args[0])
+	if err != nil {
+		return nil, err
+	}
+	stop := int64(-1)
+	if len(args) == 2 {
+		stop, err = asSsizeT(args[1])
+		if err != nil {
+			return nil, err
+		}
+	}
+	objects.SetNoMemory(start, stop)
+	return objects.None(), nil
+}
+
+// asSsizeT pulls a Go int64 out of a Python int argument, mirroring the
+// "n" PyArg_ParseTuple conversion set_nomemory uses.
+func asSsizeT(o objects.Object) (int64, error) {
+	i, ok := o.(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: an integer is required (got type %s)", o.Type().Name)
+	}
+	v, ok := i.Int64()
+	if !ok {
+		return 0, fmt.Errorf("OverflowError: Python int too large to convert to C ssize_t")
+	}
+	return v, nil
+}
+
+// removeMemHooks ports _testcapi.remove_mem_hooks, disarming the injector.
+//
+// CPython: Modules/_testcapimodule.c:2075 remove_mem_hooks
+func removeMemHooks(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	objects.RemoveNoMemory()
+	return objects.None(), nil
 }
 
 // fastcallArgs unpacks a tuple-or-None argument into a positional slice

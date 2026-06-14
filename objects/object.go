@@ -43,7 +43,12 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c:7950 object_methods
 	SetTypeDescr(objectType, "__new__", NewBuiltinFunction("object.__new__", objectNewBuiltin))
-	SetTypeDescr(objectType, "__init__", NewMethodDescr(objectType, "__init__", objectInitDescr))
+	// object.__init__ stands in for slot_tp_init's wrapper_descriptor, so
+	// its bound form is a method-wrapper (gopy's BoundMethod), matching
+	// type(object().__init__).
+	//
+	// CPython: Objects/typeobject.c slotdefs tp_init (slot_tp_init)
+	SetTypeDescr(objectType, "__init__", NewMethodDescr(objectType, "__init__", objectInitDescr).AsSlotWrapper())
 	// METH_O / METH_NOARGS rows carry their clinic flag so
 	// methodDescrCheckArity formats the arity TypeError through
 	// _PyObject_FunctionStr, yielding "object.__reduce__() takes no
@@ -61,6 +66,13 @@ func init() {
 	SetTypeDescr(objectType, "__sizeof__", NewMethodDescrConv(objectType, "__sizeof__", MethNoArgs, objectSizeofDescr))
 	SetTypeDescr(objectType, "__dir__", NewMethodDescrConv(objectType, "__dir__", MethNoArgs, objectDirDescr))
 
+	// type_ready_set_dict fills __doc__ from tp_doc for every static type.
+	// object carries a real docstring, so it lands in object.__dict__ and,
+	// through the MRO, in dir() of every type that does not override it.
+	//
+	// CPython: Objects/typeobject.c:8551 type_dict_set_doc (object_doc)
+	SetTypeDescr(objectType, "__doc__", NewStr("The base class of the class hierarchy.\n\nWhen called, it accepts no arguments and returns a new featureless\ninstance that has no instance attributes and cannot be given any.\n"))
+
 	// object_getsets table.
 	//
 	// CPython: Objects/typeobject.c:7254 object_getsets
@@ -72,33 +84,34 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c add_operators (slot wrapper for
 	// each non-NULL entry in slotdefs whose slot is tp_repr/tp_str/...)
-	SetTypeDescr(objectType, "__repr__", NewMethodDescr(objectType, "__repr__", objectReprDescr))
-	SetTypeDescr(objectType, "__str__", NewMethodDescr(objectType, "__str__", objectStrDescr))
-	SetTypeDescr(objectType, "__hash__", NewMethodDescr(objectType, "__hash__", objectHashDescr))
-	SetTypeDescr(objectType, "__getattribute__", NewMethodDescr(objectType, "__getattribute__", objectGetattributeDescr))
-	SetTypeDescr(objectType, "__setattr__", NewMethodDescr(objectType, "__setattr__", objectSetattrDescr))
-	SetTypeDescr(objectType, "__delattr__", NewMethodDescr(objectType, "__delattr__", objectDelattrDescr))
+	SetTypeDescr(objectType, "__repr__", NewMethodDescr(objectType, "__repr__", objectReprDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__str__", NewMethodDescr(objectType, "__str__", objectStrDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__hash__", NewMethodDescr(objectType, "__hash__", objectHashDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__getattribute__", NewMethodDescr(objectType, "__getattribute__", objectGetattributeDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__setattr__", NewMethodDescr(objectType, "__setattr__", objectSetattrDescr).AsSlotWrapper())
+	SetTypeDescr(objectType, "__delattr__", NewMethodDescr(objectType, "__delattr__", objectDelattrDescr).AsSlotWrapper())
 
 	// tp_richcompare slot wrappers: one per operator. object's
 	// richcompare returns NotImplemented for non-EQ/NE and identity
 	// for EQ/NE.
 	//
 	// CPython: Objects/typeobject.c:6950 object_richcompare
-	SetTypeDescr(objectType, "__eq__", NewMethodDescr(objectType, "__eq__", richCompareDescr(CompareEQ)))
-	SetTypeDescr(objectType, "__ne__", NewMethodDescr(objectType, "__ne__", richCompareDescr(CompareNE)))
-	SetTypeDescr(objectType, "__lt__", NewMethodDescr(objectType, "__lt__", richCompareDescr(CompareLT)))
-	SetTypeDescr(objectType, "__le__", NewMethodDescr(objectType, "__le__", richCompareDescr(CompareLE)))
-	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__", richCompareDescr(CompareGT)))
-	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__", richCompareDescr(CompareGE)))
+	SetTypeDescr(objectType, "__eq__", NewMethodDescr(objectType, "__eq__", richCompareDescr(CompareEQ)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__ne__", NewMethodDescr(objectType, "__ne__", richCompareDescr(CompareNE)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__lt__", NewMethodDescr(objectType, "__lt__", richCompareDescr(CompareLT)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__le__", NewMethodDescr(objectType, "__le__", richCompareDescr(CompareLE)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__", richCompareDescr(CompareGT)).AsSlotWrapper())
+	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__", richCompareDescr(CompareGE)).AsSlotWrapper())
 
-	// __dict__ getset is installed by subtype_dict in CPython when the
-	// type has tp_dictoffset != 0. gopy installs it on object so any
-	// HasDict-bearing instance has a working accessor; non-dict
-	// instances raise AttributeError, matching subtype_dict's
-	// dispatch.
+	// __dict__ getset is installed by subtype_dict in CPython only on the
+	// type that first introduces a managed dict (tp_dictoffset != 0), not
+	// on object: plain object() has no instance dict, so dir(object) and
+	// dir(list) must not list __dict__. installInstanceDictDescr stamps it
+	// onto heap types from configureManagedDict instead; subclasses inherit
+	// the descriptor through the MRO.
 	//
 	// CPython: Objects/typeobject.c subtype_dict / subtype_setdict
-	SetTypeDescr(objectType, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+	// (type_new_descriptors only adds __dict__ when add_dict is set)
 
 	// All static built-in types are immortal: CPython stamps them with
 	// _Py_IMMORTAL_REFCNT in _PyStaticType_InitBuiltin so tp_dealloc
@@ -119,15 +132,50 @@ func init() {
 // CPython: Objects/typeobject.c:3795 subtype_setdict /
 // Objects/object.c:_PyObject_SetDict
 func objectSetDict(o Object, value Object) error {
+	v, ok := o.(*Instance)
+	if !ok {
+		// Built-in subclass instances (Exception, numeric, dict subclasses)
+		// carry their managed __dict__ behind AttrDictHolder rather than the
+		// *Instance shape. Rebind it in place when the holder supports it.
+		//
+		// CPython: Objects/typeobject.c:3795 subtype_setdict
+		if s, ok := o.(AttrDictSetter); ok && o.Type().HasDict {
+			if value == nil {
+				s.SetAttrDict(NewDict())
+				return nil
+			}
+			d, ok := value.(*Dict)
+			if !ok {
+				return fmt.Errorf("TypeError: __dict__ must be set to a dictionary, not a '%s'", value.Type().Name)
+			}
+			s.SetAttrDict(d)
+			return nil
+		}
+		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
+	}
+	if !v.Type().HasDict {
+		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
+	}
+	// A nil value is `del obj.__dict__`: CPython's subtype_setdict passes
+	// NULL to _PyObject_SetManagedDict, clearing the managed dict so the
+	// next attribute access lazily rebuilds an empty one.
+	if value == nil {
+		// Detaching the managed dict drops the inline values, so the
+		// instance is no longer in the WITH_VALUES shape.
+		//
+		// CPython: Objects/dictobject.c:7540 _PyObject_SetManagedDict (NULL)
+		v.dict = NewDict()
+		v.inlineValid = false
+		return nil
+	}
 	d, ok := value.(*Dict)
 	if !ok {
 		return fmt.Errorf("TypeError: __dict__ must be set to a dictionary, not a '%s'", value.Type().Name)
 	}
-	v, ok := o.(*Instance)
-	if !ok || !v.Type().HasDict {
-		return fmt.Errorf("AttributeError: attribute '__dict__' of '%s' objects is not writable", o.Type().Name)
-	}
+	// Binding an explicit dict materializes a combined dict in place of
+	// the inline values.
 	v.dict = d
+	v.inlineValid = false
 	return nil
 }
 
@@ -399,6 +447,9 @@ func objectSetattrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err := checkNumArgs(args, 2); err != nil {
 		return nil, err
 	}
+	if err := hackcheck(args[0], GenericSetAttr, "__setattr__"); err != nil {
+		return nil, err
+	}
 	if err := GenericSetAttr(args[0], args[1], args[2]); err != nil {
 		return nil, err
 	}
@@ -410,10 +461,66 @@ func objectDelattrDescr(args []Object, _ map[string]Object) (Object, error) {
 	if err := checkNumArgs(args, 1); err != nil {
 		return nil, err
 	}
+	if err := hackcheck(args[0], GenericSetAttr, "__delattr__"); err != nil {
+		return nil, err
+	}
 	if err := GenericSetAttr(args[0], args[1], nil); err != nil {
 		return nil, err
 	}
 	return None(), nil
+}
+
+// hackcheck rejects object.__setattr__ / __delattr__ applied directly to a
+// type to bypass its metatype's setattro (the Carlo Verre hack). It walks the
+// metatype's MRO to find the type that defined the live setattro slot, then
+// confirms fn is the slot that would be reached without jumping over an
+// intermediate C-level override.
+//
+// CPython: Objects/typeobject.c:9513 hackcheck_unlocked
+func hackcheck(self Object, fn func(o, name, value Object) error, what string) error {
+	meta, ok := self.(*Type)
+	if !ok {
+		return nil
+	}
+	mt := meta.Type()
+	if mt == nil || len(mt.MRO) == 0 {
+		// Probably ok not to check the call in this case.
+		return nil
+	}
+	// Find the (base) type that defined the metatype's slot function.
+	defining := mt
+	for i := len(mt.MRO) - 1; i >= 0; i-- {
+		base := mt.MRO[i]
+		if fnPtr(base.Setattro) == fnPtr(slotTpSetattroHook) {
+			// Ignore Python classes: they never define a C-level setattro.
+			continue
+		}
+		if fnPtr(base.Setattro) == fnPtr(mt.Setattro) {
+			defining = base
+			break
+		}
+	}
+	// Reject calls that jump over intermediate C-level overrides.
+	for base := defining; base != nil; base = primaryBase(base) {
+		if fnPtr(base.Setattro) == fnPtr(fn) {
+			// fn is the right slot function to call.
+			return nil
+		}
+		if fnPtr(base.Setattro) != fnPtr(slotTpSetattroHook) {
+			// base is not a Python class and overrides fn; its setattro
+			// should be called instead.
+			return fmt.Errorf("TypeError: can't apply this %s to %s object", what, mt.Name)
+		}
+	}
+	return nil
+}
+
+// primaryBase returns t's first base (CPython tp_base), or nil for object.
+func primaryBase(t *Type) *Type {
+	if len(t.Bases) == 0 {
+		return nil
+	}
+	return t.Bases[0]
 }
 
 // richCompareDescr returns the slot wrapper for the named rich
@@ -494,7 +601,7 @@ func BindRichCmpDescriptors(t *Type) {
 				}
 				return rcmp(args[0], args[1], op)
 			},
-		))
+		).AsSlotWrapper())
 	}
 }
 
@@ -545,8 +652,12 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 	self := args[0]
 	names := map[string]struct{}{}
 	// Instance __dict__ keys. A __dict__ that is not a real dict is
-	// treated as empty, matching object___dir___impl.
-	if d, err := GetAttr(self, NewStr("__dict__")); err == nil {
+	// treated as empty, matching object___dir___impl. The optional-lookup
+	// form mirrors _PyObject_LookupAttr: a __slots__ object (e.g. a typing
+	// _SpecialForm) has no __dict__ and its __getattr__ raises
+	// AttributeError, which object___dir___impl swallows rather than
+	// leaving pending on the thread state.
+	if d, err := LookupAttr(self, NewStr("__dict__")); err == nil {
 		if dict, ok := d.(*Dict); ok {
 			for _, k := range dict.Keys() {
 				if u, ok := k.(*Unicode); ok {
@@ -561,7 +672,7 @@ func objectDirDescr(args []Object, _ map[string]Object) (Object, error) {
 	// then reports only the instance dict.
 	//
 	// CPython: Objects/typeobject.c:7906 object___dir___impl
-	if cls, err := GetAttr(self, NewStr("__class__")); err == nil {
+	if cls, err := LookupAttr(self, NewStr("__class__")); err == nil {
 		if t, ok := cls.(*Type); ok {
 			for _, base := range t.MRO {
 				for _, n := range descriptorNames(base) {
@@ -607,7 +718,10 @@ func objectGetstateDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: __getstate__() takes no arguments (%d given)", len(args)-1)
 	}
-	if d, err := GetAttr(args[0], NewStr("__dict__")); err == nil {
+	// Optional-lookup form (_PyObject_LookupAttr): a __slots__ object has no
+	// __dict__ and its __getattr__ raises AttributeError, which
+	// object_getstate_default swallows instead of leaving it pending.
+	if d, err := LookupAttr(args[0], NewStr("__dict__")); err == nil {
 		if dict, ok := d.(*Dict); ok && dict.Len() > 0 {
 			return dict, nil
 		}
@@ -703,12 +817,14 @@ func objectGetClass(o Object) (Object, error) {
 	return t, nil
 }
 
-// objectSetClass implements object.__class__ set. CPython checks that
-// old and new types have compatible C-level memory layouts; gopy only
-// supports this for *Instance objects (which share a uniform layout)
-// and rejects built-in types.
+// objectSetClass implements object.__class__ set. It mirrors
+// object_set_class_world_stopped: the swap is allowed for HEAPTYPE ->
+// HEAPTYPE, or between two ModuleType subtypes (the allowlist for mutable
+// module objects), provided neither side is an immutable type. The two
+// layouts must then be compatible. The retag writes ob_type on the shared
+// Header, so it works for any object representation, not only *Instance.
 //
-// CPython: Objects/typeobject.c:7208 object_set_class
+// CPython: Objects/typeobject.c:7108 object_set_class_world_stopped
 func objectSetClass(o Object, value Object) error {
 	if value == nil {
 		return fmt.Errorf("TypeError: can't delete __class__ attribute")
@@ -717,15 +833,103 @@ func objectSetClass(o Object, value Object) error {
 	if !ok {
 		return fmt.Errorf("TypeError: __class__ must be set to a class, not '%s' object", value.Type().Name)
 	}
-	if newType.TpFlags&TpFlagImmutable != 0 {
-		return fmt.Errorf("TypeError: can't set __class__: new type '%s' is not mutable", newType.Name)
+	oldType := o.Type()
+	// HEAPTYPE -> HEAPTYPE or ModuleType subtype -> ModuleType subtype.
+	// Immutable (statically interned) types are excluded so code cannot
+	// repaint the type of a shared singleton such as the int 1.
+	//
+	// CPython: Objects/typeobject.c:7161 object_set_class_world_stopped
+	bothModule := IsSubtype(newType, ModuleType) && IsSubtype(oldType, ModuleType)
+	if !bothModule && (newType.TpFlags&TpFlagImmutable != 0 || oldType.TpFlags&TpFlagImmutable != 0) {
+		return fmt.Errorf("TypeError: __class__ assignment only supported for mutable types or ModuleType subclasses")
 	}
-	inst, ok := o.(*Instance)
-	if !ok {
-		return fmt.Errorf("TypeError: __class__ assignment only supported for heap types, not '%s'", o.Type().Name)
+	if !compatibleForAssignment(oldType, newType) {
+		return fmt.Errorf("TypeError: __class__ assignment: '%s' object layout differs from '%s'", newType.Name, oldType.Name)
 	}
-	inst.Header.typ = newType //nolint:staticcheck // QF1008: explicit Header field access mirrors CPython's ob_type layout
+	o.Hdr().typ = newType
 	return nil
+}
+
+// compatibleForAssignment reports whether an instance may have its
+// __class__ switched from oldto to newto. It walks each type up to the
+// most-derived ancestor that still changed its instance layout, then
+// accepts the swap when those two ancestors are the same type or share a
+// base and added the same slots. This guards the member-descriptor
+// offsets so a reassigned instance keeps reading its slots correctly.
+//
+// CPython: Objects/typeobject.c:7155 compatible_for_assignment
+func compatibleForAssignment(oldto, newto *Type) bool {
+	newbase := newto
+	for compatibleWithTpBase(newbase) {
+		b, _ := bestBase(newbase.Bases)
+		if b == nil {
+			break
+		}
+		newbase = b
+	}
+	oldbase := oldto
+	for compatibleWithTpBase(oldbase) {
+		b, _ := bestBase(oldbase.Bases)
+		if b == nil {
+			break
+		}
+		oldbase = b
+	}
+	if newbase == oldbase {
+		return true
+	}
+	nb, _ := bestBase(newbase.Bases)
+	ob, _ := bestBase(oldbase.Bases)
+	return nb == ob && sameSlotsAdded(newbase, oldbase)
+}
+
+// compatibleWithTpBase reports whether child lays its instances out
+// identically to its base: it adds no named slots and introduces no new
+// managed dict or weakref storage. Mirrors the tp_basicsize /
+// tp_dictoffset / tp_weaklistoffset equality test.
+//
+// CPython: Objects/typeobject.c:7136 compatible_with_tp_base
+func compatibleWithTpBase(child *Type) bool {
+	parent, _ := bestBase(child.Bases)
+	if parent == nil {
+		return false
+	}
+	// A built-in such as dict or list differs from object only in its
+	// tp_basicsize, which the slot/dict/weakref comparison alone misses;
+	// shapeDiffers catches that so dict does not collapse to object during
+	// the layout walk. CPython compares tp_basicsize/tp_itemsize directly.
+	//
+	// CPython: Objects/typeobject.c:7136 compatible_with_tp_base
+	return !shapeDiffers(child, parent) &&
+		len(child.Slots) == 0 &&
+		child.HasDict == parent.HasDict &&
+		child.HasWeakref == parent.HasWeakref
+}
+
+// sameSlotsAdded reports whether two types that share a base contribute
+// the same instance-layout extension: identical (already sorted) slot
+// names plus matching managed-dict and weakref additions.
+//
+// CPython: Objects/typeobject.c:7100 same_slots_added
+func sameSlotsAdded(a, b *Type) bool {
+	// Two built-in (non-heap) types never share an instance layout even when
+	// neither adds named slots: their differing tp_basicsize is not modeled
+	// here, so list and dict must read as incompatible. CPython bails the same
+	// way by requiring both operands carry Py_TPFLAGS_HEAPTYPE.
+	//
+	// CPython: Objects/typeobject.c:7113 same_slots_added
+	if !a.IsUser || !b.IsUser {
+		return false
+	}
+	if len(a.Slots) != len(b.Slots) {
+		return false
+	}
+	for i := range a.Slots {
+		if a.Slots[i] != b.Slots[i] {
+			return false
+		}
+	}
+	return a.HasDict == b.HasDict && a.HasWeakref == b.HasWeakref
 }
 
 // objectGetDict implements object.__dict__ get for HasDict-bearing
@@ -733,6 +937,53 @@ func objectSetClass(o Object, value Object) error {
 // tp_dictoffset is non-zero.
 //
 // CPython: Objects/typeobject.c subtype_dict
+// installInstanceDictDescr stamps the __dict__ getset onto t. CPython's
+// type_new_descriptors adds it only to the type that first introduces a
+// managed dict; subclasses inherit it through the MRO. Skipped if t (or a
+// base, via the SetTypeDescr-on-self check at the call site) already
+// carries one, so the descriptor lands on exactly one class per chain.
+//
+// CPython: Objects/typeobject.c subtype_dict (added when add_dict is set)
+func installInstanceDictDescr(t *Type) {
+	SetTypeDescr(t, "__dict__", NewGetSetDescr("__dict__", objectGetDict, objectSetDict))
+}
+
+// InstallInstanceDictDescr is the exported entry to installInstanceDictDescr
+// for built-in types defined outside this package (BaseException) that carry
+// a tp_dictoffset and so must expose the read/write __dict__ getset. Without
+// it `exc.__dict__ = d` would be stored as a plain attribute named
+// "__dict__" rather than rebinding the managed dict.
+//
+// CPython: Objects/typeobject.c subtype_dict
+func InstallInstanceDictDescr(t *Type) { installInstanceDictDescr(t) }
+
+// installInstanceWeakrefDescr stamps the read-only __weakref__ getset on
+// the class that first introduces weak-reference support, mirroring the
+// subtype_getsets row CPython's type_new adds when may_add_weak fires.
+//
+// CPython: Objects/typeobject.c:3847 subtype_getsets_weakref_only
+func installInstanceWeakrefDescr(t *Type) {
+	SetTypeDescr(t, "__weakref__", NewGetSetDescr("__weakref__", objectGetWeakref, nil))
+}
+
+// objectGetWeakref backs the __weakref__ getset. It returns the head of
+// the referent's weakref list (the first weak reference), or None when no
+// weak reference exists yet. The descriptor is installed only on types
+// whose instances carry weakref support, so a missing list reads as None
+// rather than raising.
+//
+// CPython: Objects/typeobject.c:3818 subtype_getweakref
+func objectGetWeakref(o Object) (Object, error) {
+	if !o.Type().HasWeakref {
+		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__weakref__'", o.Type().Name)
+	}
+	h := o.Hdr()
+	if h.weakrefs == nil || h.weakrefs.head == nil {
+		return None(), nil
+	}
+	return h.weakrefs.head.asObject(), nil
+}
+
 func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
 	case *Instance:
@@ -746,6 +997,14 @@ func objectGetDict(o Object) (Object, error) {
 			// CPython: Objects/typeobject.c:6776 subtype_dict
 			v.dict = NewDict()
 		}
+		// A Python-visible mapping now aliases the instance's attribute
+		// storage; the detach owed at dealloc (and the fault it may take)
+		// is gated on this flag.
+		//
+		// CPython: Objects/dictobject.c:6776 subtype_dict materializes the
+		// managed dict over the inline values, leaving them to be detached
+		// in _PyObject_FreeInstanceAttributes at dealloc.
+		v.dictExposed = true
 		return v.dict, nil
 	case *Int:
 		// The builtin int type has no tp_dictoffset, so (42).__dict__

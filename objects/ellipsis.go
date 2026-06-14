@@ -32,6 +32,16 @@ func init() {
 	ellipsisType.Str = ellipsisType.Repr
 	ellipsisType.Getattro = GenericGetAttr
 	ellipsisType.Setattro = GenericSetAttr
+	// ellipsis defines no __eq__, so it inherits object's default
+	// pointer-identity hash. Without this it would surface as
+	// unhashable, breaking Tuple[int, ...] cache keys and any set/dict
+	// keyed on the singleton.
+	//
+	// CPython: Objects/sliceobject.c PyEllipsis_Type (tp_hash inherited)
+	ellipsisType.Hash = identityHash
+	// ellipsis is not subclassable. CPython: Objects/sliceobject.c
+	// PyEllipsis_Type does not set Py_TPFLAGS_BASETYPE.
+	ellipsisType.TpFlags &^= TpFlagBasetype
 	// EllipsisType() returns the singleton and rejects any argument.
 	//
 	// CPython: Objects/sliceobject.c:28 ellipsis_new

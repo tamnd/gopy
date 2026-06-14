@@ -72,6 +72,8 @@ var DequeType = newDequeType()
 
 func newDequeType() *objects.Type {
 	t := objects.NewType("deque", []*objects.Type{objects.ObjectType()})
+	// CPython: Modules/_collectionsmodule.c deque_methods ("__class_getitem__")
+	objects.BindClassGetitem(t)
 	t.HasDict = false
 	t.Repr = dequeRepr
 	t.Str = dequeRepr
@@ -80,6 +82,8 @@ func newDequeType() *objects.Type {
 	t.Getattro = dequeGetattr
 	t.TpNew = dequeNew
 	t.Call = nil
+	t.Dealloc = dequeDealloc
+	t.TpTraverse = dequeTraverse
 	t.Sequence = &objects.SequenceMethods{
 		Length:  dequeSeqLen,
 		GetItem: dequeSeqGetItem,
@@ -171,11 +175,12 @@ func dequeNew(cls *objects.Type, args []objects.Object, kwargs map[string]object
 		maxlen: -1,
 	}
 	d.Init(cls)
-	if len(args) > 0 || len(kwargs) > 0 {
-		if err := dequeInit(d, args, kwargs); err != nil {
-			return nil, err
-		}
-	}
+	// deque_new only allocates the empty deque; the iterable and maxlen
+	// are consumed by deque_init_impl (wired as __init__). Filling here
+	// would double-consume an iterator argument: __init__ then clears and
+	// re-iterates the already-exhausted iterator, yielding an empty deque.
+	//
+	// CPython: Modules/_collectionsmodule.c:1593 deque_new
 	return d, nil
 }
 
@@ -223,7 +228,14 @@ func dequeInit(d *dequeObject, args []objects.Object, kwargs map[string]objects.
 	}
 	d.maxlen = maxlen
 
-	// Clear existing items.
+	// Clear existing items, releasing the deque's reference on each. Mirrors
+	// deque_init_impl's deque_clear when __init__ runs on a populated deque.
+	for i := d.head; i < d.tail; i++ {
+		if old := d.items[i]; old != nil {
+			objects.Decref(old)
+		}
+		d.items[i] = nil
+	}
 	d.items = d.items[:0]
 	d.head = 0
 	d.tail = 0
@@ -270,6 +282,13 @@ func dequeInitMethod(args []objects.Object, kwargs map[string]objects.Object) (o
 //
 // CPython: Modules/_collectionsmodule.c:341 deque_append_lock_held
 func dequeAppendRight(d *dequeObject, item objects.Object) {
+	// The deque owns one counted reference per stored item, mirroring
+	// deque_append's Py_INCREF(item). dequeDealloc / clear / pop release it.
+	//
+	// CPython: Modules/_collectionsmodule.c:341 deque_append_lock_held (Py_INCREF)
+	if item != nil {
+		objects.Incref(item)
+	}
 	if d.head > 0 && d.head > cap(d.items)/2 {
 		// Slide items left to reclaim space.
 		copy(d.items, d.items[d.head:d.tail])
@@ -284,6 +303,11 @@ func dequeAppendRight(d *dequeObject, item objects.Object) {
 	}
 	d.tail++
 	if d.maxlen >= 0 && int64(dequeLen(d)) > d.maxlen {
+		// Over maxlen: the leftmost item is discarded; release its reference.
+		if old := d.items[d.head]; old != nil {
+			objects.Decref(old)
+		}
+		d.items[d.head] = nil
 		d.head++
 	} else {
 		d.state++
@@ -295,6 +319,10 @@ func dequeAppendRight(d *dequeObject, item objects.Object) {
 //
 // CPython: Modules/_collectionsmodule.c:387 deque_appendleft_lock_held
 func dequeAppendLeft(d *dequeObject, item objects.Object) {
+	// CPython: Modules/_collectionsmodule.c:387 deque_appendleft_lock_held (Py_INCREF)
+	if item != nil {
+		objects.Incref(item)
+	}
 	if d.head > 0 {
 		d.head--
 		d.items[d.head] = item
@@ -308,7 +336,12 @@ func dequeAppendLeft(d *dequeObject, item objects.Object) {
 		d.items[0] = item
 	}
 	if d.maxlen >= 0 && int64(dequeLen(d)) > d.maxlen {
+		// Over maxlen: the rightmost item is discarded; release its reference.
 		d.tail--
+		if old := d.items[d.tail]; old != nil {
+			objects.Decref(old)
+		}
+		d.items[d.tail] = nil
 	} else {
 		d.state++
 	}
@@ -550,9 +583,13 @@ func dequeRemoveMethod(args []objects.Object, _ map[string]objects.Object) (obje
 			return nil, fmt.Errorf("IndexError: deque mutated during iteration")
 		}
 		if eq {
-			// Remove items[i] by rotating, popleft, rotate back.
+			// Remove items[i] by rotating, popleft, rotate back. The removed
+			// item is discarded, so release the deque's reference on it.
 			dequeRotate(d, -i)
 			d.head++
+			if old := d.items[d.head-1]; old != nil {
+				objects.Decref(old)
+			}
 			d.items[d.head-1] = nil
 			d.state++
 			dequeRotate(d, i)
@@ -669,12 +706,48 @@ func dequeInsertMethod(args []objects.Object, _ map[string]objects.Object) (obje
 func dequeClearMethod(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	d := args[0].(*dequeObject)
 	for i := d.head; i < d.tail; i++ {
+		if old := d.items[i]; old != nil {
+			objects.Decref(old)
+		}
 		d.items[i] = nil
 	}
 	d.head = 0
 	d.tail = 0
 	d.state++
 	return objects.None(), nil
+}
+
+// dequeDealloc releases the deque's reference on every live item when its
+// Python refcount reaches zero, mirroring deque_dealloc's per-block clear.
+//
+// CPython: Modules/_collectionsmodule.c:618 deque_dealloc
+func dequeDealloc(o objects.Object) {
+	d := o.(*dequeObject)
+	objects.ClearWeakRefs(o)
+	for i := d.head; i < d.tail; i++ {
+		if it := d.items[i]; it != nil {
+			d.items[i] = nil
+			objects.Decref(it)
+		}
+	}
+	d.head = 0
+	d.tail = 0
+	d.items = nil
+}
+
+// dequeTraverse visits every live item for the cyclic GC.
+//
+// CPython: Modules/_collectionsmodule.c:587 deque_traverse
+func dequeTraverse(o objects.Object, visit objects.Visitor) error {
+	d := o.(*dequeObject)
+	for i := d.head; i < d.tail; i++ {
+		if it := d.items[i]; it != nil {
+			if err := visit(it); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // dequeCopyMethod implements deque.copy and deque.__copy__.
@@ -685,6 +758,12 @@ func dequeCopyMethod(args []objects.Object, _ map[string]objects.Object) (object
 	src := d.items[d.head:d.tail]
 	newItems := make([]objects.Object, len(src))
 	copy(newItems, src)
+	// The copy is an independent owner: take a fresh reference on each item.
+	for _, it := range newItems {
+		if it != nil {
+			objects.Incref(it)
+		}
+	}
 	nd := &dequeObject{
 		items:  newItems,
 		head:   0,
@@ -792,6 +871,9 @@ func dequeSeqInPlaceRepeat(o objects.Object, n int) (objects.Object, error) {
 	}
 	if n <= 0 {
 		for i := d.head; i < d.tail; i++ {
+			if old := d.items[i]; old != nil {
+				objects.Decref(old)
+			}
 			d.items[i] = nil
 		}
 		d.head = 0
@@ -844,13 +926,21 @@ func dequeSeqSetItem(o objects.Object, i int, v objects.Object) error {
 		return fmt.Errorf("IndexError: deque index out of range")
 	}
 	if v == nil {
-		// Delete item at position i.
+		// Delete item at position i; release the deque's reference on it.
 		dequeRotate(d, -i)
 		d.head++
+		if old := d.items[d.head-1]; old != nil {
+			objects.Decref(old)
+		}
 		d.items[d.head-1] = nil
 		d.state++
 		dequeRotate(d, i)
 		return nil
+	}
+	// Replace: take a reference on the new value and release the old one.
+	objects.Incref(v)
+	if old := d.items[d.head+i]; old != nil {
+		objects.Decref(old)
 	}
 	d.items[d.head+i] = v
 	return nil
@@ -1044,10 +1134,31 @@ type dequeIterObject struct {
 // CPython: Modules/_collectionsmodule.c:2085 dequeiter_spec
 var DequeIterType = newDequeIterType()
 
+// dequeIterDealloc releases the iterator's reference on the deque it walks.
+//
+// CPython: Modules/_collectionsmodule.c:1957 dequeiter_dealloc
+func dequeIterDealloc(o objects.Object) {
+	it := o.(*dequeIterObject)
+	if it.deque != nil {
+		objects.Decref(it.deque)
+		it.deque = nil
+	}
+}
+
+func dequeIterTraverse(o objects.Object, visit objects.Visitor) error {
+	it := o.(*dequeIterObject)
+	if it.deque != nil {
+		return visit(it.deque)
+	}
+	return nil
+}
+
 func newDequeIterType() *objects.Type {
 	t := objects.NewType("_deque_iterator", []*objects.Type{objects.ObjectType()})
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeIterNext
+	t.Dealloc = dequeIterDealloc
+	t.TpTraverse = dequeIterTraverse
 	objects.AddIterSlotWrappers(t)
 	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len
 	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescrConv(t, "__length_hint__", objects.MethNoArgs, dequeIterLenHint))
@@ -1068,6 +1179,9 @@ func dequeIterLenHint(args []objects.Object, _ map[string]objects.Object) (objec
 }
 
 func newDequeIter(d *dequeObject) *dequeIterObject {
+	// The iterator owns a reference on the deque it walks, matching
+	// dequeiter_new's Py_INCREF(deque); dequeIterDealloc releases it.
+	objects.Incref(d)
 	it := &dequeIterObject{
 		deque:   d,
 		index:   d.head,
@@ -1109,6 +1223,8 @@ func newDequeRevIterType() *objects.Type {
 	t := objects.NewType("_deque_reverse_iterator", []*objects.Type{objects.ObjectType()})
 	t.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
 	t.IterNext = dequeRevIterNext
+	t.Dealloc = dequeIterDealloc
+	t.TpTraverse = dequeIterTraverse
 	objects.AddIterSlotWrappers(t)
 	// CPython: Modules/_collectionsmodule.c:2027 dequeiter_len (shared with forward)
 	objects.SetTypeDescr(t, "__length_hint__", objects.NewMethodDescrConv(t, "__length_hint__", objects.MethNoArgs, dequeIterLenHint))
@@ -1116,6 +1232,8 @@ func newDequeRevIterType() *objects.Type {
 }
 
 func newDequeRevIter(d *dequeObject) *dequeIterObject {
+	// CPython: Modules/_collectionsmodule.c:2167 deque___reversed___impl (Py_INCREF)
+	objects.Incref(d)
 	it := &dequeIterObject{
 		deque:   d,
 		index:   d.tail - 1,
@@ -1156,6 +1274,25 @@ type DefaultDictObject struct {
 	objects.Header
 	Dict           *objects.Dict
 	DefaultFactory objects.Object
+	// attrs is the managed __dict__ for user-defined defaultdict
+	// subclasses. type_new stamps a tp_dictoffset on a Python subclass
+	// of defaultdict, so its instances carry per-instance attributes;
+	// the base defaultdict type leaves this nil.
+	attrs *objects.Dict
+}
+
+// AttrDict implements objects.AttrDictHolder so defaultdict subclasses
+// can carry instance attributes through generic_attr's HasDict path.
+//
+// CPython: Objects/object.c _PyObject_GetDictPtr (defaultdict-subclass path)
+func (dd *DefaultDictObject) AttrDict() *objects.Dict { return dd.attrs }
+
+// EnsureAttrDict allocates the instance attrs dict on first store.
+func (dd *DefaultDictObject) EnsureAttrDict() *objects.Dict {
+	if dd.attrs == nil {
+		dd.attrs = objects.NewDict()
+	}
+	return dd.attrs
 }
 
 // DefaultDictType is the type singleton for defaultdict.
@@ -1651,18 +1788,13 @@ func defaultDictGetattr(o objects.Object, name objects.Object) (objects.Object, 
 		}
 		return dd.DefaultFactory, nil
 	}
-	// Forward dict methods.
-	dd := o.(*DefaultDictObject)
-	v, err2 := objects.GenericGetAttr(o, name)
-	if err2 == nil {
-		return v, nil
-	}
-	// Try dict.
-	v, err2 = dd.Dict.Type().Getattro(dd.Dict, name)
-	if err2 == nil {
-		return objects.NewBoundMethod(v, o), nil
-	}
-	return nil, fmt.Errorf("AttributeError: 'defaultdict' object has no attribute '%s'", n)
+	// GenericGetAttr walks the type MRO (so inherited dict methods and the
+	// default_factory descriptor resolve) and falls through to the managed
+	// __dict__ exposed via AttrDictHolder, which is what carries instance
+	// attributes on a Python subclass of defaultdict.
+	//
+	// CPython: Objects/typeobject.c slot_tp_getattr_hook (defaultdict path)
+	return objects.GenericGetAttr(o, name)
 }
 
 // defaultDictSetattr sets default_factory and generic attributes.
@@ -1682,8 +1814,12 @@ func defaultDictSetattr(o objects.Object, name objects.Object, value objects.Obj
 		}
 		return nil
 	}
-	_, err2 := objects.GenericGetAttr(o, name)
-	return err2
+	// GenericSetAttr stores through the managed __dict__ (AttrDictHolder)
+	// for Python subclasses of defaultdict, matching CPython where
+	// type_new stamps a tp_dictoffset on such subclasses.
+	//
+	// CPython: Objects/object.c PyObject_GenericSetAttr (defaultdict path)
+	return objects.GenericSetAttr(o, name, value)
 }
 
 // ---------------------------------------------------------------------------

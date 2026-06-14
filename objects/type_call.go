@@ -14,6 +14,7 @@ package objects
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -140,11 +141,14 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		_, err := callBound(bound, args, kwargs)
+		res, err := callBound(bound, args, kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -169,11 +173,14 @@ func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Objec
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		_, err := callBound(bound, args, kwargs)
+		res, err := callBound(bound, args, kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -200,12 +207,29 @@ func checkNotAbstract(cls *Type) error {
 			names = append(names, u.Value())
 		}
 	}
+	// CPython joins "', '".join(sorted(__abstractmethods__)) and wraps
+	// the result in a single pair of quotes.
+	//
+	// CPython: Objects/typeobject.c:6857 object_new
+	sort.Strings(names)
 	word := "method"
 	if len(names) != 1 {
 		word = "methods"
 	}
 	return fmt.Errorf("TypeError: Can't instantiate abstract class %s without an implementation for abstract %s '%s'",
-		cls.Name, word, strings.Join(names, ", "))
+		cls.Name, word, strings.Join(names, "', '"))
+}
+
+// checkInitResult enforces slot_tp_init's rule that a Python-level
+// __init__ must return None. A non-None return (e.g. `def __init__:
+// return 10`) raises TypeError, matching CPython.
+//
+// CPython: Objects/typeobject.c:10493 slot_tp_init
+func checkInitResult(res Object) error {
+	if res == nil || IsNone(res) {
+		return nil
+	}
+	return fmt.Errorf("TypeError: __init__() should return None, not '%.200s'", res.Type().Name)
 }
 
 // typeMetaclassCall handles calling a user-defined metaclass (a subclass
@@ -252,7 +276,11 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 			bound := bindDescr(init, result, cls)
-			if _, err := callBound(bound, args, kwargs); err != nil {
+			res, err := callBound(bound, args, kwargs)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkInitResult(res); err != nil {
 				return nil, err
 			}
 		}
@@ -267,8 +295,15 @@ func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Obje
 //
 // CPython: Objects/typeobject.c:4153 type_new
 func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
-	if len(args) < 4 {
-		return nil, fmt.Errorf("TypeError: type.__new__() takes exactly 4 arguments (%d given)", len(args))
+	// type.__new__ parses (name, bases, dict) off args; the metatype is
+	// args[0] and is not counted. CPython's PyArg_ParseTuple("UO!O!")
+	// rejects any other arity with "takes exactly 3 arguments (N given)",
+	// where N excludes the metatype. The one-argument type(x) form never
+	// reaches here: it is served at the call layer for the exact `type`.
+	//
+	// CPython: Objects/typeobject.c:4766 type_new (PyArg_ParseTuple)
+	if len(args) != 4 {
+		return nil, fmt.Errorf("TypeError: type.__new__() takes exactly 3 arguments (%d given)", len(args)-1)
 	}
 	meta, ok := args[0].(*Type)
 	if !ok {
@@ -336,7 +371,25 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	for i := 0; i < basesT.Len(); i++ {
 		t, ok := basesT.Item(i).(*Type)
 		if !ok {
-			return nil, fmt.Errorf("TypeError: type() bases must contain types, got %s", typeNameOf(basesT.Item(i)))
+			// A non-type base carrying __mro_entries__ is the class-statement
+			// case (e.g. a typing.Generic alias). The 3-arg type() call does
+			// not run MRO entry resolution, so CPython rejects it outright and
+			// points the caller at types.new_class().
+			//
+			// CPython: Objects/typeobject.c:3640 type_new_get_bases
+			entries, err := LookupAttrString(basesT.Item(i), "__mro_entries__")
+			if err != nil {
+				return nil, err
+			}
+			if entries != nil {
+				return nil, fmt.Errorf("TypeError: type() doesn't support MRO entry resolution; use types.new_class()")
+			}
+			// best_base rejects any non-type base with this exact wording,
+			// which is what the class statement surfaces once __build_class__
+			// has already resolved __mro_entries__.
+			//
+			// CPython: Objects/typeobject.c best_base "bases must be types"
+			return nil, fmt.Errorf("TypeError: bases must be types")
 		}
 		bases = append(bases, t)
 	}
@@ -355,7 +408,19 @@ func typeMetaCall(args []Object, kwargs map[string]Object) (Object, error) {
 	if winner != typeType {
 		return typeMetaclassCall(winner, args, kwargs)
 	}
-	return NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
+	newType, err := NewUserTypeMetaE(nameObj.v, bases, ns, kwargs, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve a tuple subclass as the bases object (gh-132176): CPython
+	// stores the passed tuple verbatim in tp_bases. We only stash it when
+	// it is not the exact built-in tuple, since the plain case rebuilds
+	// identically from Bases.
+	if newType != nil && basesT.Type() != TupleType {
+		Incref(basesT)
+		newType.BasesObj = basesT
+	}
+	return newType, nil
 }
 
 // calculateMetaclass picks the most derived metaclass among metatype
@@ -428,7 +493,7 @@ func typeVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple)
 	if kwnames != nil && kwnames.Len() > 0 {
 		nkw := kwnames.Len()
 		kwd = NewDict()
-		for i := 0; i < nkw; i++ {
+		for i := range nkw {
 			if err := kwd.SetItem(kwnames.Item(i), args[npos+i]); err != nil {
 				return nil, err
 			}
@@ -464,8 +529,18 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	if cls.TpNew != nil {
 		return typeCallViaTpNewWithDict(cls, args, kwargs)
 	}
+	// Some builtin types (contextvars.Context/ContextVar/Token, the io
+	// classes) expose construction through their tp_call slot rather than a
+	// dedicated tp_new. Route the type call there, but only when cls.Call is
+	// genuinely the constructor: a type that defines a __call__ instance
+	// descriptor uses cls.Call as its *instance* tp_call (e.g. the keyobject
+	// returned by functools.cmp_to_key), so calling the type itself must not
+	// reuse that slot. Such a type has no tp_new and falls through to the
+	// "cannot create instances directly" error, matching CPython tp_new=0.
 	if cls.Call != nil && !cls.IsUser {
-		return cls.Call(callable, args, kwmap)
+		if d, _ := LookupDescriptor(cls, "__call__"); d == nil {
+			return cls.Call(callable, args, kwmap)
+		}
 	}
 	if !cls.IsUser {
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
@@ -476,11 +551,14 @@ func typeCallWithDict(callable Object, args []Object, kwargs *Dict) (Object, err
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
-		_, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		res, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if err != nil {
+			return nil, err
+		}
+		if err := checkInitResult(res); err != nil {
 			return nil, err
 		}
 	}
@@ -523,12 +601,15 @@ func typeCallViaTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, e
 	actual := inst.Type()
 	if init, _ := LookupDescriptor(actual, "__init__"); init != nil {
 		bound := bindDescr(init, inst, actual)
-		_, callErr := VectorcallDict(bound, args, uint(len(args)), kwargs)
+		res, callErr := VectorcallDict(bound, args, uint(len(args)), kwargs)
 		if bound != init {
 			Decref(bound)
 		}
 		if callErr != nil {
 			return nil, callErr
+		}
+		if err := checkInitResult(res); err != nil {
+			return nil, err
 		}
 	}
 	return inst, nil
@@ -572,7 +653,11 @@ func typeMetaclassCallWithDict(cls *Type, args []Object, kwargs *Dict) (Object, 
 	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
 		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 			bound := bindDescr(init, result, cls)
-			if _, err := VectorcallDict(bound, args, uint(len(args)), kwargs); err != nil {
+			res, err := VectorcallDict(bound, args, uint(len(args)), kwargs)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkInitResult(res); err != nil {
 				return nil, err
 			}
 		}

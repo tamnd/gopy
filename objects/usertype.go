@@ -17,6 +17,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 )
@@ -81,6 +82,18 @@ func installSubclassAttrSlots(t *Type) {
 		t.Getattro = intSubclassGetAttr
 		t.Setattro = intSubclassSetAttr
 		t.TpNew = IntType.TpNew
+	case IsSubtype(t, SuperType):
+		// super publishes a custom tp_getattro (the cooperative MRO walk)
+		// and an allocation-only tp_new, but no tp_setattro, so the generic
+		// customAttrBase heuristic (which keys off a custom setter) misses
+		// it. A subclass like mysuper(super) must inherit super's getattro
+		// and new or its instances are plain *Instance objects and the MRO
+		// walk never runs.
+		//
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_getattro/tp_new)
+		t.Getattro = superGetAttr
+		t.Setattro = instanceSetAttr
+		t.TpNew = SuperType.TpNew
 	case customAttrBase(t) != nil:
 		// A built-in base on the MRO stores instance attributes through a
 		// custom tp_setattro (for example _thread._local, which keeps a
@@ -127,6 +140,17 @@ func installSubclassAttrSlots(t *Type) {
 // attributes through getset descriptors and inherit object's generic
 // tp_getattro).
 //
+// A more-derived base that defines its own instance layout through a custom
+// tp_new but stores attributes generically (gopy's _io.StringIO, whose
+// instances are *StringIO and whose attrs go through the generic instance
+// path) shadows any deeper custom-setattro base such as _io._IOBase: its
+// subclasses use the generic instance slots, exactly as if they derived that
+// base directly. Walking past it to _IOBase's dict-keyed setattro would
+// strand the *StringIO subclass with a store its layout cannot satisfy and
+// would route reads through _IOBase's getattro, bypassing the subclass MRO
+// (so Python-level method overrides are lost). The search therefore stops at
+// the first layout owner that has no custom setattro of its own.
+//
 // CPython: Objects/typeobject.c:7521 inherit_slots
 func customAttrBase(t *Type) *Type {
 	for _, base := range t.MRO {
@@ -135,6 +159,9 @@ func customAttrBase(t *Type) *Type {
 		}
 		if hasCustomAttrSlot(base) {
 			return base
+		}
+		if base.TpNew != nil {
+			return nil
 		}
 	}
 	return nil
@@ -195,18 +222,43 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
+	// A base listed twice (type('X', (A, A), {})) is rejected up front with a
+	// dedicated message, before the C3 linearization would otherwise report a
+	// generic MRO conflict.
+	//
+	// CPython: Objects/typeobject.c:3168 check_duplicates
+	for i := range bases {
+		for j := i + 1; j < len(bases); j++ {
+			if bases[j] == bases[i] {
+				return nil, fmt.Errorf("TypeError: duplicate base class %s", bases[i].Name)
+			}
+		}
+	}
 	// best_base validates the instance layout before anything else: two
 	// bases whose solid bases differ (int and str each own a distinct C
 	// struct) cannot be combined, so type('A', (int, str), {}) raises a
 	// lay-out conflict here rather than producing a broken type.
 	//
 	// CPython: Objects/typeobject.c:2998 best_base
-	if _, err := bestBase(bases); err != nil {
+	solidWinner, err := bestBase(bases)
+	if err != nil {
 		return nil, err
 	}
 	t, err := newTypeE(name, bases)
 	if err != nil {
 		return nil, err
+	}
+	// type_new_alloc seeds the new type's layout from its best base, so a
+	// plain user class inherits object's tp_basicsize (16) rather than
+	// reporting 0. gopy does not model the dict/weakref/slot growth on top,
+	// but inheriting the base size keeps shape_differs false for a plain
+	// subclass, so solid_base still resolves to the base (no spurious
+	// instance-layout conflicts) while object.__basicsize__ stays nonzero.
+	//
+	// CPython: Objects/typeobject.c:4438 type_new_alloc (tp_basicsize = base->tp_basicsize)
+	if solidWinner != nil {
+		t.BaseSize = solidWinner.BaseSize
+		t.ItemSize = solidWinner.ItemSize
 	}
 	t.IsUser = true
 	// Heap (user) types are mutable: drop the IMMUTABLETYPE flag that
@@ -225,13 +277,20 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// refcount 1 from PyObject_GC_NewVar)
 	atomic.StoreInt64(&t.Hdr().refcnt, 1)
 	stampMetaclass(t, meta)
-	if err := applyMetaclassMRO(t, meta); err != nil {
-		return nil, err
-	}
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
 	configureManagedDict(t, bases, noSlotsDeclared)
+	// type_new_set_attrs copies the namespace into tp_dict (slots, classcell,
+	// plain attributes) BEFORE type_ready -> mro_internal invokes the
+	// metaclass mro(). A metaclass that overrides mro() can therefore read
+	// self.__dict__["f"] during MRO computation (test___class___mro), so the
+	// dict must be populated first; applyMetaclassMRO runs last.
+	//
+	// CPython: Objects/typeobject.c:4526 type_new_set_attrs (before type_ready)
 	if err := processClassNamespace(t, ns); err != nil {
+		return nil, err
+	}
+	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
 	}
 	// When the namespace did not carry __module__, inherit it from the
@@ -298,6 +357,41 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if t.Dealloc == nil {
 		t.Dealloc = instanceDealloc
 	}
+	// type_new warns once if the finished class dict carries a non-string
+	// key (type('MyClass', (), {1: 2}) or a metaclass that injects ns[1]=2).
+	// The namespace is the source of those keys; the special cells were
+	// already stripped above.
+	//
+	// CPython: Objects/typeobject.c:4665 type_new (RuntimeWarning)
+	if ns != nil {
+		warned := false
+		for _, k := range ns.Keys() {
+			if _, isStr := k.(*Unicode); isStr {
+				continue
+			}
+			if !warned && RuntimeWarnHook != nil {
+				if err := RuntimeWarnHook(fmt.Sprintf("non-string key in the __dict__ of class %s", name)); err != nil {
+					return nil, err
+				}
+				warned = true
+			}
+			// Keep the non-string key in tp_dict so a later _PyType_Lookup
+			// probe collides on it and fires its __eq__. CPython stores it in
+			// the same tp_dict; gopy parks it in t.nonStrDict.
+			//
+			// CPython: Objects/typeobject.c:4665 type_new (ns merged into tp_dict)
+			v, err := ns.GetItem(k)
+			if err != nil {
+				return nil, err
+			}
+			if t.nonStrDict == nil {
+				t.nonStrDict = NewDict()
+			}
+			if err := t.nonStrDict.SetItem(k, v); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// PEP 487: after the class is built, walk the namespace and call
 	// __set_name__ on every value that defines it. enum._proto_member
 	// uses this hook to turn each placeholder into a real enum member
@@ -350,11 +444,32 @@ func typeUserDealloc(o Object) {
 	//          (Py_XDECREF(type->tp_bases / tp_base / tp_mro))
 	if !t.basesReleased {
 		t.basesReleased = true
+		// Drop this type from each base's tp_subclasses before releasing the
+		// base reference, so __subclasses__() stops reporting a type that is
+		// being torn down (bpo-46417).
+		//
+		// CPython: Objects/typeobject.c type_dealloc (remove_all_subclasses)
+		for _, b := range t.Bases {
+			if b != nil {
+				b.removeSubclass(t)
+			}
+		}
 		for _, b := range t.Bases {
 			if b != nil {
 				Decref(b)
 			}
 		}
+	}
+	// Release the metatype reference stampMetaclass took, mirroring
+	// type_dealloc's Py_DECREF(Py_TYPE(type)). The latch keeps this paired
+	// one-to-one with the single incref even if dealloc re-enters on a type
+	// whose refcount oscillated through zero. typeType is immortal, so a
+	// type whose metatype is the default decrefs harmlessly here.
+	//
+	// CPython: Objects/typeobject.c:6434 type_dealloc (Py_DECREF(Py_TYPE(type)))
+	if !t.metatypeReleased {
+		t.metatypeReleased = true
+		Decref(t.Type())
 	}
 }
 
@@ -366,6 +481,19 @@ func typeUserDealloc(o Object) {
 func stampMetaclass(t *Type, meta *Type) {
 	if meta != nil && meta != typeType {
 		t.Init(meta)
+		// A type holds a strong reference to its metatype, exactly as
+		// every object holds one to ob_type. CPython allocates the new
+		// type through metatype->tp_alloc, which routes through
+		// _PyObject_Init and increfs the (heap) metatype; type_dealloc
+		// balances it with Py_DECREF(Py_TYPE(type)). Without this incref a
+		// metaclass defined in a temporary scope (six.with_metaclass) is
+		// freed the moment its defining frame returns even though a class
+		// built from it still names it as ob_type, so its tp_dict is
+		// cleared out from under the next construction.
+		//
+		// CPython: Objects/typeobject.c:6434 type_dealloc
+		//          (Py_DECREF(Py_TYPE(type)))
+		Incref(meta)
 	}
 }
 
@@ -386,30 +514,24 @@ func applyMetaclassMRO(t *Type, meta *Type) error {
 	if owner, ok := mroDescrOwner(descr); ok && owner == typeType {
 		return nil
 	}
+	// mro_internal stamps tp_mro only after mro_invoke returns, so the
+	// custom mro() sees tp_mro still at its pre-creation value (NULL for a
+	// freshly built type). NewType has already filled t.MRO with the C3
+	// default; drop it back to nil across the call so cls.__mro__ reports
+	// None inside the override, matching CPython. A reentrant __bases__
+	// assignment from within mro() may repopulate t.MRO before we return.
+	//
+	// CPython: Objects/typeobject.c:3552 mro_internal_unlocked (set_tp_mro
+	// runs after mro_invoke)
+	t.MRO = nil
 	bound := bindDescr(descr, t, meta)
 	res, err := callBound(bound, nil, nil)
 	if err != nil {
 		return err
 	}
-	tup, ok := res.(*Tuple)
-	if !ok {
-		lst, ok := res.(*List)
-		if !ok {
-			return fmt.Errorf("TypeError: mro() returned a non-tuple: %s", typeNameOf(res))
-		}
-		items := make([]Object, lst.Len())
-		for i := 0; i < lst.Len(); i++ {
-			items[i] = lst.Item(i)
-		}
-		tup = NewTuple(items)
-	}
-	newMRO := make([]*Type, 0, tup.Len())
-	for i := 0; i < tup.Len(); i++ {
-		entry, ok := tup.Item(i).(*Type)
-		if !ok {
-			return fmt.Errorf("TypeError: mro() returned a non-type at index %d: %s", i, typeNameOf(tup.Item(i)))
-		}
-		newMRO = append(newMRO, entry)
+	newMRO, err := mroResultToTypes(res)
+	if err != nil {
+		return err
 	}
 	t.MRO = newMRO
 	return nil
@@ -449,14 +571,25 @@ func hasNoSlotsDeclared(ns *Dict) bool {
 // Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types with
 // a managed dict)
 func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
+	inheritedDict := false
 	for _, b := range bases {
 		if b != nil && b.HasDict {
 			t.HasDict = true
+			inheritedDict = true
 			break
 		}
 	}
 	if noSlotsDeclared {
 		t.HasDict = true
+	}
+	// The __dict__ getset lands on the class that first introduces the
+	// managed dict; a class that merely inherits one already sees the
+	// descriptor through its MRO. This mirrors dir(C) listing __dict__ for
+	// `class C: pass` but not for a subclass of C.
+	//
+	// CPython: Objects/typeobject.c type_new_descriptors (add_dict gate)
+	if t.HasDict && !inheritedDict {
+		installInstanceDictDescr(t)
 	}
 	// HasWeakref tracks tp_weaklistoffset. It inherits from any base that
 	// provides weak-reference support, and the no-__slots__ case adds it
@@ -466,9 +599,11 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	// installSlots handles.
 	//
 	// CPython: Objects/typeobject.c:4160 type_new_slots (may_add_weak)
+	inheritedWeakref := false
 	for _, b := range bases {
 		if b != nil && mroHasWeakref(b) {
 			t.HasWeakref = true
+			inheritedWeakref = true
 			break
 		}
 	}
@@ -476,6 +611,14 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 		if base, err := bestBase(bases); err == nil && base != nil && typeItemSize(base) == 0 {
 			t.HasWeakref = true
 		}
+	}
+	// The __weakref__ getset lands on the class that first introduces
+	// weakref support, exactly like __dict__; an inheriting subclass
+	// already sees it through the MRO.
+	//
+	// CPython: Objects/typeobject.c type_new_descriptors (add_weak gate)
+	if t.HasWeakref && !inheritedWeakref {
+		installInstanceWeakrefDescr(t)
 	}
 	if !t.HasDict {
 		return
@@ -536,15 +679,32 @@ func processClassNamespace(t *Type, ns *Dict) error {
 	if ns == nil {
 		return nil
 	}
+	// type_new operates on dict = PyDict_Copy(orig_dict), never mutating
+	// the caller's namespace. The DelItem calls below (__classcell__,
+	// __classdictcell__) must therefore land on a copy, so a metaclass that
+	// reuses the same namespace dict for a second type() call still sees
+	// those keys (test___classcell___wrong_cell).
+	//
+	// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
+	ns = copyClassNamespace(ns)
 	// __classcell__ is the cell __build_class__ left in the namespace so
 	// we can patch it with the new class. It is not a real attribute,
 	// so install it before walking the rest of the namespace and skip
 	// it during the descriptor copy.
 	classCellKey := NewStr("__classcell__")
 	if cellObj, err := ns.GetItem(classCellKey); err == nil {
-		if cell, ok := cellObj.(*Cell); ok {
-			cell.Contents = t
+		// At least one method requires a reference to its defining class.
+		// A non-cell __classcell__ is rejected outright.
+		// CPython: Objects/typeobject.c:4485 type_new_set_classcell
+		cell, ok := cellObj.(*Cell)
+		if !ok {
+			r, rerr := Repr(cellObj.Type())
+			if rerr != nil {
+				return rerr
+			}
+			return fmt.Errorf("TypeError: __classcell__ must be a nonlocal cell, not %s", r)
 		}
+		cell.Contents = t
 		_ = ns.DelItem(classCellKey)
 	}
 	// __classdictcell__ is the closure cell that PEP 695 type-alias
@@ -575,6 +735,26 @@ func processClassNamespace(t *Type, ns *Dict) error {
 		return err
 	}
 	return copyNamespaceToType(t, ns)
+}
+
+// copyClassNamespace returns a plain-dict copy of ns in the order
+// type_new copies entries into tp_dict, mirroring PyDict_Copy(orig_dict).
+// The copy keeps the caller's namespace dict unmutated when type_new
+// strips __classcell__ / __classdictcell__.
+//
+// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
+func copyClassNamespace(ns *Dict) *Dict {
+	out := NewDict()
+	for _, k := range namespaceKeyOrder(ns) {
+		v, err := ns.GetItem(k)
+		if err != nil || v == nil {
+			continue
+		}
+		if err := out.SetItem(k, v); err != nil {
+			continue
+		}
+	}
+	return out
 }
 
 // copyNamespaceToType walks ns and installs each entry as a type
@@ -642,6 +822,17 @@ func copyNamespaceToType(t *Type, ns *Dict) error {
 		case "__init_subclass__", "__class_getitem__":
 			if _, isFn := v.(*Function); isFn {
 				v = NewClassMethod(v)
+			}
+		case "__new__":
+			// A __new__ defined as a plain function in the class body is
+			// implicitly wrapped in staticmethod, so type.__dict__['__new__']
+			// is a staticmethod and the unbound first parameter stays cls.
+			// Already-wrapped (@staticmethod / @classmethod) and builtin
+			// __new__ are left untouched.
+			//
+			// CPython: Objects/typeobject.c:4345 type_new_staticmethod
+			if _, isFn := v.(*Function); isFn {
+				v = NewStaticMethod(v)
 			}
 		case "__doc__":
 			// type_new_set_doc runs PyUnicode_AsUTF8 on a string __doc__;
@@ -802,66 +993,47 @@ func typeSetNames(t *Type, ns *Dict) error {
 }
 
 // typeInitSubclass invokes the parent's __init_subclass__ hook on the
-// freshly built subclass. CPython runs this from type_new after the
-// type is fully constructed; it walks the MRO starting one position
-// past `t` (via super(t, t)) so the subclass's own override does not
-// recursively reapply. kwargs is the leftover class-creation kwargs
-// after the metaclass has been pulled out, so subclass hooks see
-// `class C(Base, foo=1):` as init_subclass(cls, foo=1).
+// freshly built subclass. CPython builds super(t, t) and looks
+// __init_subclass__ up on it, so the subclass's own override is skipped
+// and the bound parent hook runs. Routing through super (rather than a
+// hand-rolled MRO walk past index 1) also reproduces supercheck: a type
+// whose custom mro() returned an MRO that omits the type itself fails the
+// super(t, t) construction with a TypeError, matching gh-92112. kwargs is
+// the leftover class-creation kwargs after the metaclass has been pulled
+// out, so subclass hooks see `class C(Base, foo=1):` as
+// init_subclass(cls, foo=1).
 //
-// CPython: Objects/typeobject.c:4595 type_init_subclass
+// CPython: Objects/typeobject.c:11560 type_new_init_subclass
 func typeInitSubclass(t *Type, kwargs map[string]Object) error {
-	for i := 1; i < len(t.MRO); i++ {
-		base := t.MRO[i]
-		descr, _ := lookupOnType(base, "__init_subclass__")
-		if descr == nil {
-			continue
-		}
-		dt := descr.Type()
-		var callable Object
-		callableIsNew := dt.DescrGet != nil
-		if callableIsNew {
-			bound, err := dt.DescrGet(descr, t, t)
-			if err != nil {
-				return err
-			}
-			callable = bound
-		} else {
-			callable = descr
-		}
-		var kwd *Dict
-		if len(kwargs) > 0 {
-			kwd = NewDict()
-			for k, v := range kwargs {
-				if err := kwd.SetItem(NewStr(k), v); err != nil {
-					return err
-				}
-			}
-		}
-		// CPython: Objects/typeobject.c:4584 type_new_init_subclass
-		_, callErr := Call(callable, NewTuple(nil), kwd)
-		// CPython: Objects/typeobject.c:4584 Py_DECREF(func) after call
-		if callableIsNew {
-			Decref(callable)
-		}
-		if callErr != nil {
-			return callErr
-		}
+	su, err := NewSuper(t, t)
+	if err != nil {
+		return err
+	}
+	// LookupAttrString hands back a new reference: the classmethod bind
+	// increfs t into the bound __init_subclass__. CPython Py_DECREFs both
+	// super and func once the hook returns; mirror that so the bound method
+	// does not keep a refcounted edge to t alive, which would block
+	// type_dealloc's remove_all_subclasses for a discarded subclass.
+	callable, err := LookupAttrString(su, "__init_subclass__")
+	if err != nil {
+		return err
+	}
+	if callable == nil {
 		return nil
 	}
-	return nil
-}
-
-// lookupOnType returns the descriptor stored directly in t's
-// typeDescrTable (no MRO walk). Used by typeInitSubclass to find the
-// first ancestor that owns __init_subclass__.
-func lookupOnType(t *Type, name string) (Object, bool) {
-	if descrs, ok := typeDescrTable[t]; ok {
-		if v, ok := descrs[name]; ok {
-			return v, true
+	defer Decref(callable)
+	var kwd *Dict
+	if len(kwargs) > 0 {
+		kwd = NewDict()
+		for k, v := range kwargs {
+			if err := kwd.SetItem(NewStr(k), v); err != nil {
+				return err
+			}
 		}
 	}
-	return nil, false
+	// CPython: Objects/typeobject.c:11575 PyObject_VectorcallDict(func, NULL, 0, kwds)
+	_, callErr := Call(callable, NewTuple(nil), kwd)
+	return callErr
 }
 
 // fixupSlotDispatchers wires the type's C-level slots to Python-level
@@ -897,6 +1069,18 @@ func fixupSlotDispatchers(t *Type) {
 	fixupNumberSlots(t)
 	fixupTpNew(t)
 	fixupFinalize(t)
+}
+
+// ReadyBuiltinSubtype runs the full slot-inheritance and fixup pass on a
+// type built in Go via NewType with a built-in base (e.g. a list or dict
+// subtype defined by an extension module). It mirrors the PyType_Ready
+// path that user `class C(list)` statements take, copying scalar slots
+// (tp_iter, tp_repr, tp_new, ...) from the base so instances behave like
+// the base type. Call it after installing the subtype's own descriptors.
+//
+// CPython: Objects/typeobject.c:8499 type_ready (inherit_slots + fixups)
+func ReadyBuiltinSubtype(t *Type) {
+	fixupSlotDispatchers(t)
 }
 
 // fixupAsyncSlots wires tp_as_async (am_aiter / am_anext / am_await)
@@ -1395,7 +1579,16 @@ func fixupNumberSlots(t *Type) {
 		{"__ior__", "__or__", func(n *NumberMethods, f func(a, b Object) (Object, error)) { n.InPlaceOr = f }},
 	}
 	for _, e := range entries {
-		if !isOwnDescriptor(t, e.dunder) {
+		// A binary number slot (nb_add, nb_pow, ...) is shared by its forward
+		// and reflected dunders, so update_one_slot installs it when EITHER is
+		// defined: a class that supplies only __radd__ still gets nb_add. The
+		// in-place slots (nb_inplace_*) map to the single __i*__ dunder only;
+		// their rdunder field names the non-inplace fallback used inside the
+		// dispatch, not a second trigger.
+		//
+		// CPython: Objects/typeobject.c:11291 update_one_slot
+		inplace := strings.HasPrefix(e.dunder, "__i")
+		if !isOwnDescriptor(t, e.dunder) && (inplace || !isOwnDescriptor(t, e.rdunder)) {
 			continue
 		}
 		dunder := e.dunder
@@ -1407,10 +1600,8 @@ func fixupNumberSlots(t *Type) {
 	// Wrap slot1BinFull ignoring the mod argument for the 2-arg bytecode form.
 	//
 	// CPython: Objects/typeobject.c:10129 SLOT1BINFULL(slot_nb_power_binary, ...)
-	if isOwnDescriptor(t, "__pow__") {
-		ensureNumberMethods(t).Power = func(a, b, _ Object) (Object, error) {
-			return slot1BinFull(a, b, "__pow__", "__rpow__")
-		}
+	if isOwnDescriptor(t, "__pow__") || isOwnDescriptor(t, "__rpow__") {
+		ensureNumberMethods(t).Power = slotPowerFull
 	}
 	if isOwnDescriptor(t, "__ipow__") {
 		ensureNumberMethods(t).InPlacePower = func(a, b, _ Object) (Object, error) {
@@ -1546,6 +1737,72 @@ func callBinaryDunder(self, other Object, dunder string) (Object, error) {
 		bound = descr
 	}
 	return Call(bound, NewTuple([]Object{other}), nil)
+}
+
+// callDunderArgs is callBinaryDunder generalized to any positional arg
+// count, so the three-argument power slot can pass the modulus through.
+func callDunderArgs(self Object, dunder string, args ...Object) (Object, error) {
+	descr, _ := LookupDescriptor(self.Type(), dunder)
+	if descr == nil {
+		return nil, nil
+	}
+	if IsNone(descr) {
+		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
+	}
+	bound := descr
+	if dg := descr.Type().DescrGet; dg != nil {
+		b, err := dg(descr, self, self.Type())
+		if err != nil {
+			return nil, err
+		}
+		bound = b
+	}
+	return Call(bound, NewTuple(args), nil)
+}
+
+// slotPowerFull implements slot_nb_power: the two-argument form delegates
+// to slot1BinFull, while the three-argument form (pow(a, b, mod) with a
+// non-None modulus) threads the modulus into __pow__ / __rpow__ rather
+// than dropping it.
+//
+// CPython: Objects/typeobject.c:10131 slot_nb_power
+func slotPowerFull(a, b, mod Object) (Object, error) {
+	if mod == nil || IsNone(mod) {
+		return slot1BinFull(a, b, "__pow__", "__rpow__")
+	}
+	aType := a.Type()
+	bType := b.Type()
+	doOther := aType != bType
+	if doOther && IsSubtype(bType, aType) && methodIsOverloaded(a, b, "__rpow__") {
+		r, err := callDunderArgs(b, "__rpow__", a, mod)
+		if err != nil {
+			return nil, err
+		}
+		if r != nil && !IsNotImplemented(r) {
+			return r, nil
+		}
+		doOther = false
+	}
+	r, err := callDunderArgs(a, "__pow__", b, mod)
+	if err != nil {
+		return nil, err
+	}
+	if r != nil && !IsNotImplemented(r) {
+		return r, nil
+	}
+	if aType == bType {
+		return notImplemented(), nil
+	}
+	if doOther {
+		rr, err := callDunderArgs(b, "__rpow__", a, mod)
+		if err != nil {
+			return nil, err
+		}
+		if rr != nil {
+			return rr, nil
+		}
+	}
+	return notImplemented(), nil
 }
 
 // makeSlotNbUnary returns a unary Number slot function that looks up the
@@ -1727,6 +1984,17 @@ func vectorcallMethod(o Object, name string, extra ...Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8174 slot_tp_call
 func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
+	// A __call__ rebound to another callable instance (A.__call__ = A())
+	// recurses through tp_call without ever pushing a Python frame, so the
+	// per-frame recursion limit never sees it. Guard the C-level nesting the
+	// way CPython's call machinery does so the loop raises RecursionError
+	// instead of overflowing the goroutine stack.
+	//
+	// CPython: Objects/call.c:242 _PyObject_MakeTpCall (Py_EnterRecursiveCall)
+	if err := enterRecursiveCall(" while calling a Python object"); err != nil {
+		return nil, err
+	}
+	defer leaveRecursiveCall()
 	fn, unbound, err := lookupMaybeMethod(callable, "__call__")
 	if err != nil {
 		return nil, err
@@ -1837,11 +2105,28 @@ func slotTpHash(o Object) (int64, error) {
 	return v, nil
 }
 
-// slotTpIter dispatches to __iter__.
+// slotTpIter dispatches to __iter__. When __iter__ is explicitly set to None
+// (typing._NotIterable's trick to block iteration without becoming Iterable
+// duck-type compatible), it raises "object is not iterable" rather than trying
+// to call None.
 //
 // CPython: Objects/typeobject.c:8400 slot_tp_iter
 func slotTpIter(o Object) (Object, error) {
-	return slotDunderNoArg(o, "__iter__")
+	fn, unbound, err := lookupMaybeMethod(o, "__iter__")
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", o.Type().Name)
+	}
+	if fn == None() {
+		if !unbound {
+			Decref(fn)
+		}
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", o.Type().Name)
+	}
+	res, callErr := callUnboundNoArg(unbound, fn, o)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // slotTpIterNext dispatches to __next__.
@@ -1900,14 +2185,34 @@ func slotTpFinalize(o Object) {
 // CPython: Objects/typeobject.c:3037 vectorcall_maybe (None raises TypeError)
 func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	name := richCompareDunderName(op)
-	d, _ := LookupDescriptor(a.Type(), name)
-	if d == nil {
-		return notImplemented(), nil
+	fn, unbound, err := lookupMaybeMethod(a, name)
+	if err != nil {
+		// A missing special method, or one whose descriptor __get__ raises
+		// AttributeError, both read as "no such comparison" and fall back
+		// to NotImplemented; only descr_get's AttributeError is cleared,
+		// any other error propagates.
+		//
+		// CPython: Objects/typeobject.c:2914 lookup_method_ex (AttributeError cleared)
+		// CPython: Objects/typeobject.c:10454 slot_tp_richcompare
+		if isAttributeError(err) {
+			return notImplemented(), nil
+		}
+		return nil, err
 	}
-	if IsNone(d) {
+	if IsNone(fn) {
 		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
 	}
-	return vectorcallMethod(a, name, b)
+	callArgs := []Object{b}
+	if unbound {
+		callArgs = []Object{a, b}
+	}
+	args := NewTuple(callArgs)
+	res, callErr := Call(fn, args, nil)
+	Decref(args)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // richCompareDunderName maps CompareOp to the dunder method name.
@@ -2040,12 +2345,18 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 //
 // CPython: Objects/typeobject.c:9395 slot_tp_new
 func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
-	newFn, _ := LookupDescriptor(cls, "__new__")
+	// Bind through getattr so a __new__ defined as a classmethod or
+	// staticmethod is unwrapped by its own __get__ (classmethod yields a
+	// method already bound to cls, which is why C(1) reaches the body as
+	// __new__(cls, cls, 1)). slot_tp_new uses GetAttr for exactly this.
+	//
+	// CPython: Objects/typeobject.c:9395 slot_tp_new
+	newFn, err := GetAttr(cls, NewStr("__new__"))
+	if err != nil {
+		return nil, err
+	}
 	if newFn == nil {
 		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
-	}
-	if sm, ok := newFn.(*StaticMethod); ok {
-		newFn = sm.smCallable
 	}
 	posArgs := make([]Object, 0, len(args)+1)
 	posArgs = append(posArgs, cls)
@@ -2071,12 +2382,16 @@ func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 //
 // CPython: Objects/typeobject.c:9395 slot_tp_new
 func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
-	newFn, _ := LookupDescriptor(cls, "__new__")
+	// Bind through getattr (see slotTpNew) so classmethod/staticmethod
+	// __new__ are unwrapped by their own descriptor protocol.
+	//
+	// CPython: Objects/typeobject.c:9395 slot_tp_new
+	newFn, err := GetAttr(cls, NewStr("__new__"))
+	if err != nil {
+		return nil, err
+	}
 	if newFn == nil {
 		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
-	}
-	if sm, ok := newFn.(*StaticMethod); ok {
-		newFn = sm.smCallable
 	}
 	posArgs := make([]Object, 0, len(args)+1)
 	posArgs = append(posArgs, cls)
@@ -2089,19 +2404,23 @@ func slotTpNewWithDict(cls *Type, args []Object, kwargs *Dict) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8444 slot_tp_descr_get
 func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
-	var objArg Object
-	if obj == nil {
-		objArg = None()
-	} else {
+	// CPython looks __get__ up raw (no descriptor binding) and calls it with
+	// the explicit (self, obj, type) stack. Binding self here would drop a
+	// positional argument when __get__ is a plain built-in function rather
+	// than a method-like descriptor (bpo-25750's bad_get is exactly that).
+	get, _ := LookupDescriptor(descr.Type(), "__get__")
+	if get == nil {
+		return descr, nil
+	}
+	objArg := None()
+	if obj != nil {
 		objArg = obj
 	}
-	var typeArg Object
-	if tp == nil {
-		typeArg = None()
-	} else {
+	typeArg := None()
+	if tp != nil {
 		typeArg = tp
 	}
-	return vectorcallMethod(descr, "__get__", objArg, typeArg)
+	return Call(get, NewTuple([]Object{descr, objArg, typeArg}), nil)
 }
 
 // slotTpDescrSet dispatches __set__(self, obj, value) or
@@ -2203,6 +2522,16 @@ func installSlots(t *Type, ns *Dict) error {
 			}
 			addDict++
 			t.HasDict = true
+			// configureManagedDict ran before __slots__ was parsed, so the
+			// managed-dict flag and the __dict__ getset it would have stamped
+			// for a no-__slots__ class were skipped. A class that names
+			// __dict__ in __slots__ still gets a per-instance dict
+			// (tp_dictoffset), so wire both here. Inline values stay off:
+			// they ride only on classes that omit __slots__ entirely.
+			//
+			// CPython: Objects/typeobject.c:4153 type_new (managed dict gate)
+			t.TpFlags |= TpFlagManagedDict
+			installInstanceDictDescr(t)
 			continue
 		case "__weakref__":
 			// CPython: Objects/typeobject.c:3998 type_new_visit_slots
@@ -2211,6 +2540,11 @@ func installSlots(t *Type, ns *Dict) error {
 			}
 			addWeak++
 			t.HasWeakref = true
+			// configureManagedDict ran before __slots__ was parsed, so the
+			// __weakref__ getset it stamps for the no-__slots__ case was
+			// skipped. A class naming __weakref__ in __slots__ still gets
+			// weakref support, so wire the descriptor here.
+			installInstanceWeakrefDescr(t)
 			continue
 		}
 		if !StrIsIdentifier(n) {
@@ -2228,29 +2562,41 @@ func installSlots(t *Type, ns *Dict) error {
 		// Conflict with a class body assignment of the same name. The
 		// __slots__ entry itself lives under the "__slots__" key so it
 		// does not appear in this check.
-		if has, _ := ns.Contains(NewStr(n)); has {
-			return fmt.Errorf("ValueError: %q in __slots__ conflicts with class variable", n)
+		// __qualname__ and __classcell__ are inserted into the namespace by
+		// the class-creation machinery and deleted before the type's dict is
+		// finalized, so they never act as class variables. Exempt them from
+		// the conflict check (a bad type for either still raises TypeError
+		// later, during qualname/classcell validation).
+		//
+		// CPython: Objects/typeobject.c:4015 type_new_slots_impl
+		if has, _ := ns.Contains(NewStr(n)); has && n != "__qualname__" && n != "__classcell__" {
+			return fmt.Errorf("ValueError: '%s' in __slots__ conflicts with class variable", n)
 		}
 		resolved = append(resolved, n)
 	}
+	// Sort the mangled slot names before assigning member offsets. The
+	// sorted order makes two classes that declare the same slots (in any
+	// order) lay their instances out identically, which is what lets
+	// __class__ be reassigned between them with the slot values intact.
+	//
+	// CPython: Objects/typeobject.c:4046 type_new_slots_impl (PyList_Sort)
+	sort.Strings(resolved)
 	for i, n := range resolved {
-		SetTypeDescr(t, n, NewMemberDescr(n, t.SlotsBase+i))
+		SetTypeDescr(t, n, NewMemberDescr(t, n, t.SlotsBase+i))
 	}
 	t.Slots = resolved
-	// Keep __slots__ accessible as a class attribute (cls.__slots__ returns
-	// the tuple of slot names). CPython stores a plain tuple in tp_dict so
-	// `type.__dict__['__slots__']` works, and copyreg._reduce_ex inspects
-	// getattr(inst, '__slots__') to decide whether to raise TypeError for
-	// classes without __getstate__. Storing the tuple directly (not wrapped
-	// in a GetSetDescr) makes it a non-data descriptor so instance-level
-	// assignments like `self.__slots__ = None` still land in __dict__.
+	// Keep __slots__ accessible as a class attribute. CPython normalizes
+	// __slots__ into a tuple only for its internal et->ht_slots store; the
+	// value visible from Python (tp_dict['__slots__']) is the user's
+	// ORIGINAL object, copied verbatim from the namespace by PyDict_Copy.
+	// So a list stays a list, a str stays a str, and the names are left
+	// unmangled (the mangling applies only to the member descriptors). This
+	// is what copyreg._reduce_ex inspects via getattr(inst, '__slots__').
+	// Storing the raw value directly (a non-data descriptor) keeps instance
+	// assignments like `self.__slots__ = None` landing in __dict__.
 	//
-	// CPython: Objects/typeobject.c:4401 type_new_descriptors
-	items := make([]Object, len(resolved))
-	for i, n := range resolved {
-		items[i] = NewStr(n)
-	}
-	SetTypeDescr(t, "__slots__", NewTuple(items))
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors / 4618 PyDict_Copy
+	SetTypeDescr(t, "__slots__", raw)
 	_ = ns.DelItem(slotsKey)
 	return nil
 }
@@ -2275,34 +2621,33 @@ func layoutSlotBase(t *Type) int {
 }
 
 // slotsToNames flattens the value of __slots__ into a list of strings.
-// Accepts a single str, a tuple, or a list. Anything else raises.
+// A single str is wrapped as one name; any other value is run through
+// PySequence_Tuple, so any iterable works (a dict yields its keys, per
+// gh test_parameterized_slots_dict). Each resulting item must be a str.
 //
-// CPython: Objects/typeobject.c:3977 type_new_slots (PySequence_Tuple)
+// CPython: Objects/typeobject.c:4579 type_new_get_slots (PyUnicode_Check
+// special case, else PySequence_Tuple) + Objects/typeobject.c:3866
+// valid_identifier (items must be strings)
 func slotsToNames(v Object) ([]string, error) {
 	if s, ok := v.(*Unicode); ok {
 		return []string{s.v}, nil
 	}
-	switch seq := v.(type) {
-	case *Tuple:
-		out := make([]string, 0, seq.Len())
-		for i := 0; i < seq.Len(); i++ {
-			s, ok := seq.Item(i).(*Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
-			}
-			out = append(out, s.v)
+	seq, err := SequenceTuple(v)
+	if err != nil {
+		// PySequence_Tuple raises TypeError when v is not iterable; surface
+		// CPython's __slots__-specific message rather than the generic one.
+		if isTypeError(err) {
+			return nil, fmt.Errorf("TypeError: __slots__ must be a string or iterable of strings, not '%s'", typeNameOf(v))
 		}
-		return out, nil
-	case *List:
-		out := make([]string, 0, seq.Len())
-		for i := 0; i < seq.Len(); i++ {
-			s, ok := seq.Item(i).(*Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
-			}
-			out = append(out, s.v)
-		}
-		return out, nil
+		return nil, err
 	}
-	return nil, fmt.Errorf("TypeError: __slots__ must be a string or iterable of strings, not '%s'", typeNameOf(v))
+	out := make([]string, 0, seq.Len())
+	for i := 0; i < seq.Len(); i++ {
+		s, ok := seq.Item(i).(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
+		}
+		out = append(out, s.v)
+	}
+	return out, nil
 }

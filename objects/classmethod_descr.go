@@ -38,6 +38,12 @@ func init() {
 	ClassMethodDescrType.Call = classMethodDescrCall
 	ClassMethodDescrType.Hash = identityHash
 	addDescrIntrospectionDescriptors(ClassMethodDescrType)
+	// Expose __get__ so classmethod_get is reachable through the
+	// attribute path (descr.__get__(obj, type)), mirroring add_operators
+	// installing the tp_descr_get wrapper on the descriptor type.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	addDescriptorSlotWrappers(ClassMethodDescrType)
 }
 
 // NewClassMethodDescr builds a classmethod descriptor exposing def on
@@ -86,7 +92,30 @@ func classMethodDescrGet2(descr Object, obj Object, ownerType *Type) (Object, er
 	if d.def.Flags&MethMethod != 0 {
 		cls = d.owner
 	}
-	return NewCFunction(d.def, t, nil, cls)
+	// classmethod_get -> PyCMethod_New yields a builtin_function_or_method
+	// whose m_self is the bound class. gopy's BuiltinFunction stands in for
+	// PyCFunction/PyCMethod, so the bound object must report
+	// BuiltinFunctionType (types.BuiltinMethodType), not the internal
+	// CFunction shim used purely for flag dispatch.
+	//
+	// CPython: Objects/descrobject.c:95 classmethod_get (PyCMethod_New)
+	cf, err := NewCFunction(d.def, t, nil, cls)
+	if err != nil {
+		return nil, err
+	}
+	Incref(t)
+	bf := &BuiltinFunction{
+		Name:     d.def.Name,
+		Conv:     MethVarargs | MethKeywords,
+		Self:     t,
+		ownsSelf: true,
+		Doc:      d.def.Doc,
+		Fn: func(args []Object, kwargs map[string]Object) (Object, error) {
+			return cfunctionCall(cf, args, kwargs)
+		},
+	}
+	bf.init(BuiltinFunctionType)
+	return bf, nil
 }
 
 // classMethodDescrCall is the unbound call: the first positional

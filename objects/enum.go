@@ -141,6 +141,8 @@ var ReversedType = NewType("reversed", []*Type{objectType})
 func init() {
 	ReversedType.Iter = SelfIter
 	ReversedType.IterNext = reversedNext
+	ReversedType.Dealloc = reversedDealloc
+	ReversedType.TpTraverse = reversedTraverse
 	AddIterSlotWrappers(ReversedType)
 }
 
@@ -159,9 +161,40 @@ func NewReversed(seq Object) (*Reversed, error) {
 	if err != nil {
 		return nil, err
 	}
+	// reversed() holds a counted reference to the sequence, so a freshly
+	// built temporary (cls.__mro__ passed straight into reversed()) survives
+	// until the iterator is exhausted instead of being reaped after the call.
+	// CPython: Python/bltinmodule.c:2654 reversed_new_impl (Py_NewRef(seq))
+	Incref(seq)
 	r := &Reversed{seq: seq, index: n - 1}
 	r.init(ReversedType)
 	return r, nil
+}
+
+// reversedDealloc drops the held sequence reference.
+//
+// CPython: Python/bltinmodule.c:2638 reversed_dealloc
+func reversedDealloc(o Object) {
+	r, ok := o.(*Reversed)
+	if !ok {
+		return
+	}
+	if r.seq != nil {
+		Decref(r.seq)
+		r.seq = nil
+	}
+}
+
+// reversedTraverse visits the held sequence so the cyclic collector can
+// trace cycles that run through it.
+//
+// CPython: Python/bltinmodule.c:2647 reversed_traverse
+func reversedTraverse(o Object, visit Visitor) error {
+	r := o.(*Reversed)
+	if r.seq == nil {
+		return nil
+	}
+	return visit(r.seq)
 }
 
 // reversedNext mirrors reversed_next: return seq[index], decrement;
@@ -177,11 +210,19 @@ func reversedNext(o Object) (Object, error) {
 	v, err := s.GetItem(r.seq, r.index)
 	if err != nil {
 		if errors.Is(err, errIndexOutOfRange) || errors.Is(err, ErrStopIteration) {
+			Decref(r.seq)
 			r.seq = nil
 			return nil, ErrStopIteration
 		}
 		return nil, err
 	}
 	r.index--
+	if r.index < 0 {
+		// Exhausted: drop the sequence reference eagerly, matching
+		// reversed_next which clears it_seq once the index goes negative.
+		// CPython: Python/bltinmodule.c:2696 reversed_next
+		Decref(r.seq)
+		r.seq = nil
+	}
 	return v, nil
 }

@@ -117,6 +117,8 @@ func init() {
 	FieldType.Str = fieldRepr
 	FieldType.Getattro = fieldGetattro
 	FieldType.Setattro = fieldSetattro
+	// CPython: Lib/dataclasses.py:343 Field.__class_getitem__ = classmethod(types.GenericAlias)
+	objects.BindClassGetitem(FieldType)
 }
 
 func newField(defaultVal, defaultFactory objects.Object, init, repr bool,

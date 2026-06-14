@@ -266,7 +266,13 @@ func registerFunctionIdentityGetSets() {
 //
 // CPython: Objects/funcobject.c:633 func_memberlist
 func registerFunctionReadOnlyGetSets() {
-	SetTypeDescr(FunctionType, "__closure__", NewGetSetDescr("__closure__",
+	// func_memberlist rows are PyMemberDef entries (T_OBJECT), so these
+	// surface as member_descriptor, not getset_descriptor. types.py derives
+	// MemberDescriptorType from type(FunctionType.__globals__); registering
+	// them as getsets reported getset_descriptor and broke that identity.
+	//
+	// CPython: Objects/funcobject.c:633 func_memberlist
+	SetTypeDescr(FunctionType, "__closure__", NewBuiltinMember(FunctionType, "__closure__", "",
 		func(o Object) (Object, error) {
 			f := o.(*Function)
 			if f.Closure == nil {
@@ -285,10 +291,10 @@ func registerFunctionReadOnlyGetSets() {
 			return f.Closure, nil
 		},
 		nil))
-	SetTypeDescr(FunctionType, "__globals__", NewGetSetDescr("__globals__",
+	SetTypeDescr(FunctionType, "__globals__", NewBuiltinMember(FunctionType, "__globals__", "",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Globals), nil },
 		nil))
-	SetTypeDescr(FunctionType, "__builtins__", NewGetSetDescr("__builtins__",
+	SetTypeDescr(FunctionType, "__builtins__", NewBuiltinMember(FunctionType, "__builtins__", "",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Builtins), nil },
 		nil))
 }
@@ -318,6 +324,14 @@ func registerFunctionMutableGetSets() {
 			if f.Defaults == nil {
 				return None(), nil
 			}
+			// func_get_defaults returns Py_XNewRef(defaults): the member
+			// is a borrowed reference, so without the Incref a consuming
+			// call (e.g. print(f.__defaults__)) decrefs the shared tuple
+			// to zero and frees the code constant out from under the
+			// function.
+			//
+			// CPython: Objects/funcobject.c:752 func_get_defaults (Py_XNewRef)
+			Incref(f.Defaults)
 			return f.Defaults, nil
 		},
 		funcSetDefaultsAttr))
@@ -327,6 +341,12 @@ func registerFunctionMutableGetSets() {
 			if f.KwDefaults == nil {
 				return None(), nil
 			}
+			// func_get_kwdefaults returns Py_XNewRef(kwdefaults): the
+			// borrowed member must be incref'd or a consuming call frees
+			// the shared dict.
+			//
+			// CPython: Objects/funcobject.c:802 func_get_kwdefaults (Py_XNewRef)
+			Incref(f.KwDefaults)
 			return f.KwDefaults, nil
 		},
 		funcSetKwDefaultsAttr))
@@ -386,14 +406,30 @@ func funcSetCodeAttr(o Object, v Object) error {
 func funcSetDefaultsAttr(o Object, v Object) error {
 	f := o.(*Function)
 	if v == nil || v == None() {
+		old := f.Defaults
 		f.SetDefaults(nil)
+		if old != nil {
+			Decref(old)
+		}
 		return nil
 	}
 	t, ok := v.(*Tuple)
 	if !ok {
 		return fmt.Errorf("TypeError: __defaults__ must be set to a tuple object")
 	}
+	// func_set_defaults uses Py_XSETREF: the function takes its own
+	// reference to the new tuple and drops the old. Without the Incref
+	// the caller's reference (e.g. a local that is dropped when its
+	// frame pops) is the only one keeping the tuple alive, so it is
+	// freed out from under the function.
+	//
+	// CPython: Objects/funcobject.c:784 func_set_defaults (Py_XSETREF)
+	Incref(t)
+	old := f.Defaults
 	f.SetDefaults(t)
+	if old != nil {
+		Decref(old)
+	}
 	return nil
 }
 
@@ -404,14 +440,27 @@ func funcSetDefaultsAttr(o Object, v Object) error {
 func funcSetKwDefaultsAttr(o Object, v Object) error {
 	f := o.(*Function)
 	if v == nil || v == None() {
+		old := f.KwDefaults
 		f.SetKwDefaults(nil)
+		if old != nil {
+			Decref(old)
+		}
 		return nil
 	}
 	d, ok := v.(*Dict)
 	if !ok {
 		return fmt.Errorf("TypeError: __kwdefaults__ must be set to a dict object")
 	}
+	// func_set_kwdefaults uses Py_XSETREF, same ownership rule as
+	// __defaults__.
+	//
+	// CPython: Objects/funcobject.c:826 func_set_kwdefaults (Py_XSETREF)
+	Incref(d)
+	old := f.KwDefaults
 	f.SetKwDefaults(d)
+	if old != nil {
+		Decref(old)
+	}
 	return nil
 }
 
@@ -626,47 +675,17 @@ func registerFunctionTypeParamsGetSet() {
 		}))
 }
 
-// registerFunctionDictGetSets installs __isabstractmethod__ and
-// __dict__, both of which read through f.Dict so decorators like
-// abstractmethod can stamp attributes without a dedicated field.
+// registerFunctionDictGetSets installs __dict__, which reads through
+// f.Dict so decorators like abstractmethod can stamp arbitrary
+// attributes without a dedicated field. CPython has no
+// __isabstractmethod__ getset on plain functions: abstractmethod just
+// stores it as an ordinary instance attribute in func.__dict__.
 //
 // CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
-// CPython: Objects/funcobject.c:805 func_get_isabstractmethod
-// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
 func registerFunctionDictGetSets() {
-	SetTypeDescr(FunctionType, "__isabstractmethod__", NewGetSetDescr("__isabstractmethod__",
-		funcGetIsAbstractMethod,
-		funcSetIsAbstractMethod))
 	SetTypeDescr(FunctionType, "__dict__", NewGetSetDescr("__dict__",
 		funcGetDict,
 		funcSetDict))
-}
-
-func funcGetIsAbstractMethod(o Object) (Object, error) {
-	f := o.(*Function)
-	if f.Dict == nil {
-		return False(), nil
-	}
-	v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
-	if err != nil || v == nil {
-		//nolint:nilerr // missing key reads as False, per func_get_isabstractmethod
-		return False(), nil
-	}
-	return v, nil
-}
-
-func funcSetIsAbstractMethod(o Object, v Object) error {
-	f := o.(*Function)
-	if v == nil {
-		if f.Dict == nil {
-			return nil
-		}
-		return f.Dict.DelItem(NewStr("__isabstractmethod__"))
-	}
-	if f.Dict == nil {
-		f.Dict = NewDict()
-	}
-	return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
 }
 
 func funcGetDict(o Object) (Object, error) {

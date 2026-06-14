@@ -90,6 +90,11 @@ func (e *Exception) EnsureAttrDict() *objects.Dict {
 	return e.attrs
 }
 
+// SetAttrDict rebinds the managed __dict__ wholesale for `exc.__dict__ = d`.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (e *Exception) SetAttrDict(d *objects.Dict) { e.attrs = d }
+
 // IsException implements the state.Exception marker.
 func (e *Exception) IsException() {}
 

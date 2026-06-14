@@ -567,6 +567,18 @@ func FormatFloat(v float64, spec Spec) (string, error) {
 		} else if precision == 0 {
 			precision = 1
 		}
+	case 'n':
+		// 'n' is 'g' plus LC_NUMERIC grouping. Render through the 'g'
+		// path; locale grouping is applied via spec.Thousands (empty in
+		// the C locale, so the digits come out ungrouped).
+		//
+		// CPython: Python/formatter_unicode.c:1290 format_float_internal ('n')
+		if precision < 0 {
+			precision = 6
+		} else if precision == 0 {
+			precision = 1
+		}
+		t = 'g'
 	case '%':
 		if precision < 0 {
 			precision = 6

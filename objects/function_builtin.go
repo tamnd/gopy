@@ -1,6 +1,9 @@
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 // BuiltinFunction wraps a Go function so the VM can call it through
 // the type's Vectorcall / Call slots. The Fn closure shape mirrors
@@ -48,6 +51,28 @@ type BuiltinFunction struct {
 	Self Object
 	Fn   func(args []Object, kwargs map[string]Object) (Object, error)
 
+	// ownsSelf records that this BuiltinFunction took a reference on Self
+	// at construction time (PyCMethod_New's Py_XNewRef), so its dealloc
+	// must release exactly that one reference. Most BuiltinFunctions are
+	// registered at init with a borrowed Self (a type or module held
+	// elsewhere) and must NOT decref it; only the bound-method temporaries
+	// minted by newBoundCMethod / classmethod binding own their receiver.
+	//
+	// CPython: Objects/methodobject.c:46 PyCMethod_New (Py_XNewRef(self))
+	ownsSelf bool
+
+	// boundDescr, when non-nil, is the method_descriptor this builtin
+	// function was minted from when method_get bound it to a receiver
+	// (PyCMethod_New). builtinFunctionVectorcall forwards straight to the
+	// descriptor's FASTCALL_KEYWORDS path with m_self prepended and the
+	// kwnames tuple intact, so keyword *order* survives. Without it the
+	// generic arm flattens kwnames into a Go map, whose iteration order is
+	// randomized, which scrambles order-sensitive impls (e.g. anything
+	// that reconstructs an insertion-ordered dict from **kwargs).
+	//
+	// CPython: Objects/descrobject.c:230 method_get (PyCMethod_New)
+	boundDescr *MethodDescr
+
 	// kwParams, when non-nil, names every keyword the Argument Clinic
 	// signature accepts. builtinFunctionVectorcall runs the AC
 	// extraneous-keyword scan over the original kwnames objects before
@@ -84,17 +109,34 @@ func init() {
 	//
 	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
 	BuiltinFunctionType.TpFlags |= TpFlagHaveVectorcall
+	// PyCFunction_Type is not subclassable: it omits Py_TPFLAGS_BASETYPE, so
+	// class C(type(len)) raises "is not an acceptable base type".
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type tp_flags
+	BuiltinFunctionType.TpFlags &^= TpFlagBasetype
 	BuiltinFunctionType.Repr = builtinFunctionRepr
 	BuiltinFunctionType.Str = builtinFunctionRepr
 	BuiltinFunctionType.Call = builtinFunctionCall
 	BuiltinFunctionType.Vectorcall = builtinFunctionVectorcall
-	AddCallSlotWrapper(BuiltinFunctionType)
-	// Identity hash so builtin functions are usable as set/dict keys.
-	// CPython inherits tp_hash from object for cfunction objects.
+	// meth_traverse / meth_dealloc visit and release m_self so a method
+	// bound to a temporary (PyCMethod_New took a reference) drops it when
+	// the bound method is collected. Decref on an immortal module/type
+	// receiver is a no-op, so static-method selves stay pinned.
 	//
-	// CPython: Objects/methodobject.c:357 PyCFunction_Type (tp_hash slot
-	// inherited from object_hash)
-	BuiltinFunctionType.Hash = identityHash
+	// CPython: Objects/methodobject.c:131 meth_dealloc / meth_traverse
+	BuiltinFunctionType.Dealloc = builtinFunctionDealloc
+	BuiltinFunctionType.TpTraverse = builtinFunctionTraverse
+	AddCallSlotWrapper(BuiltinFunctionType)
+	// meth_richcompare: two builtin_function_or_method objects are equal
+	// when they share the same receiver (m_self, by identity) and the same
+	// underlying C function (m_ml). Only ==/!= are defined; ordering yields
+	// NotImplemented. meth_hash combines the receiver's identity hash with
+	// the function's, so l.append == l.append yet hashes don't collapse onto
+	// hash(l).
+	//
+	// CPython: Objects/methodobject.c:213 meth_richcompare / :245 meth_hash
+	BuiltinFunctionType.RichCmp = builtinFunctionRichCompare
+	BuiltinFunctionType.Hash = builtinFunctionHash
 
 	// meth_getsets: __doc__, __name__, __qualname__, __self__, __module__
 	// CPython: Objects/methodobject.c:286 meth_getsets
@@ -251,9 +293,120 @@ func NewBuiltinFunctionConv(name string, conv MethFlag, fn func(args []Object, k
 	return bf
 }
 
+// builtinFunctionRepr mirrors meth_repr: a function whose m_self is NULL
+// or a module reads "<built-in function NAME>"; one bound to any other
+// object (an instance from a bound method_descriptor, or a type from a
+// classmethod/staticmethod row) reads "<built-in method NAME of TYPE
+// object at ADDR>".
+//
+// CPython: Objects/methodobject.c:155 meth_repr
+// builtinFunctionTraverse visits m_self so a bound C method participates
+// in cycle detection (a method bound to an object stored on that object
+// forms a reference cycle).
+//
+// CPython: Objects/methodobject.c:126 meth_traverse
+func builtinFunctionTraverse(o Object, visit Visitor) error {
+	bf := o.(*BuiltinFunction)
+	if bf.Self != nil {
+		return visit(bf.Self)
+	}
+	return nil
+}
+
+// builtinFunctionDealloc releases the reference PyCMethod_New took on
+// m_self. Decref on an immortal receiver (a module or type held by a
+// static/classmethod row) is a no-op, so only bound-to-temporary methods
+// actually release here.
+//
+// CPython: Objects/methodobject.c:113 meth_dealloc
+func builtinFunctionDealloc(o Object) {
+	bf := o.(*BuiltinFunction)
+	if bf.ownsSelf && bf.Self != nil {
+		Decref(bf.Self)
+	}
+}
+
+// methFuncIdentical decides whether two builtin functions wrap the same
+// underlying callable. CPython compares the m_ml PyMethodDef pointer, which
+// is shared by every binding of a given method. gopy's closest stable proxy
+// is the method_descriptor a bound c-method was minted from (boundDescr,
+// shared across l.append accesses); functions without one (module-level
+// singletons like len) are their own identity.
+//
+// CPython: Objects/methodobject.c:213 meth_richcompare (a->m_ml == b->m_ml)
+func methFuncIdentical(a, b *BuiltinFunction) bool {
+	if a.boundDescr != nil || b.boundDescr != nil {
+		return a.boundDescr == b.boundDescr
+	}
+	return a == b
+}
+
+// builtinFunctionRichCompare ports meth_richcompare: only ==/!= are
+// meaningful, and equality holds when the receiver (m_self, by identity) and
+// the wrapped function match.
+//
+// CPython: Objects/methodobject.c:213 meth_richcompare
+func builtinFunctionRichCompare(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return NotImplemented(), nil
+	}
+	fa, ok := a.(*BuiltinFunction)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	fb, ok := b.(*BuiltinFunction)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	eq := fa.Self == fb.Self && methFuncIdentical(fa, fb)
+	if op == CompareNE {
+		eq = !eq
+	}
+	return NewBool(eq), nil
+}
+
+// builtinFunctionHash ports meth_hash: the identity hash of m_self XORed
+// with the wrapped function's hash, so equal bindings hash alike while the
+// receiver's own hash never leaks in (hash([].append) is not hash([])).
+//
+// CPython: Objects/methodobject.c:245 meth_hash
+func builtinFunctionHash(o Object) (int64, error) {
+	bf := o.(*BuiltinFunction)
+	var x int64
+	if bf.Self != nil {
+		h, err := identityHash(bf.Self)
+		if err != nil {
+			return 0, err
+		}
+		x = h
+	}
+	var y int64
+	var err error
+	if bf.boundDescr != nil {
+		y, err = identityHash(bf.boundDescr)
+	} else {
+		y, err = identityHash(bf)
+	}
+	if err != nil {
+		return 0, err
+	}
+	x ^= y
+	if x == -1 {
+		x = -2
+	}
+	return x, nil
+}
+
 func builtinFunctionRepr(o Object) (string, error) {
 	bf := o.(*BuiltinFunction)
-	return "<built-in function " + bf.Name + ">", nil
+	if bf.Self == nil {
+		return "<built-in function " + bf.Name + ">", nil
+	}
+	if _, isMod := bf.Self.(*Module); isMod {
+		return "<built-in function " + bf.Name + ">", nil
+	}
+	addr := reflect.ValueOf(bf.Self).Pointer()
+	return fmt.Sprintf("<built-in method %s of %s object at %#x>", bf.Name, bf.Self.Type().Name, addr), nil
 }
 
 // builtinFunctionCall is the tp_call slot. It mirrors cfunction_call
@@ -313,6 +466,20 @@ func builtinFunctionCheckKwargs(bf *BuiltinFunction, nkw int) error {
 // CPython: Objects/methodobject.c:454 cfunction_vectorcall_FASTCALL_KEYWORDS
 func builtinFunctionVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error) {
 	bf := callable.(*BuiltinFunction)
+	// A bound method_descriptor forwards through the descriptor's own
+	// vectorcall with m_self prepended, keeping kwnames (and thus keyword
+	// order) intact. CPython: method_vectorcall over PyCMethod m_self.
+	if bf.boundDescr != nil {
+		nargs := VectorcallNargs(nargsf)
+		nkw := 0
+		if kwnames != nil {
+			nkw = kwnames.Len()
+		}
+		stack := make([]Object, 1+nargs+nkw)
+		stack[0] = bf.Self
+		copy(stack[1:], args[:nargs+nkw])
+		return methodDescrVectorcall(bf.boundDescr, stack, uint(nargs+1), kwnames)
+	}
 	nargs := VectorcallNargs(nargsf)
 	pos := make([]Object, nargs)
 	if nargs > 0 {

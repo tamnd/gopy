@@ -111,7 +111,7 @@ func TestFastLoadAttrSlot(t *testing.T) {
 	cls := objects.NewType("C", []*objects.Type{objects.ObjectType()})
 	cls.IsUser = true
 	cls.Slots = []string{"s"}
-	objects.SetTypeDescr(cls, "s", objects.NewMemberDescr("s", 0))
+	objects.SetTypeDescr(cls, "s", objects.NewMemberDescr(cls, "s", 0))
 	inst := objects.NewInstance(cls)
 	// Stamp slot 0 directly through the member descriptor's __set__.
 	descr, _ := objects.LookupDescriptor(cls, "s")

@@ -58,6 +58,20 @@ type evalState struct {
 	genYield chan<- objects.GenMsg
 	genSend  <-chan objects.GenMsg
 
+	// genDriverGoid is the goroutine id of the driver that last resumed
+	// this generator body (the goroutine that called Send/Throw/Close).
+	// On yield, the body hands the GIL baton back to this goroutine so the
+	// driver resumes recorded as the lock owner. Refreshed on every resume
+	// from the incoming GenMsg.CallerGoid.
+	genDriverGoid uint64
+
+	// genDriverHolds records whether the driver that last resumed this
+	// body owned the GIL. True (baton mode): the body borrows the driver's
+	// hold and hands it back on yield. False (genuine mode): the driver is
+	// outside Eval, so the body acquires and releases the GIL itself.
+	// Refreshed on every resume from GenMsg.CallerHoldsGIL.
+	genDriverHolds bool
+
 	// genRunning is the generator object whose Running flag should be
 	// cleared before yielding and restored after resuming. Set only for
 	// plain generators (not coroutines/async generators). Mirrors CPython's

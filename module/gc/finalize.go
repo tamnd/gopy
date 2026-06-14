@@ -105,6 +105,15 @@ func reclaimUnreachable(unreachable *gcHead, tracked map[objects.Object]*gcHead,
 	for unreachable.next != unreachable {
 		g := unreachable.next
 		listRemove(g)
+		// A heap type being reclaimed must drop itself from every base's
+		// tp_subclasses, the same teardown CPython's type_dealloc performs
+		// via remove_all_subclasses. Without it __subclasses__() keeps
+		// returning a dead type (bpo-46417).
+		//
+		// CPython: Objects/typeobject.c type_dealloc (remove_all_subclasses)
+		if t, ok := g.obj.(*objects.Type); ok {
+			objects.RemoveAllSubclasses(t)
+		}
 		delete(tracked, g.obj)
 		if finalized != nil {
 			delete(finalized, g.obj)

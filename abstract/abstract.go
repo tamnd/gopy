@@ -142,6 +142,22 @@ func Divmod(a, b objects.Object) (objects.Object, error) {
 //
 // CPython: Objects/abstract.c:1107 PyNumber_Power
 func Power(a, b, mod objects.Object) (objects.Object, error) {
+	// Subtype-first: when b's type is a strict subtype of a's and supplies
+	// its own power slot, run b's slot before a's so pow(2, I(3), 5) for an
+	// int subclass I reaches I.__rpow__ instead of int.__pow__.
+	//
+	// CPython: Objects/abstract.c:1057 ternary_op (subtype-first block)
+	if a.Type() != b.Type() && objects.IsSubtype(b.Type(), a.Type()) {
+		if n := b.Type().Number; n != nil && n.Power != nil {
+			out, err := n.Power(a, b, mod)
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if n := a.Type().Number; n != nil && n.Power != nil {
 		out, err := n.Power(a, b, mod)
 		if err != nil {

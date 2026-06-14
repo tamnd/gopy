@@ -36,6 +36,19 @@ type AttrDictHolder interface {
 	EnsureAttrDict() *Dict
 }
 
+// AttrDictSetter is the optional companion to AttrDictHolder for built-in
+// subclass instances whose managed __dict__ can be rebound wholesale via
+// `obj.__dict__ = d`. subtype_setdict reaches it from objectSetDict so an
+// Exception or numeric subclass honors the assignment the same way a plain
+// *Instance does. CPython lets any tp_dictoffset-bearing type take a new
+// dict here; a holder that omits this interface keeps the old read-only
+// behavior.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+type AttrDictSetter interface {
+	SetAttrDict(*Dict)
+}
+
 // visitAttrDict feeds an AttrDictHolder's managed __dict__ to a cycle
 // collector visitor. Every Dict is itself gc-tracked and traverses its
 // own entries, so visiting the dict object (rather than walking its
@@ -135,7 +148,7 @@ func GenericGetAttr(o Object, name Object) (Object, error) {
 	if AttributeErrorFactory != nil {
 		return nil, AttributeErrorFactory(o, attrNameStr(name))
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 }
 
 // GenericSetAttr is the default Setattro slot. It looks up name in the
@@ -162,9 +175,9 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 		return setAttrOnHolder(h, tp, name, value)
 	}
 	if value == nil {
-		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 	}
-	return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+	return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, attrNameStr(name))
 }
 
 // setAttrOnInstance stores or deletes name on an *Instance's managed dict,
@@ -176,12 +189,12 @@ func setAttrOnInstance(inst *Instance, tp *Type, name, value Object) error {
 	if inst.dict == nil {
 		if !tp.HasDict {
 			if value == nil {
-				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 			}
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.FullyQualifiedName(), attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s' and no __dict__ for setting new attributes", tp.Name, attrNameStr(name))
 		}
 		if value == nil {
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
 		// LAZY_DICT: first store materializes the managed dict.
 		//
@@ -190,7 +203,7 @@ func setAttrOnInstance(inst *Instance, tp *Type, name, value Object) error {
 	}
 	if value == nil {
 		if _, err := inst.dict.GetItem(name); err != nil {
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
 		inst.inlineValid = false
 		return inst.dict.DelItem(name)
@@ -217,10 +230,10 @@ func setAttrOnHolder(h AttrDictHolder, tp *Type, name, value Object) error {
 	if value == nil {
 		d := h.AttrDict()
 		if d == nil {
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
 		if _, err := d.GetItem(name); err != nil {
-			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.FullyQualifiedName(), attrNameStr(name))
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 		}
 		return d.DelItem(name)
 	}

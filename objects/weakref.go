@@ -266,6 +266,9 @@ func pyWeakrefNewRefOfType(referent, callback Object, cls *Type) (*Weakref, erro
 	if referent == nil {
 		return nil, errors.New("TypeError: cannot create weak reference to None")
 	}
+	if err := checkWeakrefable(referent); err != nil {
+		return nil, err
+	}
 	if callback == None() {
 		callback = nil
 	}
@@ -306,6 +309,21 @@ func NewWeakref(referent, callback Object) *Weakref {
 	return w
 }
 
+// checkWeakrefable rejects a referent whose type does not support weak
+// references (tp_weaklistoffset == 0), the gate weakref___new__ applies
+// before allocating. In gopy this only bites a heap class that declared
+// __slots__ without __weakref__.
+//
+// CPython: Objects/weakrefobject.c:294 weakref___new__
+//
+//	(PyType_SUPPORTS_WEAKREFS check)
+func checkWeakrefable(referent Object) error {
+	if !TypeSupportsWeakrefs(referent.Type()) {
+		return fmt.Errorf("TypeError: cannot create weak reference to '%s' object", referent.Type().Name)
+	}
+	return nil
+}
+
 // PyWeakref_NewRef is the public C-API spelling. Returns (nil, err)
 // for a nil referent so callers ported straight from C get the
 // CPython-shape contract.
@@ -316,6 +334,9 @@ func NewWeakref(referent, callback Object) *Weakref {
 func PyWeakref_NewRef(referent, callback Object) (*Weakref, error) {
 	if referent == nil {
 		return nil, errors.New("TypeError: cannot create weak reference to None")
+	}
+	if err := checkWeakrefable(referent); err != nil {
+		return nil, err
 	}
 	if callback == None() {
 		callback = nil
@@ -563,6 +584,9 @@ func PyWeakref_GetRef(w *Weakref) (Object, bool) {
 func PyWeakref_NewProxy(referent, callback Object) (*WeakProxy, error) {
 	if referent == nil {
 		return nil, errors.New("TypeError: cannot create weak reference to None")
+	}
+	if err := checkWeakrefable(referent); err != nil {
+		return nil, err
 	}
 	callable := referent.Type() != nil && referent.Type().Call != nil
 	if callback == None() {

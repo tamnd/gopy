@@ -134,7 +134,52 @@ func setActiveThread(ts *state.Thread) (prev *state.Thread, g uint64) {
 	// queue, so the Go runtime finalizer goroutine can hand its Python
 	// teardown off instead of racing the eval loop. Idempotent.
 	enableFinalizerDeferral()
+	// Take the GIL when this goroutine is entering Python from the
+	// outside (prev == nil means it was not already running a frame).
+	// AcquireReentrant no-ops when ts already holds the lock, which is
+	// exactly the generator/coroutine body case: the body runs on its
+	// own goroutine but shares its driver's PyThreadState, and the
+	// driver holds the GIL while blocked on the yield channel, so the
+	// body is already covered. Nested calls keep prev != nil and never
+	// re-take.
+	//
+	// CPython: Python/pystate.c PyThreadState_Swap (gil take on attach)
+	if prev == nil {
+		v := vmFor(ts)
+		if v.gil != nil && v.gil.AcquireReentrant(ts, g) {
+			v.gilTimer.reset()
+		}
+	}
 	return prev, g
+}
+
+// registerGenThread registers savedTS on the current goroutine so
+// currentThread() (used by sys.exc_info and friends inside the body)
+// resolves, WITHOUT touching the GIL. Generator / coroutine / async-gen
+// bodies own their GIL explicitly through genGILResume on resume and
+// genGILSuspend on yield. They must not take the lock at startup: an
+// orphaned (never-awaited) body would otherwise park on its send channel
+// still holding the GIL and deadlock the next goroutine to enter Eval.
+// Mirrors setActiveThread minus the AcquireReentrant arm.
+func registerGenThread(ts *state.Thread) (prev *state.Thread, g uint64) {
+	g = goid()
+	if v, ok := activeThreads.Load(g); ok {
+		prev = v.(*state.Thread)
+	}
+	activeThreads.Store(g, ts)
+	enableFinalizerDeferral()
+	return prev, g
+}
+
+// unregisterGenThread is the defer-side of registerGenThread. It drops
+// the registration without releasing the GIL, which the body already
+// handed back via genGILSuspend before signaling completion.
+func unregisterGenThread(prev *state.Thread, g uint64) {
+	if prev == nil {
+		activeThreads.Delete(g)
+		return
+	}
+	activeThreads.Store(g, prev)
 }
 
 // enableFinalizerDeferral flips on the deferred finalizer queue exactly
@@ -148,7 +193,19 @@ var enableFinalizerDeferral = func() func() {
 // cached goid from setActiveThread so we avoid a second goid() call
 // per Eval; runtime.Stack is the bench-dominant cost otherwise.
 func restoreActiveThread(prev *state.Thread, g uint64) {
+	// Drop the GIL when this goroutine leaves its outermost frame. Only
+	// the goroutine that actually took the lock releases it (ReleaseGoid
+	// no-ops otherwise), so a generator body that shared its driver's
+	// hold never drops it out from under the driver.
+	//
+	// CPython: Python/pystate.c PyThreadState_Swap (gil drop on detach)
 	if prev == nil {
+		if v, ok := activeThreads.Load(g); ok {
+			ts := v.(*state.Thread)
+			if gl := vmFor(ts).gil; gl != nil {
+				gl.ReleaseGoid(ts, g)
+			}
+		}
 		activeThreads.Delete(g)
 		return
 	}

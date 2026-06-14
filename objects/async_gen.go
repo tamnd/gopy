@@ -213,6 +213,8 @@ func asyncGenWrappedValueTraverse(o Object, visit Visitor) error {
 
 func init() {
 	AsyncGeneratorType = NewType("async_generator", []*Type{objectType})
+	// CPython: Objects/genobject.c async_gen_methods ("__class_getitem__")
+	bindClassGetitem(AsyncGeneratorType)
 	AsyncGeneratorType.Repr = asyncGenRepr
 	AsyncGeneratorType.Str = asyncGenRepr
 	AsyncGeneratorType.Async = &AsyncMethods{
@@ -427,14 +429,13 @@ func initAsyncGenAwaitableTypes() {
 	//
 	// CPython: Objects/genobject.c:1623 async_gen_methods
 	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
-		"asend":             asyncGenAsendMethod,
-		"athrow":            asyncGenAthrowMethod,
-		"aclose":            asyncGenAcloseMethod,
-		"__aiter__":         asyncGenAiterMethod,
-		"__anext__":         asyncGenAnextMethod,
-		"__class_getitem__": asyncGenClassGetitemMethod,
-		"__reduce__":        genReduceReject,
-		"__reduce_ex__":     genReduceReject,
+		"asend":         asyncGenAsendMethod,
+		"athrow":        asyncGenAthrowMethod,
+		"aclose":        asyncGenAcloseMethod,
+		"__aiter__":     asyncGenAiterMethod,
+		"__anext__":     asyncGenAnextMethod,
+		"__reduce__":    genReduceReject,
+		"__reduce_ex__": genReduceReject,
 	} {
 		SetTypeDescr(AsyncGeneratorType, name, NewMethodDescr(AsyncGeneratorType, name, fn))
 	}
@@ -1071,17 +1072,6 @@ func asyncGenAnextMethod(args []Object, _ map[string]Object) (Object, error) {
 	return g.Anext(), nil
 }
 
-// asyncGenClassGetitemMethod implements async_generator.__class_getitem__.
-// Returns self, matching CPython's Py_GenericAlias for the async_gen type.
-//
-// CPython: Objects/genobject.c Py_GenericAlias entry in async_gen_methods
-func asyncGenClassGetitemMethod(args []Object, _ map[string]Object) (Object, error) {
-	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: __class_getitem__() requires exactly one argument")
-	}
-	return NewGenericAlias(AsyncGeneratorType, args[1]), nil
-}
-
 // asyncGenASendTraverse visits the wrapped generator and the pending
 // send value. Mirrors async_gen_asend_traverse.
 //
@@ -1197,7 +1187,7 @@ func (g *AsyncGenerator) Send(v Object) (Object, error) {
 		return nil, fmt.Errorf("ValueError: async generator already executing")
 	}
 	g.started = true
-	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Val: v, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -1223,7 +1213,7 @@ func (g *AsyncGenerator) Throw(err error) (Object, error) {
 		g.closed = true
 		return nil, err
 	}
-	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: err, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	if msg.Err != nil {
 		g.closed = true
@@ -1251,7 +1241,7 @@ func (g *AsyncGenerator) Close() error {
 		_ = GenCloseIter(yf)
 		g.YieldFromTarget = nil
 	}
-	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame()}
+	g.SendCh <- GenMsg{Err: ErrGeneratorExit, CallerFrame: callerFrame(), CallerGoid: callerGoid(), CallerHoldsGIL: callerHoldsGIL()}
 	msg := <-g.YieldCh
 	g.closed = true
 	if msg.Err == nil {

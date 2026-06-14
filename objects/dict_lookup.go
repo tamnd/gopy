@@ -186,12 +186,12 @@ func lookupSplit(d *Dict, key Object, hash int64) (int, bool, error) {
 func dispatchLookup(d *Dict, key Object, hash int64) (int, bool, error) {
 	switch d.kind {
 	case dictKindUnicode:
-		if _, ok := key.(*Unicode); ok {
+		if u, ok := key.(*Unicode); ok && u.Type() == StrType() {
 			return lookupUnicodeUnicode(d, key, hash)
 		}
 		return lookupUnicodeGeneric(d, key, hash)
 	case dictKindSplit:
-		if _, ok := key.(*Unicode); ok {
+		if u, ok := key.(*Unicode); ok && u.Type() == StrType() {
 			return lookupSplit(d, key, hash)
 		}
 		return lookupUnicodeGeneric(d, key, hash)
@@ -212,7 +212,13 @@ func (d *Dict) downgradeKindOnInsert(key Object) {
 	if d.kind != dictKindUnicode {
 		return
 	}
-	if _, ok := key.(*Unicode); !ok {
+	// A str SUBCLASS key (PyUnicode_CheckExact is false) also forces the
+	// general kind: the subclass may override __eq__/__hash__ (case-folding
+	// keys, etc.), so the raw byte-equality fast path would lose lookups.
+	//
+	// CPython: Objects/dictobject.c:1635 insertdict (DK_UNICODE requires
+	// PyUnicode_CheckExact)
+	if u, ok := key.(*Unicode); !ok || u.Type() != StrType() {
 		d.kind = dictKindGeneral
 	}
 }

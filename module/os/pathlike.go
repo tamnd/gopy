@@ -1,11 +1,19 @@
-// PathLike: the abstract base class for os.fspath protocol.
-// CPython's os module ships PathLike as an abc.ABC subclass whose
-// __subclasshook__ recognizes any class with __fspath__. In gopy,
-// the os module is a Go inittab module so stdlib/os.py never runs
-// on top of it. We wire the equivalent behavior by creating a custom
-// metaclass (_PathLikeMeta) with __instancecheck__ / __subclasscheck__
-// that check for __fspath__, then assign it as the metaclass of
-// pathLikeType.
+// PathLike: the abstract base class for the os.fspath protocol.
+//
+// CPython ships PathLike in Lib/os.py as `class PathLike(abc.ABC)` whose
+// metaclass is therefore abc.ABCMeta and whose __subclasshook__ recognizes
+// any class exposing __fspath__. gopy's os module is a Go inittab module, so
+// Lib/os.py never runs on top of it. We reproduce the class faithfully by
+// constructing it through the real abc.ABCMeta the first time os.PathLike is
+// read, which is the earliest point abc is importable (the os module is built
+// while importlib's path-based finder is still half-installed, so abc cannot
+// be imported during os module construction).
+//
+// Building it on the genuine ABCMeta matters for metaclass resolution:
+// typing.Protocol's metaclass _ProtocolMeta is an ABCMeta subclass, so
+// `class C(os.PathLike, Protocol)` resolves its metaclass to _ProtocolMeta.
+// A bespoke metaclass unrelated to ABCMeta would make that a metaclass
+// conflict.
 //
 // CPython: Lib/os.py:1123 class PathLike(abc.ABC)
 package os
@@ -16,100 +24,103 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// pathLikeRegistered holds virtual subclasses registered via
-// os.PathLike.register().
-//
-// CPython: Lib/abc.py ABCMeta._abc_registry
-var pathLikeRegistered []*objects.Type
+// builtPathLike caches the PathLike class once constructed through ABCMeta.
+var builtPathLike objects.Object
 
-// pathLikeMetaType is a custom metaclass that wires __instancecheck__
-// / __subclasscheck__ to check for __fspath__, matching the ABCMeta
-// __subclasshook__ in CPython's os.PathLike.
-//
-// CPython: Lib/abc.py ABCMeta.__instancecheck__
-var pathLikeMetaType *objects.Type
-
-// pathLikeType is the os.PathLike type singleton.
+// buildPathLike constructs os.PathLike through the real abc.ABCMeta, matching
+// the Lib/os.py definition. Cached after the first call.
 //
 // CPython: Lib/os.py:1123 class PathLike(abc.ABC)
-var pathLikeType = objects.NewType("PathLike", []*objects.Type{objects.ObjectType()})
+func buildPathLike() (objects.Object, error) {
+	if builtPathLike != nil {
+		return builtPathLike, nil
+	}
+	if objects.ImportModuleHook == nil {
+		return nil, fmt.Errorf("ImportError: cannot import abc to build os.PathLike")
+	}
+	abcMod, err := objects.ImportModuleHook("abc")
+	if err != nil {
+		return nil, err
+	}
+	abcMeta, err := objects.LookupAttrString(abcMod, "ABCMeta")
+	if err != nil {
+		return nil, err
+	}
 
-func init() {
-	// Build the metaclass for PathLike. Cannot use a var-level func()
-	// initializer because that would create an init cycle with
-	// pathLikeType (meta references type, type references meta).
-	pathLikeMetaType = objects.NewType("_PathLikeMeta", []*objects.Type{objects.TypeType()})
+	emptyTuple := objects.NewTuple(nil)
 
-	objects.SetTypeDescr(pathLikeMetaType, "__instancecheck__",
-		objects.NewMethodDescr(pathLikeMetaType, "__instancecheck__", pathLikeInstanceCheck))
-	objects.SetTypeDescr(pathLikeMetaType, "__subclasscheck__",
-		objects.NewMethodDescr(pathLikeMetaType, "__subclasscheck__", pathLikeSubclassCheck))
-
-	// Wire pathLikeType's metaclass to _PathLikeMeta.
-	// Header.Init re-stamps the ob_type field without touching MRO or
-	// other type internals; it is the same pattern used by the bootstrap
-	// cycle for typeType itself.
+	ns := objects.NewDict()
+	if err := ns.SetItem(objects.NewStr("__module__"), objects.NewStr("os")); err != nil {
+		return nil, err
+	}
+	if err := ns.SetItem(objects.NewStr("__qualname__"), objects.NewStr("PathLike")); err != nil {
+		return nil, err
+	}
+	if err := ns.SetItem(objects.NewStr("__slots__"), emptyTuple); err != nil {
+		return nil, err
+	}
+	if err := ns.SetItem(objects.NewStr("__doc__"),
+		objects.NewStr("Abstract base class for implementing the file system path protocol.")); err != nil {
+		return nil, err
+	}
+	// __fspath__: the abstract path-protocol method. CPython marks it with
+	// @abc.abstractmethod; a Go builtin function cannot carry
+	// __isabstractmethod__, so the namespace entry is a plain method whose
+	// body raises NotImplementedError, matching the upstream body.
 	//
-	// CPython: Objects/typeobject.c:443 bootstrap: typeType.ob_type = typeType
-	pathLikeType.Init(pathLikeMetaType)
-
-	objects.SetTypeDescr(pathLikeType, "__fspath__",
-		objects.NewMethodDescr(pathLikeType, "__fspath__", pathLikeFspath))
-	// register() mirrors ABCMeta.register so pathlib can call
-	// os.PathLike.register(PurePath).
+	// CPython: Lib/os.py:1129 @abc.abstractmethod def __fspath__
+	fspathDescr := objects.NewMethodDescr(objects.ObjectType(), "__fspath__", pathLikeFspath)
+	if err := ns.SetItem(objects.NewStr("__fspath__"), fspathDescr); err != nil {
+		return nil, err
+	}
+	// __subclasshook__: recognize any class exposing __fspath__ so
+	// isinstance/issubclass work like CPython's _check_methods-based hook.
 	//
-	// CPython: Lib/abc.py:40 ABCMeta.register
-	objects.SetTypeDescr(pathLikeType, "register",
-		objects.NewClassMethod(objects.NewBuiltinFunction("register", pathLikeRegister)))
+	// CPython: Lib/os.py:1134 def __subclasshook__
+	hook := objects.NewClassMethod(objects.NewBuiltinFunction("__subclasshook__", pathLikeSubclasshook))
+	if err := ns.SetItem(objects.NewStr("__subclasshook__"), hook); err != nil {
+		return nil, err
+	}
+
+	bases := objects.NewTuple([]objects.Object{objects.ObjectType()})
+	args := objects.NewTuple([]objects.Object{objects.NewStr("PathLike"), bases, ns})
+	cls, err := objects.Call(abcMeta, args, nil)
+	if err != nil {
+		return nil, err
+	}
+	builtPathLike = cls
+	return cls, nil
 }
 
-// pathLikeInstanceCheck implements _PathLikeMeta.__instancecheck__:
-// isinstance(obj, os.PathLike) returns True if the instance has __fspath__.
+// pathLikeSubclasshook backs PathLike.__subclasshook__(cls, subclass): it
+// returns True when subclass exposes __fspath__ anywhere in its MRO,
+// otherwise NotImplemented so normal subclass logic continues. Mirrors the
+// _check_methods(subclass, '__fspath__') result in CPython.
 //
-// CPython: Lib/os.py:1136 PathLike.__subclasshook__
-func pathLikeInstanceCheck(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+// CPython: Lib/os.py:1134 PathLike.__subclasshook__ / _collections_abc._check_methods
+func pathLikeSubclasshook(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 2 {
-		return nil, fmt.Errorf("TypeError: __instancecheck__() takes 2 arguments")
-	}
-	instance := args[1]
-	if objects.IsSubtype(instance.Type(), pathLikeType) {
-		return objects.True(), nil
-	}
-	for _, t := range pathLikeRegistered {
-		if objects.IsSubtype(instance.Type(), t) {
-			return objects.True(), nil
-		}
-	}
-	if _, err := objects.GetAttr(instance, objects.NewStr("__fspath__")); err == nil {
-		return objects.True(), nil
-	}
-	return objects.False(), nil
-}
-
-// pathLikeSubclassCheck implements _PathLikeMeta.__subclasscheck__:
-// issubclass(cls, os.PathLike) returns True if cls defines __fspath__.
-//
-// CPython: Lib/os.py:1136 PathLike.__subclasshook__
-func pathLikeSubclassCheck(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) != 2 {
-		return nil, fmt.Errorf("TypeError: __subclasscheck__() takes 2 arguments")
+		return nil, fmt.Errorf("TypeError: __subclasshook__() takes 2 arguments")
 	}
 	sub, ok := args[1].(*objects.Type)
 	if !ok {
-		return nil, fmt.Errorf("TypeError: issubclass() arg 1 must be a class")
+		return objects.NotImplemented(), nil
 	}
-	if objects.IsSubtype(sub, pathLikeType) {
-		return objects.True(), nil
+	// _check_methods(subclass, '__fspath__'): look for '__fspath__' across the
+	// candidate's MRO __dict__ entries. A bound getattr is the wrong test here
+	// because gopy's LookupAttr reports a missing attribute as (nil, nil),
+	// which would make every class match; an explicit None entry must
+	// short-circuit to NotImplemented just as in CPython.
+	//
+	// CPython: Lib/_collections_abc.py:83 _check_methods
+	descr, _ := objects.LookupDescriptor(sub, "__fspath__")
+	if descr == nil {
+		return objects.NotImplemented(), nil
 	}
-	for _, t := range pathLikeRegistered {
-		if objects.IsSubtype(sub, t) {
-			return objects.True(), nil
-		}
+	if descr == objects.None() {
+		return objects.NotImplemented(), nil
 	}
-	if _, err := objects.LookupAttrString(sub, "__fspath__"); err == nil {
-		return objects.True(), nil
-	}
-	return objects.False(), nil
+	return objects.True(), nil
 }
 
 // pathLikeFspath is the abstract method body. CPython raises
@@ -118,18 +129,4 @@ func pathLikeSubclassCheck(args []objects.Object, _ map[string]objects.Object) (
 // CPython: Lib/os.py:1131 PathLike.__fspath__
 func pathLikeFspath(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return nil, fmt.Errorf("NotImplementedError")
-}
-
-// pathLikeRegister records cls as a virtual subclass.
-//
-// CPython: Lib/abc.py:40 ABCMeta.register
-func pathLikeRegister(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("TypeError: register() takes at least 1 argument (0 given)")
-	}
-	subclass := args[len(args)-1]
-	if t, ok := subclass.(*objects.Type); ok {
-		pathLikeRegistered = append(pathLikeRegistered, t)
-	}
-	return subclass, nil
 }

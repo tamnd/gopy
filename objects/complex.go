@@ -22,8 +22,30 @@ import (
 // CPython: Include/cpython/complexobject.h:7 PyComplexObject
 type Complex struct {
 	Header
-	v complex128
+	v     complex128
+	attrs *Dict // per-instance dict/slots for complex subclasses (CPython: tp_dictoffset)
 }
+
+// AttrDict returns the per-instance attribute dict or nil.
+func (c *Complex) AttrDict() *Dict { return c.attrs }
+
+// EnsureAttrDict allocates the per-instance attribute dict on first use.
+// A complex subclass with __slots__ stores its slot values here by name,
+// the same fallback every other built-in subclass uses.
+//
+// CPython: Objects/typeobject.c subtype_setdict
+func (c *Complex) EnsureAttrDict() *Dict {
+	if c.attrs == nil {
+		c.attrs = NewDict()
+		trackAttrDictHolder(c)
+	}
+	return c.attrs
+}
+
+// SetAttrDict rebinds the managed __dict__ for `obj.__dict__ = d`.
+//
+// CPython: Objects/typeobject.c:3795 subtype_setdict
+func (c *Complex) SetAttrDict(d *Dict) { c.attrs = d }
 
 // ComplexType is the type singleton for complex.
 //
@@ -48,15 +70,37 @@ func init() {
 		Bool:       complexBool,
 	}
 
+	// complex inherits tp_setattro from object (PyObject_GenericSetAttr),
+	// so `c.real = x` routes through the readonly member descriptor below
+	// and raises "readonly attribute" rather than the generic
+	// "object has no attributes".
+	//
+	// CPython: Objects/complexobject.c:1075 PyComplex_Type (tp_setattro slot)
+	ComplexType.Setattro = GenericSetAttr
+	ComplexType.Getattro = GenericGetAttr
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (managed __dict__/__slots__)
+	ComplexType.TpTraverse = attrDictHolderTraverse
 	// complex_members (Objects/complexobject.c:1337): real/imag are
-	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval
-	// fields. PyMember and getset behave the same to Python attribute
-	// lookup, so install GetSetDescr here for consistency with int/float.
-	SetTypeDescr(ComplexType, "real", NewGetSetDescr("real", complexRealGetter, nil))
-	SetTypeDescr(ComplexType, "imag", NewGetSetDescr("imag", complexImagGetter, nil))
+	// PyMemberDef Py_T_DOUBLE Py_READONLY slots backed by the cval fields,
+	// so they surface as member_descriptor (not getset_descriptor) and
+	// reject writes with the "readonly attribute" AttributeError.
+	SetTypeDescr(ComplexType, "real", NewBuiltinMember(ComplexType, "real", "the real part of a complex number", complexRealGetter, nil))
+	SetTypeDescr(ComplexType, "imag", NewBuiltinMember(ComplexType, "imag", "the imaginary part of a complex number", complexImagGetter, nil))
 	SetTypeDescr(ComplexType, "conjugate", NewMethodDescrConv(ComplexType, "conjugate", MethNoArgs, complexConjugateMethod))
 	SetTypeDescr(ComplexType, "__complex__", NewMethodDescrConv(ComplexType, "__complex__", MethNoArgs, complexComplexMethod))
 	SetTypeDescr(ComplexType, "__getnewargs__", NewMethodDescrConv(ComplexType, "__getnewargs__", MethNoArgs, complexGetNewArgsMethod))
+	// Install complex.__hash__ as a descriptor so complex.__hash__ resolves
+	// to complex_hash rather than object.__hash__, and so fixupHashAndIter
+	// installs complex_hash as the tp_hash slot on complex subclasses.
+	//
+	// CPython: Objects/complexobject.c:556 complex_hash
+	SetTypeDescr(ComplexType, "__hash__", NewMethodDescrConv(ComplexType, "__hash__", MethNoArgs, func(args []Object, _ map[string]Object) (Object, error) {
+		h, err := complexHash(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return NewInt(h), nil
+	}))
 	// CPython: Python/formatter_unicode.c:1693 _PyComplex_FormatAdvancedWriter
 	// is reachable both via PyObject_Format (the Format slot above) and
 	// via instance.__format__(spec). Install a method descriptor so the

@@ -29,6 +29,14 @@ func init() {
 	notImplementedType.Str = notImplementedType.Repr
 	notImplementedType.Getattro = GenericGetAttr
 	notImplementedType.Setattro = GenericSetAttr
+	// NotImplemented defines no __eq__, so it inherits object's default
+	// pointer-identity hash rather than surfacing as unhashable.
+	//
+	// CPython: Objects/object.c _PyNotImplemented_Type (tp_hash inherited)
+	notImplementedType.Hash = identityHash
+	// NotImplementedType is not subclassable. CPython: Objects/object.c
+	// _PyNotImplemented_Type does not set Py_TPFLAGS_BASETYPE.
+	notImplementedType.TpFlags &^= TpFlagBasetype
 	// NotImplemented must never be evaluated in a boolean context; the
 	// nb_bool slot raises rather than returning a truth value.
 	//

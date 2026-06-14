@@ -161,13 +161,17 @@ func threadHandleJoin(args []objects.Object, kwargs map[string]objects.Object) (
 		}
 	}
 	if timeoutSecs < 0 {
-		<-h.done
+		// Release the GIL while parked on the joined thread, otherwise the
+		// joinee can never acquire it to finish and signal h.done.
+		objects.AllowThreads(func() { <-h.done })
 		return objects.None(), nil
 	}
-	select {
-	case <-h.done:
-	case <-time.After(time.Duration(timeoutSecs * float64(time.Second))):
-	}
+	objects.AllowThreads(func() {
+		select {
+		case <-h.done:
+		case <-time.After(time.Duration(timeoutSecs * float64(time.Second))):
+		}
+	})
 	return objects.None(), nil
 }
 

@@ -156,7 +156,7 @@ test_userstring	ready	v0.10.1	71/71 pass (skipped=1)
 
 # ---- Classes / descriptors / methods -------------------------------
 test_abc	ready	v0.10.1	72/72 pass
-test_class	ready	v0.10.1	37/37 pass
+test_class	ready	v0.10.1	37/37 pass; detach-materialized-dict no-memory via _testcapi.set_nomemory
 test_descr	ready	v0.12.5	162/162 pass (skipped=2; 1 test_slots failure is test.test_descr module-prefix artifact, passes via runner)
 test_descrtut	ready	v0.10.1	8/8 pass
 test_dynamicclassattribute	ready	v0.10.1	12/12 pass (skipped=1)

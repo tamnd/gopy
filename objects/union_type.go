@@ -28,13 +28,17 @@ type UnionType struct {
 	parameters     *Tuple
 }
 
-// UnionTypeType is the type singleton for types.UnionType. Mirrors
-// _PyUnion_Type.
+// UnionTypeType is the type singleton for types.UnionType, which in 3.14 is
+// the same object as typing.Union and carries tp_name "typing.Union".
 //
-// CPython: Objects/unionobject.c:524 _PyUnion_Type
-var UnionTypeType = NewType("types.UnionType", []*Type{objectType})
+// CPython: Objects/unionobject.c:526 _PyUnion_Type (.tp_name = "typing.Union")
+var UnionTypeType = NewType("typing.Union", []*Type{objectType})
 
 func init() {
+	// Built from Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC only, so it omits
+	// Py_TPFLAGS_BASETYPE: class C(int | str) / class C(Union) is rejected.
+	// CPython: Objects/unionobject.c:534 _PyUnion_Type .tp_flags
+	UnionTypeType.TpFlags &^= TpFlagBasetype
 	UnionTypeType.Repr = unionRepr
 	UnionTypeType.Str = unionRepr
 	UnionTypeType.Hash = unionHash
@@ -117,7 +121,16 @@ func unionRepr(o Object) (string, error) {
 func unionHash(o Object) (int64, error) {
 	u := o.(*UnionType)
 	if u.unhashableArgs != nil {
-		return 0, fmt.Errorf("TypeError: union contains %d unhashable elements", u.unhashableArgs.Len())
+		// Re-hash each unhashable arg to surface its own TypeError
+		// ("unhashable type: 'X'") rather than a generic message.
+		n := u.unhashableArgs.Len()
+		for i := 0; i < n; i++ {
+			if _, err := Hash(u.unhashableArgs.Item(i)); err != nil {
+				return 0, err
+			}
+		}
+		// The args somehow became hashable again; still refuse.
+		return 0, fmt.Errorf("TypeError: union contains %d unhashable elements", n)
 	}
 	return Hash(u.hashableArgs)
 }
@@ -243,7 +256,11 @@ func (ub *unionBuilder) addTuple(t *Tuple) error {
 // CPython: Objects/unionobject.c:168 unionbuilder_add_single_unchecked
 func (ub *unionBuilder) addSingleUnchecked(arg Object) error {
 	if _, err := Hash(arg); err != nil {
-		// Unhashable: check against existing unhashables.
+		// Unhashable: clear the pending hash error (CPython calls
+		// PyErr_Clear here) and check against existing unhashables.
+		if ClearCurrentExceptionHook != nil {
+			ClearCurrentExceptionHook()
+		}
 		for _, existing := range ub.unhashableArgs {
 			eq, cerr := RichCmpBool(existing, arg, CompareEQ)
 			if cerr != nil {
@@ -356,9 +373,12 @@ func unionTypeOr(self, other Object) (Object, error) {
 //
 // CPython: Objects/unionobject.c:397 union_nb_or
 func unionNbOr(self, other Object) (Object, error) {
-	if !isUnionable(self) || !isUnionable(other) {
-		return NotImplemented(), nil
-	}
+	// Unlike _Py_union_type_or, the union's own nb_or does not gate on
+	// is_unionable: it builds in checked mode so each operand goes through
+	// type_check, which accepts the wider set type_check allows (strings
+	// become forward refs, etc.). gh-140348.
+	//
+	// CPython: Objects/unionobject.c:397 union_nb_or
 	ub := newUnionBuilder(true)
 	if err := ub.addSingle(self); err != nil {
 		return nil, err
@@ -427,14 +447,11 @@ func unionGetitem(o, item Object) (Object, error) {
 	if u.parameters == nil {
 		u.parameters = makeParameters(u.args)
 	}
-	if u.parameters.Len() == 0 {
-		repr, err := Repr(o)
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("TypeError: %s is not a generic class", repr)
+	newargs, err := subsParameters(o, u.args, u.parameters, item)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("TypeError: parameterized generic substitution is not supported")
+	return unionFromTuple(newargs)
 }
 
 // unionClsAttrs is the set of names union_getattro proxies back to
@@ -468,13 +485,20 @@ func unionGetattro(o Object, name Object) (Object, error) {
 //	384 union_properties
 func init() {
 	SetTypeDescr(UnionTypeType, "__args__", NewGetSetDescr("__args__", func(o Object) (Object, error) {
-		return o.(*UnionType).args, nil
+		// Return a new reference to the stored tuple, matching CPython's
+		// Py_NewRef. Without the Incref the caller's arg-drop decrefs the
+		// args tuple to zero; tupleDealloc then clears its items, so a
+		// later __parameters__ access sees emptied args and returns ().
+		args := o.(*UnionType).args
+		Incref(args)
+		return args, nil
 	}, nil))
 	SetTypeDescr(UnionTypeType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
 		u := o.(*UnionType)
 		if u.parameters == nil {
 			u.parameters = makeParameters(u.args)
 		}
+		Incref(u.parameters)
 		return u.parameters, nil
 	}, nil))
 	SetTypeDescr(UnionTypeType, "__name__", NewGetSetDescr("__name__", func(_ Object) (Object, error) {

@@ -55,8 +55,30 @@ type Type struct {
 	BaseSize int
 	ItemSize int
 
+	// nameObj / qualnameObj cache the str objects that __name__ and
+	// __qualname__ hand back. CPython stores ht_name / ht_qualname as a
+	// single str per type and returns Py_NewRef on each access, so
+	// `cls.__name__ is cls.__name__` holds (inspect.classify_class_attrs
+	// relies on that identity). gopy's getsets used to wrap t.Name in a
+	// fresh str every call; cache the object and invalidate it whenever
+	// the name is reassigned.
+	//
+	// CPython: Objects/typeobject.c:975 type_name (Py_NewRef(et->ht_name))
+	nameObj     Object
+	qualnameObj Object
+
 	Bases []*Type
 	MRO   []*Type
+
+	// BasesObj holds the exact tuple object passed as the bases when the
+	// type was built through type(name, bases, ns). CPython keeps tp_bases
+	// pointing at that very object, so a tuple subclass survives as the
+	// type of __bases__ (gh-132176). When nil, typeGetBases rebuilds a
+	// plain tuple from Bases, which is the right shape for built-ins and
+	// the class statement.
+	//
+	// CPython: Objects/typeobject.c:4756 type_new (tp_bases = Py_NewRef(bases))
+	BasesObj Object
 
 	// basesReleased latches the single base-reference release that
 	// typeUserDealloc performs, mirroring type_dealloc running once per
@@ -65,6 +87,12 @@ type Type struct {
 	// references (taken in newTypeE) would be decref'd repeatedly and free
 	// an ancestor that the type still depends on.
 	basesReleased bool
+
+	// metatypeReleased latches the single metatype-reference release that
+	// typeUserDealloc performs, pairing with the Incref stampMetaclass took
+	// on Py_TYPE(t). Like basesReleased, it guards against gopy re-entering
+	// dealloc on a type whose refcount oscillated through zero.
+	metatypeReleased bool
 
 	Repr    func(o Object) (string, error)
 	Str     func(o Object) (string, error)
@@ -258,6 +286,17 @@ type Type struct {
 	// CPython: Objects/typeobject.c:4500 type_new_set_classdictcell
 	// (CPython sets the __classdictcell__ to tp_dict, not to ns)
 	ClassAttrDict *Dict
+
+	// nonStrDict holds the non-string keys a class namespace carried, e.g.
+	// type('X', (), {MyKey(): 5}). CPython keeps them in tp_dict alongside
+	// the string attributes; gopy stores string attributes in the
+	// typeDescrTable side map, so the rare non-string keys live here. They
+	// are never attributes, but _PyType_Lookup still probes tp_dict for the
+	// looked-up name, and that probe fires a colliding key's __eq__, which
+	// may mutate __bases__ mid-lookup (test_descr.test_type_lookup_mro_reference).
+	//
+	// CPython: Objects/typeobject.c:5121 _PyType_Lookup (find_name_in_mro probe)
+	nonStrDict *Dict
 
 	// subclasses tracks the direct subclasses of this type in
 	// registration order. CPython stores a dict of weak references in
@@ -456,6 +495,13 @@ const (
 	//
 	// CPython: Include/object.h:332 Py_TPFLAGS_HAVE_GC
 	TpFlagHaveGC uint64 = 1 << 14
+	// TpFlagAbstract mirrors Py_TPFLAGS_IS_ABSTRACT: set when a type's
+	// __abstractmethods__ is a non-empty collection, cleared otherwise.
+	// type_set_abstractmethods toggles it; inspect.isabstract and the
+	// instantiation guard read it.
+	//
+	// CPython: Include/object.h:Py_TPFLAGS_IS_ABSTRACT
+	TpFlagAbstract uint64 = 1 << 20
 )
 
 // HasGC reports _PyType_IS_GC(t): the type carries Py_TPFLAGS_HAVE_GC, or
@@ -778,6 +824,19 @@ func (t *Type) addSubclass(sub *Type) {
 	t.subclasses = append(t.subclasses, sub)
 }
 
+// removeSubclass drops the first registration of sub from t.subclasses.
+// Used when __bases__ assignment moves sub off this base.
+//
+// CPython: Objects/typeobject.c:5897 remove_subclass
+func (t *Type) removeSubclass(sub *Type) {
+	for i, s := range t.subclasses {
+		if s == sub {
+			t.subclasses = append(t.subclasses[:i], t.subclasses[i+1:]...)
+			return
+		}
+	}
+}
+
 // Subclasses returns the direct subclasses of t in registration order.
 // Mirrors type.__subclasses__().
 //
@@ -786,6 +845,23 @@ func (t *Type) Subclasses() []*Type {
 	out := make([]*Type, len(t.subclasses))
 	copy(out, t.subclasses)
 	return out
+}
+
+// RemoveAllSubclasses drops t from every direct base's tp_subclasses.
+// CPython does this synchronously in type_dealloc; gopy stores the
+// subclass list as plain pointers (the Go GC owns the memory), so the
+// cycle collector calls this when it reclaims a heap type, otherwise
+// __subclasses__() keeps reporting a type that no longer exists.
+//
+// CPython: Objects/typeobject.c:5897 remove_subclass
+//
+//	(remove_all_subclasses loop in type_dealloc)
+func RemoveAllSubclasses(t *Type) {
+	for _, b := range t.Bases {
+		if b != nil {
+			b.removeSubclass(t)
+		}
+	}
 }
 
 // SetFlagsRecursive ORs add into t.TpFlags after clearing the bits in

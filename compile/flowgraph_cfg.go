@@ -289,13 +289,22 @@ func (g *cfgBuilder) copyBasicblock(src *basicblock) *basicblock {
 	return out
 }
 
-// isJumpOpcode reports whether op carries a jump target. Mirrors the
-// is_jump predicate inside flowgraph.c (which delegates to
-// OPCODE_HAS_JUMP). gopy's hasJumpTarget already encodes this.
+// isJumpOpcode reports whether op carries a control-flow jump target.
+// Mirrors the is_jump predicate inside flowgraph.c, which delegates to
+// OPCODE_HAS_JUMP. The SETUP_FINALLY / SETUP_WITH / SETUP_CLEANUP
+// pseudo ops do NOT have HAS_JUMP_FLAG in CPython (they are block
+// pushes, caught by isBlockPushOpcode instead), so graph traversals
+// such as mark_warm / mark_cold must not follow their exception-edge
+// targets. hasJumpTarget, by contrast, includes the SETUP family so
+// the oparg-rewriting passes still resolve their targets.
 //
 // CPython: Python/flowgraph.c:107 is_jump
 func isJumpOpcode(op Opcode) bool {
-	return hasJumpTarget(op)
+	switch op {
+	case JUMP, JUMP_NO_INTERRUPT:
+		return true
+	}
+	return HasTarget(op)
 }
 
 // hasJumpTarget reports whether op encodes a jump destination in its

@@ -62,16 +62,6 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	// the metaclass-winner calculation and fall back to the resolved
 	// slice (basesTuple) for the actual call to meta(...).
 	basesTuple := objects.NewTuple(resolved)
-	bases := make([]*objects.Type, 0, len(resolved))
-	allTypes := true
-	for _, b := range resolved {
-		t, ok := b.(*objects.Type)
-		if !ok {
-			allTypes = false
-			continue
-		}
-		bases = append(bases, t)
-	}
 
 	// kwargs may carry metaclass. Pull it out before forwarding the
 	// rest to the metaclass call (CPython removes it from mkw before
@@ -88,8 +78,15 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		delete(kwargs, "metaclass")
 	}
 	if meta == nil {
-		if len(bases) > 0 {
-			meta = bases[0].Type()
+		// No explicit metaclass: use the type of the first base. With no
+		// bases this is `type`. A non-type base contributes its own type
+		// as the metaclass candidate, so a base that is an instance of a
+		// Python metaclass (one that does not subclass type) drives the
+		// whole class statement through that metaclass.
+		//
+		// CPython: Python/bltinmodule.c:159 builtin___build_class__
+		if len(resolved) > 0 {
+			meta = resolved[0].Type()
 		} else {
 			meta = objects.TypeType()
 		}
@@ -99,8 +96,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	// metaclass. Skipped when meta is not a class.
 	//
 	// CPython: Python/bltinmodule.c:172 _PyType_CalculateMetaclass
-	if isclass && allTypes {
-		winner, err := calculateMetaclass(meta.(*objects.Type), bases)
+	if isclass {
+		winner, err := calculateMetaclass(meta.(*objects.Type), resolved)
 		if err != nil {
 			return nil, err
 		}
@@ -140,6 +137,20 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		ns = objects.NewDict()
 	}
 
+	// __prepare__ must hand back a mapping; otherwise STORE_NAME in the
+	// class body would fail later with an opaque subscript error. CPython
+	// rejects a non-mapping here with the metaclass name (or "<metaclass>"
+	// when meta is not a type).
+	//
+	// CPython: Python/bltinmodule.c:197 builtin___build_class__
+	if !objects.MappingCheck(ns) {
+		metaName := "<metaclass>"
+		if mt, ok := meta.(*objects.Type); ok {
+			metaName = mt.Name
+		}
+		return nil, fmt.Errorf("TypeError: %s.__prepare__() must return a mapping, not %s", metaName, ns.Type().Name)
+	}
+
 	// The class body opens with LOAD_NAME __name__ → STORE_NAME
 	// __module__. That LOAD_NAME must reach the enclosing module's
 	// __name__ via globals, so do not pre-stamp __name__ into the
@@ -149,7 +160,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	//
 	// CPython: Python/bltinmodule.c:131 builtin___build_class__
 
-	if err := runClassBody(fn, ns); err != nil {
+	cell, err := runClassBody(fn, ns)
+	if err != nil {
 		return nil, err
 	}
 
@@ -178,6 +190,30 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}
 	result, err := objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
+
+	// Verify the __class__ cell the body returned was filled with the
+	// freshly created class. A metaclass that drops __classcell__ from the
+	// namespace, or points it at a different class, is reported here.
+	//
+	// CPython: Python/bltinmodule.c:215 builtin___build_class__
+	if err == nil && result != nil {
+		if cellObj, ok := cell.(*objects.Cell); ok {
+			if resType, isType := result.(*objects.Type); isType && cellObj.Contents != resType {
+				nameRepr, rerr := objects.Repr(nameObj)
+				if rerr == nil {
+					clsRepr, crerr := objects.Repr(result)
+					if crerr == nil {
+						if cellObj.Contents == nil {
+							err = fmt.Errorf("RuntimeError: __class__ not set defining %s as %s. Was __classcell__ propagated to type.__new__?", nameRepr, clsRepr)
+						} else if setRepr, srerr := objects.Repr(cellObj.Contents); srerr == nil {
+							err = fmt.Errorf("TypeError: __class__ set to %s defining %s as %s", setRepr, nameRepr, clsRepr)
+						}
+						result = nil
+					}
+				}
+			}
+		}
+	}
 	// Release the initial NewDict ref. NewTuple copies raw pointers without
 	// Incref-ing ns, so the only owner remaining after the metaclass call is
 	// this reference. The metaclass copied every namespace entry into the
@@ -206,10 +242,10 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 //
 // CPython: Python/bltinmodule.c builtin___build_class__ (the
 // PyObject_Call(func, ()) call after LOCALS = PyObject_Call(prep, ...))
-func runClassBody(fn *objects.Function, ns objects.Object) error {
+func runClassBody(fn *objects.Function, ns objects.Object) (objects.Object, error) {
 	co := fn.Code
 	if co == nil {
-		return fmt.Errorf("TypeError: __build_class__: function has no code")
+		return nil, fmt.Errorf("TypeError: __build_class__: function has no code")
 	}
 	ts := currentThread()
 	if ts == nil {
@@ -236,8 +272,13 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 		}
 	}
 
-	_, err := Eval(ts, f)
-	return err
+	// The body returns its __class__ cell (when the class body references
+	// __class__ or uses zero-arg super), otherwise None. __build_class__
+	// uses it to verify the cell was filled with the freshly created class.
+	//
+	// CPython: Python/bltinmodule.c:206 builtin___build_class__ (cell = _PyEval_Vector)
+	cell, err := Eval(ts, f)
+	return cell, err
 }
 
 // calculateMetaclass ports _Py_CalculateMetaclass: for each base, if
@@ -245,7 +286,7 @@ func runClassBody(fn *objects.Function, ns objects.Object) error {
 // it; if neither is a subtype of the other, raise TypeError.
 //
 // CPython: Objects/typeobject.c:3136 _Py_CalculateMetaclass
-func calculateMetaclass(winner *objects.Type, bases []*objects.Type) (*objects.Type, error) {
+func calculateMetaclass(winner *objects.Type, bases []objects.Object) (*objects.Type, error) {
 	for _, base := range bases {
 		baseMeta := base.Type()
 		if objects.IsSubtype(winner, baseMeta) {

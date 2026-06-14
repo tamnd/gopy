@@ -23,6 +23,10 @@ var (
 var tokenMissingType = objects.NewType("Token.MISSING", []*objects.Type{objects.ObjectType()})
 
 func init() {
+	// ContextVar and Token are subscriptable via __class_getitem__.
+	// CPython: Python/context.c contextvar_methods / token_methods
+	objects.BindClassGetitem(ContextVarType)
+	objects.BindClassGetitem(TokenType)
 	ContextVarType.Hash = func(o objects.Object) (int64, error) {
 		return o.(*ContextVar).hash, nil
 	}

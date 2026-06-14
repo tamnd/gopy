@@ -1189,7 +1189,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 		if !ok || cell.Contents == nil {
 			return 0, true, formatExcUnbound(co, idx)
 		}
-		e.pushObject(cell.Contents)
+		// PyCell_GetRef returns a new reference: the cell keeps its strong
+		// ref to Contents, the pushed stack slot owns its own. Without the
+		// incref the consumer (CALL, STORE_*, ...) would Decref a borrow and
+		// undercount the cell's value.
+		//
+		// CPython: Python/bytecodes.c:1887 LOAD_FROM_DICT_OR_DEREF
+		// (PyCell_GetRef -> PyStackRef_FromPyObjectSteal)
+		e.push(stackref.FromObjectNew(cell.Contents))
 		return e.advance(), true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
@@ -1575,6 +1582,21 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 //
 // CPython: Objects/abstract.c PyNumber_Power
 func powerOp(a, b, mod objects.Object) (objects.Object, error) {
+	// Subtype-first: when b's type is a strict subtype of a's and overrides
+	// __rpow__, run b's reverse op before a's forward slot so 2 ** I(3) for
+	// an int subclass I reaches I.__rpow__.
+	//
+	// CPython: Objects/abstract.c:1057 ternary_op (subtype-first block)
+	if a.Type() != b.Type() && objects.IsSubtype(b.Type(), a.Type()) {
+		if out, ok, err := objects.DunderBinaryReverse(b, a, "**"); ok {
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
+				return out, nil
+			}
+		}
+	}
 	if n := a.Type().Number; n != nil && n.Power != nil {
 		out, err := n.Power(a, b, mod)
 		if err != nil {
@@ -1918,21 +1940,27 @@ func typeSubscript(cls *objects.Type, key objects.Object) (objects.Object, error
 	if cls == objects.TypeType() {
 		return objects.NewGenericAlias(cls, key), nil
 	}
-	descr, _ := objects.LookupDescriptor(cls, "__class_getitem__")
-	if descr != nil {
-		// Bind the descriptor against cls so a classmethod (or a plain
-		// callable installed via SetTypeDescr) sees the class as its
-		// implicit first argument.
-		dt := descr.Type()
-		bound := descr
-		if dt.DescrGet != nil {
-			v, err := dt.DescrGet(descr, cls, cls)
-			if err != nil {
-				return nil, err
-			}
-			bound = v
-		}
-		return objects.Call(bound, objects.NewTuple([]objects.Object{key}), nil)
+	// Mirror PyObject_GetItem's type branch: a full attribute lookup for
+	// __class_getitem__ on the class object. This walks both gopy's Go-level
+	// descriptor table (built-in types) and the Python class __dict__ across
+	// the MRO (user classes like contextlib.AbstractContextManager and
+	// dataclasses.Field that set __class_getitem__ = classmethod(GenericAlias)
+	// in the class body). LookupAttr binds the descriptor, so a classmethod
+	// already sees the class as its implicit first argument.
+	//
+	// CPython: Objects/abstract.c:181 PyObject_GetItem (type branch,
+	// _PyObject_LookupAttr(o, &_Py_ID(__class_getitem__), &meth))
+	meth, err := objects.LookupAttrString(cls, "__class_getitem__")
+	if err != nil {
+		return nil, err
+	}
+	// A __class_getitem__ set to None disables subscription: CPython treats
+	// the None attribute as absent and falls through to the not-subscriptable
+	// error rather than trying to call None.
+	//
+	// CPython: Objects/abstract.c:181 PyObject_GetItem (meth != Py_None gate)
+	if meth != nil && !objects.IsNone(meth) {
+		return objects.Call(meth, objects.NewTuple([]objects.Object{key}), nil)
 	}
 	return nil, fmt.Errorf("TypeError: type '%s' is not subscriptable", cls.Name)
 }
@@ -2179,15 +2207,37 @@ func (r *reraiseError) Error() string {
 // exception is on the thread state. The text mirrors
 // `repr(exc)`-style output so any test that pins err.Error() before
 // the proper traceback printer lands keeps working.
+//
+// The message is rendered lazily, only when Error() is called. Calling
+// exc.Message() runs the exception argument's __str__/__repr__, which is
+// arbitrary Python code: if that code raises and catches internally it
+// would clobber the just-installed thread-state exception and the unwind
+// loop would lose the original. CPython's do_raise never formats a
+// message during the raise, so deferring matches that ordering.
 func excSentinel(exc *pyerrors.Exception) error {
 	if exc == nil {
 		return errors.New("Exception")
 	}
-	msg := exc.Message()
-	if msg == "" {
-		return fmt.Errorf("%s", exc.TypeName())
+	return &excSentinelError{exc: exc}
+}
+
+// excSentinelError carries the in-flight exception and renders its
+// "Type: message" text on demand. Computing the text re-enters the VM
+// (the argument's __str__), so it must not happen while the exception is
+// still mid-raise on the thread state.
+type excSentinelError struct {
+	exc *pyerrors.Exception
+}
+
+func (e *excSentinelError) Error() string {
+	if e == nil || e.exc == nil {
+		return "Exception"
 	}
-	return fmt.Errorf("%s: %s", exc.TypeName(), msg)
+	msg := e.exc.Message()
+	if msg == "" {
+		return e.exc.TypeName()
+	}
+	return fmt.Sprintf("%s: %s", e.exc.TypeName(), msg)
 }
 
 // derefName returns the localsplus name at idx, post fix_cell_offsets

@@ -4,9 +4,10 @@
 // `super(C, x)` records the (type, instance) pair; attribute access
 // then resolves through `obj_type.MRO` skipping past `type`. The
 // one-arg form `super(C)` defers binding until the resulting object
-// goes through __get__; instance-mode super (no obj) and the zero-arg
-// `super()` shorthand stay unimplemented in v0.10.1 since the latter
-// requires the compiler to capture __class__ as a free var.
+// goes through __get__, and the zero-arg `super()` shorthand recovers
+// __class__ and self from the calling frame. Construction is split into
+// tp_new (superNew) and tp_init (superInit) so a Python subclass of super
+// can chain through super.__init__.
 //
 // CPython: Objects/typeobject.c:11769 superobject
 
@@ -37,8 +38,53 @@ func init() {
 	SuperType.Str = superRepr
 	SuperType.Getattro = superGetAttr
 	SuperType.DescrGet = superDescrGet
-	SuperType.Call = superCall
+	SuperType.TpNew = superNew
 	addDescriptorSlotWrappers(SuperType)
+
+	// super.__init__ is the slot that subclasses of super (mysuper(super))
+	// chain into via super(mysuper, self).__init__(*args). Without it the
+	// MRO walk past the subclass lands on object.__init__, which rejects
+	// the (type, obj) arguments.
+	//
+	// CPython: Objects/typeobject.c:12296 super tp_init
+	SetTypeDescr(SuperType, "__init__", NewMethodDescr(SuperType, "__init__", superInit))
+
+	// Read-only members exposing the three slots. A nil slot reads as None,
+	// matching a T_OBJECT member over a NULL pointer.
+	// CPython: Objects/typeobject.c:11780 super_members
+	SetTypeDescr(SuperType, "__thisclass__", NewGetSetDescr("__thisclass__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__thisclass__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.typ == nil {
+				return None(), nil
+			}
+			return su.typ, nil
+		}, nil))
+	SetTypeDescr(SuperType, "__self__", NewGetSetDescr("__self__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__self__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.obj == nil {
+				return None(), nil
+			}
+			return su.obj, nil
+		}, nil))
+	SetTypeDescr(SuperType, "__self_class__", NewGetSetDescr("__self_class__",
+		func(o Object) (Object, error) {
+			su, ok := o.(*Super)
+			if !ok {
+				return nil, fmt.Errorf("TypeError: descriptor '__self_class__' for 'super' objects doesn't apply to a '%s' object", typeNameOf(o))
+			}
+			if su.objType == nil {
+				return None(), nil
+			}
+			return su.objType, nil
+		}, nil))
 }
 
 // NewSuper builds a Super tied to (typ, obj). obj==nil produces an
@@ -51,18 +97,97 @@ func NewSuper(typ *Type, obj Object) (*Super, error) {
 	if typ == nil {
 		return nil, fmt.Errorf("TypeError: super() argument 1 must be type")
 	}
-	su := &Super{typ: typ, obj: obj}
-	if obj != nil && obj != None() {
+	su := &Super{}
+	su.init(SuperType)
+	if err := initSuper(su, typ, obj); err != nil {
+		return nil, err
+	}
+	return su, nil
+}
+
+// initSuper fills in an already-allocated super object's three slots,
+// validating obj against type via supercheck. It is the body of
+// super_init_impl after the type-supplied branch: a None obj collapses to
+// an unbound super, and a present obj caches obj_type.
+//
+// CPython: Objects/typeobject.c:12172 super_init_impl
+func initSuper(su *Super, typ *Type, obj Object) error {
+	if obj == None() {
+		obj = nil
+	}
+	var objType *Type
+	if obj != nil {
 		ot, err := supercheck(typ, obj)
+		if err != nil {
+			return err
+		}
+		objType = ot
+	}
+	su.typ = typ
+	su.obj = obj
+	su.objType = objType
+	return nil
+}
+
+// superNew is the tp_new slot for super: it allocates a bare super whose
+// three slots stay nil until super_init runs. Splitting allocation from
+// initialization is what lets a Python subclass of super (mysuper(super))
+// build through super.__new__ and then chain into super.__init__.
+//
+// CPython: Objects/typeobject.c:12298 PyType_GenericNew (super tp_new)
+func superNew(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+	su := &Super{}
+	su.init(cls)
+	return su, nil
+}
+
+// superInit is the tp_init slot wrapper for super. The receiver (args[0])
+// is the super object being initialized; the remaining positional args are
+// the optional (type, obj) pair. With no type the zero-arg form recovers
+// __class__ and self from the calling frame, exactly as super().
+//
+// CPython: Objects/typeobject.c:12133 super_init
+func superInit(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: super() takes no keyword arguments")
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' of 'super' object needs an argument")
+	}
+	su, ok := args[0].(*Super)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__init__' requires a 'super' object but received a '%s'", typeNameOf(args[0]))
+	}
+	rest := args[1:]
+
+	var typ *Type
+	var obj Object
+	switch len(rest) {
+	case 0:
+		t, o, err := superInitNoArgs()
 		if err != nil {
 			return nil, err
 		}
-		su.objType = ot
-	} else {
-		su.obj = nil
+		typ, obj = t, o
+	case 1:
+		t, ok := rest[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: super() argument 1 must be a type, not %s", typeNameOf(rest[0]))
+		}
+		typ = t
+	case 2:
+		t, ok := rest[0].(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: super() argument 1 must be a type, not %s", typeNameOf(rest[0]))
+		}
+		typ, obj = t, rest[1]
+	default:
+		return nil, fmt.Errorf("TypeError: super expected at most 2 arguments, got %d", len(rest))
 	}
-	su.init(SuperType)
-	return su, nil
+	if err := initSuper(su, typ, obj); err != nil {
+		return nil, err
+	}
+	return None(), nil
 }
 
 // supercheck mirrors the CPython helper of the same name. It validates
@@ -81,14 +206,28 @@ func supercheck(typ *Type, obj Object) (*Type, error) {
 	if IsSubtype(ot, typ) {
 		return ot, nil
 	}
+	// Slow path: allow super() with a proxy for obj, where Py_TYPE(obj) is
+	// not a subtype of type but obj.__class__ is.
+	// CPython: Objects/typeobject.c:11964 supercheck
+	classAttr, err := LookupAttrString(obj, "__class__")
+	if err != nil {
+		return nil, err
+	}
+	if ct, ok := classAttr.(*Type); ok && ct != ot && IsSubtype(ct, typ) {
+		return ct, nil
+	}
 	kind := "instance of"
 	name := ot.Name
 	if t, ok := obj.(*Type); ok {
 		kind = "type"
 		name = t.Name
 	}
-	return nil, fmt.Errorf(
-		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s)",
+	// The trailing period is part of CPython's message and must stay for
+	// parity; staticcheck's no-punctuation rule does not apply here.
+	//
+	// CPython: Objects/typeobject.c:11995 super_init_impl
+	return nil, fmt.Errorf( //nolint:staticcheck // ST1005: match CPython's message verbatim
+		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s).",
 		kind, name, typ.Name,
 	)
 }
@@ -137,7 +276,11 @@ func superGetAttr(o Object, name Object) (Object, error) {
 			return res, nil
 		}
 	}
-	return nil, fmt.Errorf("AttributeError: 'super' object has no attribute '%s'", n)
+	// Nothing found walking the bound MRO: fall back to a generic lookup on
+	// the super object itself, which resolves the members (__self__,
+	// __thisclass__, __self_class__) and any methods on the super type.
+	// CPython: Objects/typeobject.c:11915 do_super_lookup (skip branch)
+	return GenericGetAttr(o, name)
 }
 
 // lookupSuperDescr returns the attribute named `name` from the first
@@ -213,6 +356,14 @@ func superDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if owner == nil || owner == None() || su.obj != nil {
 		return descr, nil
 	}
+	// A strict subclass of super must rebind through its own type so the
+	// resulting object keeps the subclass (and runs its __init__), exactly
+	// as super_descr_get calls Py_TYPE(su)(su->type, obj).
+	//
+	// CPython: Objects/typeobject.c:12233 super_descr_get
+	if su.Type() != SuperType {
+		return Call(su.Type(), NewTuple([]Object{su.typ, owner}), nil)
+	}
 	return NewSuper(su.typ, owner)
 }
 
@@ -249,13 +400,17 @@ func superInitNoArgs() (*Type, Object, error) {
 	if self == nil {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
 	}
-	// When self is captured by a nested function (lambda/comprehension), slot 0
-	// holds the *Cell wrapper rather than the value itself. Unwrap it.
+	// Slot 0 holds a *Cell wrapper only when self is itself a cell
+	// variable, i.e. captured by a nested function. CPython gates the
+	// unwrap on _PyLocals_GetKind(kinds, 0) & CO_FAST_CELL; without that
+	// gate a method whose first argument happens to be a cell object
+	// passed in by the caller would be wrongly dereferenced (test_cell_as_self).
 	//
-	// CPython: Objects/typeobject.c:12054 super_init_without_args
-	// reads PyUnstable_InterpreterFrame_GetLocals which dereferences cells.
-	if cell, ok := self.(*Cell); ok {
-		self = cell.Contents
+	// CPython: Objects/typeobject.c:12069 super_init_without_args
+	if len(code.LocalsplusKinds) > 0 && code.LocalsplusKinds[0]&CoFastCell != 0 {
+		if cell, ok := self.(*Cell); ok {
+			self = cell.Contents
+		}
 	}
 	if self == nil {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
@@ -287,38 +442,4 @@ func superInitNoArgs() (*Type, Object, error) {
 		return nil, nil, fmt.Errorf("RuntimeError: super(): __class__ is not a type")
 	}
 	return t, self, nil
-}
-
-// superCall handles `super(...)` invocation. The zero-arg form reads
-// __class__ and self from the calling frame via superInitNoArgs; the
-// one- and two-arg forms route through NewSuper. Keyword arguments are
-// rejected to match _PyArg_NoKeywords in super_init.
-//
-// CPython: Objects/typeobject.c:12132 super_init
-func superCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
-	if len(kwargs) != 0 {
-		return nil, fmt.Errorf("TypeError: super() takes no keyword arguments")
-	}
-	switch len(args) {
-	case 0:
-		t, obj, err := superInitNoArgs()
-		if err != nil {
-			return nil, err
-		}
-		return NewSuper(t, obj)
-	case 1:
-		t, ok := args[0].(*Type)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: super() argument 1 must be type, not %s", typeNameOf(args[0]))
-		}
-		return NewSuper(t, nil)
-	case 2:
-		t, ok := args[0].(*Type)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: super() argument 1 must be type, not %s", typeNameOf(args[0]))
-		}
-		return NewSuper(t, args[1])
-	default:
-		return nil, fmt.Errorf("TypeError: super() takes at most 2 arguments (%d given)", len(args))
-	}
 }

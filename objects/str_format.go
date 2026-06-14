@@ -14,6 +14,34 @@ import (
 
 func init() {
 	strType.Format = unicodeFormat
+	// str.__format__ must be reachable both as the tp_str format slot
+	// (above) and as an explicit method, because code like enum's
+	// __format__ calls str.__format__(str(self), spec) directly. Without
+	// this descriptor that lookup walks str -> object and lands on
+	// object.__format__, which rejects any non-empty spec.
+	//
+	// CPython: Objects/unicodeobject.c:15564 unicode_methods __format__
+	SetTypeDescr(strType, "__format__", NewMethodDescrConv(strType, "__format__", MethO, strDunderFormatMethod))
+}
+
+// strDunderFormatMethod is str.__format__(self, format_spec). An empty
+// spec returns str(self); a non-empty spec runs the string renderer.
+// (Distinct from strFormatMethod, which backs str.format().)
+//
+// CPython: Python/formatter_unicode.c:1559 _PyUnicode_FormatAdvancedWriter
+func strDunderFormatMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __format__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	spec, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __format__() argument 1 must be str, not %s", typeNameOf(args[1]))
+	}
+	out, err := unicodeFormat(args[0], spec.v)
+	if err != nil {
+		return nil, err
+	}
+	return NewStr(out), nil
 }
 
 // unicodeFormat ports format_string_internal: parse the spec then run
@@ -30,7 +58,21 @@ func unicodeFormat(o Object, spec string) (string, error) {
 			o.Type().Name)
 	}
 	if spec == "" {
-		return u.v, nil
+		// Empty spec is equivalent to str(obj). For an exact str that is the
+		// value itself; for a subclass CPython routes through format_obj,
+		// which calls PyObject_Str so an overridden __str__ takes effect
+		// (e.g. a StrEnum member whose __str__ uppercases its name).
+		//
+		// CPython: Python/formatter_unicode.c:1571 _PyUnicode_FormatAdvancedWriter
+		// (start == end: PyUnicode_CheckExact ? write obj : format_obj)
+		if o.Type() == strType {
+			return u.v, nil
+		}
+		s, err := Str(o)
+		if err != nil {
+			return "", err
+		}
+		return s, nil
 	}
 	parsed, err := format.ParseSpec(spec)
 	if err != nil {

@@ -75,6 +75,17 @@ func (c *Compiler) visitInteractive(m *ast.Interactive) error {
 			return err
 		}
 	}
+	// Interactive bodies defer annotations exactly like module bodies: an
+	// annotated assignment at the REPL records a deferred annotation and a
+	// conditional index, so the __conditional_annotations__ set and the
+	// __annotate__ stash must be emitted here too. Without it the body's
+	// LOAD_NAME __conditional_annotations__ raises NameError.
+	//
+	// CPython: Python/codegen.c:895 codegen_body (runs StartAnnotationSetup /
+	// EndAnnotationSetup for the interactive branch as well)
+	if err := c.stashAnnotationCode(ast.Pos{Lineno: 1}); err != nil {
+		return err
+	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
 	return nil
 }

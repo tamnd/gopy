@@ -155,19 +155,25 @@ func Reversed(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	}
 	o := args[0]
 	t := o.Type()
-	if descr, _ := objects.LookupDescriptor(t, "__reversed__"); descr != nil {
-		fn, err := objects.GetAttr(o, objects.NewStr("__reversed__"))
-		if err == nil && fn != nil {
-			res, callErr := objects.CallObject(fn, nil)
-			// reversed_new owns the bound method returned by the special
-			// lookup and drops it once the call is done; without this the
-			// bound method (and the sequence it captured as __self__) stays
-			// pinned, so check_free_after_iterating never sees __del__ run.
-			//
-			// CPython: Objects/enumobject.c:1110 reversed_new_impl (Py_DECREF reversed_meth)
-			objects.Decref(fn)
-			return res, callErr
-		}
+	// _PyObject_LookupSpecial does a TYPE-level MRO lookup that bypasses the
+	// instance __getattribute__, so reversed() never triggers a per-instance
+	// __reversed__ or a custom __getattribute__ for the lookup itself.
+	//
+	// CPython: Objects/enumobject.c:1100 reversed_new_impl (_PyObject_LookupSpecial)
+	fn, err := objects.LookupSpecial(o, "__reversed__")
+	if err != nil {
+		return nil, err
+	}
+	if fn != nil {
+		res, callErr := objects.CallObject(fn, nil)
+		// reversed_new owns the bound method returned by the special
+		// lookup and drops it once the call is done; without this the
+		// bound method (and the sequence it captured as __self__) stays
+		// pinned, so check_free_after_iterating never sees __del__ run.
+		//
+		// CPython: Objects/enumobject.c:1110 reversed_new_impl (Py_DECREF reversed_meth)
+		objects.Decref(fn)
+		return res, callErr
 	}
 	if t.Sequence == nil || t.Sequence.GetItem == nil || t.Sequence.Length == nil {
 		return nil, fmt.Errorf("TypeError: argument to reversed() must be a sequence")

@@ -32,6 +32,16 @@ type MethodDescr struct {
 	fn      func(args []Object, kwargs map[string]Object) (Object, error)
 	owner   *Type
 
+	// fnOrdered, when non-nil, supersedes fn for order-sensitive builtins
+	// (dict(), dict.update()) whose CPython impl walks the keyword dict in
+	// caller order. The vectorcall arm rebuilds an insertion-ordered *Dict
+	// from the kwnames tuple and hands it here instead of flattening to the
+	// unordered map. kwargs is nil when no keywords were passed.
+	//
+	// CPython: Objects/dictobject.c:3795 dict_update_common (merges the
+	// ordered kwds dict, so dict(a=1, b=2) preserves call-site order)
+	fnOrdered func(args []Object, kwargs *Dict) (Object, error)
+
 	// kwParams, when non-nil, names every keyword the underlying impl
 	// accepts. methodDescrVectorcall walks the kwnames tuple in caller
 	// order and rejects the first keyword absent from this list, exactly
@@ -46,6 +56,35 @@ type MethodDescr struct {
 	kwParams     []string
 	kwFname      string
 	kwCountLimit int
+
+	// slotWrapper marks a descriptor that stands in for a CPython
+	// slot_wrapper (wrapper_descriptor) rather than a PyMethodDef
+	// method_descriptor. gopy collapses several tp-slot dunders
+	// (object.__init__, the descr_get/set/iter/call wrappers) onto
+	// MethodDescr; binding such a descriptor must yield a method-wrapper
+	// (gopy's BoundMethod), not a PyCMethod, so type(object().__init__)
+	// stays a "method" the way CPython reports "method-wrapper".
+	//
+	// CPython: Objects/descrobject.c:451 wrapperdescr_get (method-wrapper)
+	slotWrapper bool
+}
+
+// AsSlotWrapper marks the descriptor as a slot_wrapper stand-in so its
+// bound form is a method-wrapper rather than a PyCMethod. It also retypes
+// the descriptor to wrapper_descriptor so type(object.__init__) and
+// repr(object.__init__) match CPython: every dunder backed by a C-level
+// type slot is a PyWrapperDescr_Type (`<slot wrapper '__init__' of
+// 'object' objects>`), not a PyMethodDescr_Type. The Go concrete type
+// stays *MethodDescr, so all runtime code that type-asserts the
+// descriptor keeps working; only the Python-visible class/repr change.
+// WrapperDescrType's tp slots delegate back to the MethodDescr handlers
+// for these instances.
+//
+// CPython: Objects/descrobject.c:1471 PyWrapperDescr_Type
+func (d *MethodDescr) AsSlotWrapper() *MethodDescr {
+	d.slotWrapper = true
+	d.typ = WrapperDescrType
+	return d
 }
 
 // MethodDescrType is the type singleton for method descriptors.
@@ -66,6 +105,19 @@ func init() {
 	MethodDescrType.Vectorcall = methodDescrVectorcall
 	// Identity hash so method descriptors are hashable.
 	MethodDescrType.Hash = identityHash
+	// Install a faithful method_get as __get__ before the generic descriptor
+	// wrapper so the METH_METHOD branch sees the raw type argument. The
+	// generic wrap_descr_get collapses a non-type arg 2 to nil, which would
+	// hide the "needs a type, not '...', as arg 2" error.
+	//
+	// CPython: Objects/descrobject.c:230 method_get
+	// method_get carries the Argument Clinic signature "($self, instance,
+	// owner=None, /)"; inspect strips the bound $self, leaving
+	// (instance, owner=None) so inspect.signature(x.__get__) resolves.
+	//
+	// CPython: Objects/descrobject.c:230 method_get (descr_get clinic input)
+	SetTypeDescr(MethodDescrType, "__get__", NewMethodDescr(MethodDescrType, "__get__", methodDescrDunderGet).
+		WithTextSignature("($self, instance, owner=None, /)"))
 	addDescriptorSlotWrappers(MethodDescrType)
 	AddCallSlotWrapper(MethodDescrType)
 	addDescrIntrospectionDescriptors(MethodDescrType)
@@ -94,6 +146,18 @@ func (d *MethodDescr) Owner() *Type { return d.owner }
 // CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
 func NewMethodDescr(owner *Type, name string, fn func(args []Object, kwargs map[string]Object) (Object, error)) *MethodDescr {
 	d := &MethodDescr{name: name, conv: MethVarargs | MethKeywords, fn: fn, owner: owner}
+	d.init(MethodDescrType)
+	return d
+}
+
+// NewMethodDescrKwOrdered builds a method descriptor whose impl needs the
+// keyword arguments in caller order. The vectorcall arm passes them as an
+// insertion-ordered *Dict (nil when none) rather than the unordered map, so
+// constructors like dict() observe the same key order CPython does.
+//
+// CPython: Objects/descrobject.c:1100 PyDescr_NewMethod
+func NewMethodDescrKwOrdered(owner *Type, name string, fn func(args []Object, kwargs *Dict) (Object, error)) *MethodDescr {
+	d := &MethodDescr{name: name, conv: MethVarargs | MethKeywords, fnOrdered: fn, owner: owner}
 	d.init(MethodDescrType)
 	return d
 }
@@ -171,7 +235,112 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	if owner == nil {
 		return descr, nil
 	}
-	return NewBoundMethod(descr, owner), nil
+	// descr_check rejects binding to an object whose type is not a
+	// subtype of the descriptor's owner, e.g. set.add.__get__(0).
+	//
+	// CPython: Objects/descrobject.c:147 descr_check
+	d := descr.(*MethodDescr)
+	if !IsSubtype(owner.Type(), d.owner) {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, owner.Type().Name)
+	}
+	// A slot_wrapper stand-in binds to a method-wrapper (BoundMethod);
+	// only a genuine method_descriptor mints a PyCMethod.
+	if d.slotWrapper {
+		return NewBoundMethod(descr, owner), nil
+	}
+	return newBoundCMethod(d, owner), nil
+}
+
+// newBoundCMethod binds a method descriptor to an instance the way
+// method_get does: PyCMethod_New produces a builtin_function_or_method
+// whose m_self is the receiver, not a separate bound-method object. So
+// `[].append` is a builtin_function_or_method, type([].append) is that
+// type, and repr reads "<built-in method append of list object at ...>".
+// The Fn closure prepends the receiver and runs the descriptor's own
+// call machinery (subtype + arity checks, then ml_meth), mirroring
+// cfunction_call dispatching ml_meth(m_self, args).
+//
+// CPython: Objects/descrobject.c:230 method_get (PyCMethod_New)
+// CPython: Objects/methodobject.c:544 cfunction_call
+func newBoundCMethod(d *MethodDescr, self Object) *BuiltinFunction {
+	// PyCMethod_New keeps its own reference to m_self; without the Incref
+	// a bound method off a temporary ([].append, sorted(x).pop) sees its
+	// receiver decref'd to zero by the LOAD_ATTR owner-release before the
+	// call runs.
+	//
+	// CPython: Objects/classobject.c PyCMethod_New (Py_XNewRef(self))
+	Incref(self)
+	bf := &BuiltinFunction{
+		Name:     d.name,
+		Conv:     d.conv,
+		Self:     self,
+		ownsSelf: true,
+		Doc:      d.doc,
+		// boundDescr drives the order-preserving vectorcall path
+		// (builtinFunctionVectorcall forwards kwnames straight to
+		// methodDescrVectorcall). The Fn closure is the slow tp_call
+		// fallback: a Go map has already lost keyword order by the time it
+		// arrives, but CALL_KW always routes through vectorcall, so the
+		// order-sensitive callers never reach here.
+		boundDescr: d,
+		Fn: func(args []Object, kwargs map[string]Object) (Object, error) {
+			full := make([]Object, 0, len(args)+1)
+			full = append(full, self)
+			full = append(full, args...)
+			return methodDescrCall(d, full, kwargs)
+		},
+	}
+	bf.TextSignature = d.textSig
+	bf.init(BuiltinFunctionType)
+	return bf
+}
+
+// methodDescrDunderGet is the Python-level __get__(self, obj, type) for
+// method descriptors. Unlike the generic descriptor wrapper it keeps the
+// raw type argument so the METH_METHOD branch can reject a non-type arg 2
+// with the exact message method_get produces. descr_check in 3.14 only
+// short-circuits the obj==NULL (class) access; it no longer type-checks the
+// instance, so binding to an unrelated instance is deferred to call time.
+//
+// CPython: Objects/descrobject.c:230 method_get
+func methodDescrDunderGet(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: expected 1 or 2 arguments, got %d", len(args)-1)
+	}
+	d, ok := args[0].(*MethodDescr)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor '__get__' requires a 'method_descriptor' object")
+	}
+	obj := args[1]
+	if IsNone(obj) {
+		obj = nil
+	}
+	var typ Object
+	if len(args) == 3 {
+		typ = args[2]
+	}
+	if obj == nil && (typ == nil || IsNone(typ)) {
+		return nil, fmt.Errorf("TypeError: __get__(None, None) is invalid")
+	}
+	// descr_check: class access returns the descriptor itself; otherwise the
+	// instance must be an instance of the descriptor's owning type.
+	if obj == nil {
+		return d, nil
+	}
+	if !IsSubtype(obj.Type(), d.owner) {
+		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, obj.Type().Name)
+	}
+	if d.conv&MethMethod != 0 {
+		if typ != nil {
+			if _, isType := typ.(*Type); !isType {
+				return nil, fmt.Errorf("TypeError: descriptor '%s' needs a type, not '%s', as arg 2", d.name, typ.Type().Name)
+			}
+		}
+	}
+	if d.slotWrapper {
+		return NewBoundMethod(d, obj), nil
+	}
+	return newBoundCMethod(d, obj), nil
 }
 
 // methodDescrCall is the unbound call: the first positional argument
@@ -182,13 +351,28 @@ func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 func methodDescrCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
 	d := o.(*MethodDescr)
 	if len(args) == 0 {
-		return nil, fmt.Errorf("TypeError: descriptor '%s' of '%s' object needs an argument", d.name, d.owner.Name)
+		return nil, fmt.Errorf("TypeError: unbound method %s.%s() needs an argument", d.owner.Name, d.name)
 	}
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)
 	}
 	if err := methodDescrCheckArity(d, len(args)-1, len(kwargs)); err != nil {
 		return nil, err
+	}
+	if d.fnOrdered != nil {
+		// The legacy tp_call path already flattened keywords to an unordered
+		// map upstream, so order cannot be recovered here; rebuild a *Dict
+		// best-effort. Callers needing order use the vectorcall arm.
+		var kwd *Dict
+		if len(kwargs) > 0 {
+			kwd = NewDict()
+			for k, v := range kwargs {
+				if err := kwd.SetItem(NewStr(k), v); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return d.fnOrdered(args, kwd)
 	}
 	return d.fn(args, kwargs)
 }
@@ -202,7 +386,7 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	d := callable.(*MethodDescr)
 	nargs := VectorcallNargs(nargsf)
 	if nargs == 0 {
-		return nil, fmt.Errorf("TypeError: descriptor '%s' of '%s' object needs an argument", d.name, d.owner.Name)
+		return nil, fmt.Errorf("TypeError: unbound method %s.%s() needs an argument", d.owner.Name, d.name)
 	}
 	if !IsSubtype(args[0].Type(), d.owner) {
 		return nil, fmt.Errorf("TypeError: descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d.name, d.owner.Name, args[0].Type().Name)
@@ -216,6 +400,29 @@ func methodDescrVectorcall(callable Object, args []Object, nargsf uint, kwnames 
 	}
 	pos := make([]Object, nargs)
 	copy(pos, args[:nargs])
+	// Order-sensitive impls take the keywords as an insertion-ordered *Dict
+	// built straight from the kwnames tuple, bypassing the unordered map.
+	if d.fnOrdered != nil {
+		var kwd *Dict
+		if nkw > 0 {
+			kwd = NewDict()
+			order := make([]string, 0, nkw)
+			for i := 0; i < nkw; i++ {
+				name, err := Str(kwnames.Item(i))
+				if err != nil {
+					return nil, err
+				}
+				if err := kwd.SetItem(NewStr(name), args[nargs+i]); err != nil {
+					return nil, err
+				}
+				order = append(order, name)
+			}
+			if err := d.checkKwParams(order); err != nil {
+				return nil, err
+			}
+		}
+		return d.fnOrdered(pos, kwd)
+	}
 	var kwargs map[string]Object
 	if nkw > 0 {
 		kwargs = make(map[string]Object, nkw)
