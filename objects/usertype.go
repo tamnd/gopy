@@ -2590,34 +2590,33 @@ func layoutSlotBase(t *Type) int {
 }
 
 // slotsToNames flattens the value of __slots__ into a list of strings.
-// Accepts a single str, a tuple, or a list. Anything else raises.
+// A single str is wrapped as one name; any other value is run through
+// PySequence_Tuple, so any iterable works (a dict yields its keys, per
+// gh test_parameterized_slots_dict). Each resulting item must be a str.
 //
-// CPython: Objects/typeobject.c:3977 type_new_slots (PySequence_Tuple)
+// CPython: Objects/typeobject.c:4579 type_new_get_slots (PyUnicode_Check
+// special case, else PySequence_Tuple) + Objects/typeobject.c:3866
+// valid_identifier (items must be strings)
 func slotsToNames(v Object) ([]string, error) {
 	if s, ok := v.(*Unicode); ok {
 		return []string{s.v}, nil
 	}
-	switch seq := v.(type) {
-	case *Tuple:
-		out := make([]string, 0, seq.Len())
-		for i := 0; i < seq.Len(); i++ {
-			s, ok := seq.Item(i).(*Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
-			}
-			out = append(out, s.v)
+	seq, err := SequenceTuple(v)
+	if err != nil {
+		// PySequence_Tuple raises TypeError when v is not iterable; surface
+		// CPython's __slots__-specific message rather than the generic one.
+		if isTypeError(err) {
+			return nil, fmt.Errorf("TypeError: __slots__ must be a string or iterable of strings, not '%s'", typeNameOf(v))
 		}
-		return out, nil
-	case *List:
-		out := make([]string, 0, seq.Len())
-		for i := 0; i < seq.Len(); i++ {
-			s, ok := seq.Item(i).(*Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
-			}
-			out = append(out, s.v)
-		}
-		return out, nil
+		return nil, err
 	}
-	return nil, fmt.Errorf("TypeError: __slots__ must be a string or iterable of strings, not '%s'", typeNameOf(v))
+	out := make([]string, 0, seq.Len())
+	for i := 0; i < seq.Len(); i++ {
+		s, ok := seq.Item(i).(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: __slots__ items must be strings, not '%s'", typeNameOf(seq.Item(i)))
+		}
+		out = append(out, s.v)
+	}
+	return out, nil
 }
