@@ -15,14 +15,6 @@ package objects
 
 import "fmt"
 
-// GenericClassGetitemHook is called by the Generic.__class_getitem__ built-in
-// when the hook is set. typing.py wires _generic_class_getitem here via
-// _set_generic_class_getitem so that string arguments flow through
-// _type_convert -> _make_forward_ref -> eager SyntaxError validation.
-//
-// CPython: Objects/typevarobject.c:2459 generic_class_getitem
-var GenericClassGetitemHook func(cls Object, args Object) (Object, error)
-
 func init() {
 	// __class_getitem__ on the canonical "generic-capable" builtins.
 	// Each call wraps a one-arg builtin in a ClassMethod so attribute
@@ -85,12 +77,18 @@ func init() {
 	}
 }
 
-// bindGenericClassGetitem installs a hookable `__class_getitem__` classmethod
-// on t. When GenericClassGetitemHook is set (after typing.py wires it via
-// _set_generic_class_getitem) the hook is called instead of the bare
-// NewGenericAlias path, so string type arguments raise SyntaxError.
+// bindGenericClassGetitem installs Generic.__class_getitem__. CPython's C
+// generic_class_getitem resolves the Python implementation
+// typing._generic_class_getitem BY NAME from sys.modules at every call (via
+// call_typing_func_object), rather than holding a captured pointer. Resolving by
+// name is what keeps import_helper.import_fresh_module("typing") safe: that
+// re-executes typing.py to build a throwaway module, but once sys.modules is
+// restored the original _generic_class_getitem resolves again. A captured global
+// would stay pointing at the dead fresh module whose Generic/Protocol identities
+// differ, which surfaced as "<class 'typing.Protocol'> is not a generic class".
 //
 // CPython: Objects/typevarobject.c:2459 generic_class_getitem
+// CPython: Objects/typevarobject.c:60 call_typing_func_object
 func bindGenericClassGetitem(t *Type) {
 	fn := NewBuiltinFunction("__class_getitem__", func(args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 2 {
@@ -98,8 +96,18 @@ func bindGenericClassGetitem(t *Type) {
 		}
 		cls := args[0]
 		arg := args[1]
-		if hook := GenericClassGetitemHook; hook != nil {
-			return hook(cls, arg)
+		// Resolve typing._generic_class_getitem by name. Only fall back to a
+		// bare alias when typing (or the function) is not importable yet, e.g.
+		// Generic[...] subscripted during early interpreter bring-up; a real
+		// Python exception raised by the function must propagate unchanged.
+		if SysModulesGetter != nil {
+			if sysmod := SysModulesGetter(); sysmod != nil {
+				if typingMod, err := sysmod.GetItem(NewStr("typing")); err == nil && typingMod != nil {
+					if impl, err := GetAttr(typingMod, NewStr("_generic_class_getitem")); err == nil && impl != nil {
+						return Call(impl, NewTuple([]Object{cls, arg}), nil)
+					}
+				}
+			}
 		}
 		tp, ok := cls.(*Type)
 		if !ok {

@@ -52,23 +52,6 @@ func setUnionTypeCheck(args []objects.Object, _ map[string]objects.Object) (obje
 	return objects.None(), nil
 }
 
-// setGenericClassGetitem wires a Python callable as the hook for
-// Generic.__class_getitem__ so that string arguments go through
-// _type_convert -> _make_forward_ref -> eager SyntaxError validation.
-// typing.py calls this after defining _generic_class_getitem.
-//
-// CPython: Objects/typevarobject.c:2459 generic_class_getitem
-func setGenericClassGetitem(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("TypeError: _set_generic_class_getitem() takes exactly 1 argument (%d given)", len(args))
-	}
-	fn := args[0]
-	objects.GenericClassGetitemHook = func(cls objects.Object, arg objects.Object) (objects.Object, error) {
-		return objects.Call(fn, objects.NewTuple([]objects.Object{cls, arg}), nil)
-	}
-	return objects.None(), nil
-}
-
 // buildModule materializes the _typing module dict. Mirrors
 // _typing_exec.
 //
@@ -101,9 +84,6 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := dd.SetItem(objects.NewStr("_set_union_type_check"), objects.NewBuiltinFunction("_set_union_type_check", setUnionTypeCheck)); err != nil {
-		return nil, err
-	}
-	if err := dd.SetItem(objects.NewStr("_set_generic_class_getitem"), objects.NewBuiltinFunction("_set_generic_class_getitem", setGenericClassGetitem)); err != nil {
 		return nil, err
 	}
 	return m, nil
