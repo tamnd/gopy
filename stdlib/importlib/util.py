@@ -15,6 +15,7 @@ import os
 import sys
 import types
 
+from importlib._bootstrap import module_from_spec
 from importlib._bootstrap_external import (
     MAGIC_NUMBER,
     cache_from_source,
@@ -150,27 +151,6 @@ def _find_spec_from_path(name, path=None):
     if spec is None:
         raise ValueError(f'{name}.__spec__ is None')
     return spec
-
-
-def module_from_spec(spec):
-    """Create a new module based on spec and spec.loader.create_module.
-
-    CPython: Lib/importlib/_bootstrap.py:571 module_from_spec
-    """
-    import types
-    module = None
-    if hasattr(spec.loader, 'create_module'):
-        module = spec.loader.create_module(spec)
-    if module is None:
-        module = types.ModuleType(spec.name)
-    module.__loader__ = spec.loader
-    module.__spec__ = spec
-    module.__package__ = spec.name.rpartition('.')[0]
-    if spec.origin is not None:
-        module.__file__ = spec.origin
-    if spec.submodule_search_locations is not None:
-        module.__path__ = list(spec.submodule_search_locations)
-    return module
 
 
 def spec_from_loader(name, loader, *, origin=None, is_package=None):

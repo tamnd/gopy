@@ -766,6 +766,8 @@ func toBytes(o objects.Object) ([]byte, error) {
 	switch v := o.(type) {
 	case *objects.Bytes:
 		return v.Bytes(), nil
+	case *objects.ByteArray:
+		return v.Bytes(), nil
 	case *objects.Unicode:
 		s, err := objects.Str(o)
 		if err != nil {

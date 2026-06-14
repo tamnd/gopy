@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tamnd/gopy/marshal"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -139,13 +140,30 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		//
 		// CPython: Lib/importlib/_bootstrap_external.py:1236 _path_importer_cache
 		if !isDir(dir) {
-			if mod, handled, herr := tryPathHook(exec, entry, name); herr != nil {
+			spec, handled, herr := pathHookSpec(exec, entry, name)
+			if herr != nil {
 				return nil, herr
-			} else if handled {
-				bindOnParent(parent, tail, mod)
-				return mod, nil
 			}
-			continue
+			if !handled {
+				continue
+			}
+			// A namespace spec from the importer (loader None, search
+			// locations set) is a PEP 420 portion: collect it and keep
+			// scanning, exactly as CPython's PathFinder extends
+			// namespace_path instead of returning. A spec with a real
+			// loader is a concrete module, so load and return it.
+			//
+			// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+			if portions, isNS := namespacePortionsOf(spec); isNS {
+				namespacePortions = append(namespacePortions, portions...)
+				continue
+			}
+			mod, lerr := loadFromSpec(exec, name, spec)
+			if lerr != nil {
+				return nil, lerr
+			}
+			bindOnParent(parent, tail, mod)
+			return mod, nil
 		}
 		// Package case: <dir>/<tail>/__init__.py.
 		// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
@@ -159,11 +177,36 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			bindOnParent(parent, tail, mod)
 			return mod, nil
 		}
+		// Sourceless package: <dir>/<tail>/__init__.pyc. CPython's
+		// FileFinder walks its loader suffixes for __init__, so the
+		// bytecode loader is tried after the source loader.
+		// CPython: Lib/importlib/_bootstrap_external.py:1424 __init__ suffix loop
+		pkgInitPyc := filepath.Join(pkgDir, "__init__.pyc")
+		if isFile(pkgInitPyc) {
+			mod, err := loadAsPackageBytecode(exec, pkgInitPyc, pkgDir, name)
+			if err != nil {
+				return nil, err
+			}
+			bindOnParent(parent, tail, mod)
+			return mod, nil
+		}
 		// Module case: <dir>/<tail>.py.
 		// CPython: Lib/importlib/_bootstrap_external.py:1391 suffix loop
 		modFile := filepath.Join(dir, tail+".py")
 		if isFile(modFile) {
 			mod, err := loadAsModule(exec, p.Compiler, modFile, name, parent)
+			if err != nil {
+				return nil, err
+			}
+			bindOnParent(parent, tail, mod)
+			return mod, nil
+		}
+		// Sourceless module: <dir>/<tail>.pyc, loaded by the bytecode
+		// loader once the source suffix has missed.
+		// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
+		modPyc := filepath.Join(dir, tail+".pyc")
+		if isFile(modPyc) {
+			mod, err := loadAsModuleBytecode(exec, modPyc, name, parent)
 			if err != nil {
 				return nil, err
 			}
@@ -182,18 +225,19 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
 }
 
-// tryPathHook consults sys.path_hooks for a custom importer able to load
-// modules out of entry (zipimport.zipimporter for a .zip archive), asks
-// that importer for name's spec, and loads the module from it.
+// pathHookSpec consults sys.path_hooks for a custom importer able to load
+// modules out of entry (zipimport.zipimporter for a .zip archive) and asks
+// that importer for name's spec.
 //
-// handled is false when no hook claims entry, or when the importer
-// claims entry but has no spec for name, so FindModule keeps scanning the
-// remaining path entries. herr carries a real loader failure (compile or
-// exec error) that must propagate.
+// handled is false when no hook claims entry, or when the importer claims
+// entry but has no spec for name, so FindModule keeps scanning the
+// remaining path entries. herr carries a find_spec failure that must
+// propagate. The spec is returned unloaded so FindModule can tell a
+// concrete module apart from a PEP 420 namespace portion.
 //
 // CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
-// CPython: Lib/importlib/_bootstrap.py:921 _load_unlocked
-func tryPathHook(exec Executor, entry, name string) (mod *objects.Module, handled bool, herr error) {
+func pathHookSpec(exec Executor, entry, name string) (spec objects.Object, handled bool, herr error) {
+	_ = exec
 	importer, ok := pathHookImporter(entry)
 	if !ok {
 		return nil, false, nil
@@ -202,20 +246,49 @@ func tryPathHook(exec Executor, entry, name string) (mod *objects.Module, handle
 	if err != nil {
 		return nil, false, nil
 	}
-	spec, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+	s, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
 	if err != nil {
 		return nil, true, err
 	}
-	if spec == nil || objects.IsNone(spec) {
+	if s == nil || objects.IsNone(s) {
 		// The archive exists but does not contain name: a miss, not an
 		// error. CPython's PathFinder moves on to the next path entry.
 		return nil, false, nil
 	}
-	m, lerr := loadFromSpec(exec, name, spec)
-	if lerr != nil {
-		return nil, true, lerr
+	return s, true, nil
+}
+
+// namespacePortionsOf reports whether spec is a PEP 420 namespace spec
+// (loader None) and, if so, returns its submodule_search_locations as a
+// slice of strings. A spec with a real loader is a concrete module and
+// returns isNS false.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+// (spec.submodule_search_locations / namespace_path extension)
+func namespacePortionsOf(spec objects.Object) (portions []string, isNS bool) {
+	loader, err := objects.GetAttr(spec, objects.NewStr("loader"))
+	if err != nil || !objects.IsNone(loader) {
+		return nil, false
 	}
-	return m, true, nil
+	ssl, err := objects.GetAttr(spec, objects.NewStr("submodule_search_locations"))
+	if err != nil || ssl == nil || objects.IsNone(ssl) {
+		return nil, false
+	}
+	switch v := ssl.(type) {
+	case *objects.List:
+		for i := 0; i < v.Len(); i++ {
+			if s, ok := v.Item(i).(*objects.Unicode); ok {
+				portions = append(portions, s.Value())
+			}
+		}
+	case *objects.Tuple:
+		for i := 0; i < v.Len(); i++ {
+			if s, ok := v.Item(i).(*objects.Unicode); ok {
+				portions = append(portions, s.Value())
+			}
+		}
+	}
+	return portions, true
 }
 
 // pathHookImporter returns the importer object responsible for entry,
@@ -296,6 +369,18 @@ func loadFromSpec(exec Executor, name string, spec objects.Object) (*objects.Mod
 	if err != nil {
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadFromSpec %q: spec.loader: %w", name, err)
+	}
+	// A namespace-package spec carries loader None: module_from_spec has
+	// already populated __path__ from submodule_search_locations and there
+	// is no body to run, exactly as _load_unlocked skips exec_module when
+	// the loader is None.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:945 _load_unlocked (loader is None)
+	if objects.IsNone(loader) {
+		if final, ok := GetModule(name); ok {
+			return final, nil
+		}
+		return module, nil
 	}
 	execMod, err := objects.GetAttr(loader, objects.NewStr("exec_module"))
 	if err != nil {
@@ -438,6 +523,94 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		return final, nil
 	}
 	return mod, nil
+}
+
+// loadAsPackageBytecode is loadAsPackage for a sourceless package: the
+// code object comes from <pkgDir>/__init__.pyc instead of compiling
+// __init__.py. __path__ is set before the body runs so a package whose
+// __init__ does `from .submod import x` can resolve the parent's
+// __path__.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
+func loadAsPackageBytecode(exec Executor, initFile, pkgDir, name string) (*objects.Module, error) {
+	code, err := readPycCode(initFile)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: %w", name, err)
+	}
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	if err := d.SetItem(objects.NewStr("__file__"), objects.NewStr(initFile)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __file__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__path__"),
+		objects.NewList([]objects.Object{objects.NewStr(pkgDir)})); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __path__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__package__"), objects.NewStr(name)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __package__: %w", name, err)
+	}
+	AddModule(name, mod)
+	if _, err := exec.ExecCode(code, mod); err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w", name, err)
+	}
+	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return mod, nil
+}
+
+// loadAsModuleBytecode is loadAsModule for a sourceless module: the code
+// object comes from <dir>/<tail>.pyc instead of compiling <tail>.py.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
+func loadAsModuleBytecode(exec Executor, file, name, parent string) (*objects.Module, error) {
+	code, err := readPycCode(file)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: %w", name, err)
+	}
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	if err := d.SetItem(objects.NewStr("__file__"), objects.NewStr(file)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: __file__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__package__"), objects.NewStr(parent)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: __package__: %w", name, err)
+	}
+	AddModule(name, mod)
+	if _, err := exec.ExecCode(code, mod); err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w", name, err)
+	}
+	attachSpecAttrs(exec, mod, name, file, nil)
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return mod, nil
+}
+
+// readPycCode opens a .pyc file and returns its embedded code object,
+// validating the magic-number header along the way.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader.get_code
+func readPycCode(file string) (*objects.Code, error) {
+	f, err := os.Open(file) //nolint:gosec // file is filepath.Join of a trusted PathFinder.Paths entry.
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	code, _, err := marshal.ReadPyc(f)
+	if err != nil {
+		return nil, err
+	}
+	return code, nil
 }
 
 // loadAsNamespace builds a PEP 420 namespace package: a module with no

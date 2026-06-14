@@ -31,3 +31,10 @@ TECHNICAL_BRIEF.md
 /compare-baseline
 Tools/bytecodes_gen/bytecodes_gen
 /bytecodes_gen
+
+# test_zipimport scratch artifacts
+junk*.zip
+junk*/
+
+ziptestmodule
+ziptestmodule.py
