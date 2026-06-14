@@ -168,6 +168,14 @@ func Iter(o Object) (Object, error) {
 	//
 	// CPython: Objects/typeobject.c slot_tp_iter (analogous path)
 	if descr, _ := LookupDescriptor(tp, "__iter__"); descr != nil {
+		// __iter__ explicitly set to None blocks iteration without making the
+		// type duck-type compatible with Iterable. typing._NotIterable relies on
+		// this: iter() must raise "object is not iterable", not call None.
+		//
+		// CPython: Objects/typeobject.c slot_tp_iter (func == Py_None branch)
+		if descr == None() {
+			return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
+		}
 		iterFn, err := bindDescriptor(descr, o)
 		if err == nil && iterFn != nil {
 			return CallObject(iterFn, nil)

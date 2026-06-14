@@ -2074,11 +2074,28 @@ func slotTpHash(o Object) (int64, error) {
 	return v, nil
 }
 
-// slotTpIter dispatches to __iter__.
+// slotTpIter dispatches to __iter__. When __iter__ is explicitly set to None
+// (typing._NotIterable's trick to block iteration without becoming Iterable
+// duck-type compatible), it raises "object is not iterable" rather than trying
+// to call None.
 //
 // CPython: Objects/typeobject.c:8400 slot_tp_iter
 func slotTpIter(o Object) (Object, error) {
-	return slotDunderNoArg(o, "__iter__")
+	fn, unbound, err := lookupMaybeMethod(o, "__iter__")
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", o.Type().Name)
+	}
+	if fn == None() {
+		if !unbound {
+			Decref(fn)
+		}
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", o.Type().Name)
+	}
+	res, callErr := callUnboundNoArg(unbound, fn, o)
+	if !unbound {
+		Decref(fn)
+	}
+	return res, callErr
 }
 
 // slotTpIterNext dispatches to __next__.

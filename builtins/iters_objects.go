@@ -213,8 +213,15 @@ type reversedIter struct {
 var reversedIterType = objects.NewType("reversed", []*objects.Type{objects.ObjectType()})
 
 func init() {
-	reversedIterType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
+	// SelfIter hands back a new strong reference. GET_ITER closes (decrefs)
+	// the iterable slot it consumed, so returning self without the incref
+	// would drop a temporary reversed() straight to refcount zero, run its
+	// Dealloc, and clear the held sequence before FOR_ITER ever steps it.
+	// CPython: Objects/object.c:1548 PyObject_SelfIter
+	reversedIterType.Iter = objects.SelfIter
 	reversedIterType.IterNext = reversedIterNext
+	reversedIterType.Dealloc = reversedIterDealloc
+	reversedIterType.TpTraverse = reversedIterTraverse
 	objects.SetTypeDescr(reversedIterType, "__reduce__", objects.NewMethodDescrConv(reversedIterType, "__reduce__", objects.MethNoArgs, reversedIterReduce))
 	objects.SetTypeDescr(reversedIterType, "__setstate__", objects.NewMethodDescrConv(reversedIterType, "__setstate__", objects.MethO, reversedIterSetState))
 	objects.SetTypeDescr(reversedIterType, "__length_hint__", objects.NewMethodDescrConv(reversedIterType, "__length_hint__", objects.MethNoArgs, reversedIterLengthHint))
@@ -225,22 +232,57 @@ func init() {
 func reversedIterNext(o objects.Object) (objects.Object, error) {
 	it := o.(*reversedIter)
 	if it.idx < 0 || it.o == nil {
-		it.idx = -1
-		it.o = nil
+		reversedIterClear(it)
 		return nil, objects.ErrStopIteration
 	}
 	v, err := it.o.Type().Sequence.GetItem(it.o, it.idx)
 	if err != nil {
 		msg := err.Error()
 		if strings.HasPrefix(msg, "IndexError") || errors.Is(err, objects.ErrStopIteration) {
-			it.idx = -1
-			it.o = nil
+			reversedIterClear(it)
 			return nil, objects.ErrStopIteration
 		}
 		return nil, err
 	}
 	it.idx--
+	if it.idx < 0 {
+		// Exhausted: drop the sequence reference eagerly, matching
+		// reversed_next which clears it_seq once the index goes negative.
+		// CPython: Objects/enumobject.c:1135 reversed_next
+		reversedIterClear(it)
+	}
 	return v, nil
+}
+
+// reversedIterClear drops the held sequence reference and marks the iterator
+// spent. Safe to call repeatedly.
+func reversedIterClear(it *reversedIter) {
+	it.idx = -1
+	if it.o != nil {
+		objects.Decref(it.o)
+		it.o = nil
+	}
+}
+
+// reversedIterDealloc releases the held sequence when the iterator dies.
+//
+// CPython: Objects/enumobject.c:1078 reversed_dealloc
+func reversedIterDealloc(o objects.Object) {
+	if it, ok := o.(*reversedIter); ok {
+		reversedIterClear(it)
+	}
+}
+
+// reversedIterTraverse lets the cyclic collector trace through the held
+// sequence.
+//
+// CPython: Objects/enumobject.c:1089 reversed_traverse
+func reversedIterTraverse(o objects.Object, visit objects.Visitor) error {
+	it := o.(*reversedIter)
+	if it.o == nil {
+		return nil
+	}
+	return visit(it.o)
 }
 
 // CPython: Objects/enumobject.c:757 reversed_reduce
@@ -318,6 +360,12 @@ func reversedIterLengthHint(args []objects.Object, _ map[string]objects.Object) 
 }
 
 func newReversedIter(o objects.Object, n int) *reversedIter {
+	// The iterator owns a counted reference to the sequence so a freshly
+	// built temporary (cls.__mro__ or tuple(...) handed straight into
+	// reversed()) survives until the iterator is exhausted instead of being
+	// reaped once the reversed() call returns.
+	// CPython: Objects/enumobject.c:1099 reversed_new_impl (Py_INCREF(seq))
+	objects.Incref(o)
 	it := &reversedIter{o: o, idx: n - 1}
 	it.Init(reversedIterType)
 	return it
