@@ -868,7 +868,12 @@ func genericInitSubclass(args []Object, _ map[string]Object) (Object, error) {
 	if !ok {
 		return None(), nil
 	}
-	origBases, _ := GetAttr(cls, NewStr("__orig_bases__"))
+	// CPython gates parameter collection on `'__orig_bases__' in cls.__dict__`,
+	// not getattr: a plain subclass (class D(C)) without its own subscripted
+	// bases must reset __parameters__ to (), never inherit C's __orig_bases__.
+	//
+	// CPython: Lib/typing.py:1198 if '__orig_bases__' in cls.__dict__
+	origBases := TypeOwnDescrs(cls)["__orig_bases__"]
 	if origBases == nil {
 		SetTypingParameters(cls, NewTuple(nil))
 		return None(), nil
@@ -948,6 +953,26 @@ func joinStrings(ss []string, sep string) string {
 	return strings.Join(ss, sep)
 }
 
+// paramSpecAttrRichCompare compares two ParamSpecArgs (or two
+// ParamSpecKwargs) by their origins. Operands of different types yield
+// NotImplemented so Python falls back to identity.
+//
+// CPython: Objects/typevarobject.c paramspecargs_richcompare
+func paramSpecAttrRichCompare(a, b Object, op CompareOp) (Object, error) {
+	if op != CompareEQ && op != CompareNE {
+		return NotImplemented(), nil
+	}
+	aa, ok := a.(*ParamSpecAttr)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	bb, ok := b.(*ParamSpecAttr)
+	if !ok || a.Type() != b.Type() {
+		return NotImplemented(), nil
+	}
+	return RichCmp(aa.Origin, bb.Origin, op)
+}
+
 // ParamSpecAttr is the shared object behind ParamSpec.args / .kwargs.
 // CPython models both with a single paramspecattrobject carrying just
 // the back-pointer to the originating ParamSpec.
@@ -1024,6 +1049,15 @@ func init() {
 	SetTypeDescr(ParamSpecType, "kwargs", NewGetSetDescr("kwargs", func(o Object) (Object, error) {
 		return NewParamSpecKwargs(o), nil
 	}, nil))
+
+	// CPython compares ParamSpecArgs/Kwargs by delegating to their origins'
+	// richcompare, so PP.args == PP.args holds after a pickle round-trip.
+	// A mismatched type returns NotImplemented.
+	//
+	// CPython: Objects/typevarobject.c paramspecargs_richcompare,
+	// paramspeckwargs_richcompare
+	ParamSpecArgsType.RichCmp = paramSpecAttrRichCompare
+	ParamSpecKwargsType.RichCmp = paramSpecAttrRichCompare
 
 	ParamSpecArgsType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
 		if len(args) != 1 {
