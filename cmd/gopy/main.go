@@ -664,30 +664,6 @@ func runFile(path string, stdout, stderr *os.File) int {
 		return rc
 	}
 	prependSysPath0()
-	// TEMP DEBUG (revert): probe flat-module import on Windows after site +
-	// prependSysPath0, the exact state the gate script's `import io` sees.
-	{
-		probe := "import sys\n" +
-			"if sys.platform == 'win32':\n" +
-			" import nt\n" +
-			" sys.stderr.write('IMPDBG2 path=%r\\n' % (list(sys.path),))\n" +
-			" sys.stderr.write('IMPDBG2 cache=%r\\n' % (list(sys.path_importer_cache),))\n" +
-			" for _e in list(sys.path):\n" +
-			"  try: _c = nt.listdir(_e or '.')\n" +
-			"  except Exception as _x:\n" +
-			"   sys.stderr.write('IMPDBG2 listdir %r ERR %r\\n' % (_e, _x)); continue\n" +
-			"  sys.stderr.write('IMPDBG2 entry %r hasio=%r finder=%r\\n' % (_e, 'io.py' in _c, sys.path_importer_cache.get(_e)))\n" +
-			" from importlib.machinery import PathFinder as _PF\n" +
-			" sys.stderr.write('IMPDBG2 io spec=%r\\n' % (_PF.find_spec('io'),))\n" +
-			" try:\n" +
-			"  import io\n" +
-			"  sys.stderr.write('IMPDBG2 import io OK %r\\n' % (getattr(io,'__file__',None),))\n" +
-			" except Exception as _x:\n" +
-			"  import traceback; sys.stderr.write('IMPDBG2 import io FAIL %r\\n' % (_x,)); traceback.print_exc()\n"
-		if _, err := pythonrun.RunString(ts, probe, "<impdbg2>", parser.ModeFile, mainGlobals, nil); err != nil {
-			fmt.Fprintln(stderr, "IMPDBG2 probe error:", err)
-		}
-	}
 	// A vendored test runs under "test.<name>"; regrtest imports it as a
 	// normal module, so its __spec__ is a real ModuleSpec. Build the same
 	// file-location spec here so code that resolves the module by name and

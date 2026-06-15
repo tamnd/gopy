@@ -206,12 +206,18 @@ func osTimes(_ []objects.Object, _ map[string]objects.Object) (objects.Object, e
 }
 
 func init() {
-	_ = imp.AppendInittab("posix", buildPosixModule)
-	// On Windows, Lib/os.py does `from nt import *`; register the same
-	// syscall surface under the "nt" name so `import nt` resolves.
-	// CPython: Modules/posixmodule.c posixmodule_init (registers as "nt" on Windows)
+	// CPython compiles posixmodule.c under a single name per platform: "nt"
+	// on Windows, "posix" everywhere else (Modules/posixmodule.c builds with
+	// MODNAME = "nt" when MS_WINDOWS). Lib/os.py then selects ntpath vs
+	// posixpath by testing which name is in sys.builtin_module_names, so
+	// registering both on Windows makes os.py pick posixpath and mangle
+	// drive-absolute paths. Mirror CPython: one name, gated on the platform.
+	//
+	// CPython: Modules/posixmodule.c posixmodule_init (MODNAME "nt" on Windows)
 	if runtime.GOOS == "windows" {
 		_ = imp.AppendInittab("nt", buildPosixModule)
+	} else {
+		_ = imp.AppendInittab("posix", buildPosixModule)
 	}
 	_ = imp.AppendInittab("os.path", buildOSPath)
 	// posixpath and ntpath now load from stdlib/ via PathFinder.
@@ -228,7 +234,13 @@ func buildPosixModule() (*objects.Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	posix := objects.NewModule("posix")
+	// The compiled module is named "nt" on Windows, "posix" elsewhere,
+	// matching the single MODNAME CPython's posixmodule.c builds with.
+	modName := "posix"
+	if runtime.GOOS == "windows" {
+		modName = "nt"
+	}
+	posix := objects.NewModule(modName)
 	pd := posix.Dict()
 	md := m.Dict()
 	for _, k := range md.Keys() {
