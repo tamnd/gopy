@@ -610,12 +610,13 @@ func currentEvaluator(code *objects.Code, globals, locals, closure objects.Objec
 
 // currentImporter is the hook builtins.__import__ delegates to. It
 // reuses vmExecutor so the import can run frozen / built-in module
-// init code, then forwards to imp.ImportModuleLevel. fromlist is
-// accepted for signature parity; the existing IMPORT_NAME arm
-// likewise drops it pending fromlist-driven submodule discovery.
+// init code. fromlist is the raw object the caller passed, threaded
+// untouched into _handle_fromlist so a non-str entry raises the same
+// TypeError CPython raises and a custom iterable is iterated the same
+// way.
 //
 // CPython: Python/import.c:1561 PyImport_ImportModuleLevelObject
-func currentImporter(name, pkgname string, level int, fromlist []string) (objects.Object, error) {
+func currentImporter(name, pkgname string, level int, fromlist objects.Object, globals objects.Object) (objects.Object, error) {
 	ts := currentThread()
 	if ts == nil {
 		ts = state.NewThread()
@@ -631,25 +632,29 @@ func currentImporter(name, pkgname string, level int, fromlist []string) (object
 	}
 
 	// Prefer the live Python importlib, matching CPython where the builtin
-	// __import__ IS _frozen_importlib.__import__. It performs fromlist /
-	// dotted-head handling and registers in the shared sys.modules, so the
-	// manual logic below only runs during early bootstrap before
+	// __import__ IS PyImport_ImportModuleLevelObject. That C body resolves
+	// the name, drives _gcd_import / _find_and_load, and performs the
+	// fromlist / dotted-head selection itself. importModuleLevelObject ports
+	// it; the manual Go driver below only runs during early bootstrap before
 	// _bootstrap._install has wired the frozen importer.
 	//
 	// CPython: Python/bltinmodule.c:259 builtin___import___impl
-	var callerGlobals objects.Object
-	if topFrame != nil {
-		callerGlobals = topFrame.Globals
+	// CPython: Python/import.c:3798 PyImport_ImportModuleLevelObject
+	//
+	// The globals handed in must be the dict the caller passed to
+	// __import__, because resolve_name / _calc___package__ derives the
+	// relative-import anchor from it. A frame-globals fallback would anchor
+	// a bare __import__('', {'__package__': 'pkg'}, level=2) against the
+	// caller's own package; a missing globals must reach _calc___package__
+	// as None so it raises the same KeyError("'__name__' not in globals").
+	//
+	// CPython: Python/import.c:3576 resolve_name
+	// CPython: Lib/importlib/_bootstrap.py:1349 _calc___package__
+	callerGlobals := globals
+	if callerGlobals == nil {
+		callerGlobals = objects.None()
 	}
-	flItems := make([]objects.Object, len(fromlist))
-	for i, s := range fromlist {
-		flItems[i] = objects.NewStr(s)
-	}
-	fl := objects.None()
-	if len(flItems) > 0 {
-		fl = objects.NewTuple(flItems)
-	}
-	if mod, ok, derr := delegateImport(name, callerGlobals, objects.None(), fl, level); ok {
+	if mod, ok, derr := importModuleLevelObject(name, callerGlobals, fromlist, level); ok {
 		return mod, derr
 	}
 
@@ -676,12 +681,8 @@ func currentImporter(name, pkgname string, level int, fromlist []string) (object
 	// CPython: Python/bltinmodule.c:259 builtin___import___impl
 	// CPython: Lib/importlib/_bootstrap.py:1463 _handle_fromlist
 	e := &evalState{ts: ts, f: topFrame}
-	if len(fromlist) > 0 {
-		items := make([]objects.Object, len(fromlist))
-		for i, s := range fromlist {
-			items[i] = objects.NewStr(s)
-		}
-		if herr := e.handleFromlist(mod, objects.NewList(items), false); herr != nil {
+	if !isEmptyFromlist(fromlist) {
+		if herr := e.handleFromlist(mod, fromlist, false); herr != nil {
 			return nil, herr
 		}
 		return mod, nil

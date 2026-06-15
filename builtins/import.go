@@ -20,15 +20,22 @@ import (
 )
 
 // Importer resolves a module by name, with pkgname as the anchor for
-// relative imports and level as the dot-count. fromlist is empty for
-// `import a.b.c` and non-empty for `from a.b import c, d`. The hook
-// returns the resolved module along with the same chain CPython hands
-// back: when fromlist is empty the caller wants the top-level package,
-// when fromlist is non-empty the caller wants the deepest module so
+// relative imports and level as the dot-count. fromlist is the raw
+// object the caller passed (None for `import a.b.c`, a sequence for
+// `from a.b import c, d`); it is handed to _handle_fromlist unchanged,
+// so a non-str entry surfaces as the TypeError _handle_fromlist raises
+// rather than an early gopy-only rejection, and an arbitrary iterable
+// is iterated the same way CPython iterates it. globals is the dict the
+// caller handed to __import__ (or nil); the live importlib re-derives
+// the package anchor from it via _calc___package__, so it must be the
+// caller's explicit globals, not the running frame's. The hook returns
+// the resolved module along with the same chain CPython hands back:
+// when fromlist is empty the caller wants the top-level package, when
+// fromlist is non-empty the caller wants the deepest module so
 // IMPORT_FROM can grab attributes off it.
 //
 // CPython: Python/import.c:1561 PyImport_ImportModuleLevelObject
-type Importer func(name, pkgname string, level int, fromlist []string) (objects.Object, error)
+type Importer func(name, pkgname string, level int, fromlist objects.Object, globals objects.Object) (objects.Object, error)
 
 var currentImporter Importer
 
@@ -73,13 +80,13 @@ func Import(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 		}
 	}
 	pkgname := pkgnameFromGlobals(parsed.globals)
-	return currentImporter(parsed.name, pkgname, parsed.level, parsed.fromlist)
+	return currentImporter(parsed.name, pkgname, parsed.level, parsed.fromlist, parsed.globals)
 }
 
 type importArgs struct {
 	name     string
 	globals  objects.Object
-	fromlist []string
+	fromlist objects.Object
 	level    int
 }
 
@@ -130,9 +137,15 @@ func parseImportArgs(args []objects.Object, kwargs map[string]objects.Object) (i
 			return importArgs{}, fmt.Errorf("ValueError: level must be >= 0")
 		}
 	}
-	fromlist, err := fromlistArg(bound[3])
-	if err != nil {
-		return importArgs{}, err
+	// fromlist reaches the import machinery untouched. CPython's
+	// builtin___import___impl performs no type or element check; an empty
+	// tuple stands in for a missing argument, and _handle_fromlist raises
+	// the TypeError for any non-str entry or iterates a custom iterable.
+	//
+	// CPython: Python/bltinmodule.c:259 builtin___import___impl
+	fromlist := bound[3]
+	if fromlist == nil {
+		fromlist = objects.NewTuple(nil)
 	}
 	return importArgs{
 		name:     name,
@@ -140,42 +153,6 @@ func parseImportArgs(args []objects.Object, kwargs map[string]objects.Object) (i
 		fromlist: fromlist,
 		level:    level,
 	}, nil
-}
-
-// fromlistArg unpacks the fromlist argument into a flat []string.
-// None and missing both mean "empty"; a tuple or list is iterated; any
-// other type is a TypeError. The element check matches CPython's
-// import.c which rejects non-str entries before lookup.
-//
-// CPython: Python/import.c:1726 import_from
-func fromlistArg(o objects.Object) ([]string, error) {
-	if o == nil || objects.IsNone(o) {
-		return nil, nil
-	}
-	var raw []objects.Object
-	switch v := o.(type) {
-	case *objects.Tuple:
-		raw = make([]objects.Object, v.Len())
-		for i := range raw {
-			raw[i] = v.Item(i)
-		}
-	case *objects.List:
-		raw = make([]objects.Object, v.Len())
-		for i := range raw {
-			raw[i] = v.Item(i)
-		}
-	default:
-		return nil, fmt.Errorf("TypeError: fromlist must be a tuple or list")
-	}
-	out := make([]string, 0, len(raw))
-	for _, item := range raw {
-		s, err := stringArg(item, "fromlist item")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, nil
 }
 
 // stringArg coerces o to a Go string, raising TypeError when o isn't a
