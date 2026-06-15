@@ -40,7 +40,7 @@ runs all of the non-interpreter files green.
 | `test_pyclbr` | OK | `ModuleNotFoundError: pyclbr` |
 | `test_pkgimport` | (covered by `test_import/`) | no flat file |
 | `test_runpy` | OK | 3 ERROR |
-| `test_frozen` | OK | `ModuleNotFoundError: __hello__` (frozen module) |
+| `test_frozen` | OK | **OK (3/3)** — frozen test modules + override + `sys._stdlib_dir` shipped |
 | `test_zipimport` | OK | **OK (91 tests, 4 skipped)** |
 | `test_zipimport_support` | OK | needs vendored `test.test_doctest` (doctest) |
 | `test_zipapp` | OK | `ModuleNotFoundError: zipapp` |
@@ -105,7 +105,7 @@ CPython 3.14.5 (counts and `-v` lists).
 - [ ] P2: vendor `zipapp`
 - [x] `test_zipimport` green (91 tests): `func_getattro` incref + `config_get` port
 - [x] `test_module/` green (39 tests)
-- [ ] P3: frozen `__hello__` + frozen module table for `test_frozen`
+- [x] P3: frozen `__hello__`/`__phello__` + aliases, frozen override, `sys._stdlib_dir` — `test_frozen` green (3/3)
 - [ ] P4: `test_runpy` package-init exception path
 - [ ] P5: re-audit `test_import/`, `test_importlib/`, `test_module/`
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
