@@ -165,15 +165,20 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	// _override_frozen_modules_for_tests / _override_multi_interp_extensions_check:
-	// test.support.import_helper toggles these around test runs. gopy
-	// keeps them as no-ops returning a sentinel int matching CPython's
-	// previous-value convention.
+	// test.support.import_helper toggles these around test runs.
+	// _override_frozen_modules_for_tests records the override that
+	// use_frozen() consults (>0 on, <0 off, 0 default) and returns the
+	// previous value, matching the C impl.
 	//
 	// CPython: Python/import.c:5034 _imp__override_frozen_modules_for_tests_impl
 	// CPython: Python/import.c:5052 _imp__override_multi_interp_extensions_check_impl
 	if err := d.SetItem(objects.NewStr("_override_frozen_modules_for_tests"),
-		objects.NewBuiltinFunction("_override_frozen_modules_for_tests", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.None(), nil
+		objects.NewBuiltinFunction("_override_frozen_modules_for_tests", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			override, err := signedIntArg(args, "_override_frozen_modules_for_tests")
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewInt(int64(imp.SetFrozenOverride(override))), nil
 		})); err != nil {
 		return nil, err
 	}
@@ -199,6 +204,21 @@ func nameArg(fn string, args []objects.Object) (string, error) {
 	return u.Value(), nil
 }
 
+// signedIntArg pulls a single int positional out of args for the
+// override toggles, which take one C int. A missing argument defaults
+// to 0 (the "use default" override state).
+func signedIntArg(args []objects.Object, fn string) (int, error) {
+	if len(args) < 1 {
+		return 0, nil
+	}
+	v, ok := args[0].(*objects.Int)
+	if !ok {
+		return 0, fmt.Errorf("TypeError: %s() argument must be int, not '%T'", fn, args[0])
+	}
+	n, _ := v.Int64()
+	return int(n), nil
+}
+
 // isBuiltin implements _imp.is_builtin(name).
 //
 // CPython: Python/import.c:4720 _imp_is_builtin_impl
@@ -222,8 +242,11 @@ func isFrozen(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	if err != nil {
 		return nil, err
 	}
+	if !imp.UseFrozen() {
+		return objects.NewBool(false), nil
+	}
 	fm, ok := imp.FindFrozen(name)
-	return objects.NewBool(ok && fm.Code != nil), nil
+	return objects.NewBool(ok && fm.HasCode()), nil
 }
 
 // isFrozenPackage implements _imp.is_frozen_package(name).
@@ -235,7 +258,7 @@ func isFrozenPackage(args []objects.Object, _ map[string]objects.Object) (object
 		return nil, err
 	}
 	fm, ok := imp.FindFrozen(name)
-	if !ok || fm.Code == nil {
+	if !ok || !fm.HasCode() {
 		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
 	}
 	return objects.NewBool(fm.IsPackage), nil
@@ -253,14 +276,17 @@ func findFrozen(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if err != nil {
 		return nil, err
 	}
+	if !imp.UseFrozen() {
+		return objects.None(), nil
+	}
 	fm, ok := imp.FindFrozen(name)
-	if !ok || fm.Code == nil {
+	if !ok || !fm.HasCode() {
 		return objects.None(), nil
 	}
 	return objects.NewTuple([]objects.Object{
 		objects.None(),
 		objects.NewBool(fm.IsPackage),
-		objects.NewStr(name),
+		objects.NewStr(fm.Origin()),
 	}), nil
 }
 
@@ -286,10 +312,17 @@ func getFrozenObject(args []objects.Object, _ map[string]objects.Object) (object
 	}
 
 	fm, ok := imp.FindFrozen(name)
-	if !ok || fm.Code == nil {
+	if !ok || !fm.HasCode() {
 		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
 	}
-	return fm.Code, nil
+	code, err := fm.CodeObject()
+	if err != nil {
+		return nil, err
+	}
+	if code == nil {
+		return nil, fmt.Errorf("ImportError: No such frozen object named %s", name)
+	}
+	return code, nil
 }
 
 // unmarshalFrozenData ports unmarshal_frozen_code for the explicit-data

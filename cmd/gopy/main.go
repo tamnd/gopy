@@ -273,6 +273,14 @@ func installPathFinder(scriptPath string) {
 	}
 	if root := findStdlibRoot(); root != "" {
 		paths = append(paths, root)
+		// Expose the resolved stdlib root as sys._stdlib_dir so
+		// FrozenImporter._resolve_filename can compute __file__ and a
+		// frozen package's __path__ against the on-disk Lib copy, letting
+		// an unfrozen submodule (e.g. __phello__.spam from disk) be found
+		// when its parent was loaded frozen.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1108 _resolve_filename
+		sys.SetStdlibDir(root)
 		// Pin the resolved root into the environment so any subprocess
 		// this interpreter spawns through sys.executable bootstraps from
 		// the same stdlib, even when it runs in an unrelated cwd (e.g.
@@ -289,6 +297,12 @@ func installPathFinder(scriptPath string) {
 		Paths:    paths,
 		Compiler: gopyCompile,
 	})
+	// Frozen test modules (__hello__, __phello__ and friends) keep their
+	// source verbatim and compile lazily through the same compiler the
+	// path finder uses.
+	//
+	// CPython: Python/frozen.c _PyImport_FrozenModules
+	imp.FrozenCompiler = gopyCompile
 	sys.SetPath(paths)
 	// Wire the meta-path finder to consult the live sys.path so
 	// `sys.path.insert(0, x)` from user code is honored on the next

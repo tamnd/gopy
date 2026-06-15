@@ -88,6 +88,26 @@ func SetPath(path []string) {
 	}
 }
 
+// pendingStdlibDir records the stdlib root the next sys-module build
+// should expose as sys._stdlib_dir. FrozenImporter._resolve_filename
+// reads it to locate the on-disk copy of a frozen module. SetStdlibDir
+// also refreshes the live attribute when sys is already imported.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+var pendingStdlibDir string
+
+// SetStdlibDir records the stdlib root and exposes it as
+// sys._stdlib_dir, refreshing the live attribute when sys is already
+// imported.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+func SetStdlibDir(dir string) {
+	pendingStdlibDir = dir
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("_stdlib_dir"), objects.NewStr(dir))
+	}
+}
+
 // pendingSafePath records the safe_path flag supplied on the command
 // line (-P / -I / PYTHONSAFEPATH) before sys is built. buildModule
 // reads it when stamping sys.flags; SetSafePath also refreshes the live
@@ -362,6 +382,15 @@ func buildModule() (*objects.Module, error) {
 	}
 	if pendingBaseExecutable != "" {
 		if err := setStr(md, "_base_executable", pendingBaseExecutable); err != nil {
+			return nil, err
+		}
+	}
+	// sys._stdlib_dir lets FrozenImporter._resolve_filename find the
+	// on-disk copy of a frozen module.
+	//
+	// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+	if pendingStdlibDir != "" {
+		if err := setStr(md, "_stdlib_dir", pendingStdlibDir); err != nil {
 			return nil, err
 		}
 	}
