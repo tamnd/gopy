@@ -17,6 +17,7 @@ package sys
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 
@@ -53,6 +54,18 @@ func Init() (*objects.Dict, error) {
 	}
 	if err := setStr(d, "float_repr_style", "short"); err != nil {
 		return nil, err
+	}
+	// sys.winver is the Windows-only DLL version string (MS_DLL_ID, the
+	// major.minor "3.14"). site._get_path reads it to build the per-user
+	// site-packages path under os.name == 'nt', so the bootstrap needs it
+	// before site runs. CPython sets it only on Windows.
+	//
+	// CPython: Python/sysmodule.c:3869 SET_SYS_FROM_STRING("winver", PyWin_DLLVersionString)
+	if runtime.GOOS == "windows" {
+		winver := strconv.Itoa(build.PythonMajorVersion) + "." + strconv.Itoa(build.PythonMinorVersion)
+		if err := setStr(d, "winver", winver); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := setInt(d, "hexversion", hexVersion()); err != nil {
