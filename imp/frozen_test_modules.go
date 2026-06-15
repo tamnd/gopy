@@ -5,7 +5,7 @@
 // them through FrozenImporter.
 //
 // gopy keeps the source text (vendored verbatim from CPython's Lib/)
-// rather than a marshalled blob and compiles it lazily via
+// rather than a marshaled blob and compiles it lazily via
 // FrozenCompiler. The same modules are also vendored on disk under the
 // stdlib root so the "frozen disabled" code paths can load them through
 // the path finder, exactly as CPython ships Lib/__hello__.py alongside

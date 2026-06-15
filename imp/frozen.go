@@ -29,7 +29,7 @@ type FrozenModule struct {
 	Code *objects.Code
 	// Source is the canonical .py source for entries whose bytecode is
 	// produced lazily by FrozenCompiler rather than pre-embedded. This
-	// stands in for CPython's marshalled frozen blob: gopy stores the
+	// stands in for CPython's marshaled frozen blob: gopy stores the
 	// source text (vendored verbatim) and compiles it on first use.
 	Source string
 	// OrigName is the name find_frozen reports for the entry. Frozen
@@ -59,7 +59,7 @@ var FrozenCompiler func(src []byte, filename string) (*objects.Code, error)
 // CodeObject returns the entry's code object, compiling Source on first
 // use. It returns (nil, nil) for a pure placeholder (no Code, no
 // Source). The compiled result is cached so repeated imports reuse one
-// code object, matching CPython's single marshalled blob per entry.
+// code object, matching CPython's single marshaled blob per entry.
 func (m *FrozenModule) CodeObject() (*objects.Code, error) {
 	if m.Code != nil {
 		return m.Code, nil
