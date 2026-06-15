@@ -283,10 +283,15 @@ func findFrozen(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if !ok || !fm.HasCode() {
 		return objects.None(), nil
 	}
+	origname, isNone := fm.Origin()
+	var origObj objects.Object = objects.None()
+	if !isNone {
+		origObj = objects.NewStr(origname)
+	}
 	return objects.NewTuple([]objects.Object{
 		objects.None(),
 		objects.NewBool(fm.IsPackage),
-		objects.NewStr(fm.Origin()),
+		origObj,
 	}), nil
 }
 

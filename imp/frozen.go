@@ -39,6 +39,17 @@ type FrozenModule struct {
 	//
 	// CPython: Python/frozen.c _PyImport_FrozenAliases
 	OrigName string
+	// OrigNone marks an alias entry whose alias target is NULL, so
+	// find_frozen reports origname None (e.g. __hello_only__). It
+	// overrides OrigName/Name when reporting the origin.
+	//
+	// CPython: Python/frozen.c:123 aliases {"__hello_only__", NULL}
+	OrigNone bool
+	// Embedded marks a genuinely frozen entry that always yields a code
+	// object, even when Source is empty (e.g. the empty __phello__.ham
+	// package __init__). CPython freezes these as real, non-empty
+	// marshaled code; gopy compiles the (possibly empty) Source on demand.
+	Embedded bool
 	// IsPackage is true when the frozen module is a package (has __path__).
 	IsPackage bool
 
@@ -64,7 +75,7 @@ func (m *FrozenModule) CodeObject() (*objects.Code, error) {
 	if m.Code != nil {
 		return m.Code, nil
 	}
-	if m.Source == "" {
+	if m.Source == "" && !m.Embedded {
 		return nil, nil
 	}
 	m.compileMu.Lock()
@@ -85,16 +96,25 @@ func (m *FrozenModule) CodeObject() (*objects.Code, error) {
 // pre-embedded or compilable from Source. Placeholder entries (the
 // importlib bootstrap stubs, which gopy loads from disk) return false.
 func (m *FrozenModule) HasCode() bool {
-	return m.Code != nil || m.Source != ""
+	return m.Code != nil || m.Source != "" || m.Embedded
 }
 
-// Origin returns the name find_frozen reports for the entry: OrigName
-// when set, otherwise the entry's own Name.
-func (m *FrozenModule) Origin() string {
-	if m.OrigName != "" {
-		return m.OrigName
+// Origin returns the name find_frozen reports for the entry and whether
+// that origin is None. CPython seeds origname with the entry's own name,
+// then resolve_module_alias overrides it for alias entries (possibly to
+// NULL). _imp.find_frozen reports None when the resolved origname is
+// NULL or empty.
+//
+// CPython: Python/import.c:3052 find_frozen (origname seed + alias)
+// CPython: Python/import.c:4533 _imp_find_frozen_impl (NULL/empty -> None)
+func (m *FrozenModule) Origin() (string, bool) {
+	if m.OrigNone {
+		return "", true
 	}
-	return m.Name
+	if m.OrigName != "" {
+		return m.OrigName, false
+	}
+	return m.Name, false
 }
 
 var (
