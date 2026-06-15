@@ -29,8 +29,6 @@ import (
 //   - otherwise: the loop sets InstrPtr = next and continues.
 //
 // CPython: Python/ceval.c switch over op
-//
-//nolint:gocognit // mirrors CPython's ceval.c per-opcode dispatch; complexity is the surface, not algorithmic branching
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err error) {
 	// CPython: Python/ceval_macros.h:63 INSTRUCTION_STATS. Bumps the
 	// per-opcode counter + pair counter before any specializer / fast
@@ -38,61 +36,18 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err err
 	// INSTRUCTION_STATS(op) just before the TARGET label).
 	e.recordOpcode(op)
 	// Instrumentation routing: the common case (op is not an
-	// INSTRUMENTED_ variant) bails on a single [256]bool load. Only
-	// when op is one of the 21 INSTRUMENTED_ opcodes do we route
-	// through the LINE handler / PEP 669 callback fire / base-rewrite
-	// sequence. Pre-D1, monitor.IsInstrumented was called for every
-	// dispatch and burned ~6% of CPU on the tight bench just on the
-	// non-instrumented path.
+	// INSTRUMENTED_ variant) bails on a single [256]bool load inside
+	// applyInstrumentation. Only when op is one of the 21 INSTRUMENTED_
+	// opcodes do we route through the LINE handler / PEP 669 callback fire
+	// / base-rewrite / EXTENDED_ARG-prefix sequence.
 	//
 	// CPython: Python/ceval.c TARGET(INSTRUMENTED_*) labels are
 	// reached directly via the computed-goto table, so the
 	// non-instrumented path costs zero. Mirrored here by the
 	// instrumentedRewrite gate.
-	if instrumentedRewrite[op] {
-		if op == compile.INSTRUMENTED_LINE {
-			newOp, err := e.handleInstrumentedLine()
-			if err != nil {
-				return 0, err
-			}
-			op = newOp
-			if !instrumentedRewrite[op] {
-				goto afterInstrument
-			}
-		}
-		if err := e.fireInstrumented(op, oparg); err != nil {
-			return 0, err
-		}
-		op = instrumentedToBase[op]
-	}
-afterInstrument:
-	// EXTENDED_ARG never reaches dispatch from the straight-line fetch
-	// path (fetch consumes the prefix run and hands dispatch the trailing
-	// real opcode). It only lands here when the instrumented-line handler
-	// above resolved INSTRUMENTED_LINE back to an original EXTENDED_ARG:
-	// the line started on a prefixed instruction. Consume the prefix the
-	// way fetch would, then dispatch the real opcode with the accumulated
-	// arg. fetchExtended scans forward from the byte after the instrumented
-	// slot, so it reads the un-shadowed trailing opcodes.
-	//
-	// CPython: Python/ceval.c TARGET(EXTENDED_ARG)
-	if op == compile.EXTENDED_ARG {
-		realOp, realArg, ok := e.fetchExtended(e.f.InstrPtr, oparg)
-		if !ok {
-			return 0, opcodeNotImplemented(op)
-		}
-		op, oparg = realOp, realArg
-		// The trailing real opcode may itself be instrumented (the jump or
-		// call the prefix feeds is a monitored site), and the top
-		// instrumentation block already ran for the EXTENDED_ARG slot. Fire
-		// its event and rebase here, mirroring CPython dispatching from
-		// TARGET(EXTENDED_ARG) straight into TARGET(INSTRUMENTED_*).
-		if instrumentedRewrite[op] {
-			if err := e.fireInstrumented(op, oparg); err != nil {
-				return 0, err
-			}
-			op = instrumentedToBase[op]
-		}
+	op, oparg, err = e.applyInstrumentation(op, oparg)
+	if err != nil {
+		return 0, err
 	}
 	// Specializer routing: only Quickened code carries inline-cache
 	// counters and specialized variants; non-Quickened code (raw
@@ -173,6 +128,61 @@ afterInstrument:
 		return next, err
 	}
 	return 0, opcodeNotImplemented(op)
+}
+
+// applyInstrumentation runs the INSTRUMENTED_ routing for op (LINE handler,
+// PEP 669 callback fire, base rewrite) and then resolves any EXTENDED_ARG
+// prefix the rewrite exposed, returning the real opcode and accumulated arg the
+// generic dispatch body should run. The non-instrumented path is a single
+// [256]bool load plus the EXTENDED_ARG fast-out.
+//
+// CPython: Python/ceval.c TARGET(INSTRUMENTED_*)
+func (e *evalState) applyInstrumentation(op compile.Opcode, oparg uint32) (compile.Opcode, uint32, error) {
+	if instrumentedRewrite[op] {
+		if op == compile.INSTRUMENTED_LINE {
+			newOp, err := e.handleInstrumentedLine()
+			if err != nil {
+				return 0, 0, err
+			}
+			op = newOp
+			if !instrumentedRewrite[op] {
+				return e.resolveExtendedArgPrefix(op, oparg)
+			}
+		}
+		if err := e.fireInstrumented(op, oparg); err != nil {
+			return 0, 0, err
+		}
+		op = instrumentedToBase[op]
+	}
+	return e.resolveExtendedArgPrefix(op, oparg)
+}
+
+// resolveExtendedArgPrefix consumes an EXTENDED_ARG prefix that surfaced from
+// the instrumented-line handler (the line started on a prefixed instruction)
+// and returns the trailing real opcode and accumulated arg; for any other
+// opcode it is a pass-through. EXTENDED_ARG never reaches here from the
+// straight-line fetch path, which consumes the prefix run before dispatch. The
+// trailing opcode may itself be instrumented (the jump or call the prefix feeds
+// is a monitored site), and the instrumentation block already ran for the
+// EXTENDED_ARG slot, so its event is fired and rebased here. This mirrors
+// CPython dispatching from TARGET(EXTENDED_ARG) straight into TARGET(INSTRUMENTED_*).
+//
+// CPython: Python/ceval.c TARGET(EXTENDED_ARG)
+func (e *evalState) resolveExtendedArgPrefix(op compile.Opcode, oparg uint32) (compile.Opcode, uint32, error) {
+	if op != compile.EXTENDED_ARG {
+		return op, oparg, nil
+	}
+	realOp, realArg, ok := e.fetchExtended(e.f.InstrPtr, oparg)
+	if !ok {
+		return 0, 0, opcodeNotImplemented(compile.EXTENDED_ARG)
+	}
+	if instrumentedRewrite[realOp] {
+		if err := e.fireInstrumented(realOp, realArg); err != nil {
+			return 0, 0, err
+		}
+		realOp = instrumentedToBase[realOp]
+	}
+	return realOp, realArg, nil
 }
 
 // opcodeNotImplemented wraps ErrNotImplemented with the offending op.

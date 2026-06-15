@@ -332,97 +332,105 @@ func osPathSplitroot(args []objects.Object, _ map[string]objects.Object) (object
 	return objects.NewTuple([]objects.Object{objects.NewStr(root), objects.NewStr(rest)}), nil
 }
 
+const (
+	srSep   = '\\'
+	srAlt   = '/'
+	srColon = ':'
+)
+
+// srAt reads the slash-folded rune at index i (out-of-range yields 0), so the
+// structural tests run over the normp = p.replace('/', '\\') view.
+func srAt(r []rune, i int) rune {
+	if i < 0 || i >= len(r) {
+		return 0
+	}
+	if r[i] == srAlt {
+		return srSep
+	}
+	return r[i]
+}
+
+// srSlice returns string(r[a:b]) clamped to bounds, the Python p[a:b] slice.
+func srSlice(r []rune, a, b int) string {
+	if a < 0 {
+		a = 0
+	}
+	if b > len(r) {
+		b = len(r)
+	}
+	if a >= b {
+		return ""
+	}
+	return string(r[a:b])
+}
+
+// srFindSep is normp.find('\\', start) over the slash-folded view.
+func srFindSep(r []rune, start int) int {
+	for i := start; i < len(r); i++ {
+		if srAt(r, i) == srSep {
+			return i
+		}
+	}
+	return -1
+}
+
+// srHasUNCPrefix reports normp[:8].upper() == '\\\\?\\UNC\\'.
+func srHasUNCPrefix(r []rune) bool {
+	want := [8]rune{srSep, srSep, '?', srSep, 'U', 'N', 'C', srSep}
+	if len(r) < 8 {
+		return false
+	}
+	for i := 0; i < 8; i++ {
+		c := srAt(r, i)
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// srSplitUNC handles \\server\share or \\?\UNC\server\share roots.
+func srSplitUNC(p string, r []rune) (string, string) {
+	start := 2
+	if srHasUNCPrefix(r) {
+		start = 8
+	}
+	index := srFindSep(r, start)
+	if index == -1 {
+		return p, ""
+	}
+	index2 := srFindSep(r, index+1)
+	if index2 == -1 {
+		return p, ""
+	}
+	// drive=p[:index2], root=p[index2:index2+1], tail=p[index2+1:].
+	return srSlice(r, 0, index2+1), srSlice(r, index2+1, len(r))
+}
+
 // splitrootWindows is the ntpath.splitroot algorithm folded to the 2-tuple
 // (drive+root, tail) shape os._path_splitroot returns. It indexes by rune to
 // preserve Python str (code-point) slicing semantics.
 //
 // CPython: Lib/ntpath.py:172 splitroot
 func splitrootWindows(p string) (root, tail string) {
-	const (
-		sep   = '\\'
-		alt   = '/'
-		colon = ':'
-	)
 	r := []rune(p)
-	n := len(r)
-	// normp = p.replace('/', '\\'); only used for the structural tests.
-	at := func(i int) rune {
-		if i < 0 || i >= n {
-			return 0
-		}
-		c := r[i]
-		if c == alt {
-			return sep
-		}
-		return c
-	}
-	slice := func(a, b int) string {
-		if a < 0 {
-			a = 0
-		}
-		if b > n {
-			b = n
-		}
-		if a >= b {
-			return ""
-		}
-		return string(r[a:b])
-	}
-	// normp.find(sep, start) over the slash-folded view.
-	findSep := func(start int) int {
-		for i := start; i < n; i++ {
-			if at(i) == sep {
-				return i
-			}
-		}
-		return -1
-	}
-	uncPrefixUpper := func() bool {
-		// normp[:8].upper() == '\\\\?\\UNC\\'
-		want := []rune{sep, sep, '?', sep, 'U', 'N', 'C', sep}
-		if n < 8 {
-			return false
-		}
-		for i := 0; i < 8; i++ {
-			c := at(i)
-			if c >= 'a' && c <= 'z' {
-				c -= 'a' - 'A'
-			}
-			if c != want[i] {
-				return false
-			}
-		}
-		return true
-	}
-
 	switch {
-	case at(0) == sep:
-		if at(1) == sep {
-			// UNC or device drive, e.g. \\server\share or \\?\UNC\server\share.
-			start := 2
-			if uncPrefixUpper() {
-				start = 8
-			}
-			index := findSep(start)
-			if index == -1 {
-				return p, ""
-			}
-			index2 := findSep(index + 1)
-			if index2 == -1 {
-				return p, ""
-			}
-			// drive=p[:index2], root=p[index2:index2+1], tail=p[index2+1:].
-			return slice(0, index2+1), slice(index2+1, n)
+	case srAt(r, 0) == srSep:
+		if srAt(r, 1) == srSep {
+			return srSplitUNC(p, r)
 		}
 		// Relative path with root, e.g. \Windows: drive="", root=p[:1].
-		return slice(0, 1), slice(1, n)
-	case at(1) == colon:
-		if at(2) == sep {
+		return srSlice(r, 0, 1), srSlice(r, 1, len(r))
+	case srAt(r, 1) == srColon:
+		if srAt(r, 2) == srSep {
 			// Absolute drive-letter path, e.g. X:\Windows.
-			return slice(0, 3), slice(3, n)
+			return srSlice(r, 0, 3), srSlice(r, 3, len(r))
 		}
 		// Relative path with drive, e.g. X:Windows: drive=p[:2], root="".
-		return slice(0, 2), slice(2, n)
+		return srSlice(r, 0, 2), srSlice(r, 2, len(r))
 	default:
 		// Relative path, e.g. Windows.
 		return "", p
