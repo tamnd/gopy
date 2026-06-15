@@ -77,15 +77,15 @@ func osSymlink(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: symlink() requires src and dst")
 	}
-	src, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: symlink() src must be str")
+	src, err := pathStringArg(args[0], "symlink")
+	if err != nil {
+		return nil, err
 	}
-	dst, ok := args[1].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: symlink() dst must be str")
+	dst, err := pathStringArg(args[1], "symlink")
+	if err != nil {
+		return nil, err
 	}
-	if err := goos.Symlink(src.Value(), dst.Value()); err != nil {
+	if err := goos.Symlink(src, dst); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
@@ -98,11 +98,11 @@ func osReadlink(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: readlink() missing path")
 	}
-	path, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: readlink() path must be str")
+	path, err := pathStringArg(args[0], "readlink")
+	if err != nil {
+		return nil, err
 	}
-	target, err := goos.Readlink(path.Value())
+	target, err := goos.Readlink(path)
 	if err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
@@ -116,15 +116,15 @@ func osLink(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: link() requires src and dst")
 	}
-	src, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: link() src must be str")
+	src, err := pathStringArg(args[0], "link")
+	if err != nil {
+		return nil, err
 	}
-	dst, ok := args[1].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: link() dst must be str")
+	dst, err := pathStringArg(args[1], "link")
+	if err != nil {
+		return nil, err
 	}
-	if err := goos.Link(src.Value(), dst.Value()); err != nil {
+	if err := goos.Link(src, dst); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
