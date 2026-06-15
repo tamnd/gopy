@@ -155,5 +155,5 @@ const (
 	errEPIPE     = 32
 	errENOTEMPTY = 41
 	errEILSEQ    = 42
-	errETIMEDOUT = 110
+	errETIMEDOUT = 138
 )
