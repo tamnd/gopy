@@ -213,7 +213,15 @@ func rlockAcquire(r *rlockObject, args []objects.Object, kwargs map[string]objec
 	}
 
 	if timeoutSecs < 0 {
-		r.gate.Lock()
+		// Block indefinitely on the gate. Drop the GIL while parked so the
+		// owning thread can run far enough to release the gate; holding the
+		// GIL here would deadlock the owner (and any other Python thread)
+		// against this goroutine. lockAcquire does the same for non-reentrant
+		// locks.
+		//
+		// CPython: Modules/_threadmodule.c:1083 rlock_acquire releases the GIL
+		// (ACQUIRE_LOCK runs under Py_BEGIN_ALLOW_THREADS)
+		objects.AllowThreads(func() { r.gate.Lock() })
 		r.mu.Lock()
 		r.owner = me
 		r.count = 1
@@ -222,19 +230,27 @@ func rlockAcquire(r *rlockObject, args []objects.Object, kwargs map[string]objec
 	}
 
 	deadline := time.Now().Add(time.Duration(timeoutSecs * float64(time.Second)))
-	for {
-		if r.gate.TryLock() {
-			r.mu.Lock()
-			r.owner = me
-			r.count = 1
-			r.mu.Unlock()
-			return objects.True(), nil
+	acquired := false
+	objects.AllowThreads(func() {
+		for {
+			if r.gate.TryLock() {
+				acquired = true
+				return
+			}
+			if time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
 		}
-		if time.Now().After(deadline) {
-			return objects.False(), nil
-		}
-		time.Sleep(100 * time.Microsecond)
+	})
+	if acquired {
+		r.mu.Lock()
+		r.owner = me
+		r.count = 1
+		r.mu.Unlock()
+		return objects.True(), nil
 	}
+	return objects.False(), nil
 }
 
 // rlockRelease decrements the recursion counter; when it hits zero the

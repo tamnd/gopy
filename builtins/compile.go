@@ -109,7 +109,7 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 			return compileArgs{}, err
 		}
 	}
-	filename, err := stringArg(bound[1], "filename")
+	filename, err := compileFilenameArg(bound[1])
 	if err != nil {
 		return compileArgs{}, err
 	}
@@ -148,6 +148,30 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 		optimize:       optimize,
 		featureVersion: featureVersion,
 	}, nil
+}
+
+// compileFilenameArg decodes the filename argument. compile() runs it
+// through PyUnicode_FSDecoder, which accepts str, bytes, or any
+// os.PathLike (pathlib.Path) by invoking __fspath__. importlib's source
+// loaders pass a pathlib.Path here, so a bare str check is too strict.
+//
+// CPython: Python/bltinmodule.c builtin_compile (filename: object,
+//          PyUnicode_FSDecoder) and Objects/unicodeobject.c PyOS_FSPath
+func compileFilenameArg(o objects.Object) (string, error) {
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	if fspath, err := objects.GetAttr(o, objects.NewStr("__fspath__")); err == nil {
+		result, callErr := objects.CallNoArgs(fspath)
+		if callErr != nil {
+			return "", callErr
+		}
+		return compileFilenameArg(result)
+	}
+	return "", fmt.Errorf("TypeError: compile() filename must be str, bytes or os.PathLike, not %s", o.Type().Name)
 }
 
 // compileSourceArg accepts the first positional argument to compile().
