@@ -400,6 +400,32 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 		fmt.Fprintln(stderr, "preload encodings:", err)
 		return 1
 	}
+	// TEMP DEBUG (revert): probe flat-module import on Windows to capture why
+	// io/dis fail post-boot while packages like encodings load fine.
+	probe := "import sys\n" +
+		"if sys.platform == 'win32':\n" +
+		" import nt\n" +
+		" sys.stderr.write('IMPDBG path=%r\\n' % (list(sys.path),))\n" +
+		" sys.stderr.write('IMPDBG meta=%r\\n' % ([getattr(m,'__name__',m) for m in sys.meta_path],))\n" +
+		" sys.stderr.write('IMPDBG hooks=%r\\n' % (sys.path_hooks,))\n" +
+		" for _e in sys.path:\n" +
+		"  try: _c = nt.listdir(_e or '.')\n" +
+		"  except Exception as _x:\n" +
+		"   sys.stderr.write('IMPDBG listdir %r ERR %r\\n' % (_e, _x)); continue\n" +
+		"  if 'dis.py' in _c:\n" +
+		"   sys.stderr.write('IMPDBG found dis.py in %r; hasio=%r\\n' % (_e, 'io.py' in _c))\n" +
+		"   _ff = sys.path_importer_cache.get(_e)\n" +
+		"   sys.stderr.write('IMPDBG finder=%r cache=%r\\n' % (_ff, getattr(_ff,'_path_cache',None)))\n" +
+		"   from importlib.machinery import PathFinder as _PF\n" +
+		"   sys.stderr.write('IMPDBG dis spec=%r\\n' % (_PF.find_spec('dis'),))\n" +
+		" try:\n" +
+		"  import dis\n" +
+		"  sys.stderr.write('IMPDBG import dis OK %r\\n' % (getattr(dis,'__file__',None),))\n" +
+		" except Exception as _x:\n" +
+		"  import traceback; sys.stderr.write('IMPDBG import dis FAIL %r\\n' % (_x,)); traceback.print_exc()\n"
+	if _, err := pythonrun.RunString(ts, probe, "<impdbg>", parser.ModeFile, globals, nil); err != nil {
+		fmt.Fprintln(stderr, "IMPDBG probe error:", err)
+	}
 	return 0
 }
 
