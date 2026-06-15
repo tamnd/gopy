@@ -50,6 +50,7 @@ func buildModule() (*objects.Module, error) {
 		{"_is_main_interpreter", threadIsMainInterpreter},
 		{"stack_size", threadStackSize},
 		{"_count", threadCount},
+		{"_excepthook", threadExceptHook},
 	}
 	for _, e := range entries {
 		bf := objects.NewBuiltinFunction(e.name, e.fn)
@@ -94,6 +95,13 @@ func buildModule() (*objects.Module, error) {
 	}
 	// _local is the thread-local storage type; provide a minimal stub.
 	if err := d.SetItem(objects.NewStr("_local"), localType); err != nil {
+		return nil, err
+	}
+
+	// _ExceptHookArgs: struct-sequence threading.excepthook receives.
+	//
+	// CPython: Modules/_threadmodule.c:2710 PyStructSequence_NewType
+	if err := d.SetItem(objects.NewStr("_ExceptHookArgs"), exceptHookArgsType); err != nil {
 		return nil, err
 	}
 

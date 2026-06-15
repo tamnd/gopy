@@ -421,8 +421,27 @@ func fixCoFilename(args []objects.Object, _ map[string]objects.Object) (objects.
 	if !ok {
 		return nil, fmt.Errorf("TypeError: _fix_co_filename() argument 2 must be str, not '%T'", args[1])
 	}
-	code.Filename = path.Value()
+	updateCodeFilenames(code, code.Filename, path.Value())
 	return objects.None(), nil
+}
+
+// updateCodeFilenames rewrites co_filename to newname on co and on every
+// nested code object reachable through co_consts that still carries the
+// original oldname. A code compiled with a stale dfile (the .pyc records
+// it) gets re-stamped to the real source path on import, including the
+// code objects of the functions it defines.
+//
+// CPython: Python/import.c:4291 update_code_filenames
+func updateCodeFilenames(co *objects.Code, oldname, newname string) {
+	if co.Filename != oldname {
+		return
+	}
+	co.Filename = newname
+	for _, c := range co.Consts {
+		if nested, ok := c.(*objects.Code); ok {
+			updateCodeFilenames(nested, oldname, newname)
+		}
+	}
 }
 
 // sourceHash mirrors _imp.source_hash(key, source). It hashes the
