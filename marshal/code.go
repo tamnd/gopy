@@ -391,20 +391,29 @@ func boolCount(b bool) int {
 }
 
 // splitLocalsplusnames reconstructs varnames/cellvars/freevars from
-// the wire-format combined array.
+// the wire-format combined array. The three buckets are not disjoint:
+// an argument that is also closed over by a nested function carries
+// both CO_FAST_LOCAL and CO_FAST_CELL, and CPython lists it in both
+// co_varnames and co_cellvars. Routing it to cellvars only would drop
+// it from co_varnames and shift the argument-name slice the frame uses
+// to report keyword-only arguments. Match get_localsplus_names: select
+// each bucket by an independent bit test.
+//
+// CPython: Objects/codeobject.c:424 get_localsplus_names
 func splitLocalsplusnames(names []any, kinds []byte) (varnames []string, cellvars []string, freevars []string) {
 	for i, n := range names {
 		s, _ := n.(string)
 		if i >= len(kinds) {
 			break
 		}
-		switch {
-		case kinds[i]&coFastFree != 0:
-			freevars = append(freevars, s)
-		case kinds[i]&coFastCell != 0:
-			cellvars = append(cellvars, s)
-		default:
+		if kinds[i]&coFastLocal != 0 {
 			varnames = append(varnames, s)
+		}
+		if kinds[i]&coFastCell != 0 {
+			cellvars = append(cellvars, s)
+		}
+		if kinds[i]&coFastFree != 0 {
+			freevars = append(freevars, s)
 		}
 	}
 	return varnames, cellvars, freevars

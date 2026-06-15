@@ -16,6 +16,7 @@
 package sys
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 
@@ -126,6 +127,34 @@ func Init() (*objects.Dict, error) {
 	// CPython: Python/sysmodule.c sys_getdefaultencoding_impl
 	if err := setItem(d, "getdefaultencoding", objects.NewBuiltinFunction("getdefaultencoding", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.NewStr("utf-8"), nil
+	})); err != nil {
+		return nil, err
+	}
+
+	// Private helper that strips the __dict__ and __weakref__ descriptors
+	// from a mutable type's dict and refreshes its caches. dataclasses
+	// calls it in _add_slots before rebuilding the class with __slots__,
+	// so the original (descriptor-bearing) class can be garbage collected
+	// (gh-135228). Immutable types are rejected.
+	//
+	// CPython: Python/sysmodule.c:2658 sys__clear_type_descriptors_impl
+	if err := setItem(d, "_clear_type_descriptors", objects.NewBuiltinFunction("_clear_type_descriptors", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: _clear_type_descriptors() takes exactly one argument (%d given)", len(args))
+		}
+		t, ok := args[0].(*objects.Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: _clear_type_descriptors() argument 1 must be type, not %s", args[0].Type().Name)
+		}
+		if t.TpFlags&objects.TpFlagImmutable != 0 {
+			return nil, fmt.Errorf("TypeError: argument is immutable")
+		}
+		objects.DelTypeDescr(t, "__dict__")
+		objects.DelTypeDescr(t, "__weakref__")
+		// Fire PyType_Modified unconditionally, matching CPython which
+		// calls it after the pops even when neither descriptor was present.
+		t.InvalidateVersionTag()
+		return objects.None(), nil
 	})); err != nil {
 		return nil, err
 	}
@@ -302,31 +331,19 @@ func implementation() *objects.Namespace {
 	return n
 }
 
-// notStaticallyLinked lists modules that gopy keeps in its inittab as a
-// Go-side import shortcut but that CPython ships as pure-Python stdlib
-// (.py files on sys.path), so they never appear in CPython's
-// PyImport_Inittab. They are filtered out of builtin_module_names so
-// that, e.g., 'os' in sys.builtin_module_names stays False as on a
-// normal CPython build.
-var notStaticallyLinked = map[string]bool{
-	"os":          true,
-	"warnings":    true,
-	"dataclasses": true,
-	"difflib":     true,
-	"fnmatch":     true,
-}
-
 // builtinModuleNames returns the sorted tuple of module names compiled
 // into the interpreter. CPython builds this directly from
 // PyImport_Inittab; gopy statically links every extension module into
 // the binary, so the table is the inittab snapshot minus the handful of
-// pure-Python modules gopy registers there only as an import shortcut.
+// pure-Python modules gopy registers there only as an import shortcut
+// (imp.ShadowedByStdlib), keeping this list in lockstep with
+// _imp.is_builtin.
 //
 // CPython: Python/sysmodule.c:3859 list_builtin_module_names
 func builtinModuleNames() *objects.Tuple {
 	names := make([]string, 0, 64)
 	for _, e := range imp.InittabSnapshot() {
-		if notStaticallyLinked[e.Name] {
+		if imp.ShadowedByStdlib(e.Name) {
 			continue
 		}
 		names = append(names, e.Name)

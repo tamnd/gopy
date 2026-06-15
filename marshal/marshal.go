@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"unsafe"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -330,6 +331,14 @@ func (e *encoder) write(v any) error {
 		}
 		return e.writeByte(typeFalse)
 	}
+	// The Ellipsis singleton (the `...` const) is short-circuited before
+	// the FLAG_REF memo, exactly like None / True / False. gopy spells the
+	// const as ast.EllipsisType; the runtime ellipsis object maps here too.
+	//
+	// CPython: Python/marshal.c:476 w_object (v == Py_Ellipsis)
+	if isEllipsisValue(v) {
+		return e.writeByte(typeEllipsis)
+	}
 
 	e.depth++
 	defer func() { e.depth-- }()
@@ -632,6 +641,13 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 		return true, nil
 	case typeFalse:
 		return false, nil
+	case typeEllipsis:
+		// Decode to ast.EllipsisType, the same `...` const the compiler
+		// emits, so a marshalled-then-loaded code object round-trips
+		// identically to a freshly compiled one.
+		//
+		// CPython: Python/marshal.c r_object TYPE_ELLIPSIS
+		return ast.Ellipsis, nil
 	case typeInt:
 		v, err := d.readInt32()
 		return int64(v), err
@@ -835,10 +851,29 @@ func toObject(v any) (objects.Object, error) {
 		return objects.NewFloat(x), nil
 	case string:
 		return objects.NewStr(x), nil
+	case ast.EllipsisType:
+		return objects.Ellipsis(), nil
 	case objects.Object:
 		return x, nil
 	}
 	return nil, fmt.Errorf("marshal: cannot convert %T to Object", v)
+}
+
+// isEllipsisValue reports whether v is the marshalable Ellipsis const,
+// in either of the two spellings gopy uses: the compiler emits the
+// ast.EllipsisType node for a `...` literal, while a code object built
+// at runtime (e.g. via code.replace) may carry the runtime ellipsis
+// singleton instead. Both serialize to TYPE_ELLIPSIS.
+//
+// CPython: Python/marshal.c:476 w_object (v == Py_Ellipsis)
+func isEllipsisValue(v any) bool {
+	if _, ok := v.(ast.EllipsisType); ok {
+		return true
+	}
+	if obj, ok := v.(objects.Object); ok {
+		return obj == objects.Ellipsis()
+	}
+	return false
 }
 
 // fromObject converts an objects.Object back to a plain Go marshal

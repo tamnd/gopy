@@ -201,6 +201,29 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		pkgname := globalName(e.f.Globals)
 
+		// Route through the live Python importlib the way CPython's
+		// import_name calls the builtin __import__ (=
+		// _frozen_importlib.__import__). _bootstrap.__import__ runs
+		// _find_and_load / _handle_fromlist and returns the head of a dotted
+		// name for an empty fromlist, so the module pushed here is already
+		// the one CPython would push. Delegating keeps a single import path
+		// so a patched loader.exec_module fires and the traceback carries the
+		// <frozen importlib ...> frames. Only when the bootstrap is not yet
+		// installed (early startup) does the Go driver below run.
+		//
+		// CPython: Python/ceval.c:2898 import_name
+		dlocals := e.f.Locals
+		if dlocals == nil {
+			dlocals = e.f.Globals
+		}
+		if mod, ok, derr := delegateImport(modname, orNone(e.f.Globals), orNone(dlocals), orNone(fromlistObj), level); ok {
+			if derr != nil {
+				return 0, true, derr
+			}
+			e.pushObject(mod)
+			return e.advance(), true, nil
+		}
+
 		exec := &vmExecutor{ts: e.ts, builtins: builtinsNS}
 		mod, ierr := imp.ImportModuleLevelObject(exec, modname, pkgname, level)
 		if ierr != nil {

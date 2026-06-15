@@ -629,6 +629,30 @@ func currentImporter(name, pkgname string, level int, fromlist []string) (object
 	if topFrame != nil {
 		b = callerBuiltins(topFrame)
 	}
+
+	// Prefer the live Python importlib, matching CPython where the builtin
+	// __import__ IS _frozen_importlib.__import__. It performs fromlist /
+	// dotted-head handling and registers in the shared sys.modules, so the
+	// manual logic below only runs during early bootstrap before
+	// _bootstrap._install has wired the frozen importer.
+	//
+	// CPython: Python/bltinmodule.c:259 builtin___import___impl
+	var callerGlobals objects.Object
+	if topFrame != nil {
+		callerGlobals = topFrame.Globals
+	}
+	flItems := make([]objects.Object, len(fromlist))
+	for i, s := range fromlist {
+		flItems[i] = objects.NewStr(s)
+	}
+	var fl objects.Object = objects.None()
+	if len(flItems) > 0 {
+		fl = objects.NewTuple(flItems)
+	}
+	if mod, ok, derr := delegateImport(name, callerGlobals, objects.None(), fl, level); ok {
+		return mod, derr
+	}
+
 	exec := &vmExecutor{ts: ts, builtins: b}
 	mod, err := imp.ImportModuleLevel(exec, name, pkgname, level)
 	if err != nil {

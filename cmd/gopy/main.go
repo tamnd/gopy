@@ -371,7 +371,27 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 		" import zipimport\n" +
 		" sys.path_hooks.insert(0, zipimport.zipimporter)\n" +
 		"except ImportError:\n" +
-		" pass\n"
+		" pass\n" +
+		// CPython freezes importlib._bootstrap[_external] and the importlib
+		// package, so _setup gives them a __spec__ via the frozen loader
+		// before any user import runs. gopy loads these as plain .py files
+		// through the Go-side driver during this bootstrap, before the
+		// machinery is live, so they reach sys.modules without __spec__.
+		// Rebuild a SourceFileLoader spec for every still-spec-less module
+		// that carries a __file__ (importlib, importlib._bootstrap,
+		// _bootstrap_external, importlib.util), matching the spec PathFinder
+		// would have produced. Without __spec__ on the importlib package,
+		// `import importlib.util` raises AttributeError at _bootstrap.py:1325.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1517 _setup (spec fix-up loop)
+		"for _n in list(sys.modules):\n" +
+		" _m = sys.modules[_n]\n" +
+		" if getattr(_m, '__spec__', None) is None and getattr(_m, '__file__', None):\n" +
+		"  try:\n" +
+		"   _sp = _bootstrap_external.spec_from_file_location(_n, _m.__file__)\n" +
+		"   _bootstrap._init_module_attrs(_sp, _m, override=True)\n" +
+		"  except Exception:\n" +
+		"   pass\n"
 	if _, err := pythonrun.RunString(ts, install, "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
 		fmt.Fprintln(stderr, "preload importlib:", err)
 		return 1

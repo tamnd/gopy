@@ -6,10 +6,23 @@ package objects
 // 32-bit version on first call. Returns 0 when the global counter
 // has wrapped (the specializer treats this as "give up").
 //
-// CPython: Python/typeobject.c:L312 _PyType_AssignVersionTag
+// To respect the invariant that a type carries a valid version tag
+// only when every one of its bases does, the tag is first assigned to
+// all super classes. If any base cannot be assigned one (counter
+// wrapped), this type gives up too. The invariant is what lets
+// InvalidateVersionTag early-return on a zero tag: a base with tag 0
+// can have no subclass holding a live tag, so there is nothing cached
+// to clear.
+//
+// CPython: Objects/typeobject.c:1344 assign_version_tag
 func (t *Type) VersionTag() uint32 {
 	if t.versionTag != 0 {
 		return t.versionTag
+	}
+	for _, b := range t.Bases {
+		if b != nil && b.VersionTag() == 0 {
+			return 0
+		}
 	}
 	v := allocTypeVersionTag()
 	if v == 0 {

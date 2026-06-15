@@ -207,7 +207,7 @@ func isBuiltin(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if err != nil {
 		return nil, err
 	}
-	if imp.FindInitFunc(name) != nil {
+	if imp.IsBuiltinName(name) {
 		return objects.NewInt(1), nil
 	}
 	return objects.NewInt(0), nil
