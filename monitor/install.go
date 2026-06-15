@@ -62,8 +62,7 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 	}
 
 	for instr := 0; instr < len(data.Tools); {
-		op := compile.Opcode(byteAt(code.Code, instr))
-		base := DeInstrument(specialize.Deopt(op))
+		base := GetBaseCodeUnit(code, instr)
 		if !OpcodeHasEvent(base) {
 			instr += 1 + cacheCount(base, code)
 			continue

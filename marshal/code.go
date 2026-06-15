@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/specialize"
 )
@@ -68,16 +69,20 @@ func marshalCode(enc *encoder, c *objects.Code, flag byte) error {
 		}
 	}
 	// Mirror CPython's _PyCode_GetCode pre-write deopt: walk every
-	// codeunit and rewrite specialized opcodes back to their adaptive
-	// parent, then zero each trailing cache cell. Without this step a
-	// .pyc would carry whatever specialization state the in-memory Code
-	// happened to warm by marshal time, which is non-deterministic
-	// across runs and breaks byte-equality with the cpython oracle.
+	// codeunit and recover the base opcode, rewriting specialized
+	// opcodes back to their adaptive parent AND stripping the
+	// INSTRUMENTED_<X> markers (and the INSTRUMENTED_LINE side table)
+	// that sys.settrace / sys.monitoring leave in the live bytecode,
+	// then zero each trailing cache cell. Without this a .pyc would
+	// carry whatever specialization or monitoring state the in-memory
+	// Code happened to warm by marshal time: non-deterministic across
+	// runs, and on reload an INSTRUMENTED_LINE with no monitoring data
+	// behind it would dispatch a NOP in place of the real opcode.
 	// specialize.Enable on unmarshalCode re-runs Quicken so adaptive
 	// counters get reseeded on load.
 	//
 	// CPython: Objects/codeobject.c:2310 _PyCode_GetCode (deopts before write)
-	if err := enc.writeCachedBytes(specialize.DeoptCode(c.Code), true); err != nil {
+	if err := enc.writeCachedBytes(monitor.BaseCode(c), true); err != nil {
 		return err
 	}
 	consts := make([]any, len(c.Consts))
@@ -169,7 +174,16 @@ func unmarshalCode(d *decoder) (*objects.Code, error) {
 	if !ok {
 		return nil, fmt.Errorf("marshal: code.code expected bytes, got %T", codeObj)
 	}
-	c.Code = code
+	// PyCode_New copies co_code into the per-code co_code_adaptive
+	// buffer that specialization and instrumentation mutate in place;
+	// the immutable co_code bytes object is never touched. gopy keeps
+	// one slice for both roles, so it must own a private copy here.
+	// Otherwise marshal's reference table, which dedups byte-identical
+	// co_code across sibling functions, hands two code objects the same
+	// backing array and an in-place rewrite on one corrupts the other.
+	//
+	// CPython: Objects/codeobject.c:117 _PyCode_New (co_code_adaptive copy)
+	c.Code = append([]byte(nil), code...)
 
 	// consts tuple
 	constsObj, err := d.read()
