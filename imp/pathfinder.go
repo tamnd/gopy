@@ -634,6 +634,9 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
+	// Executing this package may have completed importlib's self-bootstrap,
+	// which unblocks the deferred spec queue (see maybeFlushPendingSpecs).
+	maybeFlushPendingSpecs(exec)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so an `__init__.py` that reassigns its own entry
 	// (rare for packages, but the same shape as decimal/_pydecimal).
@@ -811,6 +814,9 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
+	// A freshly executed importlib submodule may have completed the package
+	// bootstrap; drain any specs deferred while it was incomplete.
+	maybeFlushPendingSpecs(exec)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so a module body that reassigns its own entry
 	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
@@ -963,6 +969,24 @@ var (
 	pendingSpecs []pendingSpec
 )
 
+// maybeFlushPendingSpecs drains the deferred-spec queue if anything is
+// queued and importlib.util has become usable. Modules whose specs were
+// deferred during importlib's bootstrap (importlib itself, _bootstrap,
+// _bootstrap_external) are picked up here the moment the package finishes
+// initializing, so a follow-up `import importlib.abc` finds a __spec__ on
+// its parent package.
+func maybeFlushPendingSpecs(exec Executor) {
+	pendingMu.Lock()
+	n := len(pendingSpecs)
+	pendingMu.Unlock()
+	if n == 0 {
+		return
+	}
+	if util, ok := ensureImportlibUtil(exec); ok {
+		flushPendingSpecs(util)
+	}
+}
+
 // flushPendingSpecs drains the deferred-spec queue, building each
 // module's spec now that importlib.util is available.
 func flushPendingSpecs(util *objects.Module) {
@@ -1080,9 +1104,31 @@ func ensureImportlibUtil(exec Executor) (*objects.Module, bool) {
 		// lookup sees the module without spec_from_file_location yet.
 		// Treat that partial state as "not ready" so the caller defers
 		// rather than flushing the pending queue against a stub.
-		if _, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location")); err == nil {
-			return util, true
+		if _, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location")); err != nil {
+			return nil, false
 		}
+		// spec_from_file_location dereferences importlib._bootstrap_external's
+		// module-global `_bootstrap` (wired by _set_bootstrap_module). A fresh
+		// importlib re-import (test.support.import_helper.import_fresh_module)
+		// can leave util importable while that global is still None, so verify
+		// the builder is wired before reporting util ready.
+		if !specBuilderReady() {
+			return nil, false
+		}
+		return util, true
+	}
+	// Until importlib's package bootstrap finishes, importing importlib.util
+	// would pull in a fresh importlib._bootstrap_external whose module-global
+	// `_bootstrap` is still None (it is wired by _set_bootstrap_module at
+	// importlib/__init__.py:37). spec_from_file_location dereferences that
+	// global at _bootstrap_external.py:596, so building a spec mid-bootstrap
+	// crashes. Defer: the module loads without a spec now and the pending
+	// queue is flushed once importlib is fully initialized. This mirrors
+	// importlib's own rule ("Until bootstrapping is complete, DO NOT import
+	// any modules that attempt to import importlib._bootstrap").
+	//
+	// CPython: Lib/importlib/__init__.py:6 (bootstrap-complete guard)
+	if !importlibBootstrapComplete() {
 		return nil, false
 	}
 	specBootstrapMu.Lock()
@@ -1100,6 +1146,42 @@ func ensureImportlibUtil(exec Executor) (*objects.Module, bool) {
 		return nil, false
 	}
 	return util, true
+}
+
+// importlibBootstrapComplete reports whether the importlib package has
+// finished its self-bootstrap. importlib/__init__.py defines import_module
+// only after wiring _bootstrap / _bootstrap_external (lines 16-48), so the
+// presence of that attribute is a reliable "bootstrap done" sentinel. When
+// importlib is not loaded at all (very early startup), report complete so the
+// legacy lazy-import path is preserved.
+//
+// CPython: Lib/importlib/__init__.py:71 def import_module
+func importlibBootstrapComplete() bool {
+	mod, ok := GetModule("importlib")
+	if !ok {
+		return true
+	}
+	_, err := mod.Dict().GetItem(objects.NewStr("import_module"))
+	return err == nil
+}
+
+// specBuilderReady reports whether importlib._bootstrap_external is wired to
+// importlib._bootstrap. spec_from_file_location dereferences the module-global
+// `_bootstrap` (set by _set_bootstrap_module), so a fresh re-import that has
+// not run that wiring yet must not be asked to build a spec.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1552 _set_bootstrap_module
+func specBuilderReady() bool {
+	be, ok := GetModule("importlib._bootstrap_external")
+	if !ok {
+		// Not yet loaded: util will pull it in wired, so treat as ready.
+		return true
+	}
+	v, err := be.Dict().GetItem(objects.NewStr("_bootstrap"))
+	if err != nil || v == nil {
+		return false
+	}
+	return !objects.IsNone(v)
 }
 
 // isFile reports whether path exists and is a regular file. It is the

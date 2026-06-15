@@ -48,6 +48,20 @@ func SetModuleNotFound(ts *state.Thread, name string) {
 	Raise(ts, exc)
 }
 
+// SetModuleNotFoundHalted raises ModuleNotFoundError(f'import of {name}
+// halted; None in sys.modules', name=name), the exact exception CPython's
+// _bootstrap._find_and_load produces when sys.modules[name] is None. The
+// `name` member is what importlib/abc.py reads to recognize a blocked
+// _frozen_importlib import.
+//
+// CPython: Lib/importlib/_bootstrap.py:1387 _find_and_load (None sentinel)
+func SetModuleNotFoundHalted(ts *state.Thread, name string) {
+	msg := "import of " + name + " halted; None in sys.modules"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	Raise(ts, exc)
+}
+
 // SetImportErrorWithNameFrom raises ImportError(msg, name=modName,
 // path=origin, name_from=nameFrom), stamping the three members the
 // IMPORT_FROM diagnostic promises so a caught exception exposes

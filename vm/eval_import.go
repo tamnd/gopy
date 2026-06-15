@@ -247,7 +247,13 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 			//
 			// CPython: Python/import.c:1759 import_name only sets the error
 			// when PyImport_ImportModuleLevelObject returns NULL without one.
-			if errors.Is(ierr, imp.ErrModuleNotFound) && !errors.Is(ierr, imp.ErrModuleExecFailed) {
+			if errors.Is(ierr, imp.ErrBlockedNone) {
+				// sys.modules[name] is None: raise the halted ModuleNotFoundError
+				// with name set, so `except ImportError as exc: exc.name` works.
+				// A blocked sentinel is always an absolute name (level 0), so
+				// modname is already the resolved key in sys.modules.
+				pyerrors.SetModuleNotFoundHalted(e.ts, modname)
+			} else if errors.Is(ierr, imp.ErrModuleNotFound) && !errors.Is(ierr, imp.ErrModuleExecFailed) {
 				pyerrors.SetModuleNotFound(e.ts, modname)
 			}
 			return 0, true, ierr

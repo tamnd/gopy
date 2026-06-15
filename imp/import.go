@@ -18,6 +18,17 @@ import (
 // ErrModuleNotFound is returned when no finder can locate the named module.
 var ErrModuleNotFound = fmt.Errorf("imp: ModuleNotFoundError")
 
+// ErrBlockedNone tags the case where sys.modules[name] is None, the
+// sentinel test.support.import_helper.import_fresh_module installs to block
+// a module. CPython's _bootstrap raises ModuleNotFoundError(f'import of
+// {name} halted; None in sys.modules', name=name); the `name` member is what
+// importlib/abc.py inspects (`except ImportError as exc: if exc.name != ...`),
+// so the VM must synthesize a typed error carrying it rather than a bare
+// ImportError. It wraps ErrModuleNotFound so existing not-found checks match.
+//
+// CPython: Lib/importlib/_bootstrap.py:1387 _find_and_load (None sentinel)
+var ErrBlockedNone = fmt.Errorf("%w: blocked None in sys.modules", ErrModuleNotFound)
+
 // ImportWarnHook routes an ImportWarning through the live _warnings
 // machinery so it walks the filter list and any recording context
 // manager (catch_warnings / assertWarns). It is nil until module
@@ -59,7 +70,7 @@ func ImportModuleLevelObject(exec Executor, name, pkgname string, level int) (ob
 	}
 	if raw, present := GetModuleRaw(absName); present {
 		if objects.IsNone(raw) {
-			return nil, fmt.Errorf("ImportError: import of %q halted; None in sys.modules", absName)
+			return nil, fmt.Errorf("%w: %q", ErrBlockedNone, absName)
 		}
 		if _, ok := raw.(*objects.Module); !ok {
 			// A non-module cached entry: return it verbatim.
@@ -98,7 +109,7 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 	// CPython: Python/import.c:L1613 sys_modules_get_dict
 	if raw, present := GetModuleRaw(absName); present {
 		if objects.IsNone(raw) {
-			return nil, fmt.Errorf("ImportError: import of %q halted; None in sys.modules", absName)
+			return nil, fmt.Errorf("%w: %q", ErrBlockedNone, absName)
 		}
 		if mod, ok := raw.(*objects.Module); ok {
 			return mod, nil
