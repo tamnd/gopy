@@ -13,10 +13,13 @@ import (
 )
 
 // statSysFields extracts platform fields from a FileInfo's syscall.Stat_t.
-// Darwin/FreeBSD carry atime/ctime in Atimespec/Ctimespec.
+// Darwin/FreeBSD carry atime/ctime in Atimespec/Ctimespec. The returned
+// atime/ctime are full nanoseconds since the epoch so stat_result keeps
+// the sub-second precision CPython's FileFinder relies on for cache
+// invalidation.
 // CPython: Modules/posixmodule.c:3238 os_stat_impl
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	atime = mtime
 	ctime = mtime
 	sys, ok := info.Sys().(*syscall.Stat_t)
@@ -28,8 +31,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	nlink = uint64(sys.Nlink)
 	uid = sys.Uid
 	gid = sys.Gid
-	atime = sys.Atimespec.Sec
-	ctime = sys.Ctimespec.Sec
+	atime = sys.Atimespec.Sec*1_000_000_000 + sys.Atimespec.Nsec
+	ctime = sys.Ctimespec.Sec*1_000_000_000 + sys.Ctimespec.Nsec
 	return
 }
 

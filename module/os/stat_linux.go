@@ -16,7 +16,7 @@ import (
 // Linux carries atime/ctime in Atim/Ctim.
 // CPython: Modules/posixmodule.c:3238 os_stat_impl
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	atime = mtime
 	ctime = mtime
 	sys, ok := info.Sys().(*syscall.Stat_t)
@@ -28,8 +28,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	nlink = uint64(sys.Nlink) //nolint:unconvert // Nlink is uint32 on linux/arm64
 	uid = sys.Uid
 	gid = sys.Gid
-	atime = sys.Atim.Sec
-	ctime = sys.Ctim.Sec
+	atime = sys.Atim.Sec*1_000_000_000 + int64(sys.Atim.Nsec)
+	ctime = sys.Ctim.Sec*1_000_000_000 + int64(sys.Ctim.Nsec)
 	return
 }
 

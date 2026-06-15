@@ -102,14 +102,26 @@ func goFileModeToStMode(m goos.FileMode) int64 {
 	return mode
 }
 
-// newStatResult assembles an os.stat_result from the second-resolution
-// components gathered by the platform stat helpers. The visible integer
-// time slots truncate the float seconds; the hidden float and nanosecond
-// timestamps and block fields follow the CPython layout.
+// newStatResult assembles an os.stat_result from the nanosecond-resolution
+// components gathered by the platform stat helpers. CPython derives three
+// views from the same struct timespec: the visible integer slot is the
+// floor-second, the hidden float slot is sec + 1e-9*nsec, and the hidden
+// *_ns slot is the full nanosecond count. The block fields trail the
+// timestamps in the CPython layout. atimeNs/mtimeNs/ctimeNs are full
+// nanoseconds since the epoch.
 //
 // CPython: Modules/posixmodule.c:2456 _pystat_fromstructstat
-func newStatResult(mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime, blksize, blocks, rdev int64) *objects.StructSeq {
-	ns := func(sec int64) objects.Object { return objects.NewInt(sec * 1_000_000_000) }
+func newStatResult(mode, ino, dev, nlink, uid, gid, size, atimeNs, mtimeNs, ctimeNs, blksize, blocks, rdev int64) *objects.StructSeq {
+	// fillTime mirrors fill_time: the integer field floors toward negative
+	// infinity, the float field carries the fractional second.
+	// CPython: Modules/posixmodule.c:2417 fill_time
+	floorSec := func(ns int64) int64 {
+		sec := ns / 1_000_000_000
+		if ns%1_000_000_000 != 0 && ns < 0 {
+			sec--
+		}
+		return sec
+	}
 	return objects.NewStructSeq(statResultType, []objects.Object{
 		objects.NewInt(mode),
 		objects.NewInt(ino),
@@ -118,15 +130,15 @@ func newStatResult(mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime, b
 		objects.NewInt(uid),
 		objects.NewInt(gid),
 		objects.NewInt(size),
-		objects.NewInt(atime), // unnamed: integer st_atime
-		objects.NewInt(mtime), // unnamed: integer st_mtime
-		objects.NewInt(ctime), // unnamed: integer st_ctime
-		objects.NewFloat(float64(atime)),
-		objects.NewFloat(float64(mtime)),
-		objects.NewFloat(float64(ctime)),
-		ns(atime),
-		ns(mtime),
-		ns(ctime),
+		objects.NewInt(floorSec(atimeNs)), // unnamed: integer st_atime
+		objects.NewInt(floorSec(mtimeNs)), // unnamed: integer st_mtime
+		objects.NewInt(floorSec(ctimeNs)), // unnamed: integer st_ctime
+		objects.NewFloat(float64(atimeNs) / 1e9),
+		objects.NewFloat(float64(mtimeNs) / 1e9),
+		objects.NewFloat(float64(ctimeNs) / 1e9),
+		objects.NewInt(atimeNs),
+		objects.NewInt(mtimeNs),
+		objects.NewInt(ctimeNs),
 		objects.NewInt(blksize),
 		objects.NewInt(blocks),
 		objects.NewInt(rdev),
@@ -902,7 +914,7 @@ func stat(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
 	blksize, blocks, rdev := statBlockFields(info)
 	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink),
-		int64(uid), int64(gid), info.Size(), atime, info.ModTime().Unix(), ctime,
+		int64(uid), int64(gid), info.Size(), atime, info.ModTime().UnixNano(), ctime,
 		blksize, blocks, rdev), nil
 }
 
@@ -1385,7 +1397,7 @@ func osLstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return nil, fmt.Errorf("OSError: %w", serr)
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	blksize, blocks, rdev := statBlockFields(info)
 	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
@@ -1411,7 +1423,7 @@ func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	blksize, blocks, rdev := statBlockFields(info)
 	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }

@@ -21,7 +21,7 @@ import (
 //
 // CPython: Modules/posixmodule.c:1924 win32_stat
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	atime = mtime
 	ctime = mtime
 	nlink = 1
@@ -29,8 +29,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	if !ok || sys == nil {
 		return
 	}
-	atime = sys.LastAccessTime.Nanoseconds() / 1e9
-	ctime = sys.CreationTime.Nanoseconds() / 1e9
+	atime = sys.LastAccessTime.Nanoseconds()
+	ctime = sys.CreationTime.Nanoseconds()
 	return
 }
 

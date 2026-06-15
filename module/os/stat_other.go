@@ -14,7 +14,7 @@ import (
 // statSysFields returns minimal values on unsupported platforms.
 // CPython: Modules/posixmodule.c:3238 os_stat_impl
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	return 0, 0, 1, 0, 0, mtime, mtime
 }
 
