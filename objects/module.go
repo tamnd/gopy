@@ -41,6 +41,16 @@ func init() {
 	//
 	// CPython: Objects/moduleobject.c:1416 PyModule_Type (tp_dictoffset set)
 	ModuleType.HasDict = true
+	// PyModule_Type ships a __dict__ getset in module_getset. A bare module
+	// answers __dict__ through moduleGetattr, but a ModuleType subclass that
+	// reaches __dict__ via the generic path (importlib.util._LazyModule does
+	// `object.__getattribute__(self, '__dict__')`) needs the descriptor in
+	// the MRO. type_new_descriptors skips installing one on the subclass
+	// because the dict slot is inherited, so the descriptor must live on
+	// ModuleType itself.
+	//
+	// CPython: Objects/moduleobject.c:728 module_getset (__dict__ getset)
+	installInstanceDictDescr(ModuleType)
 	// A module also carries md_weaklist (a non-zero tp_weaklistoffset), so
 	// a subclass inherits the weakref slot rather than adding its own. This
 	// keeps a ModuleType subclass layout-compatible with module, which

@@ -986,6 +986,16 @@ func objectGetWeakref(o Object) (Object, error) {
 
 func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
+	case *Module:
+		// A module always carries md_dict, even a user subclass of
+		// ModuleType that never sets tp_dictoffset (HasDict false). The
+		// generic object.__getattribute__ path reaches here for
+		// `object.__getattribute__(mod, '__dict__')` (importlib's
+		// _LazyModule does exactly this), so return md_dict directly
+		// rather than gating on HasDict like the AttrDictHolder arm below.
+		//
+		// CPython: Objects/moduleobject.c module_dict getset (md_dict)
+		return v.Dict(), nil
 	case *Instance:
 		if v.dict == nil {
 			if !v.Type().HasDict {
