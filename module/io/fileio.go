@@ -15,6 +15,7 @@ import (
 	"io"
 	stdos "os"
 	"runtime"
+	"syscall"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -329,6 +330,20 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 			// CPython: Modules/_io/fileio.c:451 _io_FileIO___init___impl
 			return nil, fmt.Errorf("OSError: %w", err)
 		}
+	}
+	// open() succeeds on a directory on Unix, but a FileIO must never wrap
+	// one: fstat the descriptor and raise IsADirectoryError (EISDIR) when it
+	// names a directory, the way CPython rejects it at construction time
+	// rather than deferring the failure to the first read.
+	//
+	// CPython: Modules/_io/fileio.c:478 _io_FileIO___init___impl (S_ISDIR check)
+	if info, statErr := f.Stat(); statErr == nil && info.IsDir() {
+		_ = f.Close()
+		return nil, fmt.Errorf("OSError: %w", &stdos.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  syscall.EISDIR,
+		})
 	}
 	fi := &FileIO{
 		f:         f,

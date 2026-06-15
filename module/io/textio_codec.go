@@ -14,8 +14,6 @@ package io
 import (
 	"encoding/binary"
 	"fmt"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/tamnd/gopy/codecs"
 )
@@ -48,47 +46,51 @@ type IncrementalEncoder interface {
 	Reset()
 }
 
-// getIncrementalDecoder returns a fresh decoder for encoding. errors
-// is the error-handling strategy ("strict", "replace", "ignore"); only
-// "strict" is implemented today, matching the current one-shot
-// `decodeBytes` behavior. Unknown encodings return a LookupError-shaped
-// Go error so the caller can surface it to Python.
+// getIncrementalDecoder returns a fresh decoder for encoding. errors is
+// the error-handling strategy ("strict", "replace", "ignore",
+// "backslashreplace", ...); the decoders carry it and hand the complete
+// portion of each chunk to the shared codecs package, which applies the
+// named handler exactly as bytes.decode does. Unknown encodings return a
+// LookupError-shaped Go error so the caller can surface it to Python.
 //
 // CPython: Modules/_io/textio.c:912 _textiowrapper_set_decoder
 // (calls _PyCodecInfo_GetIncrementalDecoder).
-func getIncrementalDecoder(encoding, _ string) (IncrementalDecoder, error) {
+func getIncrementalDecoder(encoding, errors string) (IncrementalDecoder, error) {
+	if errors == "" {
+		errors = "strict"
+	}
 	switch normalizeCodec(encoding) {
 	case "utf-8":
-		return &utf8Decoder{}, nil
+		return &utf8Decoder{errors: errors}, nil
 	case "ascii":
-		return &asciiDecoder{}, nil
+		return &asciiDecoder{errors: errors}, nil
 	case "latin-1":
-		return &latin1Decoder{}, nil
+		return &latin1Decoder{errors: errors}, nil
 	case "utf-16":
-		return &utf16Decoder{variant: ""}, nil
+		return &utf16Decoder{variant: "", errors: errors}, nil
 	case "utf-16-le":
-		return &utf16Decoder{variant: "le"}, nil
+		return &utf16Decoder{variant: "le", errors: errors}, nil
 	case "utf-16-be":
-		return &utf16Decoder{variant: "be"}, nil
+		return &utf16Decoder{variant: "be", errors: errors}, nil
 	case "utf-32":
-		return &utf32Decoder{variant: ""}, nil
+		return &utf32Decoder{variant: "", errors: errors}, nil
 	case "utf-32-le":
-		return &utf32Decoder{variant: "le"}, nil
+		return &utf32Decoder{variant: "le", errors: errors}, nil
 	case "utf-32-be":
-		return &utf32Decoder{variant: "be"}, nil
+		return &utf32Decoder{variant: "be", errors: errors}, nil
 	case "cp1252":
-		return &charmapDecoder{table: &cp1252Table.decode, name: "cp1252"}, nil
+		return &charmapDecoder{table: &cp1252Table.decode, name: "cp1252", errors: errors}, nil
 	case "cp1250":
-		return &charmapDecoder{table: &cp1250Table.decode, name: "cp1250"}, nil
+		return &charmapDecoder{table: &cp1250Table.decode, name: "cp1250", errors: errors}, nil
 	case "cp1251":
-		return &charmapDecoder{table: &cp1251Table.decode, name: "cp1251"}, nil
+		return &charmapDecoder{table: &cp1251Table.decode, name: "cp1251", errors: errors}, nil
 	case "cp437":
-		return &charmapDecoder{table: &cp437Table.decode, name: "cp437"}, nil
+		return &charmapDecoder{table: &cp437Table.decode, name: "cp437", errors: errors}, nil
 	case "mac-roman":
-		return &charmapDecoder{table: &macRomanTable.decode, name: "mac-roman"}, nil
+		return &charmapDecoder{table: &macRomanTable.decode, name: "mac-roman", errors: errors}, nil
 	}
 	if ci, err := codecs.Lookup(encoding); err == nil {
-		return &registryDecoder{ci: ci}, nil
+		return &registryDecoder{ci: ci, errors: errors}, nil
 	}
 	return nil, fmt.Errorf("LookupError: unknown encoding: %s", encoding)
 }
@@ -143,7 +145,8 @@ func getIncrementalEncoder(encoding, _ string) (IncrementalEncoder, error) {
 // incomplete multi-byte sequence. CPython's utf-8 incremental decoder
 // keeps the same window because a code point spans at most four bytes.
 type utf8Decoder struct {
-	buf []byte
+	buf    []byte
+	errors string
 }
 
 func (d *utf8Decoder) Decode(input []byte, final bool) (string, error) {
@@ -154,28 +157,20 @@ func (d *utf8Decoder) Decode(input []byte, final bool) (string, error) {
 		src = append(append([]byte{}, d.buf...), input...)
 		d.buf = d.buf[:0]
 	}
-	// Walk back from the end to find the longest tail that is either
-	// a complete utf-8 sequence or an incomplete (but valid so-far)
-	// prefix. RuneStart marks the first byte of a sequence.
-	keep := 0
-	if !final && len(src) > 0 {
-		for i := len(src) - 1; i >= 0 && i >= len(src)-4; i-- {
-			if utf8.RuneStart(src[i]) {
-				if !utf8.FullRune(src[i:]) {
-					keep = len(src) - i
-				}
-				break
-			}
-		}
+	// DecodeUTF8Incremental holds back an incomplete trailing sequence
+	// when final is false and applies the configured error handler to
+	// the complete portion, so an invalid byte under "ignore" /
+	// "replace" / "backslashreplace" is repaired instead of raising.
+	//
+	// CPython: Objects/unicodeobject.c:4756 PyUnicode_DecodeUTF8Stateful
+	out, remaining, err := codecs.DecodeUTF8Incremental(src, d.errors, final)
+	if err != nil {
+		return "", err
 	}
-	complete := src[:len(src)-keep]
-	if !utf8.Valid(complete) {
-		return "", fmt.Errorf("UnicodeDecodeError: invalid utf-8 sequence")
+	if len(remaining) > 0 {
+		d.buf = append(d.buf[:0], remaining...)
 	}
-	if keep > 0 {
-		d.buf = append(d.buf[:0], src[len(src)-keep:]...)
-	}
-	return string(complete), nil
+	return out, nil
 }
 
 func (d *utf8Decoder) GetState() ([]byte, int64) { return append([]byte{}, d.buf...), 0 }
@@ -187,15 +182,11 @@ func (d *utf8Decoder) Reset() { d.buf = d.buf[:0] }
 
 // --- ascii / latin-1 -------------------------------------------------------
 
-type asciiDecoder struct{}
+type asciiDecoder struct{ errors string }
 
-func (asciiDecoder) Decode(input []byte, _ bool) (string, error) {
-	for _, b := range input {
-		if b > 127 {
-			return "", fmt.Errorf("UnicodeDecodeError: ordinal not in range(128)")
-		}
-	}
-	return string(input), nil
+func (d asciiDecoder) Decode(input []byte, _ bool) (string, error) {
+	out, _, err := codecs.Decode(input, "ascii", d.errors)
+	return out, err
 }
 func (asciiDecoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (asciiDecoder) SetState([]byte, int64) error { return nil }
@@ -210,14 +201,13 @@ func encodeASCII(s string) ([]byte, error) {
 	return []byte(s), nil
 }
 
-type latin1Decoder struct{}
+type latin1Decoder struct{ errors string }
 
-func (latin1Decoder) Decode(input []byte, _ bool) (string, error) {
-	runes := make([]rune, len(input))
-	for i, b := range input {
-		runes[i] = rune(b)
-	}
-	return string(runes), nil
+func (d latin1Decoder) Decode(input []byte, _ bool) (string, error) {
+	// latin-1 maps every byte to a code point, so the error handler is
+	// never invoked, but route through codecs for uniformity.
+	out, _, err := codecs.Decode(input, "latin-1", d.errors)
+	return out, err
 }
 func (latin1Decoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (latin1Decoder) SetState([]byte, int64) error { return nil }
@@ -242,6 +232,7 @@ func encodeLatin1(s string) ([]byte, error) {
 type utf16Decoder struct {
 	variant string // "", "le", or "be"
 	buf     []byte
+	errors  string
 	// flags encodes endianness for tell/seek snapshots.
 	// 0 = undecided (auto-variant before BOM sniff)
 	// 1 = little-endian
@@ -294,18 +285,21 @@ func (d *utf16Decoder) Decode(input []byte, final bool) (string, error) {
 		}
 	}
 	keep := len(src) % 2
-	if final && keep != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-16 truncated (odd byte count)")
+	if final {
+		// A trailing half code unit on the final chunk is a truncation
+		// the error handler must see; hand the whole tail to codecs.
+		keep = 0
 	}
 	body := src[:len(src)-keep]
 	if keep > 0 {
 		d.buf = append(d.buf, src[len(src)-keep:]...)
 	}
-	units := make([]uint16, len(body)/2)
-	for i := range units {
-		units[i] = bo.Uint16(body[2*i:])
+	name := "utf-16-le"
+	if bo == binary.BigEndian {
+		name = "utf-16-be"
 	}
-	return string(utf16.Decode(units)), nil
+	out, _, err := codecs.Decode(body, name, d.errors)
+	return out, err
 }
 
 func (d *utf16Decoder) GetState() ([]byte, int64) {
@@ -328,6 +322,7 @@ func (d *utf16Decoder) Reset() {
 type utf32Decoder struct {
 	variant string
 	buf     []byte
+	errors  string
 	flags   int64
 }
 
@@ -372,22 +367,21 @@ func (d *utf32Decoder) Decode(input []byte, final bool) (string, error) {
 		}
 	}
 	keep := len(src) % 4
-	if final && keep != 0 {
-		return "", fmt.Errorf("UnicodeDecodeError: utf-32 truncated (length %% 4 != 0)")
+	if final {
+		// A trailing partial code unit on the final chunk is a
+		// truncation the error handler must see.
+		keep = 0
 	}
 	body := src[:len(src)-keep]
 	if keep > 0 {
 		d.buf = append(d.buf, src[len(src)-keep:]...)
 	}
-	runes := make([]rune, 0, len(body)/4)
-	for i := 0; i < len(body); i += 4 {
-		cp := bo.Uint32(body[i:])
-		if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
-			return "", fmt.Errorf("UnicodeDecodeError: invalid utf-32 codepoint U+%X", cp)
-		}
-		runes = append(runes, rune(cp))
+	name := "utf-32-le"
+	if bo == binary.BigEndian {
+		name = "utf-32-be"
 	}
-	return string(runes), nil
+	out, _, err := codecs.Decode(body, name, d.errors)
+	return out, err
 }
 
 func (d *utf32Decoder) GetState() ([]byte, int64) {
@@ -408,12 +402,14 @@ func (d *utf32Decoder) Reset() {
 // --- charmap (single-byte) -------------------------------------------------
 
 type charmapDecoder struct {
-	table *[256]rune
-	name  string
+	table  *[256]rune
+	name   string
+	errors string
 }
 
 func (d *charmapDecoder) Decode(input []byte, _ bool) (string, error) {
-	return charmapDecode(input, d.table, d.name)
+	out, _, err := codecs.Decode(input, d.name, d.errors)
+	return out, err
 }
 func (d *charmapDecoder) GetState() ([]byte, int64)    { return nil, 0 }
 func (d *charmapDecoder) SetState([]byte, int64) error { return nil }
@@ -466,14 +462,15 @@ func (e *bomEncoder) Reset()                 { e.state = 0 }
 //
 // CPython: Python/codecs.c:570 _PyCodecInfo_GetIncrementalDecoder
 type registryDecoder struct {
-	ci  *codecs.CodecInfo
-	buf []byte
-	out string
+	ci     *codecs.CodecInfo
+	buf    []byte
+	out    string
+	errors string
 }
 
 func (d *registryDecoder) Decode(input []byte, final bool) (string, error) {
 	d.buf = append(d.buf, input...)
-	s, _, err := d.ci.Decode(d.buf, "strict")
+	s, _, err := d.ci.Decode(d.buf, d.errors)
 	if err != nil {
 		// Allow buffering when not final: a trailing incomplete sequence
 		// may complete on the next chunk.
@@ -497,7 +494,7 @@ func (d *registryDecoder) SetState(buffer []byte, _ int64) error {
 	if len(buffer) == 0 {
 		return nil
 	}
-	s, _, err := d.ci.Decode(d.buf, "strict")
+	s, _, err := d.ci.Decode(d.buf, d.errors)
 	if err == nil {
 		d.out = s
 	}
