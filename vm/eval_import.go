@@ -45,11 +45,11 @@ func callerBuiltins(f *frame.Frame) objects.Object {
 // the mapping lacks the key, and (nil, false, err) for a real failure.
 //
 // CPython: Python/ceval.c:2805 PyMapping_GetOptionalItemString(f_builtins, "__import__")
-func optionalImportFunc(builtins objects.Object) (objects.Object, bool, error) {
-	if builtins == nil {
+func optionalImportFunc(builtinsMap objects.Object) (objects.Object, bool, error) {
+	if builtinsMap == nil {
 		return nil, false, nil
 	}
-	return objects.MappingGetOptionalItem(builtins, objects.NewStr("__import__"))
+	return objects.MappingGetOptionalItem(builtinsMap, objects.NewStr("__import__"))
 }
 
 // isDefaultImport reports whether fn is the built-in __import__ the
@@ -272,7 +272,7 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		//
 		// CPython: Python/bytecodes.c IMPORT_NAME comment "return the
 		// head of the dotted name" when fromlist is empty.
-		result := objects.Object(mod)
+		result := mod
 		if isEmptyFromlist(fromlistObj) && strings.Contains(modname, ".") {
 			top := strings.SplitN(modname, ".", 2)[0]
 			if tm, ok := imp.GetModule(top); ok {
@@ -460,8 +460,8 @@ func checkPackageType(globals objects.Object) error {
 	if !ok {
 		return nil
 	}
-	v, err := d.GetItem(objects.NewStr("__package__"))
-	if err != nil || v == nil || objects.IsNone(v) {
+	v, _ := d.GetItem(objects.NewStr("__package__"))
+	if v == nil || objects.IsNone(v) {
 		return nil
 	}
 	if _, isStr := v.(*objects.Unicode); !isStr {
@@ -655,11 +655,11 @@ func (e *evalState) importFromError(v objects.Object, name string, modNameObj ob
 	}
 	shadowingStdlib := false
 	if shadowing {
-		if c, cerr := imp.StdlibModuleNamesContains(modNameOrUnknownObj); cerr != nil {
+		c, cerr := imp.StdlibModuleNamesContains(modNameOrUnknownObj)
+		if cerr != nil {
 			return cerr
-		} else {
-			shadowingStdlib = c
 		}
+		shadowingStdlib = c
 	}
 
 	// Fall back to __file__ for diagnostics when the spec carries no
@@ -753,8 +753,8 @@ func (e *evalState) handleFromlist(mod objects.Object, fromlist objects.Object, 
 			return fmt.Errorf("TypeError: Item in %s must be str, not %s", where, item.Type().Name)
 		}
 		entry := x.Value()
-		switch {
-		case entry == "*":
+		switch entry {
+		case "*":
 			if !recursive {
 				if allObj, present, _ := getOptionalAttr(e, mod, "__all__"); present && allObj != nil {
 					if rerr := e.handleFromlist(mod, allObj, true); rerr != nil {
@@ -763,9 +763,11 @@ func (e *evalState) handleFromlist(mod objects.Object, fromlist objects.Object, 
 				}
 			}
 		default:
-			if _, present, gerr := getOptionalAttr(e, mod, entry); gerr != nil {
+			_, present, gerr := getOptionalAttr(e, mod, entry)
+			if gerr != nil {
 				return gerr
-			} else if present {
+			}
+			if present {
 				continue
 			}
 			fromName := modName + "." + entry

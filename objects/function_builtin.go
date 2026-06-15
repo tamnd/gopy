@@ -395,11 +395,12 @@ func builtinFunctionHash(o Object) (int64, error) {
 	}
 	var y int64
 	var err error
-	if bf.boundDescr != nil {
+	switch {
+	case bf.boundDescr != nil:
 		y, err = identityHash(bf.boundDescr)
-	} else if bf.methOrigin != nil {
+	case bf.methOrigin != nil:
 		y, err = identityHash(bf.methOrigin)
-	} else {
+	default:
 		y, err = identityHash(bf)
 	}
 	if err != nil {

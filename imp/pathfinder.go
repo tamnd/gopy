@@ -159,106 +159,12 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 	// (namespace portion path) / Lib/importlib/_bootstrap.py:1167 PathFinder
 	var namespacePortions []string
 	for _, entry := range search {
-		dir := entry
-		if dir == "" {
-			dir = "."
+		mod, err := p.scanEntry(exec, entry, name, parent, tail, &namespacePortions)
+		if err != nil {
+			return nil, err
 		}
-		// spec_from_file_location runs the resolved location through
-		// _path_abspath, so every __file__, __path__ and __cached__ a
-		// path-based import produces is absolute even when the sys.path
-		// entry is relative ('', '.', or a relative directory). Absolutize
-		// the directory up front so the file paths joined below, the
-		// bytecode-cache path, and the spec origin all agree and match
-		// CPython's absolute strings.
-		//
-		// CPython: Lib/importlib/_bootstrap_external.py:782 spec_from_file_location (_path_abspath)
-		if abs, err := filepath.Abs(dir); err == nil {
-			dir = abs
-		}
-		// A sys.path entry that is not a directory (a zip archive, or a
-		// path that points inside one) is handled by a custom importer
-		// registered on sys.path_hooks, exactly as CPython's PathFinder
-		// routes such entries through zipimport.zipimporter. Only consult
-		// the hooks for non-directories so the directory scan below stays
-		// the fast path for the common case.
-		//
-		// CPython: Lib/importlib/_bootstrap_external.py:1236 _path_importer_cache
-		if !isDir(dir) {
-			spec, handled, herr := pathHookSpec(exec, entry, name)
-			if herr != nil {
-				return nil, herr
-			}
-			if !handled {
-				continue
-			}
-			// A namespace spec from the importer (loader None, search
-			// locations set) is a PEP 420 portion: collect it and keep
-			// scanning, exactly as CPython's PathFinder extends
-			// namespace_path instead of returning. A spec with a real
-			// loader is a concrete module, so load and return it.
-			//
-			// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
-			if portions, isNS := namespacePortionsOf(spec); isNS {
-				namespacePortions = append(namespacePortions, portions...)
-				continue
-			}
-			mod, lerr := loadFromSpec(exec, name, spec)
-			if lerr != nil {
-				return nil, lerr
-			}
-			bindOnParent(parent, tail, mod)
+		if mod != nil {
 			return mod, nil
-		}
-		// Package case: <dir>/<tail>/__init__.py.
-		// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
-		pkgDir := filepath.Join(dir, tail)
-		pkgInit := filepath.Join(pkgDir, "__init__.py")
-		if isFile(pkgInit) && caseOK(pkgDir) {
-			mod, err := loadAsPackage(exec, p.Compiler, pkgInit, pkgDir, name)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
-			return mod, nil
-		}
-		// Sourceless package: <dir>/<tail>/__init__.pyc. CPython's
-		// FileFinder walks its loader suffixes for __init__, so the
-		// bytecode loader is tried after the source loader.
-		// CPython: Lib/importlib/_bootstrap_external.py:1424 __init__ suffix loop
-		pkgInitPyc := filepath.Join(pkgDir, "__init__.pyc")
-		if isFile(pkgInitPyc) && caseOK(pkgDir) {
-			mod, err := loadAsPackageBytecode(exec, pkgInitPyc, pkgDir, name)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
-			return mod, nil
-		}
-		// Module case: <dir>/<tail>.py.
-		// CPython: Lib/importlib/_bootstrap_external.py:1391 suffix loop
-		modFile := filepath.Join(dir, tail+".py")
-		if isFile(modFile) && caseOK(modFile) {
-			mod, err := loadAsModule(exec, p.Compiler, modFile, name, parent)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
-			return mod, nil
-		}
-		// Sourceless module: <dir>/<tail>.pyc, loaded by the bytecode
-		// loader once the source suffix has missed.
-		// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
-		modPyc := filepath.Join(dir, tail+".pyc")
-		if isFile(modPyc) && caseOK(modPyc) {
-			mod, err := loadAsModuleBytecode(exec, modPyc, name, parent)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
-			return mod, nil
-		}
-		if isDir(pkgDir) && caseOK(pkgDir) {
-			namespacePortions = append(namespacePortions, pkgDir)
 		}
 	}
 	if len(namespacePortions) > 0 {
@@ -267,6 +173,114 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		return mod, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
+}
+
+// scanEntry searches one sys.path entry for name. It returns (mod, nil)
+// when the module was found and loaded, (nil, nil) when this entry did
+// not match (FindModule should keep scanning), or (nil, err) on a load
+// failure that must propagate. A PEP 420 namespace portion contributed
+// by this entry is appended to *namespacePortions, leaving the module
+// unresolved so the caller can fall back to a namespace package.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1357 FileFinder.find_spec
+func (p *PathFinder) scanEntry(exec Executor, entry, name, parent, tail string, namespacePortions *[]string) (*objects.Module, error) {
+	dir := entry
+	if dir == "" {
+		dir = "."
+	}
+	// spec_from_file_location runs the resolved location through
+	// _path_abspath, so every __file__, __path__ and __cached__ a
+	// path-based import produces is absolute even when the sys.path
+	// entry is relative ('', '.', or a relative directory). Absolutize
+	// the directory up front so the file paths joined below, the
+	// bytecode-cache path, and the spec origin all agree and match
+	// CPython's absolute strings.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:782 spec_from_file_location (_path_abspath)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	// A sys.path entry that is not a directory (a zip archive, or a
+	// path that points inside one) is handled by a custom importer
+	// registered on sys.path_hooks, exactly as CPython's PathFinder
+	// routes such entries through zipimport.zipimporter. Only consult
+	// the hooks for non-directories so the directory scan below stays
+	// the fast path for the common case.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:1236 _path_importer_cache
+	if !isDir(dir) {
+		spec, handled, herr := pathHookSpec(exec, entry, name)
+		if herr != nil {
+			return nil, herr
+		}
+		if !handled {
+			return nil, nil
+		}
+		// A namespace spec from the importer (loader None, search
+		// locations set) is a PEP 420 portion: collect it and keep
+		// scanning, exactly as CPython's PathFinder extends
+		// namespace_path instead of returning. A spec with a real
+		// loader is a concrete module, so load and return it.
+		//
+		// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+		if portions, isNS := namespacePortionsOf(spec); isNS {
+			*namespacePortions = append(*namespacePortions, portions...)
+			return nil, nil
+		}
+		mod, lerr := loadFromSpec(exec, name, spec)
+		if lerr != nil {
+			return nil, lerr
+		}
+		bindOnParent(parent, tail, mod)
+		return mod, nil
+	}
+	return p.scanDir(exec, dir, name, parent, tail, namespacePortions)
+}
+
+// scanDir searches a single directory sys.path entry for name, trying
+// the source package, sourceless package, source module, and sourceless
+// module loaders in CPython's suffix order. It returns the loaded module,
+// (nil, nil) for a miss, or (nil, err) on a load failure. A bare package
+// directory with no loadable __init__ is recorded as a PEP 420 portion.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1391 FileFinder suffix loop
+func (p *PathFinder) scanDir(exec Executor, dir, name, parent, tail string, namespacePortions *[]string) (*objects.Module, error) {
+	pkgDir := filepath.Join(dir, tail)
+	// (suffix file, loader) tried in CPython's order: source package,
+	// sourceless package, source module, sourceless module.
+	loaders := []struct {
+		file string
+		base string // case-sensitivity check target
+		load func() (*objects.Module, error)
+	}{
+		{filepath.Join(pkgDir, "__init__.py"), pkgDir, func() (*objects.Module, error) {
+			return loadAsPackage(exec, p.Compiler, filepath.Join(pkgDir, "__init__.py"), pkgDir, name)
+		}},
+		{filepath.Join(pkgDir, "__init__.pyc"), pkgDir, func() (*objects.Module, error) {
+			return loadAsPackageBytecode(exec, filepath.Join(pkgDir, "__init__.pyc"), pkgDir, name)
+		}},
+		{filepath.Join(dir, tail+".py"), filepath.Join(dir, tail+".py"), func() (*objects.Module, error) {
+			return loadAsModule(exec, p.Compiler, filepath.Join(dir, tail+".py"), name, parent)
+		}},
+		{filepath.Join(dir, tail+".pyc"), filepath.Join(dir, tail+".pyc"), func() (*objects.Module, error) {
+			return loadAsModuleBytecode(exec, filepath.Join(dir, tail+".pyc"), name, parent)
+		}},
+	}
+	for _, l := range loaders {
+		if !isFile(l.file) || !caseOK(l.base) {
+			continue
+		}
+		mod, err := l.load()
+		if err != nil {
+			return nil, err
+		}
+		bindOnParent(parent, tail, mod)
+		return mod, nil
+	}
+	if isDir(pkgDir) && caseOK(pkgDir) {
+		*namespacePortions = append(*namespacePortions, pkgDir)
+	}
+	return nil, nil
 }
 
 // pathHookSpec consults sys.path_hooks for a custom importer able to load
@@ -288,7 +302,7 @@ func pathHookSpec(exec Executor, entry, name string) (spec objects.Object, handl
 	}
 	findSpec, err := objects.GetAttr(importer, objects.NewStr("find_spec"))
 	if err != nil {
-		return nil, false, nil
+		return nil, false, err
 	}
 	s, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
 	if err != nil {
@@ -851,7 +865,7 @@ func setSpecInitializing(mod *objects.Module, on bool) {
 	if err != nil || spec == nil || objects.IsNone(spec) {
 		return
 	}
-	var v objects.Object = objects.False()
+	v := objects.False()
 	if on {
 		v = objects.True()
 	}

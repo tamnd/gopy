@@ -83,7 +83,7 @@ func importVerbose() bool {
 // removeImportlibFrames strips importlib frames from the traceback of the
 // exception currently on the thread. If it is an ImportError, every
 // importlib chunk is trimmed; otherwise only chunks that end with a call
-// to _call_with_frames_removed are trimmed. Matches CPython's behaviour of
+// to _call_with_frames_removed are trimmed. Matches CPython's behavior of
 // hiding the import machinery from user tracebacks.
 //
 // CPython: Python/import.c:3500 remove_importlib_frames

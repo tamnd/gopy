@@ -442,7 +442,9 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	} else {
-		f, err := os.OpenFile(a.file, flag, 0o666)
+		// 0o666 is CPython's default create mode for open(); the process
+		// umask narrows it. CPython: Modules/_io/fileio.c _io_FileIO___init___impl.
+		f, err := os.OpenFile(a.file, flag, 0o666) //nolint:gosec // CPython open() default mode, umask-narrowed
 		if err != nil {
 			// Preserve the os.PathError chain (errno + filename) with %w
 			// so the unwind path builds a FileNotFoundError /

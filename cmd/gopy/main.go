@@ -505,7 +505,7 @@ func gopyCompile(src []byte, filename string) (*objects.Code, error) {
 	// "<frozen importlib._bootstrap>" rather than a source path. gopy loads
 	// them from source; stamp the same frozen name so tracebacks that pass
 	// through the machinery read identically (test_import_bug) and
-	// remove_importlib_frames can recognise them.
+	// remove_importlib_frames can recognize them.
 	//
 	// CPython: Python/pylifecycle.c:1041 init_importlib (frozen modules)
 	filename = frozenImportlibName(filename)

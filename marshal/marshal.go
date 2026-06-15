@@ -643,7 +643,7 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 		return false, nil
 	case typeEllipsis:
 		// Decode to ast.EllipsisType, the same `...` const the compiler
-		// emits, so a marshalled-then-loaded code object round-trips
+		// emits, so a marshaled-then-loaded code object round-trips
 		// identically to a freshly compiled one.
 		//
 		// CPython: Python/marshal.c r_object TYPE_ELLIPSIS

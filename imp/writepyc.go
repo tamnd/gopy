@@ -230,14 +230,16 @@ func writeBytecodeCache(sourcePath string, code *objects.Code) {
 	if err := marshal.WritePyc(&buf, code, mtime, size); err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o777); err != nil {
+	// 0o777 is CPython's makedirs mode for __pycache__; the umask narrows it.
+	// CPython: Lib/importlib/_bootstrap_external.py source_to_cache makedirs.
+	if err := os.MkdirAll(filepath.Dir(dest), 0o777); err != nil { //nolint:gosec // CPython __pycache__ mode, umask-narrowed
 		return
 	}
 	// The cache inherits the source's permission bits plus write access, so a
 	// read-only .py still yields a rewritable .pyc.
 	//
 	// CPython: Lib/importlib/_bootstrap_external.py:438 _calc_mode
-	mode := os.FileMode(info.Mode().Perm()) | 0o200
+	mode := info.Mode().Perm() | 0o200
 
 	// Write atomically the way _write_atomic does: a uniquely-suffixed temp
 	// file in the cache directory opened O_EXCL with the computed mode, then

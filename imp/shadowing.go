@@ -116,7 +116,7 @@ func ModuleIsPossiblyShadowing(originFound bool, origin string) (bool, error) {
 	if sysPath0 == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return false, nil
+			return false, err
 		}
 		sysPath0 = cwd
 	}
@@ -185,7 +185,10 @@ func StdlibModuleNamesContains(modName objects.Object) (bool, error) {
 		return false, nil
 	}
 	namesObj, found, err := optionalAttr(sysMod, "stdlib_module_names")
-	if err != nil || !found {
+	if err != nil {
+		return false, err
+	}
+	if !found {
 		return false, nil
 	}
 	if !anySetCheck(namesObj) {

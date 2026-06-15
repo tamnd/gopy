@@ -645,7 +645,7 @@ func currentImporter(name, pkgname string, level int, fromlist []string) (object
 	for i, s := range fromlist {
 		flItems[i] = objects.NewStr(s)
 	}
-	var fl objects.Object = objects.None()
+	fl := objects.None()
 	if len(flItems) > 0 {
 		fl = objects.NewTuple(flItems)
 	}
