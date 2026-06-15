@@ -19,6 +19,7 @@ package winreg
 
 import (
 	"math/big"
+	"runtime"
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
@@ -26,6 +27,15 @@ import (
 )
 
 func init() {
+	// CPython only builds winreg on Windows (it lives in PC/winreg.c and is
+	// registered through PC/config.c's _PyImport_Inittab only for the
+	// Windows build). _bootstrap_external imports it solely under
+	// `if sys.platform == 'win32'`, so on other platforms the name must stay
+	// absent: test.support.import_helper.import_module('winreg') then raises
+	// SkipTest, exactly as it does on CPython/macOS.
+	if runtime.GOOS != "windows" {
+		return
+	}
 	_ = imp.AppendInittab("winreg", buildModule)
 }
 

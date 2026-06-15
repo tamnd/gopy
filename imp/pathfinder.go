@@ -1006,11 +1006,25 @@ func flushPendingSpecs(util *objects.Module) {
 //
 // CPython: Lib/importlib/_bootstrap.py:516 _init_module_attrs
 func applySpec(util *objects.Module, p pendingSpec) {
+	d := p.mod.Dict()
+	// importlib._bootstrap._setup already walks sys.modules and gives every
+	// built-in module a spec whose loader is BuiltinImporter. When that has
+	// run before this deferred flush, a freshly-built spec here would carry
+	// loader=None (importlib.machinery may not be importable yet) and clobber
+	// the correct __loader__. Leave _setup's work in place.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1517 _setup (built-in spec set-up)
+	if p.builtin {
+		if existing, err := d.GetItem(objects.NewStr("__spec__")); err == nil && existing != nil && !objects.IsNone(existing) {
+			if loader, lerr := objects.GetAttr(existing, objects.NewStr("loader")); lerr == nil && loader != nil && !objects.IsNone(loader) {
+				return
+			}
+		}
+	}
 	spec := buildSpec(util, p)
 	if spec == nil {
 		return
 	}
-	d := p.mod.Dict()
 	_ = d.SetItem(objects.NewStr("__spec__"), spec)
 	if loader, lerr := objects.GetAttr(spec, objects.NewStr("loader")); lerr == nil {
 		_ = d.SetItem(objects.NewStr("__loader__"), loader)
@@ -1058,9 +1072,29 @@ func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
 		if err != nil {
 			return nil
 		}
+		// CPython's BuiltinImporter.find_spec passes the importer class
+		// itself as the loader, so every built-in module's __loader__ is
+		// BuiltinImporter, not None. Mirror that: a None loader would fail
+		// test_importlib's test_everyone_has___loader__.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:760 BuiltinImporter.find_spec
+		loader := objects.Object(objects.None())
+		// importlib.machinery re-exports _bootstrap.BuiltinImporter, but it
+		// may not be imported yet when a built-in module loads early. Fall
+		// back to importlib._bootstrap, which is always live by this point.
+		for _, modName := range []string{"importlib.machinery", "importlib._bootstrap"} {
+			m, ok := GetModule(modName)
+			if !ok {
+				continue
+			}
+			if bi, lerr := m.Dict().GetItem(objects.NewStr("BuiltinImporter")); lerr == nil && bi != nil {
+				loader = bi
+				break
+			}
+		}
 		kwargs := objects.NewDict()
 		_ = kwargs.SetItem(objects.NewStr("origin"), objects.NewStr("built-in"))
-		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
+		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), loader})
 		spec, cerr := objects.Call(fn, args, kwargs)
 		if cerr != nil || spec == objects.None() {
 			return nil

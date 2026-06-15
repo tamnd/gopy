@@ -38,6 +38,17 @@ func init() {
 	objectType.Repr = objectRepr
 	objectType.Str = objectStr
 	objectType.Hash = identityHash
+	// tp_getattro / tp_setattro. PyBaseObject_Type wires both to the
+	// generic implementations, so every type that does not override them
+	// inherits GenericGetAttr / GenericSetAttr. A plain object() therefore
+	// raises AttributeError ("'object' object has no attribute %r and no
+	// __dict__ for setting new attributes") on attribute assignment, not a
+	// bare TypeError.
+	//
+	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type (tp_getattro =
+	// PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
+	objectType.Getattro = GenericGetAttr
+	objectType.Setattro = GenericSetAttr
 
 	// object_methods table.
 	//
