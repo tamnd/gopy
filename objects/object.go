@@ -1005,6 +1005,18 @@ func objectGetDict(o Object) (Object, error) {
 		// managed dict over the inline values, leaving them to be detached
 		// in _PyObject_FreeInstanceAttributes at dealloc.
 		v.dictExposed = true
+		// Handing the dict to Python code drops the inline-values fast
+		// path: code can now store straight into the mapping (e.g.
+		// vars(self).update(...)) without routing through instanceSetAttr,
+		// so gopy can no longer keep the type's cached keys in sync. CPython
+		// materializes a combined dict here and clears values->valid, which
+		// deopts the LOAD_ATTR_*_WITH_VALUES arms; mirror that by flipping
+		// inlineValid so a class attribute can no longer be served from the
+		// cache while a direct instance store shadows it.
+		//
+		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+		//          (PyDictValues stops being valid once the dict is built)
+		v.inlineValid = false
 		return v.dict, nil
 	case *Int:
 		// The builtin int type has no tp_dictoffset, so (42).__dict__
