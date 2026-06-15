@@ -11,7 +11,6 @@ package vm
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/tamnd/gopy/builtins"
@@ -774,9 +773,6 @@ func (e *evalState) handleFromlist(mod objects.Object, fromlist objects.Object, 
 			fromName := modName + "." + entry
 			exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
 			if _, ierr := imp.ImportModuleLevel(exec, fromName, "", 0); ierr != nil {
-				if strings.Contains(fromName, "_bootstrap_external") {
-					fmt.Fprintf(os.Stderr, "DBG handleFromlist import %q err=%v\n", fromName, ierr)
-				}
 				// Backwards-compatibility: ignore a fromlist-triggered import
 				// of a submodule that simply does not exist, but only when the
 				// miss is for exactly this submodule.

@@ -318,6 +318,13 @@ import (
 	// CPython: Modules/_winapi.c:3023 _winapi_exec
 	_ "github.com/tamnd/gopy/module/_winapi"
 
+	// Built-in module: winreg. Registers itself via module/winreg/
+	// module.go init(). Exposes the HKEY_*/KEY_*/REG_* constants and the
+	// error alias that importlib._bootstrap_external imports at module top
+	// level on Windows.
+	// CPython: PC/winreg.c:2121 exec_module
+	_ "github.com/tamnd/gopy/module/winreg"
+
 	// Built-in module: _hashlib. Registers itself via
 	// module/_hashlib/module.go init(). Backs Lib/hashlib.py with the
 	// HASH object type and openssl_* convenience constructors using
