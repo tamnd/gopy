@@ -66,6 +66,34 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err err
 		op = instrumentedToBase[op]
 	}
 afterInstrument:
+	// EXTENDED_ARG never reaches dispatch from the straight-line fetch
+	// path (fetch consumes the prefix run and hands dispatch the trailing
+	// real opcode). It only lands here when the instrumented-line handler
+	// above resolved INSTRUMENTED_LINE back to an original EXTENDED_ARG:
+	// the line started on a prefixed instruction. Consume the prefix the
+	// way fetch would, then dispatch the real opcode with the accumulated
+	// arg. fetchExtended scans forward from the byte after the instrumented
+	// slot, so it reads the un-shadowed trailing opcodes.
+	//
+	// CPython: Python/ceval.c TARGET(EXTENDED_ARG)
+	if op == compile.EXTENDED_ARG {
+		realOp, realArg, ok := e.fetchExtended(e.f.InstrPtr, oparg)
+		if !ok {
+			return 0, opcodeNotImplemented(op)
+		}
+		op, oparg = realOp, realArg
+		// The trailing real opcode may itself be instrumented (the jump or
+		// call the prefix feeds is a monitored site), and the top
+		// instrumentation block already ran for the EXTENDED_ARG slot. Fire
+		// its event and rebase here, mirroring CPython dispatching from
+		// TARGET(EXTENDED_ARG) straight into TARGET(INSTRUMENTED_*).
+		if instrumentedRewrite[op] {
+			if err := e.fireInstrumented(op, oparg); err != nil {
+				return 0, err
+			}
+			op = instrumentedToBase[op]
+		}
+	}
 	// Specializer routing: only Quickened code carries inline-cache
 	// counters and specialized variants; non-Quickened code (raw
 	// compile output before specialize.Quicken) skips the entire

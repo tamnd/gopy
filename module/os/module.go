@@ -449,7 +449,7 @@ func buildOS() (*objects.Module, error) {
 	for _, group := range [][]struct {
 		name string
 		val  objects.Object
-	}{entries, posixIdentityEntries()} {
+	}{entries, posixIdentityEntries(), winPathEntries()} {
 		for _, e := range group {
 			if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
 				return nil, err
