@@ -309,7 +309,7 @@ func buildOSErrorFromGo(err error) *pyerrors.Exception {
 	if errno == 0 {
 		return nil
 	}
-	return pyerrors.NewOSError(int(errno), strerrorString(errno), filename, filename2)
+	return pyerrors.NewOSError(winerrorToErrno(int(errno)), strerrorString(errno), filename, filename2)
 }
 
 // strerrorString renders the errno's message the way CPython's
@@ -346,26 +346,26 @@ func promoteOSErrorByErrno(typ *objects.Type, err error) *objects.Type {
 	if errors.As(err, &pathErr) {
 		var errno syscall.Errno
 		if errors.As(pathErr.Err, &errno) {
-			return pyerrors.ErrnoSubclass(int(errno))
+			return pyerrors.ErrnoSubclass(winerrorToErrno(int(errno)))
 		}
 	}
 	var linkErr *os.LinkError
 	if errors.As(err, &linkErr) {
 		var errno syscall.Errno
 		if errors.As(linkErr.Err, &errno) {
-			return pyerrors.ErrnoSubclass(int(errno))
+			return pyerrors.ErrnoSubclass(winerrorToErrno(int(errno)))
 		}
 	}
 	var sysErr *os.SyscallError
 	if errors.As(err, &sysErr) {
 		var errno syscall.Errno
 		if errors.As(sysErr.Err, &errno) {
-			return pyerrors.ErrnoSubclass(int(errno))
+			return pyerrors.ErrnoSubclass(winerrorToErrno(int(errno)))
 		}
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return pyerrors.ErrnoSubclass(int(errno))
+		return pyerrors.ErrnoSubclass(winerrorToErrno(int(errno)))
 	}
 	return typ
 }
