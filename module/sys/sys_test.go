@@ -42,10 +42,11 @@ func TestInitVersionInfoShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetItem(version_info): %v", err)
 	}
-	tup, ok := v.(*objects.Tuple)
+	ss, ok := v.(*objects.StructSeq)
 	if !ok {
-		t.Fatalf("version_info is %T, want *Tuple", v)
+		t.Fatalf("version_info is %T, want *StructSeq", v)
 	}
+	tup := ss.AsTuple()
 	if tup.Len() != 5 {
 		t.Fatalf("version_info has %d items, want 5", tup.Len())
 	}

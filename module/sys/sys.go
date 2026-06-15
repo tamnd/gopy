@@ -237,13 +237,28 @@ func maxsize() int64 {
 	return 1<<31 - 1
 }
 
-// versionInfo returns sys.version_info as a five-tuple
-// (major, minor, micro, releaselevel, serial). The struct-sequence
-// named-tuple lands with 1651-sys-C; v0.7 uses a plain tuple.
+// versionInfoType is the struct-sequence type behind sys.version_info:
+// a five-field named tuple (major, minor, micro, releaselevel, serial)
+// whose type repr reads sys.version_info(major=3, minor=14, ...). It
+// subclasses tuple so isinstance(sys.version_info, tuple) holds and the
+// values stay index-addressable, while sys.version_info.minor and the
+// other named members resolve through the struct-sequence members.
+//
+// CPython: Python/sysmodule.c:850 version_info_type / make_version_info
+var versionInfoType = objects.NewStructSeqType("sys.version_info", []objects.StructSeqField{
+	{Name: "major", Doc: "Major release number"},
+	{Name: "minor", Doc: "Minor release number"},
+	{Name: "micro", Doc: "Patch release number"},
+	{Name: "releaselevel", Doc: "'alpha', 'beta', 'candidate', or 'final'"},
+	{Name: "serial", Doc: "Serial release number"},
+})
+
+// versionInfo returns sys.version_info as the named struct-sequence
+// (major, minor, micro, releaselevel, serial).
 //
 // CPython: Python/sysmodule.c:3884 make_version_info
-func versionInfo() *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
+func versionInfo() *objects.StructSeq {
+	return objects.NewStructSeq(versionInfoType, []objects.Object{
 		objects.NewInt(int64(build.PythonMajorVersion)),
 		objects.NewInt(int64(build.PythonMinorVersion)),
 		objects.NewInt(0),
