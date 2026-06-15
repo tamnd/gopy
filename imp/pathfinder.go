@@ -139,6 +139,14 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			return nil, err
 		}
 		search = paths
+
+		// Track this child on the parent spec for the duration of the load so a
+		// circular import that does getattr(parent, tail) before tail finishes
+		// loading gets the "cannot access submodule" diagnostic.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1340 parent_spec._uninitialized_submodules.append(child)
+		pop := pushUninitializedSubmodule(parentMod, tail)
+		defer pop()
 	}
 
 	// PEP 420: a directory matching the tail with no __init__.py and no
@@ -826,6 +834,39 @@ func setSpecInitializing(mod *objects.Module, on bool) {
 		v = objects.True()
 	}
 	_ = objects.SetAttr(spec, objects.NewStr("_initializing"), v)
+}
+
+// pushUninitializedSubmodule appends child to parentMod.__spec__.
+// _uninitialized_submodules and returns a pop function that removes the
+// last entry. CPython brackets the child's _load_unlocked with this
+// append/pop so a circular import that reaches getattr(parent, child)
+// while child is mid-load gets the "cannot access submodule" message.
+//
+// CPython: Lib/importlib/_bootstrap.py:1340 parent_spec._uninitialized_submodules.append(child)
+func pushUninitializedSubmodule(parentMod *objects.Module, child string) func() {
+	noop := func() {}
+	if parentMod == nil {
+		return noop
+	}
+	spec, err := parentMod.Dict().GetItem(objects.NewStr("__spec__"))
+	if err != nil || spec == nil || objects.IsNone(spec) {
+		return noop
+	}
+	listObj, err := objects.GetAttr(spec, objects.NewStr("_uninitialized_submodules"))
+	if err != nil {
+		return noop
+	}
+	list, ok := listObj.(*objects.List)
+	if !ok {
+		return noop
+	}
+	list.Append(objects.NewStr(child))
+	return func() {
+		// CPython: Lib/importlib/_bootstrap.py:1345 _uninitialized_submodules.pop()
+		if n := list.Len(); n > 0 {
+			list.SetSlice(n-1, n, nil)
+		}
+	}
 }
 
 // attachNamespaceSpec binds a PEP 420 namespace ModuleSpec (loader None,

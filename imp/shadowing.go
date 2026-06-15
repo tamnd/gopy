@@ -61,6 +61,26 @@ func SpecIsInitializing(spec objects.Object) (bool, error) {
 	return objects.IsTrue(v), nil
 }
 
+// SpecIsUninitializedSubmodule ports _PyModuleSpec_IsUninitializedSubmodule:
+// name is currently mid-import as a submodule, i.e. it appears in
+// spec._uninitialized_submodules. A missing list reads as "not a submodule".
+//
+// CPython: Objects/moduleobject.c:876 _PyModuleSpec_IsUninitializedSubmodule
+func SpecIsUninitializedSubmodule(spec objects.Object, name string) (bool, error) {
+	if spec == nil || objects.IsNone(spec) {
+		return false, nil
+	}
+	v, found, err := optionalAttr(spec, "_uninitialized_submodules")
+	if err != nil || !found {
+		return false, err
+	}
+	contains, err := objects.Contains(v, objects.NewStr(name))
+	if err != nil {
+		return false, err
+	}
+	return contains, nil
+}
+
 // ModuleIsPossiblyShadowing ports _PyModule_IsPossiblyShadowing: the
 // module at origin could shadow a same-named module later on the search
 // path. The check is: not sys.flags.safe_path and
@@ -251,9 +271,21 @@ func moduleGetattrError(m *objects.Module, name string) error {
 	case initializing:
 		return fmt.Errorf("AttributeError: partially initialized module %s has no attribute %s (most likely due to a circular import)",
 			modQ, nameQ)
-	default:
-		return fmt.Errorf("AttributeError: module %s has no attribute %s", modQ, nameQ)
 	}
+
+	// Not initializing: the miss is a circular import only if the name is a
+	// submodule currently mid-load (tracked on spec._uninitialized_submodules).
+	//
+	// CPython: Objects/moduleobject.c:1116 _PyModuleSpec_IsUninitializedSubmodule
+	uninit, uerr := SpecIsUninitializedSubmodule(spec, name)
+	if uerr != nil {
+		return uerr
+	}
+	if uninit {
+		return fmt.Errorf("AttributeError: cannot access submodule %s of module %s (most likely due to a circular import)",
+			nameQ, modQ)
+	}
+	return fmt.Errorf("AttributeError: module %s has no attribute %s", modQ, nameQ)
 }
 
 // unicodeContents returns the string contents of a str (or str subclass)

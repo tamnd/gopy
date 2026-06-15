@@ -634,12 +634,25 @@ func runFile(path string, stdout, stderr *os.File) int {
 		if absErr != nil {
 			abs = path
 		}
-		src := fmt.Sprintf("import importlib.util as _u, sys as _s\n"+
+		// regrtest imports the test under "test.<name>" the normal way, so
+		// the import machinery runs setattr(parent_package, child, module):
+		// the `test` package ends up with a `test_import` attribute. gopy
+		// pre-injects the gate module into sys.modules without that parent
+		// binding, so a test like data/circular_imports/.../child.py that
+		// evaluates `test.test_import.<...>` as an expression would fail its
+		// first hop getattr(test, 'test_import'). Import the parent package
+		// and bind the leaf to mirror what _find_and_load does.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1350 setattr(parent_module, child, module)
+		src := fmt.Sprintf("import importlib, importlib.util as _u, sys as _s\n"+
 			"_m = _s.modules.get(%q)\n"+
 			"if _m is not None and getattr(_m, '__spec__', None) is None:\n"+
 			"    _m.__spec__ = _u.spec_from_file_location(%q, %q)\n"+
 			"    _m.__loader__ = _m.__spec__.loader\n"+
-			"del _u, _s, _m\n", modName, modName, abs)
+			"_parent, _, _child = %q.rpartition('.')\n"+
+			"if _m is not None and _parent:\n"+
+			"    setattr(importlib.import_module(_parent), _child, _m)\n"+
+			"del importlib, _u, _s, _m, _parent, _child\n", modName, modName, abs, modName)
 		if _, err := pythonrun.RunString(ts, src, "<spec>", parser.ModeFile, mainGlobals, nil); err != nil {
 			fmt.Fprintln(stderr, "attach main spec:", err)
 		}
