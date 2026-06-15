@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tamnd/gopy/builtins"
 	pyerrors "github.com/tamnd/gopy/errors"
@@ -614,7 +615,7 @@ func currentEvaluator(code *objects.Code, globals, locals, closure objects.Objec
 // likewise drops it pending fromlist-driven submodule discovery.
 //
 // CPython: Python/import.c:1561 PyImport_ImportModuleLevelObject
-func currentImporter(name, pkgname string, level int, _ []string) (objects.Object, error) {
+func currentImporter(name, pkgname string, level int, fromlist []string) (objects.Object, error) {
 	ts := currentThread()
 	if ts == nil {
 		ts = state.NewThread()
@@ -624,8 +625,9 @@ func currentImporter(name, pkgname string, level int, _ []string) (objects.Objec
 	//
 	// CPython: Python/import.c:1759 import_name reads interp->builtins_module.
 	var b objects.Object
-	if f := frameStackFor(ts).Top(); f != nil {
-		b = callerBuiltins(f)
+	topFrame := frameStackFor(ts).Top()
+	if topFrame != nil {
+		b = callerBuiltins(topFrame)
 	}
 	exec := &vmExecutor{ts: ts, builtins: b}
 	mod, err := imp.ImportModuleLevel(exec, name, pkgname, level)
@@ -641,6 +643,30 @@ func currentImporter(name, pkgname string, level int, _ []string) (objects.Objec
 			return nil, objects.NewRaisedError(exc, err.Error())
 		}
 		return nil, err
+	}
+	// _handle_fromlist / head-of-dotted-name selection, exactly like the
+	// IMPORT_NAME opcode path in importName: a non-empty fromlist forces
+	// the named submodules and returns the deepest module, while an empty
+	// fromlist for a dotted import returns the top-level package.
+	//
+	// CPython: Python/bltinmodule.c:259 builtin___import___impl
+	// CPython: Lib/importlib/_bootstrap.py:1463 _handle_fromlist
+	e := &evalState{ts: ts, f: topFrame}
+	if len(fromlist) > 0 {
+		items := make([]objects.Object, len(fromlist))
+		for i, s := range fromlist {
+			items[i] = objects.NewStr(s)
+		}
+		if herr := e.handleFromlist(mod, objects.NewList(items), false); herr != nil {
+			return nil, herr
+		}
+		return mod, nil
+	}
+	if strings.Contains(name, ".") {
+		top := name[:strings.IndexByte(name, '.')]
+		if tm, ok := imp.GetModule(top); ok {
+			return tm, nil
+		}
 	}
 	return mod, nil
 }

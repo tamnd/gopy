@@ -424,6 +424,16 @@ func splitLocalsplusnames(names []any, kinds []byte) (varnames []string, cellvar
 // CPython: Objects/codeobject.c:203 intern_constants
 // CPython: Python/marshal.c:391 w_ref interned check.
 func wrapConstStrings(v any) any {
+	// A code object that round-tripped through Python (marshal.load then
+	// code.replace) carries co_consts as objects.Object values rather than
+	// the native Go consts a freshly-compiled gopy Code holds. Normalize
+	// those to the native marshal value set first so the rest of this
+	// function (and writeBody) sees ints, strings, tuples and code objects.
+	if obj, ok := v.(objects.Object); ok {
+		if n, err := fromObject(obj); err == nil {
+			v = n
+		}
+	}
 	switch x := v.(type) {
 	case string:
 		if shouldInternString(x) {

@@ -163,6 +163,18 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		if dir == "" {
 			dir = "."
 		}
+		// spec_from_file_location runs the resolved location through
+		// _path_abspath, so every __file__, __path__ and __cached__ a
+		// path-based import produces is absolute even when the sys.path
+		// entry is relative ('', '.', or a relative directory). Absolutize
+		// the directory up front so the file paths joined below, the
+		// bytecode-cache path, and the spec origin all agree and match
+		// CPython's absolute strings.
+		//
+		// CPython: Lib/importlib/_bootstrap_external.py:782 spec_from_file_location (_path_abspath)
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
 		// A sys.path entry that is not a directory (a zip archive, or a
 		// path that points inside one) is handled by a custom importer
 		// registered on sys.path_hooks, exactly as CPython's PathFinder
@@ -592,9 +604,14 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: %w", name, err)
 	}
-	code, err := compiler(src, initFile)
-	if err != nil {
-		return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, err)
+	code, ok := readBytecodeCache(initFile)
+	if !ok {
+		var cerr error
+		code, cerr = compiler(src, initFile)
+		if cerr != nil {
+			return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, cerr)
+		}
+		writeBytecodeCache(initFile, code)
 	}
 	setSpecInitializing(mod, true)
 	_, execErr := exec.ExecCode(code, mod)
@@ -764,9 +781,14 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: %w", name, err)
 	}
-	code, err := compiler(src, file)
-	if err != nil {
-		return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, err)
+	code, ok := readBytecodeCache(file)
+	if !ok {
+		var cerr error
+		code, cerr = compiler(src, file)
+		if cerr != nil {
+			return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, cerr)
+		}
+		writeBytecodeCache(file, code)
 	}
 	setSpecInitializing(mod, true)
 	_, execErr := exec.ExecCode(code, mod)

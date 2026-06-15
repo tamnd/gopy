@@ -442,7 +442,7 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	} else {
-		f, err := os.OpenFile(a.file, flag, 0o600)
+		f, err := os.OpenFile(a.file, flag, 0o666)
 		if err != nil {
 			// Preserve the os.PathError chain (errno + filename) with %w
 			// so the unwind path builds a FileNotFoundError /

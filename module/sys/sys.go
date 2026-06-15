@@ -133,11 +133,12 @@ func Init() (*objects.Dict, error) {
 	// Import-system state the runtime exposes at the top level. CPython
 	// stamps these in PySys_Create / the import bootstrap; runpy and
 	// pkgutil read them directly. gopy's import is Go-side so the hooks
-	// list and the importer cache stay empty, and bytecode is never
-	// written, but the attributes must exist with the right types.
+	// list and the importer cache stay empty, but the source loaders do
+	// write __pycache__/<name>.<tag>.pyc files, so the default matches
+	// CPython: bytecode writing is on unless -B / PYTHONDONTWRITEBYTECODE.
 	//
 	// CPython: Python/sysmodule.c _PySys_AddObject path_hooks/path_importer_cache
-	if err := setItem(d, "dont_write_bytecode", objects.NewBool(true)); err != nil {
+	if err := setItem(d, "dont_write_bytecode", objects.NewBool(false)); err != nil {
 		return nil, err
 	}
 	// pycache_prefix controls where the import machinery writes .pyc

@@ -859,6 +859,20 @@ func fromObject(obj objects.Object) (any, error) {
 		return x, nil
 	case *objects.Code:
 		return x, nil
+	case *objects.Complex:
+		return x.Complex128(), nil
+	case *objects.Bytes:
+		return x.Bytes(), nil
+	case *objects.Tuple:
+		out := make([]any, x.Len())
+		for i := 0; i < x.Len(); i++ {
+			n, err := fromObject(x.Item(i))
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
+		}
+		return out, nil
 	}
 	// None and str use unexported concrete types; dispatch via type slots.
 	if obj.Type() == objects.NoneType() {
