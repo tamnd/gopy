@@ -218,6 +218,10 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		if mod, ok, derr := delegateImport(modname, orNone(e.f.Globals), orNone(dlocals), orNone(fromlistObj), level); ok {
 			if derr != nil {
+				// CPython: Python/import.c:3959 import_name trims the importlib
+				// machinery frames off the traceback before the calling frame is
+				// recorded on the way out.
+				removeImportlibFrames(e.ts)
 				return 0, true, derr
 			}
 			e.pushObject(mod)

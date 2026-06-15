@@ -500,6 +500,15 @@ func gopyCompile(src []byte, filename string) (*objects.Code, error) {
 	if len(src) == 0 || src[len(src)-1] != '\n' {
 		src = append(src, '\n')
 	}
+	// CPython freezes importlib._bootstrap[_external], so the code objects of
+	// the import machinery carry the synthetic co_filename
+	// "<frozen importlib._bootstrap>" rather than a source path. gopy loads
+	// them from source; stamp the same frozen name so tracebacks that pass
+	// through the machinery read identically (test_import_bug) and
+	// remove_importlib_frames can recognise them.
+	//
+	// CPython: Python/pylifecycle.c:1041 init_importlib (frozen modules)
+	filename = frozenImportlibName(filename)
 	mod, err := parser.ParseBytes(src, filename, parser.ModeFile)
 	if err != nil {
 		return nil, err
@@ -532,6 +541,21 @@ func gopyCompile(src []byte, filename string) (*objects.Code, error) {
 	out.SyncNameObjs()
 	out.SyncConstObjs()
 	return out, nil
+}
+
+// frozenImportlibName maps the source paths of the two importlib bootstrap
+// modules to the synthetic co_filename CPython gives their frozen code
+// objects. Any other path is returned unchanged.
+//
+// CPython: Python/import.c:3501 remove_importlib_frames (frozen names)
+func frozenImportlibName(filename string) string {
+	switch {
+	case strings.HasSuffix(filename, "importlib/_bootstrap_external.py"):
+		return "<frozen importlib._bootstrap_external>"
+	case strings.HasSuffix(filename, "importlib/_bootstrap.py"):
+		return "<frozen importlib._bootstrap>"
+	}
+	return filename
 }
 
 // runSource is the gopy -c entry. It dispatches to
