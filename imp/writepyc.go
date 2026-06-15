@@ -24,6 +24,20 @@ import (
 // CPython: Lib/importlib/_bootstrap_external.py:60 _PYCACHE
 const pycacheDir = "__pycache__"
 
+// isFrozenBootstrapSource reports whether sourcePath is one of the two
+// importlib bootstrap modules CPython freezes (importlib._bootstrap and
+// importlib._bootstrap_external). Those are never byte-compiled to a .pyc
+// in CPython, so gopy excludes them from the bytecode cache to keep their
+// "<frozen importlib._bootstrap[_external]>" co_filename intact. A cached
+// .pyc would be rewritten to the real disk path by fixCoFilename, leaving
+// the import-machinery frames un-trimmable by remove_importlib_frames.
+//
+// CPython: Python/pylifecycle.c:1041 init_importlib (frozen modules)
+func isFrozenBootstrapSource(sourcePath string) bool {
+	return strings.HasSuffix(sourcePath, "importlib/_bootstrap.py") ||
+		strings.HasSuffix(sourcePath, "importlib/_bootstrap_external.py")
+}
+
 // dontWriteBytecode reports sys.dont_write_bytecode. When True the
 // source loaders skip the cache write entirely, exactly like CPython's
 // SourceFileLoader.get_code (the `not sys.dont_write_bytecode` guard).
@@ -138,6 +152,19 @@ func cacheFromSource(sourcePath string) string {
 // CPython: Lib/importlib/_bootstrap_external.py:1129 SourceFileLoader.get_code
 // CPython: Lib/importlib/_bootstrap_external.py:585 _validate_timestamp_pyc
 func readBytecodeCache(sourcePath string) (*objects.Code, bool) {
+	if isFrozenBootstrapSource(sourcePath) {
+		// CPython freezes importlib._bootstrap[_external] and never loads
+		// them from a .pyc, so their code objects keep the synthetic
+		// "<frozen importlib._bootstrap[_external]>" co_filename for the
+		// life of the process. gopy loads them from source instead; reading
+		// a cached .pyc would route through fixCoFilename below and rewrite
+		// that co_filename to the real disk path, leaving the import-machinery
+		// frames un-trimmable by remove_importlib_frames. Skip the cache so
+		// the source compiler stamps the frozen name every time.
+		//
+		// CPython: Python/import.c:3500 remove_importlib_frames (frozen names)
+		return nil, false
+	}
 	dest := cacheFromSource(sourcePath)
 	if dest == "" {
 		return nil, false
@@ -212,7 +239,7 @@ func fixCoFilename(code *objects.Code, oldname, newname string) {
 // CPython: Lib/importlib/_bootstrap_external.py:1167 get_code (cache write)
 // CPython: Lib/importlib/_bootstrap_external.py:1185 set_data (atomic write)
 func writeBytecodeCache(sourcePath string, code *objects.Code) {
-	if dontWriteBytecode() {
+	if dontWriteBytecode() || isFrozenBootstrapSource(sourcePath) {
 		return
 	}
 	dest := cacheFromSource(sourcePath)
