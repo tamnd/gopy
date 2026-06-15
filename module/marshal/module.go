@@ -95,6 +95,12 @@ func loads(args []objects.Object, kwargs map[string]objects.Object) (objects.Obj
 	}
 	val, err := marshal.Load(bytes.NewReader(src))
 	if err != nil {
+		// A truncated or empty buffer surfaces as EOFError, mirroring
+		// r_object/r_byte/r_string; any other decode failure is a ValueError.
+		// CPython: Python/marshal.c:1922 marshal_loads_impl
+		if marshal.IsEOF(err) {
+			return nil, fmt.Errorf("EOFError: %w", err)
+		}
 		return nil, fmt.Errorf("ValueError: %w", err)
 	}
 	return wrap(val), nil
