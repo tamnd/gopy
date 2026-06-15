@@ -93,6 +93,9 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 	}
 
 	parent, tail := splitParent(name)
+	if strings.Contains(name, "_bootstrap_external") {
+		fmt.Fprintf(os.Stderr, "DBG FindModule name=%q parent=%q tail=%q paths=%v\n", name, parent, tail, p.Paths)
+	}
 	search := p.Paths
 	if parent == "" && LivePathHook != nil {
 		if live := LivePathHook(); live != nil {
@@ -136,7 +139,13 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 		}
 		paths, err := readPackagePath(parentMod)
 		if err != nil {
+			if strings.Contains(name, "_bootstrap_external") {
+				fmt.Fprintf(os.Stderr, "DBG readPackagePath err=%v\n", err)
+			}
 			return nil, err
+		}
+		if strings.Contains(name, "_bootstrap_external") {
+			fmt.Fprintf(os.Stderr, "DBG readPackagePath paths=%v\n", paths)
 		}
 		search = paths
 
@@ -267,6 +276,9 @@ func (p *PathFinder) scanDir(exec Executor, dir, name, parent, tail string, name
 		}},
 	}
 	for _, l := range loaders {
+		if strings.Contains(name, "_bootstrap_external") {
+			fmt.Fprintf(os.Stderr, "DBG scanDir candidate file=%q base=%q isFile=%v caseOK=%v\n", l.file, l.base, isFile(l.file), caseOK(l.base))
+		}
 		if !isFile(l.file) || !caseOK(l.base) {
 			continue
 		}
@@ -808,6 +820,9 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	_, execErr := exec.ExecCode(code, mod)
 	setSpecInitializing(mod, false)
 	if execErr != nil {
+		if strings.Contains(name, "_bootstrap_external") {
+			fmt.Fprintf(os.Stderr, "DBG loadAsModule %q exec err=%v\n", name, execErr)
+		}
 		RemoveModule(name)
 		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
