@@ -363,10 +363,22 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 	// FileFinder path hook to sys.path_hooks.
 	//
 	// CPython: Python/pylifecycle.c:1041 init_importlib_external
-	install := "import importlib, sys, _imp\n" +
-		"from importlib import _bootstrap, _bootstrap_external\n" +
-		"_bootstrap._install(sys, _imp)\n" +
-		"_bootstrap_external._install(_bootstrap)\n" +
+	// CPython runs init_importlib exactly once, against a fresh per-process
+	// interpreter. gopy reuses one process-wide sys.modules across every run()
+	// invocation (the cmd/gopy tests call run() several times in a single
+	// binary), so the install must be idempotent. Once the import system is
+	// live, sys.modules already holds _frozen_importlib aliased to the source
+	// _bootstrap module, which carries no __origname__; re-running
+	// _bootstrap._install would make _setup re-scan sys.modules and trip the
+	// frozen fix-up assert on it. Guard the whole install on the first run.
+	//
+	// CPython: Python/pylifecycle.c:1041 init_importlib_external
+	install := "import sys\n" +
+		"if '_frozen_importlib' not in sys.modules:\n" +
+		" import importlib, _imp\n" +
+		" from importlib import _bootstrap, _bootstrap_external\n" +
+		" _bootstrap._install(sys, _imp)\n" +
+		" _bootstrap_external._install(_bootstrap)\n" +
 		// CPython's C bootstrap freezes _bootstrap / _bootstrap_external and
 		// publishes them under the _frozen_importlib* names; importlib then
 		// aliases those exact objects to importlib._bootstrap[_external]. gopy
@@ -375,17 +387,17 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 		// importlib._bootstrap identical (issue #15386 / bootstrap tests).
 		//
 		// CPython: Lib/importlib/__init__.py:50 (_bootstrap aliasing)
-		"sys.modules['_frozen_importlib'] = _bootstrap\n" +
-		"sys.modules['_frozen_importlib_external'] = _bootstrap_external\n" +
+		" sys.modules['_frozen_importlib'] = _bootstrap\n" +
+		" sys.modules['_frozen_importlib_external'] = _bootstrap_external\n" +
 		// CPython registers the zipimporter path hook ahead of FileFinder
 		// (C-side, _PyImportZip_Init) so a sys.path entry pointing at a zip
 		// archive is claimed before the directory finder rejects it.
 		// CPython: Python/pylifecycle.c init_importlib_external (zipimport)
-		"try:\n" +
-		" import zipimport\n" +
-		" sys.path_hooks.insert(0, zipimport.zipimporter)\n" +
-		"except ImportError:\n" +
-		" pass\n" +
+		" try:\n" +
+		"  import zipimport\n" +
+		"  sys.path_hooks.insert(0, zipimport.zipimporter)\n" +
+		" except ImportError:\n" +
+		"  pass\n" +
 		// CPython freezes importlib._bootstrap[_external] and the importlib
 		// package, so _setup gives them a __spec__ via the frozen loader
 		// before any user import runs. gopy loads these as plain .py files
@@ -398,14 +410,14 @@ func bootstrapEncodings(ts *state.Thread, globals *objects.Dict, stderr *os.File
 		// `import importlib.util` raises AttributeError at _bootstrap.py:1325.
 		//
 		// CPython: Lib/importlib/_bootstrap.py:1517 _setup (spec fix-up loop)
-		"for _n in list(sys.modules):\n" +
-		" _m = sys.modules[_n]\n" +
-		" if getattr(_m, '__spec__', None) is None and getattr(_m, '__file__', None):\n" +
-		"  try:\n" +
-		"   _sp = _bootstrap_external.spec_from_file_location(_n, _m.__file__)\n" +
-		"   _bootstrap._init_module_attrs(_sp, _m, override=True)\n" +
-		"  except Exception:\n" +
-		"   pass\n"
+		" for _n in list(sys.modules):\n" +
+		"  _m = sys.modules[_n]\n" +
+		"  if getattr(_m, '__spec__', None) is None and getattr(_m, '__file__', None):\n" +
+		"   try:\n" +
+		"    _sp = _bootstrap_external.spec_from_file_location(_n, _m.__file__)\n" +
+		"    _bootstrap._init_module_attrs(_sp, _m, override=True)\n" +
+		"   except Exception:\n" +
+		"    pass\n"
 	if _, err := pythonrun.RunString(ts, install, "<bootstrap>", parser.ModeFile, globals, nil); err != nil {
 		fmt.Fprintln(stderr, "preload importlib:", err)
 		return 1
