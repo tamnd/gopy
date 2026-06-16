@@ -144,6 +144,16 @@ type interpState struct {
 	//
 	// CPython: Include/internal/pycore_interp.h modules_by_index
 	modByIndex map[int]*objects.Module
+	// hiddenExt holds the registered extension-module sys.modules entries
+	// this subinterpreter shadowed on entry. CPython gives every interpreter
+	// its own sys.modules, so a subinterpreter re-imports an extension through
+	// import_find_extension (firing the compat gate) even when the main
+	// interpreter already cached it. gopy shares one sys.modules dict, so a
+	// push removes those entries (forcing the re-import) and the matching pop
+	// restores them. nil on the main interpreter.
+	//
+	// CPython: Include/internal/pycore_interp.h imports.modules
+	hiddenExt map[string]objects.Object
 }
 
 var (
@@ -169,14 +179,16 @@ func currentInterp() *interpState {
 // CPython: Python/pylifecycle.c:586 init_interp_create_gil (own_gil) and
 // Python/interpconfig.c:262 check_multi_interp_extensions feature flag.
 func PushSubinterp(ownGil, checkMulti bool) {
-	interpMu.Lock()
-	nextInterpID++
-	interpStack = append(interpStack, &interpState{
+	s := &interpState{
 		ownGil:     ownGil,
 		checkMulti: checkMulti,
-		id:         nextInterpID,
 		modByIndex: map[int]*objects.Module{},
-	})
+		hiddenExt:  hideExtModules(),
+	}
+	interpMu.Lock()
+	nextInterpID++
+	s.id = nextInterpID
+	interpStack = append(interpStack, s)
 	interpMu.Unlock()
 }
 
@@ -184,10 +196,49 @@ func PushSubinterp(ownGil, checkMulti bool) {
 // interpreter at the bottom of the stack is never popped.
 func PopSubinterp() {
 	interpMu.Lock()
+	var popped *interpState
 	if len(interpStack) > 1 {
+		popped = interpStack[len(interpStack)-1]
 		interpStack = interpStack[:len(interpStack)-1]
 	}
 	interpMu.Unlock()
+	if popped != nil {
+		restoreExtModules(popped.hiddenExt)
+	}
+}
+
+// hideExtModules removes every registered extension module's sys.modules
+// entry, returning the removed entries so PopSubinterp can restore them. A
+// fresh subinterpreter has an empty sys.modules, so its first `import name`
+// of an extension misses and re-runs the import (firing the PEP 489 compat
+// gate through import_find_extension) instead of returning the main
+// interpreter's cached module. gopy shares the one sys.modules dict, so the
+// removal models the per-interpreter cache for the duration of the run.
+//
+// CPython: Python/import.c:1964 import_find_extension
+func hideExtModules() map[string]objects.Object {
+	hidden := map[string]objects.Object{}
+	for _, name := range ExtModuleNames() {
+		if v, ok := GetModuleRaw(name); ok {
+			hidden[name] = v
+			RemoveModule(name)
+		}
+	}
+	return hidden
+}
+
+// restoreExtModules undoes hideExtModules when a subinterpreter run ends: it
+// drops any extension entry the subinterpreter left behind and reinstates the
+// main interpreter's originals, so the shared sys.modules looks untouched.
+func restoreExtModules(hidden map[string]objects.Object) {
+	for _, name := range ExtModuleNames() {
+		RemoveModule(name)
+	}
+	for name, v := range hidden {
+		sysModulesMu.Lock()
+		_ = sysModules.SetItem(objects.NewStr(name), v)
+		sysModulesMu.Unlock()
+	}
 }
 
 // SetMultiInterpOverride sets the current interpreter's

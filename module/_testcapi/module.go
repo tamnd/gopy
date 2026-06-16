@@ -333,6 +333,15 @@ func runInSubinterp(args []objects.Object, _ map[string]objects.Object) (objects
 	if !ok {
 		return nil, fmt.Errorf("TypeError: run_in_subinterp() argument must be str, not %s", args[0].Type().Name)
 	}
+	// Py_NewInterpreter builds a legacy subinterpreter: it shares the main
+	// GIL and leaves check_multi_interp_extensions off, and it has its own
+	// sys.modules so any extension re-imports through import_find_extension.
+	// Push that interpreter state for the duration of the run so the script's
+	// "assert name not in sys.modules" holds and the re-import copies m_copy.
+	//
+	// CPython: Modules/_testcapimodule.c:1969 run_in_subinterp (Py_NewInterpreter)
+	imp.PushSubinterp(false, false)
+	defer imp.PopSubinterp()
 	return objects.NewInt(int64(builtins.RunInFreshNamespace(code.Value()))), nil
 }
 
