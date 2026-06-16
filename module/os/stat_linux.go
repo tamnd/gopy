@@ -28,8 +28,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	nlink = uint64(sys.Nlink) //nolint:unconvert // Nlink is uint32 on linux/arm64
 	uid = sys.Uid
 	gid = sys.Gid
-	atime = sys.Atim.Sec*1_000_000_000 + int64(sys.Atim.Nsec)
-	ctime = sys.Ctim.Sec*1_000_000_000 + int64(sys.Ctim.Nsec)
+	atime = sys.Atim.Sec*1_000_000_000 + int64(sys.Atim.Nsec) //nolint:unconvert // Nsec is int32 on 32-bit linux
+	ctime = sys.Ctim.Sec*1_000_000_000 + int64(sys.Ctim.Nsec) //nolint:unconvert // Nsec is int32 on 32-bit linux
 	return
 }
 
@@ -71,12 +71,12 @@ func fstatResult(fdVal int64) (*objects.StructSeq, error) {
 	if err := syscall.Fstat(int(fdVal), &st); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
-	atime := st.Atim.Sec*1_000_000_000 + int64(st.Atim.Nsec)
-	mtime := st.Mtim.Sec*1_000_000_000 + int64(st.Mtim.Nsec)
-	ctime := st.Ctim.Sec*1_000_000_000 + int64(st.Ctim.Nsec)
+	atime := st.Atim.Sec*1_000_000_000 + int64(st.Atim.Nsec) //nolint:unconvert // Nsec is int32 on 32-bit linux
+	mtime := st.Mtim.Sec*1_000_000_000 + int64(st.Mtim.Nsec) //nolint:unconvert // Nsec is int32 on 32-bit linux
+	ctime := st.Ctim.Sec*1_000_000_000 + int64(st.Ctim.Nsec) //nolint:unconvert // Nsec is int32 on 32-bit linux
 	return newStatResult(int64(st.Mode), int64(st.Ino), int64(st.Dev), int64(st.Nlink),
 		int64(st.Uid), int64(st.Gid), st.Size, atime, mtime, ctime,
-		int64(st.Blksize), int64(st.Blocks), int64(st.Rdev)), nil
+		int64(st.Blksize), int64(st.Blocks), int64(st.Rdev)), nil //nolint:unconvert // Blksize/Blocks are int32 on 32-bit linux
 }
 
 // getuid returns the real user ID of the calling process.
