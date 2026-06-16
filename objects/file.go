@@ -22,7 +22,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"unsafe"
 )
+
+// ClearOSFileFinalizer disarms the close finalizer that os.NewFile /
+// os.OpenFile arm on a borrowed descriptor. The finalizer is set on the
+// unexported inner *os.file, not on the returned *os.File, so
+// runtime.SetFinalizer(f, nil) on the outer handle is a no-op and leaves the
+// close live: a later GC then closes a descriptor whose integer was already
+// freed and reused by another open file, surfacing as a spurious EBADF
+// ("bad file descriptor") on the unrelated file's next write. os.File is
+// struct{ file *file } with the inner pointer at offset 0, so read that
+// pointer and clear the finalizer on the object it actually points at.
+func ClearOSFileFinalizer(f *os.File) {
+	if f == nil {
+		return
+	}
+	inner := *(*unsafe.Pointer)(unsafe.Pointer(f))
+	if inner != nil {
+		runtime.SetFinalizer((*byte)(inner), nil)
+	}
+}
 
 // File mirrors the union of FileIO + the buffer + TextIOWrapper. The
 // read/write side is decided at open time and does not change; mixing

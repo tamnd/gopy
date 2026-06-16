@@ -116,22 +116,6 @@ func encodeUTF32(s, variant string) []byte {
 
 // --- 8-bit code pages -------------------------------------------------------
 
-// charmapDecode decodes data using a 256-entry lookup table. -1 in the
-// table means the byte is unmapped and should raise UnicodeDecodeError.
-//
-// CPython: Modules/_codecs/charmap.c PyUnicode_DecodeCharmap
-func charmapDecode(data []byte, table *[256]rune, name string) (string, error) {
-	runes := make([]rune, len(data))
-	for i, b := range data {
-		r := table[b]
-		if r < 0 {
-			return "", fmt.Errorf("UnicodeDecodeError: %s can't decode byte 0x%02x", name, b)
-		}
-		runes[i] = r
-	}
-	return string(runes), nil
-}
-
 // charmapEncode encodes s using the inverse of the 256-entry table.
 // The map is built once at table-construction time.
 //

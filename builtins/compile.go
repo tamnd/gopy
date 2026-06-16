@@ -156,7 +156,8 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 // loaders pass a pathlib.Path here, so a bare str check is too strict.
 //
 // CPython: Python/bltinmodule.c builtin_compile (filename: object,
-//          PyUnicode_FSDecoder) and Objects/unicodeobject.c PyOS_FSPath
+//
+//	PyUnicode_FSDecoder) and Objects/unicodeobject.c PyOS_FSPath
 func compileFilenameArg(o objects.Object) (string, error) {
 	switch v := o.(type) {
 	case *objects.Unicode:

@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	stdos "os"
-	"runtime"
 	"syscall"
 
 	"github.com/tamnd/gopy/objects"
@@ -30,10 +29,14 @@ import (
 //
 // CPython: Modules/_io/fileio.c:159 _io_FileIO_close_impl owns the close;
 // there is no background reclaim of the fd.
+//
+// os.NewFile arms the finalizer on the unexported inner *os.file, not on the
+// returned *os.File, so runtime.SetFinalizer(f, nil) on the outer handle is a
+// no-op and leaves the close finalizer live. os.File is struct{ file *file }
+// with the inner pointer at offset 0, so read that pointer and clear the
+// finalizer on the object it actually points at.
 func clearGoFinalizer(f *stdos.File) {
-	if f != nil {
-		runtime.SetFinalizer(f, nil)
-	}
+	objects.ClearOSFileFinalizer(f)
 }
 
 // SMALLCHUNK / DEFAULT_BUFFER_SIZE / LARGE_BUFFER_CUTOFF_SIZE mirror the

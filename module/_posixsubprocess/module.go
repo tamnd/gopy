@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -140,11 +139,12 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// owned by Python's subprocess machinery (subprocess.py closes them
 	// explicitly after fork_exec returns). If Go's GC fires the default
 	// finalizer before Python calls os.close(), the fd is closed out from
-	// under the caller and subsequent os.close() raises EBADF.
-	// Pattern mirrors module/os/stat_darwin.go osFstat runtime.SetFinalizer.
+	// under the caller and subsequent os.close() raises EBADF. The finalizer
+	// is armed on the inner *os.file, so objects.ClearOSFileFinalizer reaches
+	// it rather than the outer handle (a SetFinalizer no-op).
 	if p2cread >= 0 {
 		f := os.NewFile(uintptr(p2cread), "pipe:stdin")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stdin = f
 	} else {
 		cmd.Stdin = io.NopCloser(os.Stdin)
@@ -154,7 +154,7 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// CPython: Modules/_posixsubprocess.c:730 dup2(c2pwrite, 1)
 	if c2pwrite >= 0 {
 		f := os.NewFile(uintptr(c2pwrite), "pipe:stdout")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stdout = f
 	} else {
 		cmd.Stdout = os.Stdout
@@ -164,7 +164,7 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// CPython: Modules/_posixsubprocess.c:737 dup2(errwrite, 2)
 	if errwrite >= 0 {
 		f := os.NewFile(uintptr(errwrite), "pipe:stderr")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stderr = f
 	} else {
 		cmd.Stderr = os.Stderr

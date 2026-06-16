@@ -1039,68 +1039,86 @@ func applySpec(util *objects.Module, p pendingSpec) {
 
 // buildSpec calls the appropriate importlib.util constructor for p.
 func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
-	if p.namespace {
-		// A PEP 420 namespace spec: loader None, origin None, the
-		// portions as submodule_search_locations. machinery.ModuleSpec
-		// is the faithful constructor; util re-exports it.
-		//
-		// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
-		machinery, ok := GetModule("importlib.machinery")
+	switch {
+	case p.namespace:
+		return buildNamespaceSpec(p)
+	case p.builtin:
+		return buildBuiltinSpec(util, p)
+	default:
+		return buildFileSpec(util, p)
+	}
+}
+
+// buildNamespaceSpec builds a PEP 420 namespace spec: loader None, origin
+// None, the portions as submodule_search_locations. machinery.ModuleSpec is
+// the faithful constructor; util re-exports it.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+func buildNamespaceSpec(p pendingSpec) objects.Object {
+	machinery, ok := GetModule("importlib.machinery")
+	if !ok {
+		return nil
+	}
+	ctor, err := machinery.Dict().GetItem(objects.NewStr("ModuleSpec"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("is_package"), objects.True())
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
+	spec, cerr := objects.Call(ctor, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	items := make([]objects.Object, len(p.search))
+	for i, s := range p.search {
+		items[i] = objects.NewStr(s)
+	}
+	_ = objects.SetAttr(spec, objects.NewStr("submodule_search_locations"), objects.NewList(items))
+	return spec
+}
+
+// buildBuiltinSpec builds the spec for a built-in module. CPython's
+// BuiltinImporter.find_spec passes the importer class itself as the loader,
+// so every built-in module's __loader__ is BuiltinImporter, not None. Mirror
+// that: a None loader would fail test_importlib's test_everyone_has___loader__.
+//
+// CPython: Lib/importlib/_bootstrap.py:760 BuiltinImporter.find_spec
+func buildBuiltinSpec(util *objects.Module, p pendingSpec) objects.Object {
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_loader"))
+	if err != nil {
+		return nil
+	}
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), builtinImporterLoader()})
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("origin"), objects.NewStr("built-in"))
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
+}
+
+// builtinImporterLoader returns the BuiltinImporter class to use as a
+// built-in module's __loader__. importlib.machinery re-exports
+// _bootstrap.BuiltinImporter, but it may not be imported yet when a built-in
+// module loads early, so fall back to importlib._bootstrap, which is always
+// live by this point. None is the last resort.
+func builtinImporterLoader() objects.Object {
+	for _, modName := range []string{"importlib.machinery", "importlib._bootstrap"} {
+		m, ok := GetModule(modName)
 		if !ok {
-			return nil
+			continue
 		}
-		ctor, err := machinery.Dict().GetItem(objects.NewStr("ModuleSpec"))
-		if err != nil {
-			return nil
+		if bi, lerr := m.Dict().GetItem(objects.NewStr("BuiltinImporter")); lerr == nil && bi != nil {
+			return bi
 		}
-		kwargs := objects.NewDict()
-		_ = kwargs.SetItem(objects.NewStr("is_package"), objects.True())
-		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
-		spec, cerr := objects.Call(ctor, args, kwargs)
-		if cerr != nil || spec == objects.None() {
-			return nil
-		}
-		items := make([]objects.Object, len(p.search))
-		for i, s := range p.search {
-			items[i] = objects.NewStr(s)
-		}
-		_ = objects.SetAttr(spec, objects.NewStr("submodule_search_locations"), objects.NewList(items))
-		return spec
 	}
-	if p.builtin {
-		fn, err := util.Dict().GetItem(objects.NewStr("spec_from_loader"))
-		if err != nil {
-			return nil
-		}
-		// CPython's BuiltinImporter.find_spec passes the importer class
-		// itself as the loader, so every built-in module's __loader__ is
-		// BuiltinImporter, not None. Mirror that: a None loader would fail
-		// test_importlib's test_everyone_has___loader__.
-		//
-		// CPython: Lib/importlib/_bootstrap.py:760 BuiltinImporter.find_spec
-		loader := objects.Object(objects.None())
-		// importlib.machinery re-exports _bootstrap.BuiltinImporter, but it
-		// may not be imported yet when a built-in module loads early. Fall
-		// back to importlib._bootstrap, which is always live by this point.
-		for _, modName := range []string{"importlib.machinery", "importlib._bootstrap"} {
-			m, ok := GetModule(modName)
-			if !ok {
-				continue
-			}
-			if bi, lerr := m.Dict().GetItem(objects.NewStr("BuiltinImporter")); lerr == nil && bi != nil {
-				loader = bi
-				break
-			}
-		}
-		kwargs := objects.NewDict()
-		_ = kwargs.SetItem(objects.NewStr("origin"), objects.NewStr("built-in"))
-		args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), loader})
-		spec, cerr := objects.Call(fn, args, kwargs)
-		if cerr != nil || spec == objects.None() {
-			return nil
-		}
-		return spec
-	}
+	return objects.None()
+}
+
+// buildFileSpec builds a file-backed spec via spec_from_file_location.
+func buildFileSpec(util *objects.Module, p pendingSpec) objects.Object {
 	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))
 	if err != nil {
 		return nil

@@ -59,29 +59,29 @@ func makeArgs(argv []string, executable string, cwd string) []objects.Object {
 
 	// 23 arguments in CPython clinic order:
 	return []objects.Object{
-		argList,        // args (process_args)
-		execList,       // executable_list
-		objects.False(), // close_fds
+		argList,                              // args (process_args)
+		execList,                             // executable_list
+		objects.False(),                      // close_fds
 		objects.NewTuple([]objects.Object{}), // pass_fds
-		cwdObj,         // cwd
-		objects.None(), // env (inherit)
-		intObj(-1),     // p2cread
-		intObj(-1),     // p2cwrite
-		intObj(-1),     // c2pread
-		intObj(-1),     // c2pwrite
-		intObj(-1),     // errread
-		intObj(-1),     // errwrite
-		intObj(-1),     // errpipe_read
-		intObj(-1),     // errpipe_write
-		objects.True(), // restore_signals
-		objects.False(), // call_setsid
-		intObj(-1),     // pgid_to_set
-		objects.None(), // gid
-		objects.None(), // extra_groups
-		objects.None(), // uid
-		intObj(-1),     // child_umask
-		objects.None(), // preexec_fn
-		objects.False(), // use_vfork
+		cwdObj,                               // cwd
+		objects.None(),                       // env (inherit)
+		intObj(-1),                           // p2cread
+		intObj(-1),                           // p2cwrite
+		intObj(-1),                           // c2pread
+		intObj(-1),                           // c2pwrite
+		intObj(-1),                           // errread
+		intObj(-1),                           // errwrite
+		intObj(-1),                           // errpipe_read
+		intObj(-1),                           // errpipe_write
+		objects.True(),                       // restore_signals
+		objects.False(),                      // call_setsid
+		intObj(-1),                           // pgid_to_set
+		objects.None(),                       // gid
+		objects.None(),                       // extra_groups
+		objects.None(),                       // uid
+		intObj(-1),                           // child_umask
+		objects.None(),                       // preexec_fn
+		objects.False(),                      // use_vfork
 	}
 }
 
@@ -107,16 +107,11 @@ func TestForkExecTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fork_exec: %v", err)
 	}
-	tup, ok := result.(*objects.Tuple)
+	// CPython returns PyLong_FromPid(pid): fork_exec yields the child PID as
+	// a plain int, not a tuple. subprocess.py assigns self.pid directly.
+	pidObj, ok := result.(*objects.Int)
 	if !ok {
-		t.Fatalf("expected tuple, got %T", result)
-	}
-	if tup.Len() < 2 {
-		t.Fatalf("expected at least 2-tuple, got len %d", tup.Len())
-	}
-	pidObj, ok := tup.Item(0).(*objects.Int)
-	if !ok {
-		t.Fatalf("pid is not an int: %T", tup.Item(0))
+		t.Fatalf("expected int pid, got %T", result)
 	}
 	pid, _ := pidObj.Int64()
 	if pid <= 0 {
@@ -137,21 +132,14 @@ func TestForkExecEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fork_exec /bin/echo: %v", err)
 	}
-	tup, ok := result.(*objects.Tuple)
+	// CPython: Modules/_posixsubprocess.c:1325 return PyLong_FromPid(pid).
+	pidObj, ok := result.(*objects.Int)
 	if !ok {
-		t.Fatalf("expected tuple, got %T", result)
-	}
-	pidObj, ok := tup.Item(0).(*objects.Int)
-	if !ok {
-		t.Fatalf("pid is not an int: %T", tup.Item(0))
+		t.Fatalf("expected int pid, got %T", result)
 	}
 	pid, _ := pidObj.Int64()
 	if pid <= 0 {
 		t.Fatalf("expected positive PID, got %d", pid)
-	}
-	// Sentinel at index 1 must be None.
-	if tup.Item(1) != objects.None() {
-		t.Fatalf("expected None sentinel at index 1, got %v", tup.Item(1))
 	}
 }
 
