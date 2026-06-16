@@ -182,12 +182,17 @@ func osCPUCount(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	return objects.NewInt(int64(n)), nil
 }
 
-// osIsatty returns True if fd is a tty. The implementation Stats the
-// fd through the goos package and tests the char-device bit, which
-// matches what `isatty(3)` reports for the common cases _colorize
-// cares about.
+// osIsatty returns True if fd is a tty. It fstats the descriptor and
+// tests the char-device type bit, which matches what `isatty(3)` reports
+// for the common cases _colorize cares about. The stat goes through the
+// platform fstatResult helper, which calls fstat(2) directly rather than
+// borrowing the fd in a temporary os.File. A borrowed os.File arms a
+// finalizer on its inner handle that runtime.SetFinalizer on the outer
+// struct cannot clear, so a GC of the wrapper would close a descriptor we
+// do not own and unrelated writes would later fail with EBADF.
 //
-// CPython: Modules/posixmodule.c:11947 os_isatty_impl
+// CPython: Modules/posixmodule.c:11947 os_isatty_impl borrows the fd
+// and never closes it.
 func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: isatty() missing required argument: 'fd'")
@@ -197,27 +202,18 @@ func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		return nil, fmt.Errorf("TypeError: an integer is required")
 	}
 	fdVal, _ := fdObj.Int64()
-	// The fd is owned by the caller (a live file, socket, or one of the
-	// std streams); this wrapper only borrows it to Stat. Clear Go's
-	// runtime finalizer so a later GC of the throwaway *os.File never
-	// closes a descriptor we do not own. Without this, a GC mid-run
-	// closes a borrowed fd and unrelated writes fail with EBADF.
-	//
-	// CPython: Modules/posixmodule.c:11947 os_isatty_impl borrows the fd
-	// and never closes it.
-	f := goos.NewFile(uintptr(fdVal), "")
-	if f == nil {
-		return objects.NewBool(false), nil
-	}
-	runtime.SetFinalizer(f, nil)
-	info, err := f.Stat()
+	st, err := fstatResult(fdVal)
 	if err != nil {
 		// CPython os.isatty returns False on any error rather than
-		// raising; a Stat failure here means the fd is not a real
+		// raising; a stat failure here means the fd is not a real
 		// device, which is exactly what callers want to know.
 		return objects.NewBool(false), nil //nolint:nilerr // CPython os.isatty parity
 	}
-	return objects.NewBool((info.Mode() & goos.ModeCharDevice) != 0), nil
+	// st_mode is the first stat_result slot. S_IFMT masks the file-type
+	// nibble; S_IFCHR marks a character device.
+	const sIFMT, sIFCHR = 0o170000, 0o020000
+	mode, _ := st.Items()[0].(*objects.Int).Int64()
+	return objects.NewBool(mode&sIFMT == sIFCHR), nil
 }
 
 // osFsdecode decodes filename from the filesystem encoding (utf-8 on

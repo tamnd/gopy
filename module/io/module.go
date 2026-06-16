@@ -469,6 +469,7 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 				Err:  syscall.EISDIR,
 			})
 		}
+		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	}
 

@@ -51,6 +51,16 @@ type File struct {
 	f  *os.File
 	rd *bufio.Reader
 	wr io.Writer
+
+	// noCloseFd marks a borrowed descriptor (the standard streams wrap
+	// os.Stdout/os.Stderr or an inherited pipe). fileno() still reports
+	// f's fd, but Close() must not close it: tearing down the sys.stdout
+	// wrapper, or letting a transient wrapper be collected, must leave the
+	// process's real fd 1/2 open. Mirrors CPython opening the std streams
+	// with closefd=False.
+	//
+	// CPython: Modules/_io/fileio.c:399 _io_FileIO___init___impl (closefd)
+	noCloseFd bool
 }
 
 // FileType is the type singleton for File. CPython exposes three or
@@ -114,6 +124,21 @@ func NewWriterFile(w io.Writer, name, mode string) *File {
 		encoding: "utf-8",
 		errors:   "strict",
 		wr:       w,
+	}
+	// A caller-supplied writer that is really an *os.File (the normal CLI
+	// case, where sys.stdout/stderr wrap os.Stdout/os.Stderr, and the
+	// subprocess case, where they wrap an inherited pipe fd) keeps a live
+	// descriptor. Record it so fileno() returns the real fd, matching
+	// CPython's fd-backed standard streams. Writes still pass straight
+	// through w (no bufio layer) so output ordering is unchanged; only a
+	// non-fd writer such as a test bytes.Buffer leaves f nil and makes
+	// fileno() raise io.UnsupportedOperation, as CPython does for a
+	// stream with no underlying descriptor.
+	//
+	// CPython: Python/sysmodule.c:3795 sys_init_streams (fd-backed FileIO)
+	if osf, ok := w.(*os.File); ok {
+		fi.f = osf
+		fi.noCloseFd = true
 	}
 	fi.init(FileType)
 	return fi
@@ -277,7 +302,7 @@ func (fi *File) Close() error {
 			firstErr = ioErr(err)
 		}
 	}
-	if fi.f != nil {
+	if fi.f != nil && !fi.noCloseFd {
 		if err := fi.f.Close(); err != nil && firstErr == nil {
 			firstErr = ioErr(err)
 		}

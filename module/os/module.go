@@ -1402,9 +1402,12 @@ func osLstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
 }
 
-// osFstat returns the stat of an open file descriptor.
-// The underlying fd is not closed; runtime.SetFinalizer is cleared on
-// the temporary os.File wrapper so the GC never closes it.
+// osFstat returns the stat of an open file descriptor. The work is
+// delegated to the platform fstatResult helper, which calls fstat(2)
+// directly through syscall rather than borrowing the fd in a temporary
+// os.File. An os.File wrapper arms a finalizer on its inner file handle
+// that runtime.SetFinalizer on the outer struct cannot clear, so a GC of
+// the wrapper would close the live descriptor out from under its owner.
 //
 // CPython: Modules/posixmodule.c:3399 os_fstat_impl
 func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -1416,16 +1419,7 @@ func osFstat(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return nil, fmt.Errorf("TypeError: an integer is required")
 	}
 	fdVal, _ := fdObj.Int64()
-	f := goos.NewFile(uintptr(fdVal), "")
-	runtime.SetFinalizer(f, nil)
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("OSError: %w", err)
-	}
-	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
-	mtime := info.ModTime().UnixNano()
-	blksize, blocks, rdev := statBlockFields(info)
-	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
+	return fstatResult(fdVal)
 }
 
 // osReplace atomically renames src to dst, replacing dst if it exists.

@@ -63,6 +63,25 @@ func statBlockFields(info goos.FileInfo) (blksize, blocks, rdev int64) {
 	return
 }
 
+// fstatResult stats an open descriptor via fstat(2) and assembles the
+// stat_result directly from the syscall.Stat_t. It never wraps the fd in
+// an os.File, so no finalizer is armed that could close the live
+// descriptor when the wrapper is garbage-collected.
+//
+// CPython: Modules/posixmodule.c:3399 os_fstat_impl
+func fstatResult(fdVal int64) (*objects.StructSeq, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(fdVal), &st); err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	atime := st.Atimespec.Sec*1_000_000_000 + st.Atimespec.Nsec
+	mtime := st.Mtimespec.Sec*1_000_000_000 + st.Mtimespec.Nsec
+	ctime := st.Ctimespec.Sec*1_000_000_000 + st.Ctimespec.Nsec
+	return newStatResult(int64(st.Mode), int64(st.Ino), int64(st.Dev), int64(st.Nlink),
+		int64(st.Uid), int64(st.Gid), st.Size, atime, mtime, ctime,
+		int64(st.Blksize), st.Blocks, int64(st.Rdev)), nil
+}
+
 // getuid returns the real user ID of the calling process.
 // CPython: Modules/posixmodule.c:9635 os_getuid_impl
 func getuid(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

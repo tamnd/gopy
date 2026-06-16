@@ -7,9 +7,29 @@ package os
 import (
 	"fmt"
 	goos "os"
+	"runtime"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// fstatResult stats an open descriptor through a temporary os.File on
+// platforms without a syscall.Stat_t. SetFinalizer is cleared on a
+// best-effort basis; these fallback targets do not run the kqueue
+// netpoller that makes the borrowed-fd close fatal on Darwin.
+//
+// CPython: Modules/posixmodule.c:3399 os_fstat_impl
+func fstatResult(fdVal int64) (*objects.StructSeq, error) {
+	f := goos.NewFile(uintptr(fdVal), "")
+	runtime.SetFinalizer(f, nil)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
+	mtime := info.ModTime().UnixNano()
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
+}
 
 // statSysFields returns minimal values on unsupported platforms.
 // CPython: Modules/posixmodule.c:3238 os_stat_impl
