@@ -29,21 +29,21 @@ tree before porting.
 The panel is the 12 flat files plus the three directory suites. CPython 3.14.5
 runs all of the non-interpreter files green.
 
-| Test | CPython 3.14.5 | gopy (audit 2026-06-15) |
+| Test | CPython 3.14.5 | gopy (audit 2026-06-16) |
 | --- | --- | --- |
-| `test_module/` (dir) | OK | OK (39 tests) |
-| `test_import/` (dir) | OK | import error: full importlib finders not live |
-| `test_importlib/` (dir) | OK | depends on live finders |
-| `test_modulefinder` | OK | 17 ERROR: `importlib.machinery.PathFinder` missing |
-| `test_pkg` | OK | AssertionError: module `dir()` missing `__cached__`/`__doc__`/`__loader__`/`__spec__` |
-| `test_pkgutil` | OK | 7 failures, 1 error |
-| `test_pyclbr` | OK | `ModuleNotFoundError: pyclbr` |
+| `test_module/` (dir) | OK | **OK (39 tests)** |
+| `test_import/` (dir) | OK | 118 tests; 5 errors (`_testsinglephase`/`_testmultiphase` C-ext subinterp, P7), 16 skipped |
+| `test_importlib/` (dir) | OK | 1346 tests; 2 failures (module-lock GC lifetime, threaded circular import) + 1 error (incomplete multi-phase C-ext), 63 skipped |
+| `test_modulefinder` | OK | **OK (17 tests)** |
+| `test_pkg` | OK | **OK (8 tests)** |
+| `test_pkgutil` | OK | **OK (21 tests)** |
+| `test_pyclbr` | OK | **OK (6 tests)** |
 | `test_pkgimport` | (covered by `test_import/`) | no flat file |
-| `test_runpy` | OK | 3 ERROR |
+| `test_runpy` | OK | **OK (40 tests)** |
 | `test_frozen` | OK | **OK (3/3)** — frozen test modules + override + `sys._stdlib_dir` shipped |
 | `test_zipimport` | OK | **OK (91 tests, 4 skipped)** |
 | `test_zipimport_support` | OK | needs vendored `test.test_doctest` (doctest) |
-| `test_zipapp` | OK | `ModuleNotFoundError: zipapp` |
+| `test_zipapp` | OK | **OK (35 tests)** |
 | `test__interpchannels` | PEP 554 | deferred (see below) |
 | `test__interpreters` | PEP 554 | deferred (`_interpreters.run_string` missing) |
 
@@ -98,17 +98,25 @@ CPython 3.14.5 (counts and `-v` lists).
 
 ## Checklist
 
-- [ ] P1: `os.altsep`
-- [ ] P1: module-object `dir()` surface (`__cached__`, `__doc__`, `__loader__`, `__spec__`) for `test_pkg`
-- [ ] P2: vendor `modulefinder`
-- [ ] P2: vendor `pyclbr`
-- [ ] P2: vendor `zipapp`
+- [x] P1: `os.altsep`
+- [x] P1: module-object `dir()` surface (`__cached__`, `__doc__`, `__loader__`, `__spec__`) for `test_pkg` — `test_pkg` green (8 tests)
+- [x] P2: vendor `modulefinder` — `test_modulefinder` green (17 tests)
+- [x] P2: vendor `pyclbr` — `test_pyclbr` green (6 tests)
+- [x] P2: vendor `zipapp` — `test_zipapp` green (35 tests)
+- [x] P2: `test_pkgutil` green (21 tests)
 - [x] `test_zipimport` green (91 tests): `func_getattro` incref + `config_get` port
 - [x] `test_module/` green (39 tests)
 - [x] P3: frozen `__hello__`/`__phello__` + aliases, frozen override, `sys._stdlib_dir` — `test_frozen` green (3/3)
-- [ ] P4: `test_runpy` package-init exception path
+- [x] P4: `test_runpy` green (40 tests) — package-init exception path closed
 - [x] P5: `test_import/` runs all 118 tests without the threaded crash — `os.fstat`/`os.isatty` no longer borrow the fd in a finalizer-bearing `os.File`; remaining 5 errors are the `_testmultiphase`/`_testsinglephase` C-extension subinterpreter tests (P7)
 - [x] P5: `test_module_with_large_stack` no longer flakes with `bad file descriptor` — `os.NewFile`/`os.OpenFile` arm the close finalizer on the unexported inner `*os.file`, so `SetFinalizer(f, nil)` on the outer handle was a no-op. A leaked borrowed-fd wrapper (subprocess pipes) would close a reused descriptor mid-write. `objects.ClearOSFileFinalizer` reaches the inner pointer; the `io` and `_posixsubprocess` borrows route through it
-- [ ] P5: re-audit `test_importlib/`, `test_module/`
+- [x] P5: re-audit `test_module/` — green (39 tests)
+- [ ] P5: `test_importlib/` residuals — 1346 tests run, down to 2 failures + 1 error. The error
+  (`test_incomplete_multi_phase_init_module`) is the `_testmultiphase` C-ext path (P7). The two
+  failures are GC/threading edge cases: `test_all_locks` expects `_bootstrap._module_locks` to drain
+  to zero after `gc_collect()` (gopy's collector leaves the no-longer-referenced `_ModuleLock`
+  weakref entries live across the full import sweep, though the isolated `test_lock_lifetime` passes),
+  and `test_circular_imports` is a threaded-import determinism case. Both overlap the broader
+  weakref/GC work (see the weakref/gc panel tasks).
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
