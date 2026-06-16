@@ -107,6 +107,7 @@ CPython 3.14.5 (counts and `-v` lists).
 - [x] `test_module/` green (39 tests)
 - [x] P3: frozen `__hello__`/`__phello__` + aliases, frozen override, `sys._stdlib_dir` — `test_frozen` green (3/3)
 - [ ] P4: `test_runpy` package-init exception path
-- [ ] P5: re-audit `test_import/`, `test_importlib/`, `test_module/`
+- [x] P5: `test_import/` runs all 118 tests without the threaded crash — `os.fstat`/`os.isatty` no longer borrow the fd in a finalizer-bearing `os.File`; remaining 5 errors are the `_testmultiphase`/`_testsinglephase` C-extension subinterpreter tests (P7)
+- [ ] P5: re-audit `test_importlib/`, `test_module/`
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
