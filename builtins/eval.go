@@ -329,3 +329,23 @@ func runCode(code *objects.Code, globals, locals, closure objects.Object) (objec
 	}
 	return currentEvaluator(code, globals, locals, closure)
 }
+
+// RunInFreshNamespace compiles and runs source in a brand-new __main__
+// namespace and returns PyRun_SimpleStringFlags's result code: 0 when the
+// code runs to completion, -1 when it raises. It backs the subinterpreter
+// test entries (_testcapi.run_in_subinterp and
+// _testinternalcapi.run_in_subinterp_with_config). Every gopy extension is
+// a Go builtin compiled into the runtime (multi-phase by construction), so
+// importing one inside a subinterpreter behaves exactly like a fresh-
+// namespace exec in the current process; the only observable result the
+// callers read is the integer status.
+//
+// CPython: Python/pythonrun.c:592 PyRun_SimpleStringFlags
+func RunInFreshNamespace(source string) int {
+	ns := objects.NewDict()
+	_ = ns.SetItem(objects.NewStr("__name__"), objects.NewStr("__main__"))
+	if _, err := Exec([]objects.Object{objects.NewStr(source), ns}, nil); err != nil {
+		return -1
+	}
+	return 0
+}

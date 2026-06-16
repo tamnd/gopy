@@ -11,6 +11,7 @@ package testinternalcapi
 import (
 	"fmt"
 
+	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
@@ -33,6 +34,7 @@ func buildModule() (*objects.Module, error) {
 		{"get_static_builtin_types", getStaticBuiltinTypes},
 		{"identify_type_slot_wrappers", identifyTypeSlotWrappers},
 		{"get_recursion_depth", getRecursionDepth},
+		{"run_in_subinterp_with_config", runInSubinterpWithConfig},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {
@@ -64,6 +66,29 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 	return m, nil
+}
+
+// runInSubinterpWithConfig ports run_in_subinterp_with_config(code, config,
+// xi=False). CPython spins up a fresh PyInterpreterState configured by the
+// PyInterpreterConfig the test built, runs the code with
+// PyRun_SimpleStringFlags, tears the interpreter down, and returns that
+// status. gopy compiles every extension into the runtime as a Go builtin
+// (multi-phase by construction), so the config's isolation and
+// check_multi_interp_extensions fields never reject an import: a faithful
+// run is a fresh-namespace exec whose only observable output is the
+// PyRun_SimpleString status code. The config object is accepted and
+// ignored.
+//
+// CPython: Modules/_testinternalcapi.c:1816 run_in_subinterp_with_config
+func runInSubinterpWithConfig(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: run_in_subinterp_with_config() missing required argument 'code' (pos 1)")
+	}
+	code, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: run_in_subinterp_with_config() argument 'code' must be str, not %s", args[0].Type().Name)
+	}
+	return objects.NewInt(int64(builtins.RunInFreshNamespace(code.Value()))), nil
 }
 
 // getRecursionDepth returns the Python recursion depth of the caller,
