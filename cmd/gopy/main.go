@@ -273,6 +273,19 @@ func installPathFinder(scriptPath string) {
 	}
 	if root := findStdlibRoot(); root != "" {
 		paths = append(paths, root)
+		// Materialize the compiled-in extension modules as stub files in a
+		// lib-dynload directory and add it to sys.path, the gopy analogue of
+		// CPython's <prefix>/lib-dynload. The real PathFinder -> FileFinder
+		// discovers them by suffix and routes them through ExtensionFileLoader
+		// -> _imp.create_dynamic, so module.__spec__.loader is an
+		// ExtensionFileLoader exactly as for a CPython .so. The stub lives
+		// outside the vendored stdlib tree so that tree stays pristine.
+		//
+		// CPython: Modules/getpath.py (lib-dynload on sys.path)
+		dynload := filepath.Join(os.TempDir(), "gopy-lib-dynload")
+		if err := imp.MaterializeExtensions(dynload); err == nil {
+			paths = append(paths, dynload)
+		}
 		// Expose the resolved stdlib root as sys._stdlib_dir so
 		// FrozenImporter._resolve_filename can compute __file__ and a
 		// frozen package's __path__ against the on-disk Lib copy, letting

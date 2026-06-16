@@ -102,7 +102,12 @@ func buildModule() (*objects.Module, error) {
 	// CPython: Python/import.c:4807 _imp_extension_suffixes_impl
 	if err := d.SetItem(objects.NewStr("extension_suffixes"),
 		objects.NewBuiltinFunction("extension_suffixes", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewList(nil), nil
+			suffixes := imp.ExtensionSuffixes()
+			items := make([]objects.Object, len(suffixes))
+			for i, s := range suffixes {
+				items[i] = objects.NewStr(s)
+			}
+			return objects.NewList(items), nil
 		})); err != nil {
 		return nil, err
 	}
@@ -152,7 +157,10 @@ func buildModule() (*objects.Module, error) {
 	}
 	if err := d.SetItem(objects.NewStr("exec_dynamic"),
 		objects.NewBuiltinFunction("exec_dynamic", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
+			// gopy's create_dynamic already ran the module's Init (both the
+			// PEP 489 create and exec phases), so exec_dynamic is a no-op that
+			// reports success with 0, matching the C impl's return value.
+			return objects.NewInt(0), nil
 		})); err != nil {
 		return nil, err
 	}
@@ -183,8 +191,12 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := d.SetItem(objects.NewStr("_override_multi_interp_extensions_check"),
-		objects.NewBuiltinFunction("_override_multi_interp_extensions_check", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			return objects.NewInt(0), nil
+		objects.NewBuiltinFunction("_override_multi_interp_extensions_check", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+			override, err := signedIntArg(args, "_override_multi_interp_extensions_check")
+			if err != nil {
+				return nil, err
+			}
+			return objects.NewInt(int64(imp.SetMultiInterpOverride(override))), nil
 		})); err != nil {
 		return nil, err
 	}
@@ -386,6 +398,7 @@ func createDynamic(args []objects.Object, _ map[string]objects.Object) (objects.
 	if err != nil {
 		return nil, err
 	}
+	origin := ""
 	if !objects.IsNone(originObj) {
 		originStr, ok := originObj.(*objects.Unicode)
 		if !ok {
@@ -394,6 +407,20 @@ func createDynamic(args []objects.Object, _ map[string]objects.Object) (objects.
 		if err := checkEmbeddedNull(originStr.Value()); err != nil {
 			return nil, err
 		}
+		origin = originStr.Value()
+	}
+
+	// gopy compiles its extension modules into the runtime as Go builtins
+	// rather than dlopening a shared object. When the spec names a
+	// registered extension, run its Init (the create+exec phases) behind the
+	// PEP 489 multiple-interpreters compat check; otherwise fall back to the
+	// "cannot load a C extension" ImportError.
+	mod, found, err := imp.CreateExtModule(nameStr.Value(), origin)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return mod, nil
 	}
 
 	return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")

@@ -35,6 +35,7 @@ func buildModule() (*objects.Module, error) {
 		{"identify_type_slot_wrappers", identifyTypeSlotWrappers},
 		{"get_recursion_depth", getRecursionDepth},
 		{"run_in_subinterp_with_config", runInSubinterpWithConfig},
+		{"clear_extension", clearExtension},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {
@@ -88,7 +89,63 @@ func runInSubinterpWithConfig(args []objects.Object, _ map[string]objects.Object
 	if !ok {
 		return nil, fmt.Errorf("TypeError: run_in_subinterp_with_config() argument 'code' must be str, not %s", args[0].Type().Name)
 	}
+
+	// gopy cannot spin up a real OS-level subinterpreter, so the run is a
+	// fresh-namespace exec. The config's gil and check_multi_interp_extensions
+	// fields are honoured: they are pushed onto the interpreter-state stack
+	// the PEP 489 extension compat check (imp.CheckExtSubinterpCompat) reads,
+	// so importing an incompatible extension from the script raises the same
+	// ImportError CPython's subinterpreter would. own_gil follows
+	// config.gil == 'own' (the ISOLATED gil=2 case).
+	//
+	// CPython: Python/pylifecycle.c:586 init_interp_create_gil (own_gil)
+	ownGil, checkMulti := false, false
+	if len(args) >= 2 && !objects.IsNone(args[1]) {
+		config := args[1]
+		if gilObj, err := objects.GetAttr(config, objects.NewStr("gil")); err == nil {
+			if gilStr, ok := gilObj.(*objects.Unicode); ok {
+				ownGil = gilStr.Value() == "own"
+			}
+		}
+		if checkObj, err := objects.GetAttr(config, objects.NewStr("check_multi_interp_extensions")); err == nil {
+			if t, terr := objects.IsTruthy(checkObj); terr == nil {
+				checkMulti = t
+			}
+		}
+	}
+
+	imp.PushSubinterp(ownGil, checkMulti)
+	defer imp.PopSubinterp()
 	return objects.NewInt(int64(builtins.RunInFreshNamespace(code.Value()))), nil
+}
+
+// clearExtension ports clear_extension(name, filename): it clears all
+// internally cached data for a single-phase extension module so the test
+// suite can re-import it fresh. It delegates to _PyImport_ClearExtension.
+//
+// CPython: Modules/_testinternalcapi.c:893 clear_extension
+//
+//	(Python/import.c:903 _PyImport_ClearExtension)
+func clearExtension(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: clear_extension() takes exactly 2 arguments (%d given)", len(args))
+	}
+	name, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: clear_extension() argument 1 must be str, not %s", args[0].Type().Name)
+	}
+	path := ""
+	if !objects.IsNone(args[1]) {
+		filename, ok := args[1].(*objects.Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: clear_extension() argument 2 must be str, not %s", args[1].Type().Name)
+		}
+		path = filename.Value()
+	}
+	if err := imp.ClearExtension(name.Value(), path); err != nil {
+		return nil, err
+	}
+	return objects.None(), nil
 }
 
 // getRecursionDepth returns the Python recursion depth of the caller,

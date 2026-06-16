@@ -79,6 +79,21 @@ func importModuleByName(name string) (objects.Object, error) {
 	if mod, ok := imp.GetModule(name); ok && mod != nil {
 		return mod, nil
 	}
+	// PyImport_ImportModule drives the live importlib _gcd_import, which
+	// recurses parent packages and resolves namespace packages (directories
+	// with no __init__.py). The Go ImportModule driver below resolves only
+	// the named module against sys.path and does not import the parents, so
+	// it misses a deeply dotted namespace submodule. Prefer _gcd_import once
+	// _frozen_importlib is installed; fall back to the Go driver during early
+	// bootstrap, before importlib is live.
+	//
+	// CPython: Python/import.c:1450 PyImport_ImportModule (_gcd_import)
+	if frozen, ok := imp.GetModule("_frozen_importlib"); ok && frozen != nil {
+		gcd, err := objects.GetAttr(frozen, objects.NewStr("_gcd_import"))
+		if err == nil && gcd != nil {
+			return objects.Call(gcd, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+		}
+	}
 	ts := currentThread()
 	if ts == nil {
 		ts = state.NewThread()

@@ -67,11 +67,20 @@ type interp struct {
 	whence int
 	refs   int64
 	ns     *objects.Dict
+	// ownGil and checkMulti capture the PyInterpreterConfig the interpreter
+	// was created with: whether it runs with its own GIL and whether it
+	// enforces the subinterpreter-incompatible-extension check. The default
+	// _PyInterpreterConfig_INIT (isolated) sets both, so a bare create()
+	// produces an interpreter that rejects single-phase extension imports.
+	//
+	// CPython: Include/cpython/pylifecycle.h:52 _PyInterpreterConfig_INIT
+	ownGil     bool
+	checkMulti bool
 }
 
 var (
 	mu       sync.Mutex
-	registry = map[int64]*interp{}
+	registry       = map[int64]*interp{}
 	nextID   int64 = 1
 )
 
@@ -114,15 +123,55 @@ func argInt(args []objects.Object, i int) (int64, error) {
 // create allocates a new interpreter and returns its id.
 //
 // CPython: Modules/_interpretersmodule.c:768 interp_create
-func create(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func create(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	// The optional config selects the interpreter's isolation. The default
+	// (_PyInterpreterConfig_INIT) is fully isolated: its own GIL and the
+	// multi-interpreter extension check enabled. A "legacy" named config or
+	// an explicit object can relax that.
+	//
+	// CPython: Modules/_interpretersmodule.c:404 config_from_object
+	ownGil, checkMulti := true, true
+	if len(args) >= 1 && !objects.IsNone(args[0]) {
+		ownGil, checkMulti = configFromObject(args[0])
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	id := nextID
 	nextID++
 	ns := objects.NewDict()
 	_ = ns.SetItem(objects.NewStr("__name__"), objects.NewStr("__main__"))
-	registry[id] = &interp{id: id, whence: whenceStdlib, refs: 0, ns: ns}
+	registry[id] = &interp{id: id, whence: whenceStdlib, refs: 0, ns: ns, ownGil: ownGil, checkMulti: checkMulti}
 	return objects.NewInt(id), nil
+}
+
+// configFromObject reads the (own_gil, check_multi_interp_extensions) pair
+// from a create() config argument: a named-config string or an object whose
+// attributes mirror PyInterpreterConfig.
+//
+// CPython: Python/interpconfig.c:262 _PyInterpreterConfig_InitFromDict
+func configFromObject(cfg objects.Object) (ownGil, checkMulti bool) {
+	if name, ok := cfg.(*objects.Unicode); ok {
+		switch name.Value() {
+		case "legacy":
+			return false, false
+		case "empty":
+			return false, false
+		default: // "default", "isolated", ""
+			return true, true
+		}
+	}
+	ownGil, checkMulti = true, true
+	if gilObj, err := objects.GetAttr(cfg, objects.NewStr("gil")); err == nil {
+		if gilStr, ok := gilObj.(*objects.Unicode); ok {
+			ownGil = gilStr.Value() == "own"
+		}
+	}
+	if checkObj, err := objects.GetAttr(cfg, objects.NewStr("check_multi_interp_extensions")); err == nil {
+		if t, terr := objects.IsTruthy(checkObj); terr == nil {
+			checkMulti = t
+		}
+	}
+	return ownGil, checkMulti
 }
 
 // destroy finalizes and removes an interpreter.
@@ -298,6 +347,15 @@ func execCode(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 //
 // CPython: Modules/_interpretersmodule.c _PyXI_excinfo
 func excinfoFor(err error) objects.Object {
+	// CPython's _run_in_interpreter consumes the script's exception into the
+	// excinfo snapshot and clears it from the interpreter, so the failure
+	// does not leak into later operations (a pending exception otherwise
+	// surfaces during the next generator finalization). Mirror that clear.
+	//
+	// CPython: Python/crossinterp.c:1700 _PyXI_excinfo_InitFromException
+	if objects.ClearCurrentExceptionHook != nil {
+		objects.ClearCurrentExceptionHook()
+	}
 	typeName := "Exception"
 	msg := err.Error()
 	if re, ok := err.(*objects.RaisedError); ok {
@@ -309,12 +367,57 @@ func excinfoFor(err error) objects.Object {
 		}
 	}
 	ns := objects.NewNamespace()
-	_ = objects.SetAttr(ns, objects.NewStr("type"), objects.NewStr(typeName))
+	// excinfo.type is itself a namespace carrying the exception type's
+	// __name__/__qualname__/__module__, the shape _PyXI_excinfo_TypeAsObject
+	// builds so callers can read exc.type.__name__.
+	//
+	// CPython: Python/crossinterp.c:1517 _PyXI_excinfo_TypeAsObject
+	typeNS := objects.NewNamespace()
+	_ = objects.SetAttr(typeNS, objects.NewStr("__name__"), objects.NewStr(typeName))
+	_ = objects.SetAttr(typeNS, objects.NewStr("__qualname__"), objects.NewStr(typeName))
+	_ = objects.SetAttr(ns, objects.NewStr("type"), typeNS)
 	_ = objects.SetAttr(ns, objects.NewStr("msg"), objects.NewStr(msg))
 	formatted := fmt.Sprintf("%s: %s", typeName, msg)
 	_ = objects.SetAttr(ns, objects.NewStr("formatted"), objects.NewStr(formatted))
 	_ = objects.SetAttr(ns, objects.NewStr("errdisplay"), objects.NewStr(formatted))
 	return ns
+}
+
+// runString runs a source string in the interpreter's __main__ namespace.
+// Like exec it returns None on success or an excinfo namespace on an
+// unhandled exception; the high-level caller decides what to do with it.
+//
+// CPython: Modules/_interpretersmodule.c:1174 interp_run_string
+func runString(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	id, err := argInt(args, 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: run_string() missing 'script'")
+	}
+	script, ok := args[1].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: run_string() argument 2 must be a string, not %s", args[1].Type().Name)
+	}
+	mu.Lock()
+	it, err := lookup(id)
+	mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// A subinterpreter run is a fresh-namespace exec that pushes a non-main
+	// interpreter state, so the PEP 489 extension compat check and the
+	// gh-144601 single-phase failure path observe the subinterpreter the
+	// same way CPython's switched-to-main init does.
+	//
+	// CPython: Modules/_interpretersmodule.c:650 _run_in_interpreter
+	imp.PushSubinterp(it.ownGil, it.checkMulti)
+	defer imp.PopSubinterp()
+	if _, err := builtins.Exec([]objects.Object{script, it.ns}, nil); err != nil {
+		return excinfoFor(err), nil
+	}
+	return objects.None(), nil
 }
 
 func isShareable(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -361,6 +464,7 @@ func buildModule() (*objects.Module, error) {
 		{"is_running", fn("is_running", isRunning)},
 		{"set___main___attrs", fn("set___main___attrs", setMainAttrs)},
 		{"exec", fn("exec", execCode)},
+		{"run_string", fn("run_string", runString)},
 		{"is_shareable", fn("is_shareable", isShareable)},
 	}
 	for _, e := range entries {

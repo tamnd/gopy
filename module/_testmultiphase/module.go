@@ -27,7 +27,39 @@ import (
 )
 
 func init() {
-	_ = imp.AppendInittab("_testmultiphase", buildModule)
+	// gopy cannot dlopen a compiled extension, so each PyInit_* entry the C
+	// extension exposes is registered as a gopy extension module keyed by
+	// name, carrying the PEP 489 Py_mod_multiple_interpreters slot value its
+	// PyModuleDef declares. _imp.create_dynamic dispatches here and applies
+	// the subinterpreter compat check before running the body.
+	//
+	// CPython: Modules/_testmultiphase.c:438 main_slots (PER_INTERPRETER_GIL)
+	imp.RegisterExtModule(&imp.ExtModuleDef{
+		Name:               "_testmultiphase",
+		HasMultiInterpSlot: true,
+		MultiInterp:        imp.MultiInterpPerInterpreterGIL,
+		Init:               func() (*objects.Module, error) { return buildModule("_testmultiphase") },
+	})
+	// CPython: Modules/_testmultiphase.c:943 non_isolated_slots (NOT_SUPPORTED)
+	imp.RegisterExtModule(&imp.ExtModuleDef{
+		Name:               "_test_non_isolated",
+		HasMultiInterpSlot: true,
+		MultiInterp:        imp.MultiInterpNotSupported,
+		Init:               func() (*objects.Module, error) { return buildModule("_test_non_isolated") },
+	})
+	// CPython: Modules/_testmultiphase.c:964 shared_gil_only_slots (SUPPORTED, explicit)
+	imp.RegisterExtModule(&imp.ExtModuleDef{
+		Name:               "_test_shared_gil_only",
+		HasMultiInterpSlot: true,
+		MultiInterp:        imp.MultiInterpSupported,
+		Init:               func() (*objects.Module, error) { return buildModule("_test_shared_gil_only") },
+	})
+	// CPython: Modules/_testmultiphase.c:980 no_multiple_interpreter_slot_slots (no slot)
+	imp.RegisterExtModule(&imp.ExtModuleDef{
+		Name:               "_test_no_multiple_interpreter_slot",
+		HasMultiInterpSlot: false,
+		Init:               func() (*objects.Module, error) { return buildModule("_test_no_multiple_interpreter_slot") },
+	})
 }
 
 // exampleObject backs _testimportexec.Example: a GC type whose attribute
@@ -206,8 +238,8 @@ func init() {
 //
 // CPython: Modules/_testmultiphase.c:392 execfunc
 // CPython: Modules/_testmultiphase.c:444 main_def
-func buildModule() (*objects.Module, error) {
-	m := objects.NewModule("_testmultiphase")
+func buildModule(name string) (*objects.Module, error) {
+	m := objects.NewModule(name)
 	d := m.Dict()
 
 	// CPython: Modules/_testmultiphase.c:374 testexport_methods

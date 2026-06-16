@@ -161,6 +161,28 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		return mod, nil
 	}
 
+	// 3b. Go-implemented C extension (the test-extension registry). CPython
+	// reaches these through PathFinder -> ExtensionFileLoader after a
+	// lib-dynload `.so` matches; gopy ports the extension as a Go builtin
+	// registered by name and builds it via the same create_dynamic compat
+	// gate, then attaches the ExtensionFileLoader spec so module.__spec__
+	// reads like a real extension.
+	//
+	// CPython: Python/import.c:2001 import_run_extension
+	if ext := FindExtModule(absName); ext != nil {
+		mod, found, eerr := CreateExtModule(absName, ExtensionOrigin(absName))
+		if eerr != nil {
+			return nil, eerr
+		}
+		if found {
+			AddModule(absName, mod)
+			AttachExtensionSpec(exec, mod, absName, ExtensionOrigin(absName))
+			parent, tail := splitParent(absName)
+			bindOnParent(parent, tail, mod)
+			return mod, nil
+		}
+	}
+
 	// 4. Path-based finder (sys.path).
 	// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder.find_spec
 	//

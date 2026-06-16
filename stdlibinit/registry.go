@@ -181,6 +181,13 @@ import (
 	// CPython: Modules/_testmultiphase.c:447 PyInit__testmultiphase
 	_ "github.com/tamnd/gopy/module/_testmultiphase"
 
+	// Built-in module: _testsinglephase. Registers itself via
+	// module/_testsinglephase/module.go init(). Reproduces the legacy
+	// single-phase init extension and the gh-144601 raise-on-init fixture
+	// the SubinterpImportTests drive through ExtensionFileLoader.
+	// CPython: Modules/_testsinglephase.c:533 PyInit__testsinglephase
+	_ "github.com/tamnd/gopy/module/_testsinglephase"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.

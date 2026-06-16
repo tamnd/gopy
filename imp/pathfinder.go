@@ -962,6 +962,34 @@ type pendingSpec struct {
 	search    []string
 	builtin   bool
 	namespace bool
+	extension bool
+}
+
+// AttachExtensionSpec gives a Go-implemented extension module the
+// __spec__ / __loader__ / __file__ surface CPython's ExtensionFileLoader
+// installs: an ExtensionFileLoader instance as the loader and the
+// synthesized lib-dynload path as origin / __file__. test_import's
+// require_extension asserts module.__spec__.loader is ExtensionFileLoader,
+// so the loader type must be exactly that.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1032 ExtensionFileLoader
+func AttachExtensionSpec(exec Executor, mod *objects.Module, name, origin string) {
+	d := mod.Dict()
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	_ = d.SetItem(objects.NewStr("__file__"), objects.NewStr(origin))
+	p := pendingSpec{mod: mod, name: name, origin: origin, extension: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
 }
 
 var (
@@ -1044,9 +1072,45 @@ func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
 		return buildNamespaceSpec(p)
 	case p.builtin:
 		return buildBuiltinSpec(util, p)
+	case p.extension:
+		return buildExtensionSpec(util, p)
 	default:
 		return buildFileSpec(util, p)
 	}
+}
+
+// buildExtensionSpec builds a spec whose loader is an ExtensionFileLoader
+// instance, mirroring the spec PathFinder produces for a compiled
+// extension. spec_from_file_location with an explicit loader keeps the
+// loader type exactly ExtensionFileLoader and records origin as __file__.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1546 ExtensionFileLoader path hook
+func buildExtensionSpec(util *objects.Module, p pendingSpec) objects.Object {
+	machinery, ok := GetModule("importlib.machinery")
+	if !ok {
+		return nil
+	}
+	loaderCls, err := machinery.Dict().GetItem(objects.NewStr("ExtensionFileLoader"))
+	if err != nil || loaderCls == nil {
+		return nil
+	}
+	loader, lerr := objects.Call(loaderCls,
+		objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)}), nil)
+	if lerr != nil {
+		return nil
+	}
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("loader"), loader)
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)})
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
 }
 
 // buildNamespaceSpec builds a PEP 420 namespace spec: loader None, origin
