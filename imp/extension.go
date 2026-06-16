@@ -39,7 +39,7 @@ const (
 	MultiInterpPerInterpreterGIL
 )
 
-// ExtModuleDef is gopy's analogue of a C extension's PyModuleDef plus the
+// ExtModuleDef is gopy's analog of a C extension's PyModuleDef plus the
 // PEP 489 slot table the loader reads. Init builds the fully populated
 // module body (gopy has no separate create / exec phase for builtins, so
 // the create_dynamic step runs Init and exec_dynamic is a no-op).
@@ -72,7 +72,7 @@ type ExtModuleDef struct {
 	DefName string
 	// ShareDefWith names a registered module whose def (and thus its
 	// modules_by_index slot and cached m_copy) this entry reuses, the gopy
-	// analogue of one init function calling another's.
+	// analog of one init function calling another's.
 	//
 	// CPython: Python/import.c:960 "two or more modules share a PyModuleDef"
 	ShareDefWith string
@@ -319,7 +319,7 @@ func subinterpIncompatible(name string) error {
 	return fmt.Errorf("ImportError: module %s does not support loading in subinterpreters", name)
 }
 
-// extDef is gopy's analogue of a single PyModuleDef instance: the unit the
+// extDef is gopy's analog of a single PyModuleDef instance: the unit the
 // extensions cache and the modules_by_index table key on. Two registry
 // entries that share a def (an init function that calls another's) point at
 // the same extDef, so they share an m_index (PyState_FindModule / look_up_self)
@@ -538,7 +538,7 @@ func reloadSinglephase(def *ExtModuleDef, ed *extDef, cached *extCacheValue, nam
 	return mod, true, nil
 }
 
-// snapshotDict returns a shallow copy of d, the gopy analogue of the m_copy
+// snapshotDict returns a shallow copy of d, the gopy analog of the m_copy
 // the import machinery saves after a basic module is first loaded.
 //
 // CPython: Python/import.c:1140 fixup_cached_def (def->m_base.m_copy)
@@ -643,7 +643,7 @@ var (
 )
 
 // SetExtensionDir records the directory the materialized extension stub
-// files live in (the gopy analogue of CPython's lib-dynload). The path
+// files live in (the gopy analog of CPython's lib-dynload). The path
 // finder discovers the stubs there and ExtensionOrigin reports __file__
 // against it.
 func SetExtensionDir(dir string) {
@@ -678,7 +678,7 @@ func ExtensionOrigin(name string) string {
 // CreateExtModule. The stub bytes are never read; the Go registry holds
 // the actual module body. dir is recorded as the extension dir.
 func MaterializeExtensions(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	suffix := extensionSuffix()
@@ -687,7 +687,7 @@ func MaterializeExtensions(dir string) error {
 		if _, err := os.Stat(p); err == nil {
 			continue
 		}
-		if err := os.WriteFile(p, nil, 0o644); err != nil {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
 			return err
 		}
 	}

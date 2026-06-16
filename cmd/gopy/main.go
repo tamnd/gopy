@@ -274,7 +274,7 @@ func installPathFinder(scriptPath string) {
 	if root := findStdlibRoot(); root != "" {
 		paths = append(paths, root)
 		// Materialize the compiled-in extension modules as stub files in a
-		// lib-dynload directory and add it to sys.path, the gopy analogue of
+		// lib-dynload directory and add it to sys.path, the gopy analog of
 		// CPython's <prefix>/lib-dynload. The real PathFinder -> FileFinder
 		// discovers them by suffix and routes them through ExtensionFileLoader
 		// -> _imp.create_dynamic, so module.__spec__.loader is an
