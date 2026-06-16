@@ -32,7 +32,7 @@ runs all of the non-interpreter files green.
 | Test | CPython 3.14.5 | gopy (audit 2026-06-16) |
 | --- | --- | --- |
 | `test_module/` (dir) | OK | **OK (39 tests)** |
-| `test_import/` (dir) | OK | 118 tests; 5 errors (`_testsinglephase`/`_testmultiphase` C-ext subinterp, P7), 16 skipped |
+| `test_import/` (dir) | OK | **OK (118 tests, 4 skipped)** — 3 platform skips + `test_frozen_compat` (needs a frozen `_frozen_importlib`, P7) |
 | `test_importlib/` (dir) | OK | 1346 tests; 2 failures (module-lock GC lifetime, threaded circular import) + 1 error (incomplete multi-phase C-ext), 63 skipped |
 | `test_modulefinder` | OK | **OK (17 tests)** |
 | `test_pkg` | OK | **OK (8 tests)** |
@@ -108,7 +108,8 @@ CPython 3.14.5 (counts and `-v` lists).
 - [x] `test_module/` green (39 tests)
 - [x] P3: frozen `__hello__`/`__phello__` + aliases, frozen override, `sys._stdlib_dir` — `test_frozen` green (3/3)
 - [x] P4: `test_runpy` green (40 tests) — package-init exception path closed
-- [x] P5: `test_import/` runs all 118 tests without the threaded crash — `os.fstat`/`os.isatty` no longer borrow the fd in a finalizer-bearing `os.File`; remaining 5 errors are the `_testmultiphase`/`_testsinglephase` C-extension subinterpreter tests (P7)
+- [x] P5: `test_import/` runs all 118 tests without the threaded crash — `os.fstat`/`os.isatty` no longer borrow the fd in a finalizer-bearing `os.File`
+- [x] P5: `test_import/` green — ported the single-phase extension cache (`_testsinglephase*` variants, `m_size` kinds, the extensions cache + `m_copy` reload), the gh-123950 circular import (`_testsinglephase_circular` via the `_gcd_import` import hook), and per-subinterpreter `sys.modules` isolation so the PEP 489 compat gate fires on re-import. 4 skips remain: 3 platform-specific, plus `test_frozen_compat`, which needs a frozen `_frozen_importlib` (P7)
 - [x] P5: `test_module_with_large_stack` no longer flakes with `bad file descriptor` — `os.NewFile`/`os.OpenFile` arm the close finalizer on the unexported inner `*os.file`, so `SetFinalizer(f, nil)` on the outer handle was a no-op. A leaked borrowed-fd wrapper (subprocess pipes) would close a reused descriptor mid-write. `objects.ClearOSFileFinalizer` reaches the inner pointer; the `io` and `_posixsubprocess` borrows route through it
 - [x] P5: re-audit `test_module/` — green (39 tests)
 - [ ] P5: `test_importlib/` residuals — 1346 tests run, down to 2 failures + 1 error. The error
