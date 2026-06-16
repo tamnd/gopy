@@ -110,7 +110,7 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 //
 // CPython: Python/import.c:3887 (!has_from branch)
 func headSelection(name, packageStr string, level int, module objects.Object) (objects.Object, bool, error) {
-	if level != 0 && len(name) == 0 {
+	if level != 0 && name == "" {
 		// CPython: Python/import.c:3895 (elif !name: final_mod = mod).
 		return module, true, nil
 	}

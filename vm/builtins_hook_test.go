@@ -82,7 +82,7 @@ func TestCurrentImporterRoutesThroughInittab(t *testing.T) {
 	}
 	defer imp.RemoveModule(name)
 
-	got, err := currentImporter(name, "", 0, nil)
+	got, err := currentImporter(name, "", 0, nil, nil)
 	if err != nil {
 		t.Fatalf("currentImporter: %v", err)
 	}
