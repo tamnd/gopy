@@ -126,7 +126,7 @@ func osErrorInit(e *Exception, cls *objects.Type, args []objects.Object, myerrno
 		if nargs >= 2 && nargs <= 5 {
 			// filename, filename2 and winerror are stripped from args
 			// for compatibility with old in-place unpacking code.
-			e.setArgs(objects.NewTuple([]objects.Object{args[0], args[1]}))
+			e.setArgsSteal(objects.NewTuple([]objects.Object{args[0], args[1]}))
 		}
 	}
 errnoStore:

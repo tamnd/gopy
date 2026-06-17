@@ -145,6 +145,23 @@ func (e *Exception) setArgs(t *objects.Tuple) {
 	}
 }
 
+// setArgsSteal stores a freshly built args tuple whose single counted
+// reference is transferred to the exception, releasing the previous one. The
+// inits all build their args with NewTuple (refcount 1, no other owner), so
+// taking another reference the way setArgs does for a borrowed value would
+// strand the tuple, and through it the positional arguments, at a phantom +1
+// after the exception is gone.
+//
+// CPython: Objects/exceptions.c:60 BaseException_init (self->args = Py_NewRef(args),
+// balanced by the caller's DECREF of the freshly built args tuple)
+func (e *Exception) setArgsSteal(t *objects.Tuple) {
+	old := e.Args
+	e.Args = t
+	if old != nil {
+		objects.Decref(old)
+	}
+}
+
 // New constructs an exception with the given type and args. Mirrors
 // BaseException_new + BaseException_init.
 //
@@ -153,14 +170,15 @@ func New(t *objects.Type, args *objects.Tuple) *Exception {
 	if args == nil {
 		args = objects.NewTuple(nil)
 	}
-	// BaseException owns its args tuple: excTraverse visits Args, so the
-	// cyclic collector accounts for an exception->args edge during trial
-	// deletion. The edge must correspond to a real counted reference or
-	// subtractRefs drives the tuple to zero and tuple_dealloc nils its
-	// items while the live exception still points at it (e.args goes
-	// empty). Take that reference here.
+	// BaseException owns a counted reference on its args tuple: excTraverse
+	// visits Args, and the raise/normalize machinery decrefs the args tuple
+	// once as it consumes the Go-level error, so the exception needs its own
+	// reference to keep args[0] alive in the handler. The fresh-tuple inits
+	// (baseExceptionInit and friends) use setArgsSteal to avoid stacking a
+	// second reference on a tuple no caller else owns; the type-call path
+	// allocates with empty args here and lets tp_init install the real tuple.
 	//
-	// CPython: Objects/exceptions.c:60 BaseException_init (self->args = Py_NewRef(args))
+	// CPython: Objects/exceptions.c:48 BaseException_new (self->args = Py_NewRef(args))
 	objects.Incref(args)
 	e := &Exception{ExcType: t, Args: args}
 	if t != nil {

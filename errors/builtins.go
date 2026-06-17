@@ -275,7 +275,15 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 // CPython: Objects/exceptions.c:2503 NameError_init
 // CPython: Objects/exceptions.c:2586 AttributeError_init
 func excTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	exc := New(cls, objects.NewTuple(args))
+	// Allocate with empty args, mirroring BaseException_new's behaviour when
+	// the real positional arguments are about to be installed by tp_init
+	// (typeCallViaTpNew always runs __init__, which lands on baseExceptionInit
+	// and stores the args via setArgsSteal). Building the real tuple here too
+	// would leave it orphaned the moment tp_init replaces it, stranding every
+	// positional argument at a phantom reference the collector cannot reclaim.
+	//
+	// CPython: Objects/exceptions.c:48 BaseException_new (empty args; BaseException_init sets them)
+	exc := New(cls, nil)
 	if len(kwargs) > 0 {
 		d := exc.EnsureAttrDict()
 		for k, v := range kwargs {
