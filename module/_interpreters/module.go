@@ -14,6 +14,7 @@ package _interpreters
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/tamnd/gopy/builtins"
@@ -335,6 +336,13 @@ func execCode(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	if err != nil {
 		return nil, err
 	}
+	// Like run_string, exec runs in a fresh non-main interpreter state so the
+	// PEP 489 extension compat check observes the subinterpreter (own GIL,
+	// check_multi_interp_extensions) rather than the main interpreter.
+	//
+	// CPython: Modules/_interpretersmodule.c:650 _run_in_interpreter
+	imp.PushSubinterp(it.ownGil, it.checkMulti)
+	defer imp.PopSubinterp()
 	if _, err := builtins.Exec([]objects.Object{code, it.ns}, nil); err != nil {
 		return excinfoFor(err), nil
 	}
@@ -353,11 +361,23 @@ func excinfoFor(err error) objects.Object {
 	// surfaces during the next generator finalization). Mirror that clear.
 	//
 	// CPython: Python/crossinterp.c:1700 _PyXI_excinfo_InitFromException
+	typeName := "Exception"
+	msg := err.Error()
+	// Prefer the live pending exception object: it carries the real type
+	// regardless of how the Go error wraps it (RaisedError, the VM's reraise
+	// sentinel, a bare formatted error). A RaisedError that crossed back from
+	// the VM as a reraise sentinel would otherwise be read as a plain
+	// Exception, dropping the ImportError type the compat-check test asserts on.
+	if objects.SaveCurrentExceptionHook != nil {
+		if pending := objects.SaveCurrentExceptionHook(); pending != nil {
+			if exc, ok := pending.(objects.Object); ok && exc != nil {
+				typeName = exc.Type().Name
+			}
+		}
+	}
 	if objects.ClearCurrentExceptionHook != nil {
 		objects.ClearCurrentExceptionHook()
 	}
-	typeName := "Exception"
-	msg := err.Error()
 	if re, ok := err.(*objects.RaisedError); ok {
 		if re.Exc != nil {
 			typeName = re.Exc.Type().Name
@@ -366,6 +386,10 @@ func excinfoFor(err error) objects.Object {
 			msg = re.Msg
 		}
 	}
+	// The Go error text is rendered "Type: message"; the excinfo msg field is
+	// just the message (str(exc)), so strip a leading "typeName: " to avoid
+	// the formatted line reading "ImportError: ImportError: ...".
+	msg = strings.TrimPrefix(msg, typeName+": ")
 	ns := objects.NewNamespace()
 	// excinfo.type is itself a namespace carrying the exception type's
 	// __name__/__qualname__/__module__, the shape _PyXI_excinfo_TypeAsObject

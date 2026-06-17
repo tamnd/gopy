@@ -170,15 +170,31 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 	//
 	// CPython: Python/import.c:2001 import_run_extension
 	if ext := FindExtModule(absName); ext != nil {
-		mod, found, eerr := CreateExtModule(absName, ExtensionOrigin(absName))
+		obj, found, eerr := CreateExtModule(absName, ExtensionOrigin(absName))
 		if eerr != nil {
 			return nil, eerr
 		}
 		if found {
+			mod, isModule := obj.(*objects.Module)
+			if !isModule {
+				// A non-module create result (a multi-phase nonmodule variant)
+				// is only ever reached through an explicit ExtensionFileLoader,
+				// never a plain `import name`, so it does not belong here.
+				return nil, fmt.Errorf("ImportError: create_dynamic for %s did not return a module", absName)
+			}
 			AddModule(absName, mod)
 			AttachExtensionSpec(exec, mod, absName, ExtensionOrigin(absName))
 			parent, tail := splitParent(absName)
 			bindOnParent(parent, tail, mod)
+			// A plain `import name` of a multi-phase extension runs both the
+			// create and exec phases; importlib's ExtensionFileLoader splits
+			// them across create_dynamic / exec_dynamic, but the Go-side
+			// shortcut here must drive exec itself.
+			//
+			// CPython: Objects/moduleobject.c:463 PyModule_ExecDef
+			if eerr := ExecExtModule(mod); eerr != nil {
+				return nil, eerr
+			}
 			return mod, nil
 		}
 	}

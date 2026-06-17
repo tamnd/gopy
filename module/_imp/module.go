@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/hash"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/marshal"
@@ -156,12 +157,7 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := d.SetItem(objects.NewStr("exec_dynamic"),
-		objects.NewBuiltinFunction("exec_dynamic", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-			// gopy's create_dynamic already ran the module's Init (both the
-			// PEP 489 create and exec phases), so exec_dynamic is a no-op that
-			// reports success with 0, matching the C impl's return value.
-			return objects.NewInt(0), nil
-		})); err != nil {
+		objects.NewBuiltinFunction("exec_dynamic", execDynamic)); err != nil {
 		return nil, err
 	}
 	// _fix_co_filename(code, path): rewrite co_filename on a code object
@@ -423,7 +419,36 @@ func createDynamic(args []objects.Object, _ map[string]objects.Object) (objects.
 		return mod, nil
 	}
 
-	return nil, fmt.Errorf("ImportError: gopy does not support dynamic (C extension) module loading")
+	// No registered extension exposes this name. CPython reaches here after
+	// dlopen finds the shared object but no PyInit_<name> symbol, raising
+	// ImportError with the missing name stamped on the exception so callers
+	// can read exc.name.
+	//
+	// CPython: Python/importdl.c:178 _PyImport_LoadDynamicModuleWithSpec
+	msg := fmt.Sprintf("dynamic module does not define module export function (PyInit_%s)", nameStr.Value())
+	exc := pyerrors.New(pyerrors.PyExc_ImportError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	d := exc.EnsureAttrDict()
+	_ = d.SetItem(objects.NewStr("name"), objects.NewStr(nameStr.Value()))
+	_ = d.SetItem(objects.NewStr("msg"), objects.NewStr(msg))
+	return nil, objects.NewRaisedError(exc, msg)
+}
+
+// execDynamic implements _imp.exec_dynamic(module). For a multi-phase
+// extension it runs the def's Py_mod_exec slots through PyModule_ExecDef;
+// for a single-phase extension (whose body already ran during
+// create_dynamic) it is a no-op. It returns 0 on success, matching the C
+// impl's int return.
+//
+// CPython: Python/import.c:4801 _imp_exec_dynamic_impl
+// CPython: Objects/moduleobject.c:463 PyModule_ExecDef
+func execDynamic(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: exec_dynamic() missing required argument 'mod'")
+	}
+	if err := imp.ExecExtModule(args[0]); err != nil {
+		return nil, err
+	}
+	return objects.NewInt(0), nil
 }
 
 // checkEmbeddedNull mirrors the ValueError CPython raises when encoding a

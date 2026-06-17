@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -38,6 +39,67 @@ const (
 	// MultiInterpPerInterpreterGIL is Py_MOD_PER_INTERPRETER_GIL_SUPPORTED.
 	MultiInterpPerInterpreterGIL
 )
+
+// PEP 489 slot IDs, mirroring the Py_mod_* values an extension's
+// PyModuleDef_Slot table carries. ExtSlotLast is _Py_mod_LAST_SLOT, the
+// largest valid ID; a table entry outside [1, ExtSlotLast] is the
+// "unknown slot ID" error PyModule_FromDefAndSpec2 reports.
+//
+// CPython: Include/moduleobject.h:74 Py_mod_create / Py_mod_exec / ...
+const (
+	ExtSlotCreate               = 1 // Py_mod_create
+	ExtSlotExec                 = 2 // Py_mod_exec
+	ExtSlotMultipleInterpreters = 3 // Py_mod_multiple_interpreters
+	ExtSlotGIL                  = 4 // Py_mod_gil
+	ExtSlotLast                 = 4 // _Py_mod_LAST_SLOT
+)
+
+// PyInit result kinds the export_* test variants reproduce, the
+// classification _PyImport_RunModInitFunc assigns to a PyInit_* return
+// before PyModule_FromDefAndSpec2 ever runs. ExtInitNormal is the only
+// kind a real multi-phase module produces.
+//
+// CPython: Python/importdl.c:416 _PyImport_RunModInitFunc
+const (
+	// ExtInitNormal: PyInit returned an initialized PyModuleDef. Proceed
+	// to the create/exec protocol (export_unreported_exception also lands
+	// here, with InitRaised set, so the ERR_UNREPORTED_EXC branch fires).
+	ExtInitNormal = iota
+	// ExtInitReturnedNil: PyInit returned NULL (export_null / export_raise).
+	ExtInitReturnedNil
+	// ExtInitUninitialized: PyInit returned a PyModuleDef that was never
+	// passed through PyModuleDef_Init (export_uninitialized).
+	ExtInitUninitialized
+)
+
+// ExtMethod is one PyMethodDef the module def carries in m_methods: a
+// module-level function added to the module (or non-module create result)
+// during the create phase by _add_methods_to_object.
+//
+// CPython: Objects/moduleobject.c:_add_methods_to_object
+type ExtMethod struct {
+	Name string
+	Fn   func([]objects.Object, map[string]objects.Object) (objects.Object, error)
+}
+
+// ExtSlot is one PyModuleDef_Slot. ID is the raw slot identifier (so the
+// bad_slot_large / bad_slot_negative variants can carry out-of-range IDs).
+// Create / Exec are set for Py_mod_create / Py_mod_exec; Value carries the
+// Py_mod_multiple_interpreters / Py_mod_gil integer.
+//
+// Create returns (object, raised): a nil object models a create function
+// that returned NULL, and a non-nil raised models PyErr_Occurred() after
+// the call (the create_* error variants). Exec returns (ret, raised) the
+// way a C execfunc returns an int and may leave an exception set: ret != 0
+// is failure, raised is the exception it set (if any).
+//
+// CPython: Include/moduleobject.h:74 PyModuleDef_Slot
+type ExtSlot struct {
+	ID     int
+	Create func() (objects.Object, *pyerrors.Exception)
+	Exec   func(m objects.Object) (int, *pyerrors.Exception)
+	Value  int
+}
 
 // ExtModuleDef is gopy's analog of a C extension's PyModuleDef plus the
 // PEP 489 slot table the loader reads. Init builds the fully populated
@@ -83,8 +145,35 @@ type ExtModuleDef struct {
 	// CPython: Modules/_testsinglephase.c:690 _check_cache_first modules
 	CheckCacheFirst bool
 	// Init builds the module. A non-nil error models a PyInit function
-	// that raised before returning its def.
+	// that raised before returning its def. Used by the legacy single-phase
+	// path and by the simple multi-phase mains that have no slot table.
 	Init func() (*objects.Module, error)
+
+	// MultiPhase marks a PEP 489 multi-phase def driven through the
+	// create/exec slot protocol (PyModule_FromDefAndSpec2 +
+	// PyModule_ExecDef) rather than a single Init. When set, the fields
+	// below describe the def the loader reads.
+	MultiPhase bool
+	// Doc is m_doc, set on the module by PyModule_SetDocString after create.
+	Doc string
+	// Methods is m_methods, added to the module by _add_methods_to_object.
+	Methods []ExtMethod
+	// Slots is the m_slots table, scanned in declaration order.
+	Slots []ExtSlot
+	// Variant marks a def reachable only by an explicit ExtensionFileLoader
+	// (the test loads it by name against the main extension's origin); it is
+	// not materialized as a discoverable stub on the path. The PyInit_x and
+	// pkg.* / non-ASCII test variants live in the one _testmultiphase
+	// extension, so they have no file of their own.
+	Variant bool
+	// InitKind classifies the PyInit_* return for the export_* edge cases.
+	// ExtInitNormal for a real multi-phase def.
+	InitKind int
+	// InitRaised, when non-nil, is the exception PyInit_* set before
+	// returning. With InitKind ExtInitReturnedNil it is the EXCEPTION re-raised
+	// as-is (export_raise); with ExtInitNormal it is the ERR_UNREPORTED_EXC the
+	// loader chains a SystemError onto (export_unreported_exception).
+	InitRaised func() *pyerrors.Exception
 }
 
 var (
@@ -316,7 +405,10 @@ func CheckExtSubinterpCompat(def *ExtModuleDef) error {
 //
 // CPython: Python/import.c:1560 PyErr_Format(PyExc_ImportError, ...)
 func subinterpIncompatible(name string) error {
-	return fmt.Errorf("ImportError: module %s does not support loading in subinterpreters", name)
+	msg := fmt.Sprintf("module %s does not support loading in subinterpreters", name)
+	exc := pyerrors.New(pyerrors.PyExc_ImportError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	return objects.NewRaisedError(exc, "ImportError: "+msg)
 }
 
 // extDef is gopy's analog of a single PyModuleDef instance: the unit the
@@ -393,22 +485,34 @@ func defFor(def *ExtModuleDef) *extDef {
 // caller fall back to the "gopy cannot dlopen" ImportError.
 //
 // CPython: Python/import.c:2001 import_run_extension
-func CreateExtModule(name, path string) (mod *objects.Module, found bool, err error) {
+func CreateExtModule(name, path string) (mod objects.Object, found bool, err error) {
 	def := FindExtModule(name)
 	if def == nil {
 		return nil, false, nil
 	}
+	if def.MultiPhase {
+		// PEP 489 multi-phase: run _PyImport_RunModInitFunc result validation
+		// then PyModule_FromDefAndSpec2 (the create step). The exec slots run
+		// later, from exec_dynamic -> ExecExtModule. The result may be a
+		// non-module object (the nonmodule create variants), which the
+		// dynamic-loader contract surfaces verbatim.
+		m, cerr := createMultiPhase(def, name)
+		if cerr != nil {
+			return nil, true, cerr
+		}
+		return m, true, nil
+	}
 	if !def.SinglePhase {
-		// Multi-phase modules apply the compat gate as part of
-		// PyModule_FromDefAndSpec2 (the create step) before the body runs.
+		// Legacy multi-phase main with an Init closure and no slot table: the
+		// compat gate stands in for PyModule_FromDefAndSpec2's slot check.
 		if cerr := CheckExtSubinterpCompat(def); cerr != nil {
 			return nil, true, cerr
 		}
-		mod, err = def.Init()
-		if err != nil {
-			return nil, true, err
+		m, ierr := def.Init()
+		if ierr != nil {
+			return nil, true, ierr
 		}
-		return mod, true, nil
+		return m, true, nil
 	}
 
 	ed := func() *extDef {
@@ -430,6 +534,242 @@ func CreateExtModule(name, path string) (mod *objects.Module, found bool, err er
 		}
 	}
 	return runSinglephase(def, ed, name, path)
+}
+
+// sysErr surfaces a fresh SystemError(msg) as a Go error so it raises the
+// exact exception type the C loader's PyErr_Format(PyExc_SystemError, ...)
+// would.
+//
+// CPython: Python/errors.c PyErr_Format
+func sysErr(msg string) error {
+	exc := pyerrors.New(pyerrors.PyExc_SystemError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	return objects.NewRaisedError(exc, "SystemError: "+msg)
+}
+
+// raiseExc surfaces an existing exception object verbatim, the analog of the
+// C loader returning after a slot left PyErr_Occurred() set (it leaves the
+// pending exception in place rather than chaining onto it).
+func raiseExc(exc *pyerrors.Exception) error {
+	msg := exc.ExcType.Name
+	if exc.Args != nil && exc.Args.Len() > 0 {
+		if s, ok := exc.Args.Item(0).(*objects.Unicode); ok {
+			msg = exc.ExcType.Name + ": " + s.Value()
+		}
+	}
+	return objects.NewRaisedError(exc, msg)
+}
+
+// chainedSysErr builds the SystemError(msg) the loader raises through
+// _PyErr_FormatFromCause: __cause__ and __context__ point at the offending
+// exception and __suppress_context__ is set, so `raise ... from cause`
+// chaining is preserved (the test asserts cm.exception.__cause__ is not None).
+//
+// CPython: Python/errors.c:1438 _PyErr_FormatFromCause
+func chainedSysErr(cause *pyerrors.Exception, msg string) error {
+	exc := pyerrors.New(pyerrors.PyExc_SystemError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	exc.Cause = cause
+	exc.Context = cause
+	exc.ContextSet = true
+	exc.Suppress = true
+	return objects.NewRaisedError(exc, "SystemError: "+msg)
+}
+
+var (
+	pendingExecMu sync.Mutex
+	pendingExec   = map[*objects.Module]*ExtModuleDef{}
+)
+
+// registerPendingExec records the def whose exec slots ExecExtModule should
+// run when exec_dynamic reaches this module, the gopy stand-in for the
+// md_def the C module carries from create through exec.
+func registerPendingExec(mod *objects.Module, def *ExtModuleDef) {
+	pendingExecMu.Lock()
+	pendingExec[mod] = def
+	pendingExecMu.Unlock()
+}
+
+// takePendingExec returns and clears the pending exec def for mod.
+func takePendingExec(mod *objects.Module) *ExtModuleDef {
+	pendingExecMu.Lock()
+	def := pendingExec[mod]
+	delete(pendingExec, mod)
+	pendingExecMu.Unlock()
+	return def
+}
+
+// createMultiPhase ports the create half of the PEP 489 multi-phase load:
+// _PyImport_RunModInitFunc's classification of the PyInit_* return, then
+// PyModule_FromDefAndSpec2 (the create step). The exec slots run later, from
+// exec_dynamic -> ExecExtModule.
+//
+// CPython: Python/importdl.c:118 _PyImport_RunModInitFunc (apply_error)
+// CPython: Objects/moduleobject.c:269 PyModule_FromDefAndSpec2
+func createMultiPhase(def *ExtModuleDef, name string) (objects.Object, error) {
+	switch def.InitKind {
+	case ExtInitReturnedNil:
+		// PyInit returned NULL. If it set an exception (export_raise) re-raise
+		// it as-is; otherwise it is the "without raising an exception" case.
+		//
+		// CPython: Python/importdl.c apply_error (ERR_MISSING)
+		if def.InitRaised != nil {
+			return nil, raiseExc(def.InitRaised())
+		}
+		return nil, sysErr(fmt.Sprintf("initialization of %s failed without raising an exception", name))
+	case ExtInitUninitialized:
+		// PyInit returned a def that never went through PyModuleDef_Init.
+		//
+		// CPython: Python/importdl.c apply_error (ERR_UNINITIALIZED)
+		return nil, sysErr(fmt.Sprintf("init function of %s returned uninitialized object", name))
+	}
+	// ExtInitNormal. export_unreported_exception returns a real def but leaves
+	// an exception set, which the loader chains a SystemError onto.
+	//
+	// CPython: Python/importdl.c apply_error (ERR_UNREPORTED_EXC)
+	if def.InitRaised != nil {
+		return nil, chainedSysErr(def.InitRaised(), fmt.Sprintf("initialization of %s raised unreported exception", name))
+	}
+	return fromDefAndSpec(def, name)
+}
+
+// fromDefAndSpec ports PyModule_FromDefAndSpec2: the m_size guard, the slot
+// scan (validating IDs and rejecting duplicate create / multiple-interpreters
+// slots), the subinterpreter compat gate, the create slot (or PyModule_New),
+// the non-module state / exec-slot checks, and the methods / doc population.
+//
+// CPython: Objects/moduleobject.c:269 PyModule_FromDefAndSpec2
+func fromDefAndSpec(def *ExtModuleDef, name string) (objects.Object, error) {
+	if def.MSize < 0 {
+		return nil, sysErr(fmt.Sprintf("module %s: m_size may not be negative for multi-phase initialization", name))
+	}
+
+	var createSlot *ExtSlot
+	hasExec := false
+	sawCreate := false
+	sawMultiInterp := false
+	sawGIL := false
+	for i := range def.Slots {
+		s := &def.Slots[i]
+		switch s.ID {
+		case ExtSlotCreate:
+			if sawCreate {
+				return nil, sysErr(fmt.Sprintf("module %s has multiple create slots", name))
+			}
+			sawCreate = true
+			createSlot = s
+		case ExtSlotExec:
+			hasExec = true
+		case ExtSlotMultipleInterpreters:
+			if sawMultiInterp {
+				return nil, sysErr(fmt.Sprintf("module %s has more than one 'multiple interpreters' slots", name))
+			}
+			sawMultiInterp = true
+		case ExtSlotGIL:
+			if sawGIL {
+				return nil, sysErr(fmt.Sprintf("module %s has more than one 'gil' slot", name))
+			}
+			sawGIL = true
+		default:
+			return nil, sysErr(fmt.Sprintf("module %s uses unknown slot ID %d", name, s.ID))
+		}
+	}
+
+	if cerr := CheckExtSubinterpCompat(def); cerr != nil {
+		return nil, cerr
+	}
+
+	var m objects.Object
+	if createSlot != nil {
+		obj, raised := createSlot.Create()
+		if obj == nil {
+			if raised != nil {
+				return nil, raiseExc(raised)
+			}
+			return nil, sysErr(fmt.Sprintf("creation of module %s failed without setting an exception", name))
+		}
+		if raised != nil {
+			return nil, chainedSysErr(raised, fmt.Sprintf("creation of module %s raised unreported exception", name))
+		}
+		m = obj
+	} else {
+		defName := def.DefName
+		if defName == "" {
+			defName = name
+		}
+		m = objects.NewModule(defName)
+	}
+
+	mod, isModule := m.(*objects.Module)
+	if !isModule {
+		// A non-module create result may not carry module state or exec slots.
+		if def.MSize > 0 {
+			return nil, sysErr(fmt.Sprintf("module %s is not a module object, but requests module state", name))
+		}
+		if hasExec {
+			return nil, sysErr(fmt.Sprintf("module %s specifies execution slots, but did not create a ModuleType instance", name))
+		}
+	}
+
+	if err := addExtMethods(m, def.Methods); err != nil {
+		return nil, err
+	}
+	if def.Doc != "" {
+		if err := objects.SetAttr(m, objects.NewStr("__doc__"), objects.NewStr(def.Doc)); err != nil {
+			return nil, err
+		}
+	}
+	if isModule {
+		registerPendingExec(mod, def)
+	}
+	return m, nil
+}
+
+// addExtMethods adds each m_methods entry to the create result as a bound
+// module function, the gopy analog of _add_methods_to_object building a
+// PyCFunction with the module as self and SetAttr-ing it.
+//
+// CPython: Objects/moduleobject.c:176 _add_methods_to_object
+func addExtMethods(m objects.Object, methods []ExtMethod) error {
+	for _, meth := range methods {
+		fn := objects.NewBuiltinFunction(meth.Name, meth.Fn)
+		if err := objects.SetAttr(m, objects.NewStr(meth.Name), fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExecExtModule ports PyModule_ExecDef: it runs the def's Py_mod_exec slots in
+// declaration order, mapping a non-zero return or a left-set exception to the
+// SystemError the C loader raises. It backs _imp.exec_dynamic.
+//
+// CPython: Objects/moduleobject.c:463 PyModule_ExecDef
+func ExecExtModule(m objects.Object) error {
+	mod, ok := m.(*objects.Module)
+	if !ok {
+		return nil
+	}
+	def := takePendingExec(mod)
+	if def == nil {
+		return nil
+	}
+	name := def.Name
+	for i := range def.Slots {
+		s := &def.Slots[i]
+		if s.ID != ExtSlotExec || s.Exec == nil {
+			continue
+		}
+		ret, raised := s.Exec(mod)
+		if ret != 0 {
+			if raised != nil {
+				return raiseExc(raised)
+			}
+			return sysErr(fmt.Sprintf("execution of module %s failed without setting an exception", name))
+		}
+		if raised != nil {
+			return chainedSysErr(raised, fmt.Sprintf("execution of module %s raised unreported exception", name))
+		}
+	}
+	return nil
 }
 
 // runSinglephase ports the fresh-load path: it runs the init (on the "main
@@ -683,6 +1023,14 @@ func MaterializeExtensions(dir string) error {
 	}
 	suffix := extensionSuffix()
 	for _, name := range ExtModuleNames() {
+		// Variant defs (PyInit_x, pkg.*, the non-ASCII names) live inside the
+		// one _testmultiphase extension and are reached only by an explicit
+		// ExtensionFileLoader against that origin, so they never get a
+		// discoverable stub of their own. Skip them, matching CPython's
+		// single-.so-many-symbols model.
+		if def := FindExtModule(name); def != nil && def.Variant {
+			continue
+		}
 		p := filepath.Join(dir, name+suffix)
 		if _, err := os.Stat(p); err == nil {
 			continue
