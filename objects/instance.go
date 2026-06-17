@@ -298,6 +298,18 @@ func instanceDealloc(o Object) {
 				WriteUnraisableHook(inst, "Exception ignored while detaching the instance dictionary", fmt.Errorf("MemoryError"))
 			}
 		}
+	} else if inst.dict != nil && !inst.dictExposed {
+		// The instance is the sole owner of an unexposed __dict__, so its
+		// reclamation must release the references its attribute values
+		// hold, the same as subtype_dealloc's clear_dict step. Without
+		// this the values stay pinned by a refcount nothing actually owns
+		// (the instance reaches the dict only through an uncounted Go
+		// field), so the cycle collector can never reclaim them. A dict
+		// that has been handed to Python (dictExposed) may be aliased by a
+		// live mapping object and is left to its own owner.
+		//
+		// CPython: Objects/typeobject.c:2782 subtype_dealloc (clear_dict)
+		ClearOwnedContents(inst.dict)
 	}
 	t := inst.Type()
 	if t != nil && t.IsUser {
