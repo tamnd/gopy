@@ -33,7 +33,7 @@ runs all of the non-interpreter files green.
 | --- | --- | --- |
 | `test_module/` (dir) | OK | **OK (39 tests)** |
 | `test_import/` (dir) | OK | **OK (118 tests, 4 skipped)** — 3 platform skips + `test_frozen_compat` (needs a frozen `_frozen_importlib`, P7) |
-| `test_importlib/` (dir) | OK | 1346 tests; 2 failures (module-lock GC lifetime, threaded circular import) + 1 error (incomplete multi-phase C-ext), 63 skipped |
+| `test_importlib/` (dir) | OK | 1346 tests; 1 failure (threaded circular import) + 1 error (incomplete multi-phase C-ext), 63 skipped — module-lock GC lifetime closed via tp_clear-from-delete_garbage |
 | `test_modulefinder` | OK | **OK (17 tests)** |
 | `test_pkg` | OK | **OK (8 tests)** |
 | `test_pkgutil` | OK | **OK (21 tests)** |
@@ -112,12 +112,21 @@ CPython 3.14.5 (counts and `-v` lists).
 - [x] P5: `test_import/` green — ported the single-phase extension cache (`_testsinglephase*` variants, `m_size` kinds, the extensions cache + `m_copy` reload), the gh-123950 circular import (`_testsinglephase_circular` via the `_gcd_import` import hook), and per-subinterpreter `sys.modules` isolation so the PEP 489 compat gate fires on re-import. 4 skips remain: 3 platform-specific, plus `test_frozen_compat`, which needs a frozen `_frozen_importlib` (P7)
 - [x] P5: `test_module_with_large_stack` no longer flakes with `bad file descriptor` — `os.NewFile`/`os.OpenFile` arm the close finalizer on the unexported inner `*os.file`, so `SetFinalizer(f, nil)` on the outer handle was a no-op. A leaked borrowed-fd wrapper (subprocess pipes) would close a reused descriptor mid-write. `objects.ClearOSFileFinalizer` reaches the inner pointer; the `io` and `_posixsubprocess` borrows route through it
 - [x] P5: re-audit `test_module/` — green (39 tests)
-- [ ] P5: `test_importlib/` residuals — 1346 tests run, down to 2 failures + 1 error. The error
-  (`test_incomplete_multi_phase_init_module`) is the `_testmultiphase` C-ext path (P7). The two
-  failures are GC/threading edge cases: `test_all_locks` expects `_bootstrap._module_locks` to drain
-  to zero after `gc_collect()` (gopy's collector leaves the no-longer-referenced `_ModuleLock`
-  weakref entries live across the full import sweep, though the isolated `test_lock_lifetime` passes),
-  and `test_circular_imports` is a threaded-import determinism case. Both overlap the broader
-  weakref/GC work (see the weakref/gc panel tasks).
+- [ ] P5: `test_importlib/` residuals — 1346 tests run, down to 1 failure + 1 error. The error
+  (`test_incomplete_multi_phase_init_module`) is the `_testmultiphase` C-ext path (P7). `test_all_locks`
+  now passes: the collector grew a `tp_clear` slot that runs from `delete_garbage` (the cyclic-GC path,
+  after the collector has proven unreachability) instead of the eager refcount-zero dealloc path, so an
+  instance `__dict__` that pins a `_ModuleLock` is cleared at GC time and `_bootstrap._module_locks`
+  drains to zero. The eager path deliberately no longer clears, so an object the VM under-counts to zero
+  while still live is never cleared out from under its users. The remaining failure,
+  `test_circular_imports`, is a threaded-import determinism case overlapping the broader weakref/GC work.
+- Note: `test_namespace_pkgs.SeparatedNamespacePackagesCreatedWhileRunning.test_invalidate_caches` and
+  `LoaderTests.test_path_indexable` fail when the file is run standalone (`gopy test_namespace_pkgs.py`),
+  but CPython 3.14 fails identically standalone — `PathFinder.invalidate_caches` does
+  `from importlib.metadata import MetadataPathFinder`, and the test's `sys.path` replacement strips the
+  stdlib, so the first-time `import json` under that restricted path raises `ModuleNotFoundError`. Under
+  the canonical package run (`python -m test test_importlib`) an earlier submodule imports
+  `importlib.metadata` while the path is unrestricted, so it stays cached and both tests pass. This is a
+  run-mode artifact, not a gopy defect; gopy matches CPython behavior in both modes.
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
