@@ -298,23 +298,31 @@ func instanceDealloc(o Object) {
 				WriteUnraisableHook(inst, "Exception ignored while detaching the instance dictionary", fmt.Errorf("MemoryError"))
 			}
 		}
-	} else if inst.dict != nil && !inst.dictExposed {
-		// The instance is the sole owner of an unexposed __dict__, so its
-		// reclamation must release the references its attribute values
-		// hold, the same as subtype_dealloc's clear_dict step. Without
-		// this the values stay pinned by a refcount nothing actually owns
-		// (the instance reaches the dict only through an uncounted Go
-		// field), so the cycle collector can never reclaim them. A dict
-		// that has been handed to Python (dictExposed) may be aliased by a
-		// live mapping object and is left to its own owner.
-		//
-		// CPython: Objects/typeobject.c:2782 subtype_dealloc (clear_dict)
-		ClearOwnedContents(inst.dict)
 	}
 	t := inst.Type()
 	if t != nil && t.IsUser {
 		inst.typeReleased = true
 		Decref(t)
+	}
+}
+
+// instanceClear is the tp_clear slot for pure user-class instances. The
+// cycle collector calls it from delete_garbage once the instance is
+// proven unreachable, releasing the references its __dict__ holds so a
+// cycle that runs through instance attributes is broken and the held
+// values become collectible. A dict handed to Python (dictExposed) may
+// be aliased by a live mapping object, so it is left to its own owner;
+// only the sole-owner case is cleared, matching the dealloc path's old
+// guard but firing from the collector instead of from refcount zero.
+//
+// CPython: Objects/typeobject.c:1411 subtype_clear
+func instanceClear(o Object) {
+	inst, ok := o.(*Instance)
+	if !ok {
+		return
+	}
+	if inst.dict != nil && !inst.dictExposed {
+		ClearOwnedContents(inst.dict)
 	}
 }
 

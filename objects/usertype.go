@@ -357,6 +357,17 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	if t.Dealloc == nil {
 		t.Dealloc = instanceDealloc
 	}
+	// subtype_clear drops the instance dict's references so the cycle
+	// collector's delete_garbage step can break reference cycles that run
+	// through instance attributes. Wire it for the same pure user classes
+	// that get instanceDealloc; built-in subclasses keep their inherited
+	// (or absent) tp_clear. Unlike the dealloc-time clear, this runs only
+	// after the collector has proven the instance unreachable.
+	//
+	// CPython: Objects/typeobject.c:1411 subtype_clear
+	if t.TpClear == nil {
+		t.TpClear = instanceClear
+	}
 	// type_new warns once if the finished class dict carries a non-string
 	// key (type('MyClass', (), {1: 2}) or a metaclass that injects ns[1]=2).
 	// The namespace is the source of those keys; the special cells were

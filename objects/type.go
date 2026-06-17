@@ -193,6 +193,18 @@ type Type struct {
 	// CPython: Include/cpython/object.h tp_traverse
 	TpTraverse func(o Object, visit Visitor) error
 
+	// TpClear mirrors tp_clear. The cycle collector's delete_garbage step
+	// calls it on each object it has proven unreachable, dropping the
+	// references the object holds so reference cycles break and the held
+	// values become collectible. It runs ONLY from the collector (which
+	// has confirmed unreachability), never from the eager refcount-zero
+	// dealloc path, so an object the VM has merely under-counted to zero
+	// while still live is never cleared out from under its users.
+	//
+	// CPython: Include/cpython/object.h tp_clear
+	// CPython: Python/gc.c:1198 delete_garbage (tp_clear call)
+	TpClear func(o Object)
+
 	Number   *NumberMethods
 	Sequence *SequenceMethods
 	Mapping  *MappingMethods
