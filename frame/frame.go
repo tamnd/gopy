@@ -266,6 +266,17 @@ func (f *Frame) Init(co *objects.Code, globals, builtins objects.Object, fn obje
 	f.Globals = globals
 	f.Builtins = builtins
 	f.Locals = nil
+	// The frame owns a counted reference on its function object for the
+	// duration of the call; _PyEvalFramePushAndInit transfers/holds
+	// f_funcobj and clear_thread_frame drops it. Without this the CALL
+	// that consumed the callable's only stack reference would let the
+	// function reach refcount zero (and run func_dealloc, clearing its
+	// closure) while its own frame is still executing.
+	//
+	// CPython: Python/ceval.c:1860 _PyEval_BuildFrame sets f_funcobj
+	if fn != nil {
+		objects.Incref(fn)
+	}
 	f.Func = fn
 	f.Previous = prev
 	f.InstrPtr = 0
@@ -377,6 +388,12 @@ func (f *Frame) Clear() {
 	f.Globals = nil
 	f.Builtins = nil
 	f.Locals = nil
+	// Release the frame's reference on f_funcobj acquired in Init.
+	//
+	// CPython: Python/frame.c clear_thread_frame Py_DECREF(frame->f_funcobj)
+	if f.Func != nil {
+		objects.Decref(f.Func)
+	}
 	f.Func = nil
 	f.Previous = nil
 }

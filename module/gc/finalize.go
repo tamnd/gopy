@@ -30,7 +30,22 @@ import (
 //
 // CPython: Python/gc.c:1067 finalize_garbage
 func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer, finalized map[objects.Object]struct{}) {
+	// Snapshot the node order before running any finalizer. A finalizer
+	// (and, with container tp_clear semantics, the Decref cascade a
+	// tp_dealloc/tp_clear triggers) can free another object whose type
+	// carries a Finalize slot, which routes through Decref ->
+	// GCUntrackHook -> listRemove and unlinks a node mid-list. Walking
+	// the live linked list across that mutation derefs a stale next
+	// pointer. Capturing the nodes up front keeps the iteration stable;
+	// the per-node gcFinalized flag still guards against re-finalizing a
+	// node the cascade already reclaimed.
+	//
+	// CPython: Python/gc.c:1067 finalize_garbage (gc_list_init snapshot)
+	var nodes []*gcHead
 	for g := unreachable.next; g != unreachable; g = g.next {
+		nodes = append(nodes, g)
+	}
+	for _, g := range nodes {
 		if g.flags&gcFinalized != 0 {
 			continue
 		}

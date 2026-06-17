@@ -409,6 +409,28 @@ func (e *evalState) run() (objects.Object, error) {
 			if e.handleException(err) {
 				continue
 			}
+			// No handler in this frame: the exception propagates to the
+			// caller and this activation record is about to be torn down.
+			// CPython's exception_unwind clears the whole frame (every
+			// remaining operand-stack temporary is Py_XDECREF'd) before
+			// _PyEvalFrameClearAndPop hands control up. gopy otherwise
+			// defers that release to FrameStack.Pop -> frame.Clear, which
+			// runs only after chunk.Pop has snapshotted the frame for any
+			// live tb_frame wrapper. A traceback attached during this same
+			// unwind wraps this very frame, so a stale exc-info temporary
+			// still sitting on the operand stack would be copied (and
+			// Incref'd) into the snapshot, forming a traceback -> snapshot
+			// -> operand-stack -> traceback cycle that pins the frame's
+			// locals (e.g. a `with _ModuleLockManager(name)` manager) long
+			// after the exception itself is gone. Releasing the operand
+			// stack here matches CPython and leaves the snapshot to capture
+			// only fast locals / cells / frees, exactly what tb_frame
+			// exposes.
+			//
+			// CPython: Python/ceval.c exception_unwind (_PyEvalFrameClearAndPop)
+			if e.f.Owner != frame.OwnedByGenerator {
+				e.f.DropStack(e.f.StackTop)
+			}
 			return nil, err
 		}
 		e.f.InstrPtr = next
