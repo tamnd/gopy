@@ -52,8 +52,36 @@ func NewContextVar(name string, defaultVal objects.Object, hasDefault bool) *Con
 		hasDefault: hasDefault,
 	}
 	cv.Init(ContextVarType)
+	if hasDefault && defaultVal != nil {
+		objects.Incref(defaultVal) // the ContextVar owns its default (Py_XNewRef)
+	}
 	cv.hash = generateHash(unsafe.Pointer(cv), name)
 	return cv
+}
+
+// contextVarDealloc releases the default value reference. The cache
+// slot is a borrowed reference (validated by tsid/version, never
+// incref'd) so it is not released here.
+//
+// CPython: Python/context.c:945 contextvar_tp_dealloc
+func contextVarDealloc(o objects.Object) {
+	cv := o.(*ContextVar)
+	if cv.hasDefault && cv.defaultVal != nil {
+		objects.Decref(cv.defaultVal)
+		cv.defaultVal = nil
+	}
+}
+
+// contextVarTraverse visits the default value for the cyclic
+// collector.
+//
+// CPython: Python/context.c:935 contextvar_tp_traverse
+func contextVarTraverse(o objects.Object, visit objects.Visitor) error {
+	cv := o.(*ContextVar)
+	if cv.hasDefault && cv.defaultVal != nil {
+		return visit(cv.defaultVal)
+	}
+	return nil
 }
 
 // Name returns the variable's name as a Go string.
@@ -198,7 +226,7 @@ func (cv *ContextVar) Set(ts *state.Thread, val objects.Object) (*Token, error) 
 	if err != nil {
 		return nil, err
 	}
-	ctx.vars = newVars
+	ctx.setVars(newVars)
 
 	cv.cacheStore(ts, val)
 	return tok, nil
@@ -238,14 +266,14 @@ func (cv *ContextVar) Reset(ts *state.Thread, tok *Token) error {
 			errors.SetString(ts, errors.PyExc_LookupError, cv.name)
 			return errLookup
 		}
-		ctx.vars = newVars
+		ctx.setVars(newVars)
 		return nil
 	}
 	newVars, err := ctx.vars.Assoc(cv, tok.oldVal)
 	if err != nil {
 		return err
 	}
-	ctx.vars = newVars
+	ctx.setVars(newVars)
 	return nil
 }
 

@@ -242,8 +242,15 @@ func contextGetMethod(c *Context, args []objects.Object, kwargs map[string]objec
 		return nil, err
 	}
 	if !found {
-		return def, nil
+		val = def
 	}
+	// Context.get returns a new reference, mirroring PyContextVar_Get:
+	// the value is borrowed from the HAMT (or the supplied default), so
+	// hand back an owned ref the VM can pop and decref without driving a
+	// HAMT-only value below its true refcount.
+	//
+	// CPython: Python/context.c:946 _contextvars_ContextVar_get_impl
+	objects.Incref(val)
 	return val, nil
 }
 
@@ -281,6 +288,11 @@ func contextSubscript(o, key objects.Object) (objects.Object, error) {
 		}
 		return nil, fmt.Errorf("KeyError")
 	}
+	// ctx[var] returns a new reference: the value is borrowed from the
+	// HAMT, so the result the VM pops and decrefs must carry its own +1.
+	//
+	// CPython: Python/context.c:585 context_tp_subscript
+	objects.Incref(val)
 	return val, nil
 }
 

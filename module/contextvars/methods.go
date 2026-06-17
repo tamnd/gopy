@@ -124,10 +124,24 @@ func contextVarGet(cv *ContextVar, args []objects.Object, kwargs map[string]obje
 	if err != nil {
 		return nil, err
 	}
+	var val objects.Object
 	if len(args) == 1 {
-		return cv.GetWithDefault(ts, args[0])
+		val, err = cv.GetWithDefault(ts, args[0])
+	} else {
+		val, err = cv.Get(ts)
 	}
-	return cv.Get(ts)
+	if err != nil {
+		return nil, err
+	}
+	// PyContextVar_Get returns a new reference: the value is borrowed
+	// from the HAMT (or is the constructor/argument default), and the
+	// caller frame owns the result the VM later pops and decrefs. Hand
+	// back an owned ref so a value held only by the context HAMT is not
+	// driven below its true refcount by repeated lookups.
+	//
+	// CPython: Python/context.c:309 PyContextVar_Get (Py_INCREF(*value))
+	objects.Incref(val)
+	return val, nil
 }
 
 // contextVarSet ports ContextVar.set(value).
