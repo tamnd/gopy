@@ -37,10 +37,12 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 
 	// CPython: Python/import.c:3829 resolve_name / abs_name selection.
 	// _gcd_import runs _sanity_check + _resolve_name itself, so we hand it
-	// the original (name, package, level); we recompute abs_name here only
-	// to slice the dotted head below, mirroring the C standalone abs_name.
+	// the original (name, package, level); we recompute abs_name here both
+	// to slice the dotted head below and to drive the import_get_module /
+	// import_ensure_initialized cache fast path the C body runs before ever
+	// calling _find_and_load.
 	var packageStr string
-	var module objects.Object
+	var absName string
 	if level > 0 {
 		// _bootstrap.__import__: globals_ = globals if globals is not None
 		// else {}. _calc___package__ runs the __package__/__spec__/__name__
@@ -63,29 +65,41 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 		if u, isStr := pkgObj.(*objects.Unicode); isStr {
 			packageStr = u.Value()
 		}
-		gcd, err := objects.GetAttr(frozen, objects.NewStr("_gcd_import"))
-		if err != nil {
-			return nil, true, err
-		}
-		module, err = objects.Call(gcd, objects.NewTuple([]objects.Object{
-			objects.NewStr(name), pkgObj, objects.NewInt(int64(level)),
-		}), nil)
-		if err != nil {
-			return nil, true, err
-		}
+		absName = resolveImportName(name, packageStr, level)
 	} else {
 		// CPython: Python/import.c:3835 level == 0 requires a non-empty name.
 		if name == "" {
 			return nil, true, fmt.Errorf("ValueError: Empty module name")
 		}
-		gcd, err := objects.GetAttr(frozen, objects.NewStr("_gcd_import"))
-		if err != nil {
-			return nil, true, err
-		}
-		module, err = objects.Call(gcd, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
-		if err != nil {
-			return nil, true, err
-		}
+		absName = name
+	}
+
+	// CPython: Python/import.c:3842 import_get_module + import_ensure_initialized.
+	// When abs_name is already in sys.modules AND still initializing (another
+	// thread is mid-import on it), the C body waits for it via
+	// _bootstrap._lock_unlock_module instead of re-entering _find_and_load.
+	// That matters for concurrent circular imports: _lock_unlock_module
+	// CATCHES the _DeadlockError the per-module lock raises, whereas the
+	// _ModuleLockManager context inside _find_and_load lets it propagate and
+	// kill the importing thread. Skipping this fast path is the difference
+	// between test_threaded_import.test_circular_imports resolving (both
+	// threads finish) and one thread dying on an uncaught _DeadlockError.
+	//
+	// Only the still-initializing case takes this branch. For the fully
+	// loaded cache hit and the cold miss, _find_and_load's own optimization
+	// (Lib/importlib/_bootstrap.py:1364 "module is _NEEDS_LOADING or
+	// _initializing") already returns the module without entering the lock,
+	// so delegating the whole import to the live __import__ is observably
+	// identical and keeps the common path's refcount discipline unchanged.
+	module, accepted, ferr := acceptInitializingModule(frozen, absName)
+	if ferr != nil {
+		return nil, true, ferr
+	}
+	if !accepted {
+		// CPython: Python/import.c:3718 import_find_and_load -> the builtin
+		// __import__ runs _find_and_load / _handle_fromlist and the dotted-head
+		// selection. __import__ ignores its locals argument, so pass None.
+		return delegateImport(name, orNone(globals), objects.None(), orNone(fromlist), level)
 	}
 
 	// CPython: Python/import.c:3881 has_from = PyObject_IsTrue(fromlist).
@@ -101,6 +115,79 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 		return headSelection(name, packageStr, level, module)
 	}
 	return fromlistSelection(frozen, module, fromlist)
+}
+
+// acceptInitializingModule ports the still-initializing arm of
+// import_ensure_initialized. It returns (module, true, nil) only when
+// sys.modules already holds a module for absName whose __spec__._initializing
+// is True: another thread is mid-import on it. In that case it waits via
+// _bootstrap._lock_unlock_module, which CATCHES the _DeadlockError a
+// concurrent circular import raises, and the caller accepts the (possibly
+// partially initialized) cached module instead of re-entering _find_and_load
+// (whose _ModuleLockManager would let that _DeadlockError propagate and kill
+// the thread).
+//
+// Every other case (absent, None, or a fully initialized cache hit) returns
+// (nil, false, nil): the caller delegates to the live __import__, whose own
+// _find_and_load optimization returns the module without locking. Restricting
+// the special handling to the initializing case keeps the common import path
+// byte-for-byte identical to the long-standing delegateImport route.
+//
+// CPython: Python/import.c:244 import_ensure_initialized
+// CPython: Python/import.c:3842 PyImport_ImportModuleLevelObject (cache check)
+func acceptInitializingModule(frozen objects.Object, absName string) (objects.Object, bool, error) {
+	raw, present := imp.GetModuleRaw(absName)
+	if !present || objects.IsNone(raw) {
+		return nil, false, nil
+	}
+
+	// Optimization: only call _lock_unlock_module when __spec__._initializing
+	// is true (set before the module is stuffed in sys.modules).
+	//
+	// CPython: Python/import.c:249 import_ensure_initialized (_initializing check)
+	spec, serr := objects.GetAttr(raw, objects.NewStr("__spec__"))
+	if serr != nil || spec == nil || objects.IsNone(spec) {
+		return nil, false, nil
+	}
+	initializing, ierr := imp.SpecIsInitializing(spec)
+	if ierr != nil {
+		return nil, false, ierr
+	}
+	if !initializing {
+		return nil, false, nil
+	}
+
+	// Wait until the module is done importing. _lock_unlock_module acquires
+	// then releases the per-module lock and CATCHES the _DeadlockError a
+	// concurrent circular import raises, accepting a partially initialized
+	// module rather than propagating the error.
+	//
+	// CPython: Python/import.c:267 _bootstrap._lock_unlock_module
+	lockUnlock, lerr := objects.GetAttr(frozen, objects.NewStr("_lock_unlock_module"))
+	if lerr != nil {
+		return nil, false, lerr
+	}
+	if _, cerr := objects.Call(lockUnlock, objects.NewTuple([]objects.Object{objects.NewStr(absName)}), nil); cerr != nil {
+		return nil, false, cerr
+	}
+
+	// Verify the module is still in sys.modules. Another thread may have
+	// removed it (import failure) between the lookup and the initializing
+	// check; if so, fall back to a full import to preserve normal semantics.
+	//
+	// CPython: Python/import.c:3851 mod_check != mod
+	check, stillPresent := imp.GetModuleRaw(absName)
+	if !stillPresent || check != raw {
+		return nil, false, nil
+	}
+	// import_get_module returns a NEW reference (PyMapping_GetOptionalItem);
+	// imp.GetModuleRaw borrows from sys.modules (PyDict_GetItem semantics), so
+	// incref before returning or the IMPORT_NAME DECREF_INPUTS under-counts the
+	// module and a later GC tp_clears its globals out from under live code.
+	//
+	// CPython: Python/import.c:238 import_get_module (Py_INCREF via GetOptionalItem)
+	objects.Incref(raw)
+	return raw, true, nil
 }
 
 // headSelection mirrors the !has_from branch of
@@ -134,6 +221,13 @@ func headSelection(name, packageStr string, level int, module objects.Object) (o
 	cutOff := len(runes) - dot
 	toReturn := string(absRunes[:len(absRunes)-cutOff])
 	mod, err := imp.SysModules().GetItem(objects.NewStr(toReturn))
+	if err == nil && mod != nil {
+		// GetItem borrows from sys.modules; import_get_module hands back a
+		// new reference, so incref before returning.
+		//
+		// CPython: Python/import.c:3917 import_get_module(to_return)
+		objects.Incref(mod)
+	}
 	if err != nil || mod == nil {
 		// CPython: Python/import.c:3924 KeyError "%R not in sys.modules
 		// as expected".
