@@ -36,42 +36,9 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 	}
 
 	// CPython: Python/import.c:3829 resolve_name / abs_name selection.
-	// _gcd_import runs _sanity_check + _resolve_name itself, so we hand it
-	// the original (name, package, level); we recompute abs_name here both
-	// to slice the dotted head below and to drive the import_get_module /
-	// import_ensure_initialized cache fast path the C body runs before ever
-	// calling _find_and_load.
-	var packageStr string
-	var absName string
-	if level > 0 {
-		// _bootstrap.__import__: globals_ = globals if globals is not None
-		// else {}. _calc___package__ runs the __package__/__spec__/__name__
-		// fallback (and its DeprecationWarning / ImportWarning / KeyError /
-		// TypeError) against that dict.
-		//
-		// CPython: Lib/importlib/_bootstrap.py:1487 __import__
-		g := globals
-		if g == nil || objects.IsNone(g) {
-			g = objects.NewDict()
-		}
-		calc, err := objects.GetAttr(frozen, objects.NewStr("_calc___package__"))
-		if err != nil {
-			return nil, true, err
-		}
-		pkgObj, err := objects.Call(calc, objects.NewTuple([]objects.Object{g}), nil)
-		if err != nil {
-			return nil, true, err
-		}
-		if u, isStr := pkgObj.(*objects.Unicode); isStr {
-			packageStr = u.Value()
-		}
-		absName = resolveImportName(name, packageStr, level)
-	} else {
-		// CPython: Python/import.c:3835 level == 0 requires a non-empty name.
-		if name == "" {
-			return nil, true, fmt.Errorf("ValueError: Empty module name")
-		}
-		absName = name
+	absName, packageStr, pkgObj, rerr := resolveImportContext(frozen, name, globals, level)
+	if rerr != nil {
+		return nil, true, rerr
 	}
 
 	// CPython: Python/import.c:3842 import_get_module + import_ensure_initialized.
@@ -85,24 +52,149 @@ func importModuleLevelObject(name string, globals objects.Object, fromlist objec
 	// between test_threaded_import.test_circular_imports resolving (both
 	// threads finish) and one thread dying on an uncaught _DeadlockError.
 	//
-	// Only the still-initializing case takes this branch. For the fully
-	// loaded cache hit and the cold miss, _find_and_load's own optimization
-	// (Lib/importlib/_bootstrap.py:1364 "module is _NEEDS_LOADING or
-	// _initializing") already returns the module without entering the lock,
-	// so delegating the whole import to the live __import__ is observably
-	// identical and keeps the common path's refcount discipline unchanged.
+	// Only the still-initializing case takes this fast path. Every other
+	// case (cold miss or fully loaded) falls through to _gcd_import below,
+	// exactly as the C body calls import_find_and_load.
 	module, accepted, ferr := acceptInitializingModule(frozen, absName)
 	if ferr != nil {
 		return nil, true, ferr
 	}
 	if !accepted {
-		// CPython: Python/import.c:3718 import_find_and_load -> the builtin
-		// __import__ runs _find_and_load / _handle_fromlist and the dotted-head
-		// selection. __import__ ignores its locals argument, so pass None.
-		return delegateImport(name, orNone(globals), objects.None(), orNone(fromlist), level)
+		// CPython: Python/import.c:3718 import_find_and_load -> _gcd_import.
+		// Drive the live importlib _gcd_import to load (or return the cached)
+		// module, then perform the fromlist / dotted-head selection in C
+		// below rather than in _bootstrap.__import__. Routing through the
+		// Python __import__ here would re-run the dotted-head slice via
+		// module.__name__, which raises AttributeError instead of the
+		// expected KeyError when a caller stuffed a non-module into
+		// sys.modules (test_malicious_relative_import, gh-134100).
+		gcd, err := objects.GetAttr(frozen, objects.NewStr("_gcd_import"))
+		if err != nil {
+			return nil, true, err
+		}
+		var gcdArgs *objects.Tuple
+		if level > 0 {
+			gcdArgs = objects.NewTuple([]objects.Object{
+				objects.NewStr(name), pkgObj, objects.NewInt(int64(level)),
+			})
+		} else {
+			gcdArgs = objects.NewTuple([]objects.Object{objects.NewStr(name)})
+		}
+		module, err = objects.Call(gcd, gcdArgs, nil)
+		if err != nil {
+			return nil, true, err
+		}
 	}
 
 	// CPython: Python/import.c:3881 has_from = PyObject_IsTrue(fromlist).
+	hasFrom := false
+	if fromlist != nil && !objects.IsNone(fromlist) {
+		t, err := objects.IsTruthy(fromlist)
+		if err != nil {
+			return nil, true, err
+		}
+		hasFrom = t
+	}
+	if !hasFrom {
+		return headSelection(name, packageStr, level, module)
+	}
+	return fromlistSelection(frozen, module, fromlist)
+}
+
+// resolveImportContext ports the abs_name / package resolution prologue of
+// PyImport_ImportModuleLevelObject. For level>0 it runs
+// _bootstrap._calc___package__ against the caller globals (carrying its
+// DeprecationWarning / ImportWarning / KeyError / TypeError), derives the
+// package string, and recomputes abs_name via _resolve_name; for level==0 it
+// rejects an empty name with ValueError and uses name verbatim. pkgObj is the
+// package object _gcd_import expects for a relative import (nil for level==0).
+//
+// CPython: Python/import.c:3829 PyImport_ImportModuleLevelObject (resolve)
+// CPython: Lib/importlib/_bootstrap.py:1487 __import__
+func resolveImportContext(frozen objects.Object, name string, globals objects.Object, level int) (absName, packageStr string, pkgObj objects.Object, err error) {
+	if level > 0 {
+		// globals_ = globals if globals is not None else {}; _calc___package__
+		// runs the __package__/__spec__/__name__ fallback against that dict.
+		g := globals
+		if g == nil || objects.IsNone(g) {
+			g = objects.NewDict()
+		}
+		calc, gerr := objects.GetAttr(frozen, objects.NewStr("_calc___package__"))
+		if gerr != nil {
+			return "", "", nil, gerr
+		}
+		pkgObj, err = objects.Call(calc, objects.NewTuple([]objects.Object{g}), nil)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if u, isStr := pkgObj.(*objects.Unicode); isStr {
+			packageStr = u.Value()
+		}
+		absName = resolveImportName(name, packageStr, level)
+		return absName, packageStr, pkgObj, nil
+	}
+	// CPython: Python/import.c:3835 level == 0 requires a non-empty name.
+	if name == "" {
+		return "", "", nil, fmt.Errorf("ValueError: Empty module name")
+	}
+	return name, "", nil, nil
+}
+
+// importViaDelegate is the IMPORT_NAME opcode's import path. It runs the same
+// import_ensure_initialized still-initializing fast path as the builtin
+// __import__ (so concurrent circular imports resolve instead of dying on an
+// uncaught _DeadlockError), but otherwise delegates the load to
+// _frozen_importlib.__import__ rather than driving _gcd_import + the C
+// dotted-head selection directly.
+//
+// The distinction is a refcount one, not a semantic one. IMPORT_NAME applies
+// DECREF_INPUTS to the module it pushes, and the long-standing delegateImport
+// route returns an owned reference whose count that decref was proven against
+// (#223). Routing IMPORT_NAME through importModuleLevelObject's _gcd_import +
+// headSelection path produces a module whose net refcount differs, so the
+// DECREF_INPUTS drops it to a GC-clearable state and a later collection
+// tp_clears its globals out from under live code. The builtin __import__ has
+// no DECREF_INPUTS, so it keeps the C-faithful importModuleLevelObject body
+// (whose headSelection raises the gh-134100 KeyError); IMPORT_NAME keeps the
+// delegate body it was proven against, with only the circular-import fast path
+// prepended.
+//
+// CPython: Python/import.c:3842 import_ensure_initialized (cache fast path)
+func importViaDelegate(name string, globals objects.Object, fromlist objects.Object, level int) (objects.Object, bool, error) {
+	frozen, ok := imp.GetModule("_frozen_importlib")
+	if !ok {
+		return nil, false, nil
+	}
+	absName, packageStr, _, rerr := resolveImportContext(frozen, name, globals, level)
+	if rerr != nil {
+		return nil, true, rerr
+	}
+	module, accepted, ferr := acceptInitializingModule(frozen, absName)
+	if ferr != nil {
+		return nil, true, ferr
+	}
+	if !accepted {
+		// Cold load: _frozen_importlib.__import__ runs _find_and_load and the
+		// fromlist / dotted-head selection itself, so its return is already
+		// the module CPython's import_name would push. This is the
+		// long-standing refcount-proven route (#223).
+		mod, ok2, err := delegateImport(name, globals, objects.None(), fromlist, level)
+		if err != nil {
+			return nil, true, err
+		}
+		if !ok2 {
+			return nil, false, nil
+		}
+		return mod, true, nil
+	}
+
+	// The fast path handed back the (possibly partially initialized) module
+	// named by abs_name. The fromlist / dotted-head selection still has to run
+	// against it, exactly as the C body does after import_find_and_load: a
+	// bare `from . import sub` during a package's own init relies on
+	// _handle_fromlist to force-import the submodule.
+	//
+	// CPython: Python/import.c:3881 has_from selection
 	hasFrom := false
 	if fromlist != nil && !objects.IsNone(fromlist) {
 		t, err := objects.IsTruthy(fromlist)

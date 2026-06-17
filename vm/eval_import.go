@@ -212,7 +212,7 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		// installed (early startup) does the Go driver below run.
 		//
 		// CPython: Python/ceval.c:2898 import_name
-		if mod, ok, derr := importModuleLevelObject(modname, orNone(e.f.Globals), orNone(fromlistObj), level); ok {
+		if mod, ok, derr := importViaDelegate(modname, orNone(e.f.Globals), orNone(fromlistObj), level); ok {
 			if derr != nil {
 				// CPython: Python/import.c:3959 import_name trims the importlib
 				// machinery frames off the traceback before the calling frame is
