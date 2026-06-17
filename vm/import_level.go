@@ -238,7 +238,12 @@ func acceptInitializingModule(frozen objects.Object, absName string) (objects.Ob
 	//
 	// CPython: Python/import.c:249 import_ensure_initialized (_initializing check)
 	spec, serr := objects.GetAttr(raw, objects.NewStr("__spec__"))
-	if serr != nil || spec == nil || objects.IsNone(spec) {
+	if serr != nil {
+		// A cached module without a usable __spec__ cannot be mid-import;
+		// treat it as not-initializing and fall back to the normal import.
+		return nil, false, nil //nolint:nilerr // missing __spec__ is a fall-back, not an error
+	}
+	if spec == nil || objects.IsNone(spec) {
 		return nil, false, nil
 	}
 	initializing, ierr := imp.SpecIsInitializing(spec)
