@@ -530,10 +530,12 @@ func CreateExtModule(name, path string) (mod objects.Object, found bool, err err
 		cached, ok := extCache[extCacheKey{path, name}]
 		extCacheMu.Unlock()
 		if ok {
-			return reloadSinglephase(def, ed, cached, name)
+			mod, rerr := reloadSinglephase(def, ed, cached, name)
+			return mod, true, rerr
 		}
 	}
-	return runSinglephase(def, ed, name, path)
+	mod, rerr := runSinglephase(def, ed, name, path)
+	return mod, true, rerr
 }
 
 // sysErr surfaces a fresh SystemError(msg) as a Go error so it raises the
@@ -636,14 +638,13 @@ func createMultiPhase(def *ExtModuleDef, name string) (objects.Object, error) {
 // slots), the subinterpreter compat gate, the create slot (or PyModule_New),
 // the non-module state / exec-slot checks, and the methods / doc population.
 //
-// CPython: Objects/moduleobject.c:269 PyModule_FromDefAndSpec2
-func fromDefAndSpec(def *ExtModuleDef, name string) (objects.Object, error) {
-	if def.MSize < 0 {
-		return nil, sysErr(fmt.Sprintf("module %s: m_size may not be negative for multi-phase initialization", name))
-	}
-
-	var createSlot *ExtSlot
-	hasExec := false
+// scanExtSlots walks the def's slot table once, validating slot IDs and
+// rejecting a duplicate create slot or repeated multiple-interpreters / gil
+// slots. It returns the lone create slot (nil when absent) and whether any
+// exec slot is present, the two facts fromDefAndSpec needs downstream.
+//
+// CPython: Objects/moduleobject.c:269 PyModule_FromDefAndSpec2 (slot scan)
+func scanExtSlots(def *ExtModuleDef, name string) (createSlot *ExtSlot, hasExec bool, err error) {
 	sawCreate := false
 	sawMultiInterp := false
 	sawGIL := false
@@ -652,7 +653,7 @@ func fromDefAndSpec(def *ExtModuleDef, name string) (objects.Object, error) {
 		switch s.ID {
 		case ExtSlotCreate:
 			if sawCreate {
-				return nil, sysErr(fmt.Sprintf("module %s has multiple create slots", name))
+				return nil, false, sysErr(fmt.Sprintf("module %s has multiple create slots", name))
 			}
 			sawCreate = true
 			createSlot = s
@@ -660,17 +661,30 @@ func fromDefAndSpec(def *ExtModuleDef, name string) (objects.Object, error) {
 			hasExec = true
 		case ExtSlotMultipleInterpreters:
 			if sawMultiInterp {
-				return nil, sysErr(fmt.Sprintf("module %s has more than one 'multiple interpreters' slots", name))
+				return nil, false, sysErr(fmt.Sprintf("module %s has more than one 'multiple interpreters' slots", name))
 			}
 			sawMultiInterp = true
 		case ExtSlotGIL:
 			if sawGIL {
-				return nil, sysErr(fmt.Sprintf("module %s has more than one 'gil' slot", name))
+				return nil, false, sysErr(fmt.Sprintf("module %s has more than one 'gil' slot", name))
 			}
 			sawGIL = true
 		default:
-			return nil, sysErr(fmt.Sprintf("module %s uses unknown slot ID %d", name, s.ID))
+			return nil, false, sysErr(fmt.Sprintf("module %s uses unknown slot ID %d", name, s.ID))
 		}
+	}
+	return createSlot, hasExec, nil
+}
+
+// CPython: Objects/moduleobject.c:269 PyModule_FromDefAndSpec2
+func fromDefAndSpec(def *ExtModuleDef, name string) (objects.Object, error) {
+	if def.MSize < 0 {
+		return nil, sysErr(fmt.Sprintf("module %s: m_size may not be negative for multi-phase initialization", name))
+	}
+
+	createSlot, hasExec, serr := scanExtSlots(def, name)
+	if serr != nil {
+		return nil, serr
 	}
 
 	if cerr := CheckExtSubinterpCompat(def); cerr != nil {
@@ -778,7 +792,7 @@ func ExecExtModule(m objects.Object) error {
 // cache. A failing init inside a subinterpreter takes the gh-144601 path.
 //
 // CPython: Python/import.c:2078 import_run_extension
-func runSinglephase(def *ExtModuleDef, ed *extDef, name, path string) (*objects.Module, bool, error) {
+func runSinglephase(def *ExtModuleDef, ed *extDef, name, path string) (*objects.Module, error) {
 	inSubinterp := !currentInterp().isMain
 	mod, initErr := def.Init()
 	if initErr != nil {
@@ -792,12 +806,12 @@ func runSinglephase(def *ExtModuleDef, ed *extDef, name, path string) (*objects.
 				objects.WriteUnraisableHook(nil, "Exception while importing from subinterpreter", initErr)
 			}
 			// CPython: Python/import.c:2168 PyErr_SetString(PyExc_ImportError, ...)
-			return nil, true, fmt.Errorf("ImportError: failed to import from subinterpreter due to exception")
+			return nil, fmt.Errorf("ImportError: failed to import from subinterpreter due to exception")
 		}
-		return nil, true, initErr
+		return nil, initErr
 	}
 	if cerr := CheckExtSubinterpCompat(def); cerr != nil {
-		return nil, true, cerr
+		return nil, cerr
 	}
 
 	s := currentInterp()
@@ -823,7 +837,7 @@ func runSinglephase(def *ExtModuleDef, ed *extDef, name, path string) (*objects.
 	extCacheMu.Unlock()
 
 	setModuleByIndex(s, ed.index, mod)
-	return mod, true, nil
+	return mod, nil
 }
 
 // reloadSinglephase ports reload_singlephase_extension: a basic module
@@ -832,11 +846,11 @@ func runSinglephase(def *ExtModuleDef, ed *extDef, name, path string) (*objects.
 // module with state re-runs its init function.
 //
 // CPython: Python/import.c:1869 reload_singlephase_extension
-func reloadSinglephase(def *ExtModuleDef, ed *extDef, cached *extCacheValue, name string) (*objects.Module, bool, error) {
+func reloadSinglephase(def *ExtModuleDef, ed *extDef, cached *extCacheValue, name string) (*objects.Module, error) {
 	// It may have been imported before in an interpreter that allows legacy
 	// modules but is barred in the current one.
 	if cerr := CheckExtSubinterpCompat(def); cerr != nil {
-		return nil, true, cerr
+		return nil, cerr
 	}
 	s := currentInterp()
 	if ed.mSize == -1 {
@@ -854,28 +868,28 @@ func reloadSinglephase(def *ExtModuleDef, ed *extDef, cached *extCacheValue, nam
 		for _, k := range cached.mCopy.Keys() {
 			v, gerr := cached.mCopy.GetItem(k)
 			if gerr != nil {
-				return nil, true, gerr
+				return nil, gerr
 			}
 			if serr := dst.SetItem(k, v); serr != nil {
-				return nil, true, serr
+				return nil, serr
 			}
 		}
 		extCacheMu.Lock()
 		modToDef[mod] = ed
 		extCacheMu.Unlock()
 		setModuleByIndex(s, ed.index, mod)
-		return mod, true, nil
+		return mod, nil
 	}
 	// m_size >= 0: re-run the init function.
 	mod, err := def.Init()
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 	extCacheMu.Lock()
 	modToDef[mod] = ed
 	extCacheMu.Unlock()
 	setModuleByIndex(s, ed.index, mod)
-	return mod, true, nil
+	return mod, nil
 }
 
 // snapshotDict returns a shallow copy of d, the gopy analog of the m_copy

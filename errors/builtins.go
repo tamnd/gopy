@@ -275,7 +275,7 @@ func newExcType(name string, bases []*objects.Type) *objects.Type {
 // CPython: Objects/exceptions.c:2503 NameError_init
 // CPython: Objects/exceptions.c:2586 AttributeError_init
 func excTpNew(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	// Allocate with empty args, mirroring BaseException_new's behaviour when
+	// Allocate with empty args, mirroring BaseException_new's behavior when
 	// the real positional arguments are about to be installed by tp_init
 	// (typeCallViaTpNew always runs __init__, which lands on baseExceptionInit
 	// and stores the args via setArgsSteal). Building the real tuple here too
