@@ -33,7 +33,7 @@ runs all of the non-interpreter files green.
 | --- | --- | --- |
 | `test_module/` (dir) | OK | **OK (39 tests)** |
 | `test_import/` (dir) | OK | **OK (118 tests, 4 skipped)** — 3 platform skips + `test_frozen_compat` (needs a frozen `_frozen_importlib`, P7) |
-| `test_importlib/` (dir) | OK | 1346 tests; 1 failure (threaded circular import) + 1 error (incomplete multi-phase C-ext), 63 skipped — module-lock GC lifetime closed via tp_clear-from-delete_garbage |
+| `test_importlib/` (dir) | OK | 1346 tests; 0 failures, 0 errors, 63 skipped — threaded circular import and incomplete multi-phase init both closed; module-lock GC lifetime closed via tp_clear-from-delete_garbage |
 | `test_modulefinder` | OK | **OK (17 tests)** |
 | `test_pkg` | OK | **OK (8 tests)** |
 | `test_pkgutil` | OK | **OK (21 tests)** |
@@ -112,14 +112,21 @@ CPython 3.14.5 (counts and `-v` lists).
 - [x] P5: `test_import/` green — ported the single-phase extension cache (`_testsinglephase*` variants, `m_size` kinds, the extensions cache + `m_copy` reload), the gh-123950 circular import (`_testsinglephase_circular` via the `_gcd_import` import hook), and per-subinterpreter `sys.modules` isolation so the PEP 489 compat gate fires on re-import. 4 skips remain: 3 platform-specific, plus `test_frozen_compat`, which needs a frozen `_frozen_importlib` (P7)
 - [x] P5: `test_module_with_large_stack` no longer flakes with `bad file descriptor` — `os.NewFile`/`os.OpenFile` arm the close finalizer on the unexported inner `*os.file`, so `SetFinalizer(f, nil)` on the outer handle was a no-op. A leaked borrowed-fd wrapper (subprocess pipes) would close a reused descriptor mid-write. `objects.ClearOSFileFinalizer` reaches the inner pointer; the `io` and `_posixsubprocess` borrows route through it
 - [x] P5: re-audit `test_module/` — green (39 tests)
-- [ ] P5: `test_importlib/` residuals — 1346 tests run, down to 1 failure + 1 error. The error
-  (`test_incomplete_multi_phase_init_module`) is the `_testmultiphase` C-ext path (P7). `test_all_locks`
-  now passes: the collector grew a `tp_clear` slot that runs from `delete_garbage` (the cyclic-GC path,
+- [x] P5: `test_importlib/` residuals — 1346 tests run, 0 failures + 0 errors. `test_all_locks`
+  passes: the collector grew a `tp_clear` slot that runs from `delete_garbage` (the cyclic-GC path,
   after the collector has proven unreachability) instead of the eager refcount-zero dealloc path, so an
   instance `__dict__` that pins a `_ModuleLock` is cleared at GC time and `_bootstrap._module_locks`
   drains to zero. The eager path deliberately no longer clears, so an object the VM under-counts to zero
-  while still live is never cleared out from under its users. The remaining failure,
-  `test_circular_imports`, is a threaded-import determinism case overlapping the broader weakref/GC work.
+  while still live is never cleared out from under its users. `test_incomplete_multi_phase_init_module`
+  passes once the `_testmultiphase` incomplete-init path is wired. `test_circular_imports` passes by
+  splitting the import entry points: the VM `IMPORT_NAME` opcode keeps the refcount-proven
+  `_frozen_importlib.__import__` delegate route (it applies `DECREF_INPUTS` to the module it pushes),
+  with the `import_ensure_initialized` still-initializing fast path prepended so a concurrent circular
+  import waits via `_bootstrap._lock_unlock_module` (which catches `_DeadlockError`) instead of dying on
+  an uncaught `_DeadlockError` inside `_find_and_load`'s `_ModuleLockManager`. The builtin `__import__`
+  keeps the full C-faithful `PyImport_ImportModuleLevelObject` body (`_gcd_import` + the dotted-head
+  `KeyError` for gh-134100), which a shared function could not satisfy without breaking one side or the
+  other.
 - Note: `test_namespace_pkgs.SeparatedNamespacePackagesCreatedWhileRunning.test_invalidate_caches` and
   `LoaderTests.test_path_indexable` fail when the file is run standalone (`gopy test_namespace_pkgs.py`),
   but CPython 3.14 fails identically standalone — `PathFinder.invalidate_caches` does
