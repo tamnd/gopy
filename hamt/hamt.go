@@ -5,6 +5,14 @@
 // maximum non-collision depth is 7. A level-7 collision node lifts the
 // total maximum depth to 8 (MaxTreeDepth).
 //
+// Nodes are refcounted objects.Object values: each node owns one
+// reference on every key, value, and child it stores. assoc/without
+// return an owned reference (the caller must Decref it); the unchanged
+// path returns Incref(self). This mirrors CPython's tp_dealloc /
+// Py_NewRef / Py_SETREF discipline 1:1 so that a value stored only in a
+// ContextVar (via the HAMT) carries an honest refcount and does not get
+// torn down while it is still reachable.
+//
 // CPython: Python/hamt.c
 package hamt
 
@@ -47,8 +55,12 @@ const (
 )
 
 // node is the internal interface for the three node shapes. The
-// dispatch matches hamt_node_assoc / without / find in CPython.
+// dispatch matches hamt_node_assoc / without / find in CPython. Every
+// node embeds objects.Header so a node value is a full objects.Object:
+// it can be stored in a bitmap's value slot, incref'd, and decref'd
+// uniformly with the keys and values it sits beside.
 type node interface {
+	objects.Object
 	assoc(shift uint32, hash int32, key, val objects.Object) (newNode node, addedLeaf bool, err error)
 	without(shift uint32, hash int32, key objects.Object) (res withoutResult, newNode node, err error)
 	find(shift uint32, hash int32, key objects.Object) (val objects.Object, found bool, err error)
@@ -61,6 +73,7 @@ type node interface {
 //
 // CPython: Python/hamt.c:316 PyHamtNode_Bitmap
 type bitmapNode struct {
+	objects.Header
 	bitmap uint32
 	array  []objects.Object
 }
@@ -71,6 +84,7 @@ type bitmapNode struct {
 //
 // CPython: Python/hamt.c:316 PyHamtNode_Array
 type arrayNode struct {
+	objects.Header
 	count    int
 	children [arrayNodeSize]node
 }
@@ -81,16 +95,68 @@ type arrayNode struct {
 //
 // CPython: Python/hamt.c:325 PyHamtNode_Collision
 type collisionNode struct {
+	objects.Header
 	hash  int32
 	array []objects.Object
 }
 
+// Node type objects. They exist so a node satisfies objects.Object and
+// so Decref can reach the per-shape Dealloc that releases the stored
+// references. HAMT is private to the runtime, so the bare type name is
+// all we register.
+//
+// CPython: Python/hamt.c:2843 _PyHamt_BitmapNode_Type / _PyHamt_ArrayNode_Type / _PyHamt_CollisionNode_Type
+var (
+	bitmapNodeType    = objects.NewType("hamt_bitmap_node", []*objects.Type{objects.ObjectType()})
+	arrayNodeType     = objects.NewType("hamt_array_node", []*objects.Type{objects.ObjectType()})
+	collisionNodeType = objects.NewType("hamt_collision_node", []*objects.Type{objects.ObjectType()})
+)
+
 // emptyBitmap is the singleton empty bitmap node. CPython caches the
-// same instance; we cache to keep New() allocation-free for empty
-// HAMTs.
+// same instance and statically allocates it (immortal); we stamp it
+// immortal so the Incref/Decref it sees as the root of every empty
+// Hamt and as the working node in assoc are all no-ops and it never
+// deallocs.
 //
 // CPython: Python/hamt.c:498 _Py_SINGLETON(hamt_bitmap_node_empty)
 var emptyBitmap = &bitmapNode{}
+
+func init() {
+	bitmapNodeType.Dealloc = bitmapNodeDealloc
+	bitmapNodeType.TpTraverse = bitmapNodeTraverse
+	arrayNodeType.Dealloc = arrayNodeDealloc
+	arrayNodeType.TpTraverse = arrayNodeTraverse
+	collisionNodeType.Dealloc = collisionNodeDealloc
+	collisionNodeType.TpTraverse = collisionNodeTraverse
+
+	emptyBitmap.Init(bitmapNodeType)
+	emptyBitmap.MakeImmortal()
+}
+
+// xIncref / xDecref mirror Py_XINCREF / Py_XDECREF: a nil operand is a
+// no-op. A nil bitmap key slot is the common case (it marks a child
+// node in the value slot), so the guard earns its keep.
+func xIncref(o objects.Object) {
+	if o != nil {
+		objects.Incref(o)
+	}
+}
+
+func xDecref(o objects.Object) {
+	if o != nil {
+		objects.Decref(o)
+	}
+}
+
+// setref stores v into arr[i] and drops the reference the slot held
+// before. Mirrors Py_SETREF / Py_XSETREF: the store happens before the
+// decref so a self-referential value cannot be freed mid-swap. v is
+// already an owned reference (or nil); the slot adopts it.
+func setref(arr []objects.Object, i int, v objects.Object) {
+	old := arr[i]
+	arr[i] = v
+	xDecref(old)
+}
 
 // hamtHash reduces a Python hash to 32 bits via XOR-fold. CPython
 // pins this exact reducer so test fixtures can target specific tree
@@ -135,14 +201,17 @@ func hamtBitindex(bitmap, bit uint32) uint32 {
 ///////////////////////////////// Bitmap node /////////////////////////
 
 // newBitmap returns a bitmap node with `size` empty slots. size==0
-// reuses the empty singleton.
+// reuses the immortal empty singleton (CPython returns Py_NewRef of
+// the statically allocated singleton; here the incref is a no-op).
 //
 // CPython: Python/hamt.c:489 hamt_node_bitmap_new
 func newBitmap(size int) *bitmapNode {
 	if size == 0 {
 		return emptyBitmap
 	}
-	return &bitmapNode{array: make([]objects.Object, size)}
+	b := &bitmapNode{array: make([]objects.Object, size)}
+	b.Init(bitmapNodeType)
+	return b
 }
 
 // count returns the number of (k, v) pairs in the bitmap node. CPython
@@ -153,12 +222,16 @@ func (b *bitmapNode) count() int {
 	return len(b.array) / 2
 }
 
-// clone copies the bitmap and the slot array.
+// clone copies the bitmap and the slot array, taking a reference on
+// every copied entry.
 //
 // CPython: Python/hamt.c:533 hamt_node_bitmap_clone
 func (b *bitmapNode) clone() *bitmapNode {
 	c := newBitmap(len(b.array))
-	copy(c.array, b.array)
+	for i := range b.array {
+		c.array[i] = b.array[i]
+		xIncref(c.array[i])
+	}
 	c.bitmap = b.bitmap
 	return c
 }
@@ -174,9 +247,11 @@ func (b *bitmapNode) cloneWithout(bit uint32) *bitmapNode {
 	valIdx := keyIdx + 1
 	for i := uint32(0); i < keyIdx; i++ {
 		c.array[i] = b.array[i]
+		xIncref(c.array[i])
 	}
 	for i := valIdx + 1; i < uint32(len(b.array)); i++ {
 		c.array[i-2] = b.array[i]
+		xIncref(b.array[i])
 	}
 	c.bitmap = b.bitmap & ^bit
 	return c
@@ -184,7 +259,8 @@ func (b *bitmapNode) cloneWithout(bit uint32) *bitmapNode {
 
 // newBitmapOrCollision returns a node holding two key/value pairs
 // that collided in the parent bitmap node. It promotes to a collision
-// node only when the full 32-bit hashes are identical.
+// node only when the full 32-bit hashes are identical. The returned
+// node is an owned reference.
 //
 // CPython: Python/hamt.c:584 hamt_node_new_bitmap_or_collision
 func newBitmapOrCollision(shift uint32, key1 objects.Object, val1 objects.Object, key2Hash int32, key2, val2 objects.Object) (node, error) {
@@ -193,17 +269,25 @@ func newBitmapOrCollision(shift uint32, key1 objects.Object, val1 objects.Object
 		return nil, err
 	}
 	if key1Hash == key2Hash {
-		return &collisionNode{
-			hash:  key1Hash,
-			array: []objects.Object{key1, val1, key2, val2},
-		}, nil
+		n := newCollision(key1Hash, 4)
+		n.array[0] = key1
+		objects.Incref(key1)
+		n.array[1] = val1
+		objects.Incref(val1)
+		n.array[2] = key2
+		objects.Incref(key2)
+		n.array[3] = val2
+		objects.Incref(val2)
+		return n, nil
 	}
 	n := newBitmap(0)
 	n2, _, err := n.assoc(shift, key1Hash, key1, val1)
+	objects.Decref(n)
 	if err != nil {
 		return nil, err
 	}
 	n3, _, err := n2.assoc(shift, key2Hash, key2, val2)
+	objects.Decref(n2)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +296,8 @@ func newBitmapOrCollision(shift uint32, key1 objects.Object, val1 objects.Object
 
 // assoc on a bitmap node. The four code paths (sub-node descent,
 // equal-key replace, collision promotion, and the new-key insert /
-// promote-to-array branch) line up with CPython 1:1.
+// promote-to-array branch) line up with CPython 1:1. The returned
+// node is an owned reference.
 //
 // CPython: Python/hamt.c:642 hamt_node_bitmap_assoc
 func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (node, bool, error) {
@@ -227,14 +312,16 @@ func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (n
 	n := bits.OnesCount32(b.bitmap)
 	if n >= bitmapPromoteThreshold {
 		jdx := hamtMask(hash, shift)
-		newArr := &arrayNode{count: n + 1}
+		newArr := newArray(n + 1)
 
 		empty := newBitmap(0)
 		child, _, err := empty.assoc(shift+5, hash, key, val)
 		if err != nil {
+			objects.Decref(empty)
+			objects.Decref(newArr)
 			return nil, false, err
 		}
-		newArr.children[jdx] = child
+		newArr.children[jdx] = child // borrow: adopt the owned ref
 
 		// Re-distribute existing entries.
 		j := 0
@@ -243,20 +330,27 @@ func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (n
 				continue
 			}
 			if b.array[j] == nil {
-				newArr.children[i] = b.array[j+1].(node)
+				cn := b.array[j+1].(node)
+				objects.Incref(cn)
+				newArr.children[i] = cn
 			} else {
 				rehash, err := hamtHash(b.array[j])
 				if err != nil {
+					objects.Decref(empty)
+					objects.Decref(newArr)
 					return nil, false, err
 				}
 				child, _, err := empty.assoc(shift+5, rehash, b.array[j], b.array[j+1])
 				if err != nil {
+					objects.Decref(empty)
+					objects.Decref(newArr)
 					return nil, false, err
 				}
-				newArr.children[i] = child
+				newArr.children[i] = child // borrow
 			}
 			j += 2
 		}
+		objects.Decref(empty)
 		return newArr, true, nil
 	}
 
@@ -266,11 +360,15 @@ func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (n
 	out := newBitmap(2 * (n + 1))
 	for i := uint32(0); i < keyIdx; i++ {
 		out.array[i] = b.array[i]
+		xIncref(b.array[i])
 	}
 	out.array[keyIdx] = key
+	objects.Incref(key)
 	out.array[valIdx] = val
+	objects.Incref(val)
 	for i := keyIdx; i < uint32(len(b.array)); i++ {
 		out.array[i+2] = b.array[i]
+		xIncref(b.array[i])
 	}
 	out.bitmap = b.bitmap | bit
 	return out, true, nil
@@ -294,10 +392,12 @@ func (b *bitmapNode) assocFilled(shift uint32, hash int32, idx uint32, key, val 
 			return nil, false, err
 		}
 		if subNode == oldSub {
+			objects.Decref(subNode)
+			objects.Incref(b)
 			return b, addedLeaf, nil
 		}
 		ret := b.clone()
-		ret.array[valIdx] = subNode.(objects.Object)
+		setref(ret.array, int(valIdx), subNode) // adopt owned subNode
 		return ret, addedLeaf, nil
 	}
 
@@ -307,10 +407,12 @@ func (b *bitmapNode) assocFilled(shift uint32, hash int32, idx uint32, key, val 
 	}
 	if eq {
 		if val == valOrNode {
+			objects.Incref(b)
 			return b, false, nil
 		}
 		ret := b.clone()
-		ret.array[valIdx] = val
+		objects.Incref(val)
+		setref(ret.array, int(valIdx), val)
 		return ret, false, nil
 	}
 
@@ -319,12 +421,13 @@ func (b *bitmapNode) assocFilled(shift uint32, hash int32, idx uint32, key, val 
 		return nil, false, err
 	}
 	ret := b.clone()
-	ret.array[keyIdx] = nil
-	ret.array[valIdx] = subNode.(objects.Object)
+	setref(ret.array, int(keyIdx), nil)     // drop the old key
+	setref(ret.array, int(valIdx), subNode) // adopt owned subNode
 	return ret, true, nil
 }
 
-// without on a bitmap node.
+// without on a bitmap node. On wNewNode the returned node is an owned
+// reference.
 //
 // CPython: Python/hamt.c:902 hamt_node_bitmap_without
 func (b *bitmapNode) without(shift uint32, hash int32, key objects.Object) (withoutResult, node, error) {
@@ -350,13 +453,16 @@ func (b *bitmapNode) without(shift uint32, hash int32, key objects.Object) (with
 				if sb.count() == 1 && sb.array[0] != nil {
 					// Inline a single-entry bitmap into the parent.
 					clone := b.clone()
-					clone.array[keyIdx] = sb.array[0]
-					clone.array[valIdx] = sb.array[1]
+					objects.Incref(sb.array[0])
+					setref(clone.array, int(keyIdx), sb.array[0])
+					objects.Incref(sb.array[1])
+					setref(clone.array, int(valIdx), sb.array[1])
+					objects.Decref(sub)
 					return wNewNode, clone, nil
 				}
 			}
 			clone := b.clone()
-			clone.array[valIdx] = sub.(objects.Object)
+			setref(clone.array, int(valIdx), sub) // adopt owned sub
 			return wNewNode, clone, nil
 		case wError, wNotFound:
 			return res, nil, err
@@ -378,7 +484,8 @@ func (b *bitmapNode) without(shift uint32, hash int32, key objects.Object) (with
 	return wNewNode, b.cloneWithout(bit), nil
 }
 
-// find on a bitmap node.
+// find on a bitmap node. The returned value is borrowed (CPython
+// returns a borrowed reference from hamt_node_bitmap_find).
 //
 // CPython: Python/hamt.c:1040 hamt_node_bitmap_find
 func (b *bitmapNode) find(shift uint32, hash int32, key objects.Object) (objects.Object, bool, error) {
@@ -404,7 +511,48 @@ func (b *bitmapNode) find(shift uint32, hash int32, key objects.Object) (objects
 	return nil, false, nil
 }
 
+// bitmapNodeDealloc releases the reference the node holds on every
+// slot. The empty singleton is immortal and never reaches here.
+//
+// CPython: Python/hamt.c:1102 hamt_node_bitmap_dealloc
+func bitmapNodeDealloc(o objects.Object) {
+	b := o.(*bitmapNode)
+	if b == emptyBitmap {
+		return
+	}
+	for i := len(b.array) - 1; i >= 0; i-- {
+		xDecref(b.array[i])
+		b.array[i] = nil
+	}
+}
+
+// bitmapNodeTraverse visits every slot for the cyclic collector.
+//
+// CPython: Python/hamt.c:1085 hamt_node_bitmap_traverse
+func bitmapNodeTraverse(o objects.Object, visit objects.Visitor) error {
+	b := o.(*bitmapNode)
+	for i := len(b.array) - 1; i >= 0; i-- {
+		if b.array[i] == nil {
+			continue
+		}
+		if err := visit(b.array[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 ///////////////////////////////// Collision node //////////////////////
+
+// newCollision allocates a collision node with `size` slots and the
+// given shared hash.
+//
+// CPython: Python/hamt.c:1192 hamt_node_collision_new
+func newCollision(hash int32, size int) *collisionNode {
+	c := &collisionNode{hash: hash, array: make([]objects.Object, size)}
+	c.Init(collisionNodeType)
+	return c
+}
 
 // findIndex linearly scans for `key`. Returns the index of the key or
 // -1 if absent.
@@ -423,7 +571,7 @@ func (c *collisionNode) findIndex(key objects.Object) (int, error) {
 	return -1, nil
 }
 
-// assoc on a collision node.
+// assoc on a collision node. The returned node is an owned reference.
 //
 // CPython: Python/hamt.c:1268 hamt_node_collision_assoc
 func (c *collisionNode) assoc(shift uint32, hash int32, key, val objects.Object) (node, bool, error) {
@@ -434,19 +582,29 @@ func (c *collisionNode) assoc(shift uint32, hash int32, key, val objects.Object)
 		}
 		if idx < 0 {
 			// Append the new pair.
-			out := &collisionNode{hash: c.hash, array: make([]objects.Object, len(c.array)+2)}
-			copy(out.array, c.array)
+			out := newCollision(c.hash, len(c.array)+2)
+			for i := range c.array {
+				out.array[i] = c.array[i]
+				objects.Incref(c.array[i])
+			}
 			out.array[len(c.array)] = key
+			objects.Incref(key)
 			out.array[len(c.array)+1] = val
+			objects.Incref(val)
 			return out, true, nil
 		}
 		// Replace value.
 		if c.array[idx+1] == val {
+			objects.Incref(c)
 			return c, false, nil
 		}
-		out := &collisionNode{hash: c.hash, array: make([]objects.Object, len(c.array))}
-		copy(out.array, c.array)
-		out.array[idx+1] = val
+		out := newCollision(c.hash, len(c.array))
+		for i := range c.array {
+			out.array[i] = c.array[i]
+			objects.Incref(c.array[i])
+		}
+		objects.Incref(val)
+		setref(out.array, idx+1, val)
 		return out, false, nil
 	}
 	// Different 32-bit hash: lift into a bitmap node containing the
@@ -454,10 +612,14 @@ func (c *collisionNode) assoc(shift uint32, hash int32, key, val objects.Object)
 	wrap := newBitmap(2)
 	wrap.bitmap = hamtBitpos(c.hash, shift)
 	wrap.array[1] = c
-	return wrap.assoc(shift, hash, key, val)
+	objects.Incref(c)
+	res, addedLeaf, err := wrap.assoc(shift, hash, key, val)
+	objects.Decref(wrap)
+	return res, addedLeaf, err
 }
 
-// without on a collision node.
+// without on a collision node. On wNewNode the returned node is an
+// owned reference.
 //
 // CPython: Python/hamt.c:1378 hamt_node_collision_without
 func (c *collisionNode) without(shift uint32, hash int32, key objects.Object) (withoutResult, node, error) {
@@ -480,25 +642,31 @@ func (c *collisionNode) without(shift uint32, hash int32, key objects.Object) (w
 		out := newBitmap(2)
 		if idx == 0 {
 			out.array[0] = c.array[2]
+			objects.Incref(c.array[2])
 			out.array[1] = c.array[3]
+			objects.Incref(c.array[3])
 		} else {
 			out.array[0] = c.array[0]
+			objects.Incref(c.array[0])
 			out.array[1] = c.array[1]
+			objects.Incref(c.array[1])
 		}
 		out.bitmap = hamtBitpos(hash, shift)
 		return wNewNode, out, nil
 	}
-	out := &collisionNode{hash: c.hash, array: make([]objects.Object, len(c.array)-2)}
+	out := newCollision(c.hash, len(c.array)-2)
 	for i := 0; i < idx; i++ {
 		out.array[i] = c.array[i]
+		objects.Incref(c.array[i])
 	}
 	for i := idx + 2; i < len(c.array); i++ {
 		out.array[i-2] = c.array[i]
+		objects.Incref(c.array[i])
 	}
 	return wNewNode, out, nil
 }
 
-// find on a collision node.
+// find on a collision node. The returned value is borrowed.
 //
 // CPython: Python/hamt.c:1466 hamt_node_collision_find
 func (c *collisionNode) find(shift uint32, hash int32, key objects.Object) (objects.Object, bool, error) {
@@ -512,19 +680,59 @@ func (c *collisionNode) find(shift uint32, hash int32, key objects.Object) (obje
 	return c.array[idx+1], true, nil
 }
 
+// collisionNodeDealloc releases every stored reference.
+//
+// CPython: Python/hamt.c:1503 hamt_node_collision_dealloc
+func collisionNodeDealloc(o objects.Object) {
+	c := o.(*collisionNode)
+	for i := len(c.array) - 1; i >= 0; i-- {
+		xDecref(c.array[i])
+		c.array[i] = nil
+	}
+}
+
+// collisionNodeTraverse visits every stored value.
+//
+// CPython: Python/hamt.c:1489 hamt_node_collision_traverse
+func collisionNodeTraverse(o objects.Object, visit objects.Visitor) error {
+	c := o.(*collisionNode)
+	for i := len(c.array) - 1; i >= 0; i-- {
+		if c.array[i] == nil {
+			continue
+		}
+		if err := visit(c.array[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 ///////////////////////////////// Array node //////////////////////////
 
-// clone deep-copies the children slice. Cheap because every entry is
-// itself a pointer.
+// newArray allocates an array node with the given non-nil child count.
+//
+// CPython: Python/hamt.c:1557 hamt_node_array_new
+func newArray(count int) *arrayNode {
+	a := &arrayNode{count: count}
+	a.Init(arrayNodeType)
+	return a
+}
+
+// clone copies the children, taking a reference on each non-nil child.
 //
 // CPython: Python/hamt.c:1581 hamt_node_array_clone
 func (a *arrayNode) clone() *arrayNode {
-	out := &arrayNode{count: a.count}
-	out.children = a.children
+	out := newArray(a.count)
+	for i := 0; i < arrayNodeSize; i++ {
+		out.children[i] = a.children[i]
+		if a.children[i] != nil {
+			objects.Incref(a.children[i])
+		}
+	}
 	return out
 }
 
-// assoc on an array node.
+// assoc on an array node. The returned node is an owned reference.
 //
 // CPython: Python/hamt.c:1604 hamt_node_array_assoc
 func (a *arrayNode) assoc(shift uint32, hash int32, key, val objects.Object) (node, bool, error) {
@@ -532,28 +740,41 @@ func (a *arrayNode) assoc(shift uint32, hash int32, key, val objects.Object) (no
 	child := a.children[idx]
 	if child == nil {
 		empty := newBitmap(0)
-		newChild, _, err := empty.assoc(shift+5, hash, key, val)
+		newChild, addedLeaf, err := empty.assoc(shift+5, hash, key, val)
+		objects.Decref(empty)
 		if err != nil {
 			return nil, false, err
 		}
-		out := &arrayNode{count: a.count + 1}
-		out.children = a.children
-		out.children[idx] = newChild
-		return out, true, nil
+		out := newArray(a.count + 1)
+		for i := 0; i < arrayNodeSize; i++ {
+			out.children[i] = a.children[i]
+			if a.children[i] != nil {
+				objects.Incref(a.children[i])
+			}
+		}
+		out.children[idx] = newChild // borrow: slot was nil, adopt owned ref
+		return out, addedLeaf, nil
 	}
 	newChild, addedLeaf, err := child.assoc(shift+5, hash, key, val)
 	if err != nil {
 		return nil, false, err
 	}
 	if newChild == child {
+		objects.Decref(newChild)
+		objects.Incref(a)
 		return a, addedLeaf, nil
 	}
 	out := a.clone()
-	out.children[idx] = newChild
+	old := out.children[idx]
+	out.children[idx] = newChild // adopt owned ref
+	if old != nil {
+		objects.Decref(old)
+	}
 	return out, addedLeaf, nil
 }
 
-// without on an array node.
+// without on an array node. On wNewNode the returned node is an owned
+// reference.
 //
 // CPython: Python/hamt.c:1687 hamt_node_array_without
 func (a *arrayNode) without(shift uint32, hash int32, key objects.Object) (withoutResult, node, error) {
@@ -568,7 +789,11 @@ func (a *arrayNode) without(shift uint32, hash int32, key objects.Object) (witho
 		return res, nil, err
 	case wNewNode:
 		clone := a.clone()
-		clone.children[idx] = sub
+		old := clone.children[idx]
+		clone.children[idx] = sub // adopt owned sub
+		if old != nil {
+			objects.Decref(old)
+		}
 		return wNewNode, clone, nil
 	case wEmpty:
 		newCount := a.count - 1
@@ -578,7 +803,10 @@ func (a *arrayNode) without(shift uint32, hash int32, key objects.Object) (witho
 		if newCount >= bitmapPromoteThreshold {
 			out := a.clone()
 			out.count = newCount
-			out.children[idx] = nil
+			if out.children[idx] != nil {
+				objects.Decref(out.children[idx])
+				out.children[idx] = nil
+			}
 			return wNewNode, out, nil
 		}
 		// Demote to a bitmap node.
@@ -597,10 +825,13 @@ func (a *arrayNode) without(shift uint32, hash int32, key objects.Object) (witho
 			bitmap |= 1 << i
 			if bn, ok := n.(*bitmapNode); ok && bn.count() == 1 && bn.array[0] != nil {
 				out.array[newI] = bn.array[0]
+				objects.Incref(bn.array[0])
 				out.array[newI+1] = bn.array[1]
+				objects.Incref(bn.array[1])
 			} else {
 				out.array[newI] = nil
-				out.array[newI+1] = n.(objects.Object)
+				out.array[newI+1] = n
+				objects.Incref(n)
 			}
 			newI += 2
 		}
@@ -611,7 +842,7 @@ func (a *arrayNode) without(shift uint32, hash int32, key objects.Object) (witho
 	}
 }
 
-// find on an array node.
+// find on an array node. The returned value is borrowed.
 //
 // CPython: Python/hamt.c:1841 hamt_node_array_find
 func (a *arrayNode) find(shift uint32, hash int32, key objects.Object) (objects.Object, bool, error) {
@@ -623,14 +854,31 @@ func (a *arrayNode) find(shift uint32, hash int32, key objects.Object) (objects.
 	return child.find(shift+5, hash, key)
 }
 
-// arrayNode and collisionNode satisfy objects.Object so bitmap slots
-// can carry them in the value position. The Hdr/Type slots are not
-// needed by the runtime (HAMT is private to the runtime), but we
-// implement them so the value can flow through any code that expects
-// an Object.
-func (a *arrayNode) Type() *objects.Type      { return nil }
-func (a *arrayNode) Hdr() *objects.Header     { return nil }
-func (b *bitmapNode) Type() *objects.Type     { return nil }
-func (b *bitmapNode) Hdr() *objects.Header    { return nil }
-func (c *collisionNode) Type() *objects.Type  { return nil }
-func (c *collisionNode) Hdr() *objects.Header { return nil }
+// arrayNodeDealloc releases the reference held on every non-nil child.
+//
+// CPython: Python/hamt.c:1872 hamt_node_array_dealloc
+func arrayNodeDealloc(o objects.Object) {
+	a := o.(*arrayNode)
+	for i := 0; i < arrayNodeSize; i++ {
+		if a.children[i] != nil {
+			objects.Decref(a.children[i])
+			a.children[i] = nil
+		}
+	}
+}
+
+// arrayNodeTraverse visits every non-nil child.
+//
+// CPython: Python/hamt.c:1857 hamt_node_array_traverse
+func arrayNodeTraverse(o objects.Object, visit objects.Visitor) error {
+	a := o.(*arrayNode)
+	for i := 0; i < arrayNodeSize; i++ {
+		if a.children[i] == nil {
+			continue
+		}
+		if err := visit(a.children[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}

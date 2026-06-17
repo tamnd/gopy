@@ -15,6 +15,33 @@ import "github.com/tamnd/gopy/objects"
 // CPython: Python/hamt.c:2814 _PyHamt_Type
 var HamtType = objects.NewType("hamt", []*objects.Type{objects.ObjectType()})
 
+func init() {
+	HamtType.Dealloc = hamtDealloc
+	HamtType.TpTraverse = hamtTraverse
+}
+
+// hamtDealloc releases the reference the Hamt holds on its root node.
+//
+// CPython: Python/hamt.c:2420 hamt_tp_clear / hamt_dealloc
+func hamtDealloc(o objects.Object) {
+	h := o.(*Hamt)
+	if h.root != nil {
+		objects.Decref(h.root)
+		h.root = nil
+	}
+}
+
+// hamtTraverse visits the root node for the cyclic collector.
+//
+// CPython: Python/hamt.c:2410 hamt_tp_traverse
+func hamtTraverse(o objects.Object, visit objects.Visitor) error {
+	h := o.(*Hamt)
+	if h.root != nil {
+		return visit(h.root)
+	}
+	return nil
+}
+
 // HamtKeysType, HamtValuesType, HamtItemsType wrap the three iterator
 // shapes CPython exposes through _PyHamt_NewIterKeys etc. They are
 // runtime-private so we register only the bare type name.
