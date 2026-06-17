@@ -73,11 +73,19 @@ func init() {
 	// member descriptors with CPython's docstrings.
 	//
 	// CPython: Objects/classobject.c:114 method_memberlist
+	// method_memberlist exposes __func__/__self__ as T_OBJECT members, and
+	// member_get does Py_XINCREF before handing the value back: the result
+	// is a new reference the caller owns. Returning the bare field would
+	// leak a borrow the VM later decrefs, driving the bound instance below
+	// its true refcount (so a method held only via a container, e.g. an
+	// ExitStack callback, gets torn down while still reachable).
+	//
+	// CPython: Objects/descrobject.c member_get (Py_XINCREF)
 	SetTypeDescr(BoundMethodType, "__func__", NewGetSetDescr("__func__",
-		func(o Object) (Object, error) { return o.(*BoundMethod).imFunc, nil },
+		func(o Object) (Object, error) { v := o.(*BoundMethod).imFunc; Incref(v); return v, nil },
 		nil))
 	SetTypeDescr(BoundMethodType, "__self__", NewGetSetDescr("__self__",
-		func(o Object) (Object, error) { return o.(*BoundMethod).imSelf, nil },
+		func(o Object) (Object, error) { v := o.(*BoundMethod).imSelf; Incref(v); return v, nil },
 		nil))
 	// method_getset: __doc__ proxies to the wrapped function so a
 	// bound method shows its target's docstring.
