@@ -138,6 +138,23 @@ CPython 3.14.5 (counts and `-v` lists).
   keeps the full C-faithful `PyImport_ImportModuleLevelObject` body (`_gcd_import` + the dotted-head
   `KeyError` for gh-134100), which a shared function could not satisfy without breaking one side or the
   other.
+- [x] P5: `test_zipimport.testZip64LargeFile` runs under the bare-file harness (`use_resources is None`
+  enables `largefile`). The reconstruction stitches the `>4 GiB` sparse zip back from
+  `zipimport_data/sparse-zip64-c0-*.part`; CPython ships three parts (offsets `0`, `0x1_0000_0000`,
+  `0x2_0000_0000`) and `test/cpython/zipimport_data/` carries all three, so the central directory near
+  the 8 GiB mark is present and the file parses. `testAFakeZlib` self-skips with `'zlib is a builtin
+  module'`: gopy statically links zlib, which is exactly the static-zlib build configuration CPython's
+  own comment says to skip on, so the 4-vs-2 skip delta against a dynamic-zlib CPython is faithful, not
+  a divergence.
+- [x] P5: cyclic collector no longer reclaims `_frozen_importlib._blocking_on`
+  (`'_WeakValueDictionary' object has no attribute 'data'`) under `testZip64`'s heap churn. `sys.modules`
+  is held through a Go pointer the refcount pass cannot see, so `pin_roots` floated only the direct
+  module entries and trusted `move_unreachable` to resurrect the rest. gopy containers do not incref what
+  they store (instance `__dict__` among them), so `subtract_refs` over-decrements an interior node on the
+  `module -> module __dict__ -> _WeakValueDictionary -> instance __dict__` chain and a partition order that
+  fails to resurrect every hop drops a still-live object. `markReachableClosure` now walks the whole
+  strongly-reachable closure from the static roots and floats each candidate to `refs >= 1`, recursing
+  only through candidates so a young-generation collection stays as cheap as before.
 - Note: `test_namespace_pkgs.SeparatedNamespacePackagesCreatedWhileRunning.test_invalidate_caches` and
   `LoaderTests.test_path_indexable` fail when the file is run standalone (`gopy test_namespace_pkgs.py`),
   but CPython 3.14 fails identically standalone — `PathFinder.invalidate_caches` does
