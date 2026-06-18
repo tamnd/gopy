@@ -21,6 +21,36 @@ var (
 
 func init() {
 	objects.SysModulesGetter = func() *objects.Dict { return sysModules }
+	// Pin sys.modules as a cycle-collector root. CPython keeps it
+	// reachable through interp->modules; gopy holds it through this Go
+	// pointer, invisible to the refcount-based collector, so without
+	// this the module graph collapses and a singleton reachable only
+	// through its module __dict__ (for example
+	// _frozen_importlib._blocking_on, a self-cyclic _WeakValueDictionary)
+	// is reclaimed while still live.
+	//
+	// The sys.modules dict itself is never tracked (it is allocated
+	// during early init, before container tracking is live), so it is
+	// already an effective root the collector never reclaims. But that
+	// also means move_unreachable never traverses it, so the candidates
+	// it references are not re-floated. We walk its entries here and pin
+	// each direct target; move_unreachable's visit_reachable then pulls
+	// in the rest of the strongly-reachable closure (module __dict__,
+	// module globals, and so on).
+	//
+	// CPython: Python/gc.c:1430 gc_collect_main (interp->modules roots)
+	objects.GCStaticRootsHook = func(pin func(objects.Object)) {
+		sysModulesMu.RLock()
+		defer sysModulesMu.RUnlock()
+		tr := sysModules.Type().TpTraverse
+		if tr == nil {
+			return
+		}
+		_ = tr(sysModules, func(o objects.Object) error {
+			pin(o)
+			return nil
+		})
+	}
 }
 
 // SysModules returns the dict backing sys.modules. The same pointer is

@@ -169,44 +169,63 @@ func importViaDelegate(name string, globals objects.Object, fromlist objects.Obj
 	if rerr != nil {
 		return nil, true, rerr
 	}
-	module, accepted, ferr := acceptInitializingModule(frozen, absName)
-	if ferr != nil {
-		return nil, true, ferr
-	}
-	if !accepted {
-		// Cold load: _frozen_importlib.__import__ runs _find_and_load and the
-		// fromlist / dotted-head selection itself, so its return is already
-		// the module CPython's import_name would push. This is the
-		// long-standing refcount-proven route (#223).
-		mod, ok2, err := delegateImport(name, globals, objects.None(), fromlist, level)
-		if err != nil {
-			return nil, true, err
-		}
-		if !ok2 {
-			return nil, false, nil
-		}
-		return mod, true, nil
+
+	// If abs_name is already in sys.modules and still initializing (another
+	// thread is mid-import on it), wait for it via _bootstrap._lock_unlock_module.
+	// _lock_unlock_module CATCHES the _DeadlockError a concurrent circular
+	// import raises, whereas re-entering _find_and_load's _ModuleLockManager
+	// would let it propagate and kill the thread.
+	//
+	// CPython: Python/import.c:3842 import_ensure_initialized (cache fast path)
+	raw, stillInit, werr := waitForInitializingModule(frozen, absName)
+	if werr != nil {
+		return nil, true, werr
 	}
 
-	// The fast path handed back the (possibly partially initialized) module
-	// named by abs_name. The fromlist / dotted-head selection still has to run
-	// against it, exactly as the C body does after import_find_and_load: a
-	// bare `from . import sub` during a package's own init relies on
-	// _handle_fromlist to force-import the submodule.
+	// When the module is STILL initializing after the wait, another thread
+	// holds the per-module lock and is itself blocked: re-entering
+	// _find_and_load via the delegate would re-acquire that lock and deadlock.
+	// Return the (partially initialized) cached module directly, exactly as
+	// CPython's import_ensure_initialized fast path does, then run the fromlist
+	// / dotted-head selection against it. This is the only path that must not
+	// delegate; it is reached only under genuine concurrent circular imports.
 	//
-	// CPython: Python/import.c:3881 has_from selection
-	hasFrom := false
-	if fromlist != nil && !objects.IsNone(fromlist) {
-		t, err := objects.IsTruthy(fromlist)
-		if err != nil {
-			return nil, true, err
+	// CPython: Python/import.c:3851 PyImport_ImportModuleLevelObject (fast path)
+	if raw != nil && stillInit {
+		// import_get_module returns a NEW reference (PyMapping_GetOptionalItem);
+		// imp.GetModuleRaw borrows from sys.modules, so incref before the
+		// selection consumes it.
+		//
+		// CPython: Python/import.c:238 import_get_module
+		objects.Incref(raw)
+		hasFrom := false
+		if fromlist != nil && !objects.IsNone(fromlist) {
+			t, terr := objects.IsTruthy(fromlist)
+			if terr != nil {
+				return nil, true, terr
+			}
+			hasFrom = t
 		}
-		hasFrom = t
+		if !hasFrom {
+			return headSelection(name, packageStr, level, raw)
+		}
+		return fromlistSelection(frozen, raw, fromlist)
 	}
-	if !hasFrom {
-		return headSelection(name, packageStr, level, module)
+
+	// Otherwise (not cached, or the wait completed and the module is fully
+	// initialized) delegate. _frozen_importlib.__import__ runs _find_and_load
+	// and the fromlist / dotted-head selection itself, so its return is already
+	// the module CPython's import_name would push. This is the long-standing
+	// refcount-proven route (#223); IMPORT_NAME's DECREF_INPUTS was proven
+	// against the reference it owns.
+	mod, ok2, err := delegateImport(name, globals, objects.None(), fromlist, level)
+	if err != nil {
+		return nil, true, err
 	}
-	return fromlistSelection(frozen, module, fromlist)
+	if !ok2 {
+		return nil, false, nil
+	}
+	return mod, true, nil
 }
 
 // acceptInitializingModule ports the still-initializing arm of
@@ -228,6 +247,41 @@ func importViaDelegate(name string, globals objects.Object, fromlist objects.Obj
 // CPython: Python/import.c:244 import_ensure_initialized
 // CPython: Python/import.c:3842 PyImport_ImportModuleLevelObject (cache check)
 func acceptInitializingModule(frozen objects.Object, absName string) (objects.Object, bool, error) {
+	raw, _, werr := waitForInitializingModule(frozen, absName)
+	if werr != nil {
+		return nil, false, werr
+	}
+	if raw == nil {
+		return nil, false, nil
+	}
+	// import_get_module returns a NEW reference (PyMapping_GetOptionalItem);
+	// imp.GetModuleRaw borrows from sys.modules (PyDict_GetItem semantics), so
+	// incref before returning or the C-faithful headSelection / fromlistSelection
+	// that follows in the builtin __import__ path under-counts the module and a
+	// later GC tp_clears its globals out from under live code.
+	//
+	// CPython: Python/import.c:238 import_get_module (Py_INCREF via GetOptionalItem)
+	objects.Incref(raw)
+	return raw, true, nil
+}
+
+// waitForInitializingModule ports the still-initializing arm of
+// import_ensure_initialized without taking ownership of the result. When
+// sys.modules already holds a module for absName whose __spec__._initializing
+// is True (another thread is mid-import on it), it waits via
+// _bootstrap._lock_unlock_module (which CATCHES the _DeadlockError a concurrent
+// circular import raises) and returns the borrowed cached module. The second
+// return value reports whether the module is STILL initializing after the wait:
+// True means the holding thread is itself blocked (a genuine circular-import
+// deadlock the lock_unlock swallowed), so the caller must use the module
+// directly instead of re-entering _find_and_load. Every other case (absent,
+// None, no usable __spec__, or not initializing) returns (nil, false, nil).
+//
+// The returned reference is BORROWED from sys.modules. The caller increfs it
+// before use.
+//
+// CPython: Python/import.c:244 import_ensure_initialized
+func waitForInitializingModule(frozen objects.Object, absName string) (objects.Object, bool, error) {
 	raw, present := imp.GetModuleRaw(absName)
 	if !present || objects.IsNone(raw) {
 		return nil, false, nil
@@ -237,18 +291,9 @@ func acceptInitializingModule(frozen objects.Object, absName string) (objects.Ob
 	// is true (set before the module is stuffed in sys.modules).
 	//
 	// CPython: Python/import.c:249 import_ensure_initialized (_initializing check)
-	spec, serr := objects.GetAttr(raw, objects.NewStr("__spec__"))
+	initializing, serr := specInitializing(raw)
 	if serr != nil {
-		// A cached module without a usable __spec__ cannot be mid-import;
-		// treat it as not-initializing and fall back to the normal import.
-		return nil, false, nil //nolint:nilerr // missing __spec__ is a fall-back, not an error
-	}
-	if spec == nil || objects.IsNone(spec) {
-		return nil, false, nil
-	}
-	initializing, ierr := imp.SpecIsInitializing(spec)
-	if ierr != nil {
-		return nil, false, ierr
+		return nil, false, serr
 	}
 	if !initializing {
 		return nil, false, nil
@@ -270,21 +315,36 @@ func acceptInitializingModule(frozen objects.Object, absName string) (objects.Ob
 
 	// Verify the module is still in sys.modules. Another thread may have
 	// removed it (import failure) between the lookup and the initializing
-	// check; if so, fall back to a full import to preserve normal semantics.
+	// check; if so, signal nothing to wait on so the caller does a full import.
 	//
 	// CPython: Python/import.c:3851 mod_check != mod
 	check, stillPresent := imp.GetModuleRaw(absName)
 	if !stillPresent || check != raw {
 		return nil, false, nil
 	}
-	// import_get_module returns a NEW reference (PyMapping_GetOptionalItem);
-	// imp.GetModuleRaw borrows from sys.modules (PyDict_GetItem semantics), so
-	// incref before returning or the IMPORT_NAME DECREF_INPUTS under-counts the
-	// module and a later GC tp_clears its globals out from under live code.
-	//
-	// CPython: Python/import.c:238 import_get_module (Py_INCREF via GetOptionalItem)
-	objects.Incref(raw)
-	return raw, true, nil
+	// Re-read _initializing after the wait. If it is still True the holding
+	// thread is blocked (circular-import deadlock the lock_unlock swallowed),
+	// and the caller must not re-enter _find_and_load.
+	stillInit, ierr := specInitializing(raw)
+	if ierr != nil {
+		return nil, false, ierr
+	}
+	return raw, stillInit, nil
+}
+
+// specInitializing reports whether raw's __spec__._initializing is True. A
+// missing or None __spec__ means the module cannot be mid-import.
+//
+// CPython: Python/import.c:249 import_ensure_initialized (_initializing check)
+func specInitializing(raw objects.Object) (bool, error) {
+	spec, serr := objects.GetAttr(raw, objects.NewStr("__spec__"))
+	if serr != nil {
+		return false, nil //nolint:nilerr // missing __spec__ is a fall-back, not an error
+	}
+	if spec == nil || objects.IsNone(spec) {
+		return false, nil
+	}
+	return imp.SpecIsInitializing(spec)
 }
 
 // headSelection mirrors the !has_from branch of

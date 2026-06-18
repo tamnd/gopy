@@ -1181,6 +1181,16 @@ func builtinImporterLoader() objects.Object {
 	return objects.None()
 }
 
+// BuiltinImporterLoader returns the BuiltinImporter class CPython uses as
+// the initial __loader__ for the __main__ module. add_main_module stamps it
+// when __main__'s dict has no __loader__ yet, so test_importlib's
+// test_everyone_has___loader__ finds the attribute on __main__.
+//
+// CPython: Python/pylifecycle.c add_main_module (BuiltinImporter loader)
+func BuiltinImporterLoader() objects.Object {
+	return builtinImporterLoader()
+}
+
 // buildFileSpec builds a file-backed spec via spec_from_file_location.
 func buildFileSpec(util *objects.Module, p pendingSpec) objects.Object {
 	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))

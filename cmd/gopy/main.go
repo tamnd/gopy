@@ -927,6 +927,16 @@ func newMainGlobals(builtinsDict *objects.Dict, name string) *objects.Dict {
 		builtinsBinding = bm
 	}
 	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsBinding)
+	// add_main_module gives __main__ a __loader__ of BuiltinImporter when the
+	// dict has none yet. imp.is_builtin("__main__") is False, but CPython picks
+	// BuiltinImporter as the most appropriate initial loader so that every
+	// module in sys.modules answers hasattr(m, '__loader__')
+	// (test_importlib test_everyone_has___loader__).
+	//
+	// CPython: Python/pylifecycle.c add_main_module (sets __loader__)
+	if has, _ := mainDict.Contains(objects.NewStr("__loader__")); !has {
+		_ = mainDict.SetItem(objects.NewStr("__loader__"), imp.BuiltinImporterLoader())
+	}
 	// CPython always binds __main__.__spec__: None for `-c`/script runs,
 	// a real ModuleSpec under `-m`. runFile overwrites this with a
 	// file-location spec for vendored "test.<name>" runs.
