@@ -6,6 +6,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"os"
@@ -182,6 +183,18 @@ opts:
 	if st.OptInd < len(argv) {
 		scriptPath := argv[st.OptInd]
 		sys.SetArgv(append([]string{scriptPath}, argv[st.OptInd+1:]...))
+		// If the positional argument is a package (a directory or a ZIP
+		// archive) it is an import-path entry, not a source file: prepend it
+		// to sys.path and run its __main__ submodule. CPython detects this in
+		// pymain_get_importer (PyImport_GetImporter runs the path hooks) and
+		// runs pymain_run_module(L"__main__", 0); set_argv0=0 leaves argv[0]
+		// as the archive path. A plain .py file falls through to pymain_run_file.
+		//
+		// CPython: Modules/main.c:127 pymain_get_importer
+		// CPython: Modules/main.c:691 pymain_run_python (main_importer_path branch)
+		if isImporterPath(scriptPath) {
+			return runImporterMain(scriptPath, stdout, stderr)
+		}
 		return runFile(scriptPath, stdout, stderr)
 	}
 	sys.SetArgv([]string{""})
@@ -525,6 +538,30 @@ func isFile(p string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// isImporterPath reports whether p is an import-path entry rather than a
+// source file: a directory (which the FileFinder path hook always claims)
+// or a ZIP archive (which the zipimporter path hook claims). CPython makes
+// the same determination by running PyImport_GetImporter over sys.path_hooks
+// in pymain_get_importer; a regular .py file yields None and is run as a
+// plain script instead.
+//
+// CPython: Modules/main.c:127 pymain_get_importer
+// CPython: Lib/zipimport.py zipimporter.__init__ (ZIP end-of-central-directory probe)
+func isImporterPath(p string) bool {
+	if isDir(p) {
+		return true
+	}
+	if !isFile(p) {
+		return false
+	}
+	zr, err := zip.OpenReader(p)
+	if err != nil {
+		return false
+	}
+	_ = zr.Close()
+	return true
+}
+
 // gopyCompile is the SourceCompiler injected into PathFinder. It is
 // the parser + compiler chain that pythonrun.RunString runs.
 //
@@ -651,6 +688,57 @@ func runModule(modName string, modArgs []string, stdout, stderr *os.File) int {
 	// Equivalent of CPython's pymain_run_module which calls
 	// runpy._run_module_as_main(modName) on the Python side.
 	src := fmt.Sprintf("import runpy\nrunpy._run_module_as_main(%q)\n", modName)
+	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
+	gc.RunShutdownFinalizers()
+	pythonrun.FlushStdFiles()
+	return rc
+}
+
+// runImporterMain is the gopy <dir-or-zip> entry. When the positional
+// argument is an import-path entry (directory or ZIP archive), CPython
+// prepends it to sys.path and runs its __main__ submodule via
+// pymain_run_module(L"__main__", 0). The set_argv0=0 argument tells
+// runpy._run_module_as_main NOT to rewrite argv[0]: it stays the archive
+// path, which the dispatch already placed there. The module loads through
+// the path hook that claims the entry (FileFinder for a directory,
+// zipimporter for a ZIP), so its code object carries the loader's
+// co_filename (e.g. "app.zip/__main__.py") and tracebacks resolve source
+// through the loader's get_source rather than reading the raw archive.
+//
+// CPython: Modules/main.c:691 pymain_run_python (main_importer_path branch)
+// CPython: Modules/main.c:326 pymain_run_module (set_argv0=0)
+func runImporterMain(importerPath string, stdout, stderr *os.File) int {
+	g, err := bootstrapBuiltins(stdout, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, "builtins:", err)
+		return 1
+	}
+	// sys.path[0] is the import-path entry itself (the dir/zip), not its
+	// parent directory. CPython sets path0 = main_importer_path directly,
+	// even under -P / -I (the safe_path branch is skipped once an importer
+	// claims the entry).
+	//
+	// CPython: Modules/main.c:647 path0 = Py_NewRef(main_importer_path)
+	installPathFinder("")
+	abs, absErr := filepath.Abs(importerPath)
+	if absErr != nil {
+		abs = importerPath
+	}
+	sysPath0Entry = abs
+	sysPath0Present = true
+	imp.SetConfigSysPath0(abs, true)
+	mainGlobals := newMainGlobals(g, "__main__")
+	ts := state.NewThread()
+	if rc := bootstrapEncodings(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
+	if rc := bootstrapSite(ts, mainGlobals, stderr); rc != 0 {
+		return rc
+	}
+	prependSysPath0()
+	// pymain_run_module(L"__main__", 0): run __main__ from the import-path
+	// entry without altering argv[0].
+	src := "import runpy\nrunpy._run_module_as_main(\"__main__\", False)\n"
 	rc := pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 	gc.RunShutdownFinalizers()
 	pythonrun.FlushStdFiles()
@@ -821,7 +909,21 @@ func mainModuleName(path string) string {
 		return "__main__"
 	}
 	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
-		return "test." + strings.TrimSuffix(base, ".py")
+		stem := strings.TrimSuffix(base, ".py")
+		// A module that lives inside a vendored test package (the parent
+		// directory is a test_xxx/ with an __init__.py) runs under the
+		// package-qualified name "test.test_xxx.test_yyy", not the bare
+		// "test.test_yyy". Otherwise it would shadow the package object in
+		// sys.modules, and a sibling import like
+		// `from test.test_doctest.decorator_mod import ...` would find the
+		// module instead of the package and raise "not a package".
+		//
+		// CPython: Lib/test/libregrtest/runtest.py (imports test.<pkg>.<mod>)
+		parent := filepath.Base(filepath.Dir(path))
+		if strings.HasPrefix(parent, "test_") && isFile(filepath.Join(filepath.Dir(path), "__init__.py")) {
+			return "test." + parent + "." + stem
+		}
+		return "test." + stem
 	}
 	return "__main__"
 }
