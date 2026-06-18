@@ -50,8 +50,8 @@ func (s *InterpState) SetLocalEvents(code *objects.Code, tool Tool, events Event
 	if events>>LocalEvents != 0 {
 		return fmt.Errorf("event set %#x has bits outside the %d local events", events, LocalEvents)
 	}
-	if !s.IsToolInUse(tool) {
-		return fmt.Errorf("tool %d is not in use", tool)
+	if err := s.checkTool(tool); err != nil {
+		return err
 	}
 	data := EnsureCoMonitoringData(code)
 	data.ToolVersions[tool] = s.ToolVersions[tool]
@@ -72,8 +72,8 @@ func (s *InterpState) GetLocalEvents(code *objects.Code, tool Tool) (EventSet, e
 	if err := CheckToolID(tool); err != nil {
 		return 0, err
 	}
-	if !s.IsToolInUse(tool) {
-		return 0, fmt.Errorf("tool %d is not in use", tool)
+	if err := s.checkTool(tool); err != nil {
+		return 0, err
 	}
 	data := CoMonitoring(code)
 	if data == nil {
