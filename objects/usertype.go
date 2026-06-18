@@ -696,6 +696,35 @@ func basesAllowInlineValues(bases []*Type, noSlotsDeclared bool) bool {
 	return true
 }
 
+// dropTransientDict releases the namespace copy type_new builds. When
+// the release drops it to refcount zero it stands in for CPython's
+// dict_dealloc: clear every key/value the copy owns (which releases the
+// class methods it captured, whose __globals__ would otherwise pin the
+// defining module dict) and untrack it from the cycle collector.
+//
+// gopy's Decref deliberately leaves a refcount-zero container tracked,
+// without clearing it, so the next cycle pass can fire its weakref
+// callbacks. That is wrong for this private transient: it carries no
+// weakrefs, and leaving its captured method references live keeps the
+// {namespace, class, instance} cycle rooted, so a Python __del__ never
+// runs (test_module test_clear_dict_in_ref_cycle). Worse, when the copy
+// later does get walked it counts as a reclaimed cycle member, which
+// CPython never sees because its copy is freed the instant type_new
+// finishes. Releasing it synchronously here matches CPython on both
+// counts.
+//
+// CPython: Objects/dictobject.c dict_dealloc (PyObject_GC_UnTrack + key/value Py_DECREF)
+func dropTransientDict(d *Dict) {
+	Decref(d)
+	if atomic.LoadInt64(&d.Hdr().refcnt) != 0 {
+		return
+	}
+	if h := GCUntrackHook; h != nil {
+		h(d)
+	}
+	d.clearContents()
+}
+
 // processClassNamespace patches __classcell__, installs __slots__
 // descriptors, and copies the rest of ns onto t.
 func processClassNamespace(t *Type, ns *Dict) error {
@@ -718,7 +747,18 @@ func processClassNamespace(t *Type, ns *Dict) error {
 	// whose __globals__ is the defining module dict, which roots the whole
 	// {namespace, class, instance} cycle and stops gc.collect() from ever
 	// finalizing the instances (test_module test_clear_dict_in_ref_cycle).
-	defer Decref(ns)
+	//
+	// type_new's PyDict_Copy is freed synchronously the instant its
+	// refcount reaches zero, which removes it from the GC list before any
+	// collection can see it. gopy keeps refcount-zero containers tracked so
+	// the cycle collector can still fire their weakref callbacks, but this
+	// copy is a private transient that never escapes and carries no
+	// weakrefs, so a later gc.collect() would otherwise count it as a
+	// reclaimed cycle member. Untrack it on disposal to match CPython, where
+	// the copy is gone before the collector runs.
+	//
+	// CPython: Objects/dictobject.c dict_dealloc (PyObject_GC_UnTrack)
+	defer dropTransientDict(ns)
 	// __classcell__ is the cell __build_class__ left in the namespace so
 	// we can patch it with the new class. It is not a real attribute,
 	// so install it before walking the rest of the namespace and skip
