@@ -35,7 +35,27 @@ func init() {
 var parseErrorType *objects.Type
 
 func init() {
-	parseErrorType = objects.NewType("ParseError", []*objects.Type{errors.PyExc_SyntaxError})
+	// PyErr_NewException builds the class via type(name, (base,), dict),
+	// so the new type runs through inherit_slots and picks up the base's
+	// tp_new / tp_init / tp_str. NewExcType wires the standard exception
+	// slots; copying SyntaxError's TpNew on top mirrors inherit_slots
+	// adopting the base's tp_new (a bare objects.NewType leaves TpNew nil,
+	// and type_call then refuses construction with "cannot create
+	// 'ParseError' instances directly").
+	//
+	// CPython: Modules/_elementtree.c:4505 PyErr_NewException
+	// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
+	parseErrorType = errors.NewExcType("ParseError", []*objects.Type{errors.PyExc_SyntaxError})
+	parseErrorType.TpNew = errors.PyExc_SyntaxError.TpNew
+	parseErrorType.Str = errors.PyExc_SyntaxError.Str
+	// PyErr_NewException splits the dotted name "xml.etree.ElementTree.ParseError"
+	// at the last dot: the prefix becomes __module__ and the leaf becomes the
+	// class name. traceback.format_exception_only qualifies the printed type as
+	// __module__ + '.' + __qualname__, so the module must be set here for the
+	// exception to render as "xml.etree.ElementTree.ParseError".
+	//
+	// CPython: Python/errors.c:911 PyErr_NewExceptionWithDoc (dotted-name split)
+	parseErrorType.Module = "xml.etree.ElementTree"
 }
 
 // buildModule constructs the _elementtree module dict.
