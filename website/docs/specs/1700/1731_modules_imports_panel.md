@@ -135,5 +135,18 @@ CPython 3.14.5 (counts and `-v` lists).
   the canonical package run (`python -m test test_importlib`) an earlier submodule imports
   `importlib.metadata` while the path is unrestricted, so it stays cached and both tests pass. This is a
   run-mode artifact, not a gopy defect; gopy matches CPython behavior in both modes.
+- Note: `type_new` copies the class body into a transient dict, drains it onto the type, then drops the
+  copy. That copy captures every class method, whose `__globals__` pins the defining module dict, so the
+  drop has to release synchronously the way `dict_dealloc` does. `dropTransientDict` decrefs the copy and,
+  if that takes it to zero, clears its contents and untracks it on the spot. A plain `Decref` left it at
+  refcount zero but still tracked (gopy keeps refcount-zero non-finalizable containers tracked for the
+  weakref pass), so the next collection counted it as an extra cycle member and the `module/gc` unit tests
+  (`TestUserDelFiresDuringCycleCollect`) reported one too many reclaims.
+- Note: `test_importlib.frozen.test_finder` compares the frozen loader's `filename` against
+  `os.path.join(STDLIB_DIR, '__hello__.py')`, where `STDLIB_DIR` is derived from where `test/support`
+  lives. gopy reports the live on-disk frozen path, matching CPython (which freezes `__hello__` with its
+  `Lib/__hello__.py` filename). The two agree when the suite runs in its natural location under the
+  stdlib (12/12 green); they only diverge if the corpus is relocated, which moves `STDLIB_DIR` away from
+  the real stdlib. Run-mode artifact, not a gopy defect.
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
