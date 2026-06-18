@@ -276,6 +276,18 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// CPython: Objects/typeobject.c:4153 type_new (heap types start at
 	// refcount 1 from PyObject_GC_NewVar)
 	atomic.StoreInt64(&t.Hdr().refcnt, 1)
+	// A heap type is a gc container: CPython gives it Py_TPFLAGS_HAVE_GC and
+	// type_traverse so the cycle collector can subtract a class's references
+	// to its methods, class attributes and bases. gopy tracks the type here
+	// (typeType.TpTraverse = typeTraverse does the visiting) so a class kept
+	// alive only by a cycle through one of its methods (a method whose
+	// __globals__ is the defining module, say) collapses to unreachable and
+	// the module dict it pins can be collected.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new (heap types are PyObject_GC)
+	if h := GCTrackHook; h != nil {
+		h(t)
+	}
 	stampMetaclass(t, meta)
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
@@ -698,6 +710,15 @@ func processClassNamespace(t *Type, ns *Dict) error {
 	//
 	// CPython: Objects/typeobject.c:4612 type_new (dict = PyDict_Copy)
 	ns = copyClassNamespace(ns)
+	// CPython keeps this copy as tp_dict. gopy instead installs each
+	// entry into the type's ClassAttrDict / typeDescrTable (SetTypeDescr
+	// re-increfs every stored value), so the copy is purely transient and
+	// must be released once its entries are installed. Leaving it at
+	// refcnt 1 keeps a live, untracked reference to the class methods,
+	// whose __globals__ is the defining module dict, which roots the whole
+	// {namespace, class, instance} cycle and stops gc.collect() from ever
+	// finalizing the instances (test_module test_clear_dict_in_ref_cycle).
+	defer Decref(ns)
 	// __classcell__ is the cell __build_class__ left in the namespace so
 	// we can patch it with the new class. It is not a real attribute,
 	// so install it before walking the rest of the namespace and skip
@@ -2168,6 +2189,28 @@ func slotTpIterNext(o Object) (Object, error) {
 // CPython: Objects/typeobject.c:10585 slot_tp_finalize
 // CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
 func slotTpFinalize(o Object) {
+	// Bracket the __del__ call with a save/restore of the thread's
+	// raised exception, exactly as CPython's slot_tp_finalize wraps the
+	// call in PyErr_GetRaisedException / PyErr_SetRaisedException. gopy
+	// fires __del__ synchronously from Decref, so a finalizer can run
+	// while the interpreter is mid-unwind (for instance handle_exception
+	// allocating a traceback entry triggers the cycle collector, which
+	// reclaims a now-dead __del__ object). Without this, a __del__ that
+	// raises and swallows its own exception (try: next(it) except
+	// StopIteration: pass) would clear the exception the outer frame is
+	// still propagating, leaving Occurred() nil and a typed-nil pushed
+	// onto the value stack.
+	//
+	// CPython: Objects/typeobject.c:9883 slot_tp_finalize
+	var saved Object
+	if h := SaveRaisedExceptionHook; h != nil {
+		saved = h()
+	}
+	defer func() {
+		if h := RestoreRaisedExceptionHook; h != nil {
+			h(saved)
+		}
+	}()
 	fn, unbound, err := lookupMaybeMethod(o, "__del__")
 	if err != nil {
 		return

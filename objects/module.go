@@ -15,6 +15,10 @@ type Module struct {
 	Header
 	dict  *Dict
 	state any // per-module state for Go-implemented modules
+	// dictReleased records that tp_clear or tp_dealloc has already dropped
+	// the module's reference to md_dict, so the second of the two (the
+	// collector clears then the last Decref deallocs) does not double-drop.
+	dictReleased bool
 	// Initializing is true while the module body is executing. When set,
 	// moduleGetAnnotations does not cache its result so that circular
 	// imports see the annotations that existed at the point of access
@@ -69,6 +73,18 @@ func init() {
 	//
 	// CPython: Objects/moduleobject.c:739 module_traverse
 	ModuleType.TpTraverse = moduleTraverse
+	// module_clear releases md_dict so a module caught in a reference cycle
+	// (its __dict__ holds a function whose __globals__ is that same dict)
+	// can be torn down by the collector. module_dealloc drops the same
+	// reference on the last refcount, which is the path `del m` takes: the
+	// module is not itself part of the cycle, so it reaches refcount zero
+	// directly, and without dealloc its +1 on md_dict would stay live and
+	// pin the whole {dict, classes, functions} cycle as externally rooted.
+	//
+	// CPython: Objects/moduleobject.c:737 module_clear
+	// CPython: Objects/moduleobject.c:752 module_dealloc
+	ModuleType.TpClear = moduleClear
+	ModuleType.Dealloc = moduleDealloc
 	// Modules are hashable by identity in CPython (tp_hash = PyObject_GenericHash).
 	// CPython: Objects/moduleobject.c:766 PyModule_Type (tp_hash not overridden → id-based)
 	ModuleType.Hash = IdentityHash
@@ -224,6 +240,50 @@ func moduleTraverse(o Object, visit Visitor) error {
 		}
 	}
 	return nil
+}
+
+// moduleClear is the tp_clear slot. It releases md_dict so a module
+// trapped in a reference cycle becomes collectible once the collector
+// proves it unreachable.
+//
+// CPython: Objects/moduleobject.c:737 module_clear
+func moduleClear(o Object) {
+	m, ok := o.(*Module)
+	if !ok || m.dictReleased {
+		return
+	}
+	// Drop the reference but keep the pointer: gopy leaves refcount-zero
+	// objects on the Go heap, so a stray borrowed reference that still
+	// reaches this module after teardown reads a valid (if logically dead)
+	// namespace rather than dereferencing nil. Py_CLEAR nulls md_dict
+	// because CPython frees the storage immediately; gopy cannot.
+	//
+	// CPython: Objects/moduleobject.c:737 module_clear (Py_CLEAR md_dict)
+	if m.dict != nil {
+		m.dictReleased = true
+		Decref(m.dict)
+	}
+}
+
+// moduleDealloc is the tp_dealloc slot. It untracks the module from the
+// collector and drops its reference to md_dict. `del m` on a module that
+// is not itself part of a cycle takes this path; releasing md_dict here
+// removes the external +1 that would otherwise keep a module-body cycle
+// (functions whose __globals__ is md_dict) from ever collapsing.
+//
+// CPython: Objects/moduleobject.c:752 module_dealloc
+func moduleDealloc(o Object) {
+	m, ok := o.(*Module)
+	if !ok {
+		return
+	}
+	if h := GCUntrackHook; h != nil {
+		h(m)
+	}
+	if m.dict != nil && !m.dictReleased {
+		m.dictReleased = true
+		Decref(m.dict)
+	}
 }
 
 // Dict returns the module's attribute dict (__dict__).

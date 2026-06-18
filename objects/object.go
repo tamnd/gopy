@@ -1006,7 +1006,19 @@ func objectGetDict(o Object) (Object, error) {
 		// rather than gating on HasDict like the AttrDictHolder arm below.
 		//
 		// CPython: Objects/moduleobject.c module_dict getset (md_dict)
-		return v.Dict(), nil
+		//
+		// PyObject_GenericGetDict hands back a new reference; the eval
+		// loop treats a getset getter's result as owned and decrefs it,
+		// so a borrowed md_dict here would drive a live module's
+		// namespace toward refcount zero and defeat the cycle collector
+		// (the module __dict__ <-> class-method __globals__ cycle never
+		// loses the under-counted reference, so __del__ never fires).
+		//
+		// CPython: Objects/object.c:1226 _PyObject_GenericGetDict
+		// (Py_XINCREF(dict) before return)
+		d := v.Dict()
+		Incref(d)
+		return d, nil
 	case *Instance:
 		if v.dict == nil {
 			if !v.Type().HasDict {
@@ -1038,6 +1050,7 @@ func objectGetDict(o Object) (Object, error) {
 		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
 		//          (PyDictValues stops being valid once the dict is built)
 		v.inlineValid = false
+		Incref(v.dict)
 		return v.dict, nil
 	case *Int:
 		// The builtin int type has no tp_dictoffset, so (42).__dict__
@@ -1049,6 +1062,7 @@ func objectGetDict(o Object) (Object, error) {
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}
+		Incref(v.attrs)
 		return v.attrs, nil
 	case *Unicode:
 		if !v.Type().HasDict {
@@ -1057,6 +1071,7 @@ func objectGetDict(o Object) (Object, error) {
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}
+		Incref(v.attrs)
 		return v.attrs, nil
 	case AttrDictHolder:
 		// Subclasses of C-port types (list, bytearray, ...) carry their
@@ -1068,7 +1083,9 @@ func objectGetDict(o Object) (Object, error) {
 		if !o.Type().HasDict {
 			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 		}
-		return v.EnsureAttrDict(), nil
+		d := v.EnsureAttrDict()
+		Incref(d)
+		return d, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 }

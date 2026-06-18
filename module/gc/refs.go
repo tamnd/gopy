@@ -115,4 +115,21 @@ func pinRoots(containers *gcHead, tracked map[objects.Object]*gcHead) {
 			}
 		})
 	}
+	// Re-float the interpreter-lifetime singletons (sys.modules) that
+	// gopy holds through a Go pointer. CPython roots these via
+	// interp->modules; without this the whole module graph collapses to
+	// gc_refs == 0 and a module global reachable only through its module
+	// __dict__ is reclaimed while still live.
+	//
+	// CPython: Python/gc.c:1430 gc_collect_main (interp->modules roots)
+	if h := objects.GCStaticRootsHook; h != nil {
+		h(func(o objects.Object) {
+			if o == nil {
+				return
+			}
+			if g, ok := tracked[o]; ok && g.flags&gcCollecting != 0 && g.refs == 0 {
+				g.refs = 1
+			}
+		})
+	}
 }

@@ -261,6 +261,50 @@ var typeDescrTable = map[*Type]map[string]Object{}
 // order (e.g. enum members, dataclass fields).
 var typeDescrOrder = map[*Type][]string{}
 
+// typeTraverse is tp_traverse for the metatype. A class holds its methods
+// and class attributes in typeDescrTable (plus the live ClassAttrDict /
+// nonStrDict mirrors) and its lineage in the __bases__ tuple; CPython's
+// type_traverse visits tp_dict / tp_bases / tp_mro so the cycle collector
+// can subtract a type's outgoing references. Only heap types are
+// gc-tracked (static types are immortal and never appear as candidates),
+// so this runs for user classes and lets subtract_refs see, for example,
+// a class -> method __globals__ -> module cycle and collapse it. The set
+// visited here mirrors exactly the references a type owns; reachable ones
+// get re-floated by move_unreachable's visit_reachable through the rooted
+// module that defines the class.
+//
+// CPython: Objects/typeobject.c:1227 type_traverse
+func typeTraverse(o Object, visit Visitor) error {
+	t, ok := o.(*Type)
+	if !ok {
+		return nil
+	}
+	for _, v := range typeDescrTable[t] {
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	if t.ClassAttrDict != nil {
+		if err := visit(t.ClassAttrDict); err != nil {
+			return err
+		}
+	}
+	if t.nonStrDict != nil {
+		if err := visit(t.nonStrDict); err != nil {
+			return err
+		}
+	}
+	if t.BasesObj != nil {
+		if err := visit(t.BasesObj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TypeDescrNames returns the names registered on t through
 // SetTypeDescr, walking the MRO and de-duplicating. Used by builtins
 // dir() to introspect a class.

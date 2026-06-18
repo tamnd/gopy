@@ -895,6 +895,20 @@ func newFunction(name string, code *Code, globals Object, qualname string) (*Fun
 		f.Builtins = CurrentBuiltinsHook()
 	}
 	f.init(FunctionType)
+	// A function holds its globals (and closure, defaults, annotations),
+	// so it can sit on a reference cycle and, more importantly, it is the
+	// only path from a class method back to the module that defined it
+	// (func.__globals__). CPython gives PyFunction_Type Py_TPFLAGS_HAVE_GC
+	// and func_traverse for exactly this; without tracking, a module
+	// reachable only through a live class's method globals (a source
+	// re-import of importlib._bootstrap held by a test class, say)
+	// collapses under the cycle collector and its singletons are reclaimed
+	// while still live.
+	//
+	// CPython: Objects/funcobject.c:582 func_traverse (PyFunction_Type tp_traverse)
+	if h := GCTrackHook; h != nil {
+		h(f)
+	}
 	return f, nil
 }
 

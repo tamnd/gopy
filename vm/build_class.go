@@ -189,7 +189,8 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 	}
 
 	callArgs := []objects.Object{nameObj, basesTuple, ns}
-	result, err := objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
+	callTuple := objects.NewTuple(callArgs)
+	result, err := objects.Call(meta, callTuple, kwargsToDict(kwargs))
 
 	// Verify the __class__ cell the body returned was filled with the
 	// freshly created class. A metaclass that drops __classcell__ from the
@@ -214,17 +215,26 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 			}
 		}
 	}
-	// Release the initial NewDict ref. NewTuple copies raw pointers without
-	// Incref-ing ns, so the only owner remaining after the metaclass call is
-	// this reference. The metaclass copied every namespace entry into the
-	// type's descriptor table with its own Incref, so this is the last owner
-	// of ns. gopy dicts carry no synchronous tp_dealloc, so dropping the
-	// refcount alone leaves the method functions ns holds pinned by a count
-	// no live container backs: the class dies, the methods never reclaim, and
-	// weakref(A.method) never clears. Mirror dict_dealloc and clear the
-	// namespace contents once ns reaches refcount zero (the precise signal
-	// that nothing else, e.g. a __prepare__ mapping the caller kept, still
-	// holds it).
+	// Release the temporary args tuple the metaclass call owned. NewTuple
+	// Incref'd each item (name, bases, ns), so dropping the tuple's last
+	// reference runs tupleDealloc, which decrefs ns back down. Without this
+	// the tuple lingers as an orphan whose refcount no live container backs;
+	// the cycle collector then treats it as an external root and the ns it
+	// points at (plus every method ns holds) never reclaims.
+	//
+	// CPython: Python/bltinmodule.c:241 builtin___build_class__ Py_DECREF(margs)
+	objects.Decref(callTuple)
+
+	// Release the initial NewDict ref. After the args-tuple decref above the
+	// only owner remaining after the metaclass call is this reference (the
+	// metaclass copied every namespace entry into the type's descriptor table
+	// with its own Incref). gopy dicts carry no synchronous tp_dealloc, so
+	// dropping the refcount alone leaves the method functions ns holds pinned
+	// by a count no live container backs: the class dies, the methods never
+	// reclaim, and weakref(A.method) never clears. Mirror dict_dealloc and
+	// clear the namespace contents once ns reaches refcount zero (the precise
+	// signal that nothing else, e.g. a __prepare__ mapping the caller kept,
+	// still holds it).
 	//
 	// CPython: Python/bltinmodule.c:246 builtin___build_class__ Py_DECREF(ns)
 	// CPython: Objects/dictobject.c:2768 dict_dealloc (PyDict_Clear on last decref)

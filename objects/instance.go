@@ -355,6 +355,21 @@ func instanceTraverse(o Object, visit Visitor) error {
 			return err
 		}
 	}
+	// For a heap type, the instance holds a counted reference to its
+	// type (NewInstance increfs it, instanceDealloc releases it), so
+	// subtype_traverse visits the type. Without this edge the collector
+	// cannot see the instance->type link, and a class that is only kept
+	// alive by its own instances (a cycle through a method's __globals__,
+	// say) never collapses to unreachable. Static types are immortal and
+	// not gc-tracked, so visiting them is a harmless no-op; restrict to
+	// heap types to mirror CPython exactly.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (Py_VISIT(type))
+	if t := i.Type(); t != nil && t.IsUser {
+		if err := visit(t); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

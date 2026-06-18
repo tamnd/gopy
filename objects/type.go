@@ -432,6 +432,24 @@ type GCRoot interface {
 // CPython: Python/gc.c:1430 gc_collect_main (tstate->current_frame roots)
 var GCExecutingRootsHook func(pin func(Object))
 
+// GCStaticRootsHook reports the interpreter-lifetime singletons the
+// cycle collector must treat as roots. CPython keeps sys.modules alive
+// through interp->modules, a C reference held in the interpreter struct
+// that gc_collect_main never collects; everything strongly reachable
+// from a module is therefore reachable from a root and survives until
+// interpreter shutdown. gopy holds the sys.modules dict through a plain
+// Go pointer that the refcount-based collector cannot see, so the whole
+// module graph collapses to gc_refs == 0 under subtract_refs. A module
+// global whose only strong reference is its module __dict__ (for
+// example _frozen_importlib._blocking_on, a self-cyclic
+// _WeakValueDictionary) would then be reclaimed out from under live
+// import machinery. This hook reports the sys.modules dict so the
+// collector re-floats it; move_unreachable's visit_reachable then pulls
+// in the strongly-reachable closure. nil until imp initializes.
+//
+// CPython: Python/gc.c:1430 gc_collect_main (interp->modules stays reachable)
+var GCStaticRootsHook func(pin func(Object))
+
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //
 // CPython: Include/object.h:L284 Py_TPFLAGS_MAPPING / Py_TPFLAGS_SEQUENCE
@@ -651,6 +669,14 @@ func init() {
 	//
 	// CPython: Objects/typeobject.c:352 _PyStaticType_InitBuiltin
 	typeType.MakeImmortal()
+	// type is a gc container: a heap type holds its methods, class
+	// attributes and lineage, so the cycle collector must be able to
+	// subtract those references. CPython gives PyType_Type a tp_traverse
+	// (type_traverse); gopy installs the metatype traverse here so a
+	// gc-tracked user class participates in cycle detection.
+	//
+	// CPython: Objects/typeobject.c:1227 type_traverse
+	typeType.TpTraverse = typeTraverse
 	// type inherits from object. CPython: Objects/typeobject.c:6361
 	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
 	// in type's MRO so metatype lookup of __class__ / __dict__ finds

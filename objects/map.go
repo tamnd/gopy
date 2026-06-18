@@ -33,6 +33,8 @@ var MapType = NewType("map", []*Type{objectType})
 func init() {
 	MapType.Iter = SelfIter
 	MapType.IterNext = mapNext
+	MapType.Dealloc = mapDealloc
+	MapType.TpTraverse = mapTraverse
 	AddIterSlotWrappers(MapType)
 	SetTypeDescr(MapType, "__reduce__", NewMethodDescrConv(MapType, "__reduce__", MethNoArgs, mapReduce))
 	SetTypeDescr(MapType, "__setstate__", NewMethodDescrConv(MapType, "__setstate__", MethO, mapSetstate))
@@ -54,9 +56,67 @@ func NewMap(fn Object, iterables []Object, strict bool) (*Map, error) {
 		}
 		iters[i] = it
 	}
+	// The map owns a counted reference to its function so a bound method
+	// or lambda handed straight into map() survives until the map is
+	// exhausted, even after the caller's stack slot is released. Each
+	// entry of iters already carries the owned reference Iter() returned,
+	// so only the function needs an explicit incref here. Without this the
+	// function (often a bound method whose imSelf is the only live handle
+	// on an instance) drops to refcount zero when map() returns, its
+	// dealloc decrefs that instance, and a mid-iteration collection then
+	// reaps an object the loop is still walking.
+	//
+	// CPython: Python/bltinmodule.c:1361 map_new (Py_INCREF(func);
+	//          the iters PyTuple owns its entries)
+	Incref(fn)
 	m := &Map{Func: fn, Iters: iters, Strict: strict}
 	m.init(MapType)
 	return m, nil
+}
+
+// mapDealloc releases the owned references on the function and every
+// source iterator. Mirrors map_dealloc's Py_XDECREF(lz->func) plus the
+// iters-tuple release.
+//
+// CPython: Python/bltinmodule.c:1404 map_dealloc
+func mapDealloc(o Object) {
+	m, ok := o.(*Map)
+	if !ok {
+		return
+	}
+	if m.Func != nil {
+		Decref(m.Func)
+	}
+	for _, it := range m.Iters {
+		if it != nil {
+			Decref(it)
+		}
+	}
+}
+
+// mapTraverse lets the cyclic collector trace through the function and
+// the source iterators. Mirrors map_traverse.
+//
+// CPython: Python/bltinmodule.c:1416 map_traverse
+func mapTraverse(o Object, visit Visitor) error {
+	m, ok := o.(*Map)
+	if !ok {
+		return nil
+	}
+	if m.Func != nil {
+		if err := visit(m.Func); err != nil {
+			return err
+		}
+	}
+	for _, it := range m.Iters {
+		if it == nil {
+			continue
+		}
+		if err := visit(it); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // mapNext pulls one value from each source iterator and forwards

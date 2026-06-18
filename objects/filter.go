@@ -28,6 +28,8 @@ var FilterType = NewType("filter", []*Type{objectType})
 func init() {
 	FilterType.Iter = SelfIter
 	FilterType.IterNext = filterNext
+	FilterType.Dealloc = filterDealloc
+	FilterType.TpTraverse = filterTraverse
 	AddIterSlotWrappers(FilterType)
 	SetTypeDescr(FilterType, "__reduce__", NewMethodDescrConv(FilterType, "__reduce__", MethNoArgs, filterReduce))
 }
@@ -42,9 +44,54 @@ func NewFilter(fn, iterable Object) (*Filter, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The filter owns a counted reference to its predicate. it already
+	// carries the owned reference Iter() returned. Without owning fn, a
+	// bound-method predicate handed straight into filter() drops to
+	// refcount zero when the call returns, its dealloc decrefs imSelf, and
+	// a mid-iteration collection reaps an instance the loop still walks.
+	//
+	// CPython: Python/bltinmodule.c:501 filter_new (Py_INCREF(func))
+	Incref(fn)
 	f := &Filter{Func: fn, It: it}
 	f.init(FilterType)
 	return f, nil
+}
+
+// filterDealloc releases the owned predicate and source-iterator
+// references. Mirrors filter_dealloc's Py_XDECREF pair.
+//
+// CPython: Python/bltinmodule.c:540 filter_dealloc
+func filterDealloc(o Object) {
+	f, ok := o.(*Filter)
+	if !ok {
+		return
+	}
+	if f.Func != nil {
+		Decref(f.Func)
+	}
+	if f.It != nil {
+		Decref(f.It)
+	}
+}
+
+// filterTraverse lets the cyclic collector trace through the predicate
+// and the source iterator. Mirrors filter_traverse.
+//
+// CPython: Python/bltinmodule.c:552 filter_traverse
+func filterTraverse(o Object, visit Visitor) error {
+	f, ok := o.(*Filter)
+	if !ok {
+		return nil
+	}
+	if f.Func != nil {
+		if err := visit(f.Func); err != nil {
+			return err
+		}
+	}
+	if f.It != nil {
+		return visit(f.It)
+	}
+	return nil
 }
 
 // filterNext advances the iterator until the predicate accepts a
