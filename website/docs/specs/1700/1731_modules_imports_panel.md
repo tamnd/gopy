@@ -33,7 +33,7 @@ runs all of the non-interpreter files green.
 | --- | --- | --- |
 | `test_module/` (dir) | OK | **OK (39 tests)** |
 | `test_import/` (dir) | OK | **OK (118 tests, 4 skipped)** — 3 platform skips + `test_frozen_compat` (needs a frozen `_frozen_importlib`, P7) |
-| `test_importlib/` (dir) | OK | 1346 tests; 0 failures, 0 errors, 63 skipped — threaded circular import and incomplete multi-phase init both closed; module-lock GC lifetime closed via tp_clear-from-delete_garbage |
+| `test_importlib/` (dir) | OK | 1346 tests; 0 failures, 0 errors, 63 skipped — threaded circular import and incomplete multi-phase init both closed; module-lock GC lifetime closed via tp_clear-from-delete_garbage. Run from a clean cwd: invoking `test_importlib.test_util` directly from the repo root puts `module/` (the Go module-port dir) on `sys.path[0]`, where `import module` then resolves as a PEP 420 namespace package and `test_find_submodule_in_module` no longer sees a `ModuleNotFoundError`. CPython fails identically from such a cwd; the canonical regrtest run uses a clean directory. |
 | `test_modulefinder` | OK | **OK (17 tests)** |
 | `test_pkg` | OK | **OK (8 tests)** |
 | `test_pkgutil` | OK | **OK (21 tests)** |
@@ -42,7 +42,7 @@ runs all of the non-interpreter files green.
 | `test_runpy` | OK | **OK (40 tests)** |
 | `test_frozen` | OK | **OK (3/3)** — frozen test modules + override + `sys._stdlib_dir` shipped |
 | `test_zipimport` | OK | **OK (91 tests, 4 skipped)** |
-| `test_zipimport_support` | OK | needs vendored `test.test_doctest` (doctest) |
+| `test_zipimport_support` | OK | **OK (4 tests)** — vendored `test.test_doctest`; pdb single-step under doctest now works after the opcode-tracing fix |
 | `test_zipapp` | OK | **OK (35 tests)** |
 | `test__interpchannels` | PEP 554 | deferred (see below) |
 | `test__interpreters` | PEP 554 | deferred (`_interpreters.run_string` missing) |
@@ -112,6 +112,17 @@ CPython 3.14.5 (counts and `-v` lists).
 - [x] P5: `test_import/` green — ported the single-phase extension cache (`_testsinglephase*` variants, `m_size` kinds, the extensions cache + `m_copy` reload), the gh-123950 circular import (`_testsinglephase_circular` via the `_gcd_import` import hook), and per-subinterpreter `sys.modules` isolation so the PEP 489 compat gate fires on re-import. 4 skips remain: 3 platform-specific, plus `test_frozen_compat`, which needs a frozen `_frozen_importlib` (P7)
 - [x] P5: `test_module_with_large_stack` no longer flakes with `bad file descriptor` — `os.NewFile`/`os.OpenFile` arm the close finalizer on the unexported inner `*os.file`, so `SetFinalizer(f, nil)` on the outer handle was a no-op. A leaked borrowed-fd wrapper (subprocess pipes) would close a reused descriptor mid-write. `objects.ClearOSFileFinalizer` reaches the inner pointer; the `io` and `_posixsubprocess` borrows route through it
 - [x] P5: re-audit `test_module/` — green (39 tests)
+- [x] `test_doctest` green (71 tests) and `test_zipimport_support` green (4 tests): pdb single-stepping
+  under doctest needed faithful opcode (INSTRUCTION) tracing. The bug was in the monitoring shadow walk:
+  `add_tools`/`remove_tools` bailed when a slot's live byte was already `INSTRUMENTED_LINE` or
+  `INSTRUMENTED_INSTRUCTION`, so installing the global `PY_RETURN` event the legacy `sys.settrace` bridge
+  needs never reached the real opcode parked in the line / per-instruction side table. When `pdb`'s
+  `step` toggled `f_trace_opcodes` off, the slot restored to the plain opcode and the return event was
+  lost, so the debugger jumped back into `doctest.__run` instead of stopping at the function's
+  `--Return--`. Ported `instrument()` and `de_instrument()` (Python/instrumentation.c) to walk the live
+  byte through both side tables to the location CPython tracks as `opcode_ptr` and rewrite the
+  (de)instrumented opcode there. The `module/` dir, the directory, and the ZIP archive each run as their
+  own `__main__` via the new `pymain_get_importer` path in `cmd/gopy`.
 - [x] P5: `test_importlib/` residuals — 1346 tests run, 0 failures + 0 errors. `test_all_locks`
   passes: the collector grew a `tp_clear` slot that runs from `delete_garbage` (the cyclic-GC path,
   after the collector has proven unreachability) instead of the eager refcount-zero dealloc path, so an
