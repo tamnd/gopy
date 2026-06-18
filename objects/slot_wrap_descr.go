@@ -22,6 +22,17 @@ import "fmt"
 // already-defined-wins behavior.
 //
 // CPython: Objects/typeobject.c add_operators
+// AddDescriptorSlotWrappers is the exported entry point for types
+// defined in other packages (e.g. module/_functools) so their
+// tp_descr_get / tp_descr_set surface a __get__ / __set__ / __delete__
+// wrapper, matching add_operators. Without it inspect.ismethoddescriptor
+// (which probes hasattr(type, '__get__')) misclassifies the type.
+//
+// CPython: Objects/typeobject.c add_operators
+func AddDescriptorSlotWrappers(t *Type) {
+	addDescriptorSlotWrappers(t)
+}
+
 func addDescriptorSlotWrappers(t *Type) {
 	if t == nil {
 		return

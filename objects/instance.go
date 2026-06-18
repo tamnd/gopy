@@ -86,6 +86,16 @@ var WriteUnraisableHook func(obj Object, errMsg string, err error)
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 var WarnUnawaitedCoroutineHook func(coro Object)
 
+// SetOpcodeTraceHook toggles per-instruction (opcode) tracing on a
+// frame's code object so the legacy sys.settrace bridge fires
+// PyTrace_OPCODE events for that frame. bdb / pdb sets
+// frame.f_trace_opcodes mid-execution, so the hook must also
+// re-instrument the live call chain immediately. objects/ stays
+// independent of vm via this indirection.
+//
+// CPython: Python/ceval.c:_PyEval_SetOpcodeTrace
+var SetOpcodeTraceHook func(f *Frame, enable bool) error
+
 // WarnUnawaitedAgenMethodHook routes a never-awaited async-generator
 // asend/athrow/aclose awaitable through warnings so the consumer sees a
 // RuntimeWarning of the form "coroutine method 'asend' of '<qualname>'
