@@ -498,23 +498,23 @@ func (e *evalState) advance() int {
 	}
 	op := compile.Opcode(code[ip])
 	// Under monitoring the live byte at ip may be INSTRUMENTED_LINE (a
-	// marker left in place while dispatch runs the hidden opcode) or an
-	// INSTRUMENTED_<X> variant. Both preserve the base opcode's inline
-	// cache layout, but the cache table is keyed by base opcode, so a
-	// jump computed off the raw instrumented byte would count zero cache
-	// codeunits and land one codeunit short of its target. Resolve to the
-	// base opcode first.
+	// marker left in place while dispatch runs the hidden opcode),
+	// INSTRUMENTED_INSTRUCTION (opcode tracing hides the real opcode in
+	// the per-instruction side table), or an INSTRUMENTED_<X> variant.
+	// All three preserve the base opcode's inline cache layout, but the
+	// cache table is keyed by base opcode, so a stride computed off the
+	// raw instrumented byte would count zero cache codeunits and land one
+	// codeunit short. GetBaseCodeUnit walks the line table, then the
+	// per-instruction table, then the de-instrument / deopt maps, so it
+	// recovers the true base opcode whichever marker is on top.
 	//
 	// CPython: the JUMPBY stride is the base arm's compile-time
 	// INLINE_CACHE_ENTRIES_<OP>, independent of the instrumented byte.
-	if op == compile.INSTRUMENTED_LINE {
-		if data := monitor.CoMonitoring(e.f.Code); data != nil {
-			if base := monitor.GetOriginalOpcode(data, ip/2); base != 0 {
-				op = base
-			}
-		}
+	if monitor.IsInstrumented(op) {
+		op = monitor.GetBaseCodeUnit(e.f.Code, ip/2)
+	} else {
+		op = monitor.DeInstrument(op)
 	}
-	op = monitor.DeInstrument(op)
 	return ip + 2 + 2*compile.CacheCount(op)
 }
 

@@ -239,6 +239,12 @@ func init() {
 	//
 	// CPython: pycore_frame.h _PyThreadState_GetFrame is the same shape.
 	objects.CurrentFrameHook = currentInterpreterFrame
+	// Arm opcode-level tracing when Python assigns frame.f_trace_opcodes
+	// (bdb / pdb). objects/ cannot reach the monitoring instrumentation
+	// directly, so it routes through this hook.
+	//
+	// CPython: Python/legacy_tracing.c:159 _PyEval_SetOpcodeTrace
+	objects.SetOpcodeTraceHook = setOpcodeTraceHook
 	// Expose the same hook to module/sys for sys._getframe().
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl

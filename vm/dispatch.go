@@ -60,7 +60,21 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err err
 	// CPython: Python/ceval.c only enters the adaptive ladder under
 	// the per-opcode TARGET(<adaptive>) label, never on the generic
 	// non-quickened body.
-	if e.f.Code.Quickened {
+	//
+	// An instrumented instruction never enters the adaptive ladder: its
+	// visible bytecode byte is an INSTRUMENTED_<X> marker, and the
+	// specializer / unspecializer write the rewritten opcode straight
+	// into code[InstrPtr], which would clobber the marker and orphan the
+	// original opcode parked in the per-instruction / line side table.
+	// CPython avoids this by dispatching instrumented code through the
+	// TARGET(INSTRUMENTED_*) labels, which carry no specialization
+	// counter logic; specialization only fires on the bare adaptive
+	// target. applyInstrumentation already resolved op to the runnable
+	// base opcode, so the adaptive pass has nothing left to do here.
+	//
+	// CPython: Python/instrumentation.c the instrumented opcodes are not
+	// specialized; specialization runs only on the de-instrumented form.
+	if e.f.Code.Quickened && !monitor.IsInstrumented(compile.Opcode(e.f.Code.Code[e.f.InstrPtr])) {
 		if next, ok, err := e.trySpecialized(op, oparg); ok {
 			return next, err
 		}
@@ -71,19 +85,19 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err err
 			// fresh op and give the fast-path arm a shot before
 			// falling back to the generic body.
 			op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
-			// The re-read may yield INSTRUMENTED_LINE when the slot
-			// was overwritten by the monitoring shadow walk. Resolve
-			// the original opcode without re-firing the line event;
-			// the fire already happened above.
+			// The re-read may yield an instrumentation marker
+			// (INSTRUMENTED_LINE when the slot was overwritten by the
+			// monitoring shadow walk, or INSTRUMENTED_INSTRUCTION when
+			// opcode tracing hides the real opcode in the per-instruction
+			// side table). Resolve the original opcode without re-firing
+			// the event; the fire already happened above.
 			//
 			// CPython: Python/ceval.c DISPATCH_GOTO avoids this by
-			// jumping directly to TARGET(INSTRUMENTED_LINE) from the
-			// adaptive rewrite path, which then re-enters the line
-			// handler. Here we short-circuit to the opcode lookup.
-			if op == compile.INSTRUMENTED_LINE {
-				instr := e.f.InstrPtr / 2
-				data := monitor.CoMonitoring(e.f.Code)
-				op = monitor.GetOriginalOpcode(data, instr)
+			// jumping directly to TARGET(INSTRUMENTED_*) from the
+			// adaptive rewrite path, which then re-enters the marker
+			// handler. Here we short-circuit to the resolved opcode.
+			if monitor.IsInstrumented(op) {
+				op = monitor.GetBaseCodeUnit(e.f.Code, e.f.InstrPtr/2)
 				if op == 0 {
 					op = compile.NOP
 				}
@@ -141,6 +155,23 @@ func (e *evalState) applyInstrumentation(op compile.Opcode, oparg uint32) (compi
 	if instrumentedRewrite[op] {
 		if op == compile.INSTRUMENTED_LINE {
 			newOp, err := e.handleInstrumentedLine()
+			if err != nil {
+				return 0, 0, err
+			}
+			op = newOp
+			if !instrumentedRewrite[op] {
+				return e.resolveExtendedArgPrefix(op, oparg)
+			}
+		}
+		// INSTRUMENTED_INSTRUCTION fires the per-instruction (opcode)
+		// event, then re-dispatches the opcode it hides. That opcode may
+		// itself be an INSTRUMENTED_<event> variant (a monitored site
+		// that also carries opcode tracing), so fall through to the
+		// event-fire block below.
+		//
+		// CPython: Python/bytecodes.c INSTRUMENTED_INSTRUCTION
+		if op == compile.INSTRUMENTED_INSTRUCTION {
+			newOp, err := e.handleInstrumentedInstruction()
 			if err != nil {
 				return 0, 0, err
 			}
