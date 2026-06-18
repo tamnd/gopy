@@ -181,24 +181,28 @@ opts:
 	}
 
 	if st.OptInd < len(argv) {
-		scriptPath := argv[st.OptInd]
-		sys.SetArgv(append([]string{scriptPath}, argv[st.OptInd+1:]...))
-		// If the positional argument is a package (a directory or a ZIP
-		// archive) it is an import-path entry, not a source file: prepend it
-		// to sys.path and run its __main__ submodule. CPython detects this in
-		// pymain_get_importer (PyImport_GetImporter runs the path hooks) and
-		// runs pymain_run_module(L"__main__", 0); set_argv0=0 leaves argv[0]
-		// as the archive path. A plain .py file falls through to pymain_run_file.
-		//
-		// CPython: Modules/main.c:127 pymain_get_importer
-		// CPython: Modules/main.c:691 pymain_run_python (main_importer_path branch)
-		if isImporterPath(scriptPath) {
-			return runImporterMain(scriptPath, stdout, stderr)
-		}
-		return runFile(scriptPath, stdout, stderr)
+		return runPositional(argv[st.OptInd], argv[st.OptInd+1:], stdout, stderr)
 	}
 	sys.SetArgv([]string{""})
 	return runInteractive(stdout, stderr)
+}
+
+// runPositional dispatches the trailing positional argument. If it names
+// a package (a directory or a ZIP archive) it is an import-path entry,
+// not a source file: prepend it to sys.path and run its __main__
+// submodule. CPython detects this in pymain_get_importer
+// (PyImport_GetImporter runs the path hooks) and runs
+// pymain_run_module(L"__main__", 0); set_argv0=0 leaves argv[0] as the
+// archive path. A plain .py file falls through to pymain_run_file.
+//
+// CPython: Modules/main.c:127 pymain_get_importer
+// CPython: Modules/main.c:691 pymain_run_python (main_importer_path branch)
+func runPositional(scriptPath string, rest []string, stdout, stderr *os.File) int {
+	sys.SetArgv(append([]string{scriptPath}, rest...))
+	if isImporterPath(scriptPath) {
+		return runImporterMain(scriptPath, stdout, stderr)
+	}
+	return runFile(scriptPath, stdout, stderr)
 }
 
 // safePathMode records whether -P / -I / PYTHONSAFEPATH was supplied, so
@@ -534,7 +538,7 @@ func isDir(p string) bool {
 }
 
 func isFile(p string) bool {
-	info, err := os.Stat(p)
+	info, err := os.Stat(p) //nolint:gosec // p is os.Executable/os.Getwd/$GOPY_STDLIB or the argv script path the user asked us to run.
 	return err == nil && info.Mode().IsRegular()
 }
 
