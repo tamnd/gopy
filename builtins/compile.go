@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -184,6 +185,15 @@ func compileFilenameArg(o objects.Object) (string, error) {
 func compileSourceArg(o objects.Object) (string, []byte, error) {
 	switch v := o.(type) {
 	case *objects.Unicode:
+		// _Py_SourceAsString encodes a str source through the strict
+		// utf-8 codec (PyUnicode_AsUTF8AndSize), so a lone surrogate
+		// raises UnicodeEncodeError here rather than reaching the
+		// tokenizer as a "Non-UTF-8 code" SyntaxError.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString
+		if _, _, encErr := codecs.Encode(v.Value(), "utf-8", "strict"); encErr != nil {
+			return "", nil, encErr
+		}
 		return v.Value(), nil, nil
 	case *objects.Bytes:
 		b := v.Bytes()

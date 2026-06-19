@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -303,6 +304,17 @@ func sourceAsString(cmd objects.Object, fnName string) (string, bool, error) {
 	isUnicode := false
 	switch v := cmd.(type) {
 	case *objects.Unicode:
+		// _Py_SourceAsString routes a str through PyUnicode_AsUTF8AndSize,
+		// the strict utf-8 encoder. A source string carrying a lone
+		// surrogate (e.g. the console fed "'\ud800'") therefore raises
+		// UnicodeEncodeError here, before the tokenizer ever runs, rather
+		// than surfacing as the lexer's "Non-UTF-8 code" SyntaxError.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString
+		// (PyUnicode_AsUTF8AndSize)
+		if _, _, encErr := codecs.Encode(v.Value(), "utf-8", "strict"); encErr != nil {
+			return "", false, encErr
+		}
 		s = v.Value()
 		isUnicode = true
 	case *objects.Bytes:
