@@ -125,14 +125,14 @@ test_traceback	done	v0.12.7	370/370 green
 test_abstract_numbers	ready	v0.4.0	7/7 pass
 test_bool	ready	v0.2.0	31/31 pass
 test_buffer	out-of-scope	-	C-level buffer protocol API
-test_builtin	ready	v0.7.0	147/147 pass (skipped=6)
-test_bytes	ready	v0.4.0	317/317 pass (skipped=8)
+test_builtin	ready	v0.13.6	133/133 pass (skipped=7); 1726 bridge: breakpoint PyErr_Clear + type-creation namespace order
+test_bytes	ready	v0.13.6	317/317 pass (skipped=9); 1726 bridge: getbuffer_with_null_view ported
 test_complex	ready	v0.4.0	37/37 pass
-test_dict	ready	v0.2.0	120/120 pass
+test_dict	ready	v0.13.6	118/120 pass (skipped=1); 1726 bridge: dict_getitem_knownhash ported. 2 documented impl-detail residuals: test_splittable_popitem (PEP 412 split tables), test_oob_indexing_dictiter_iternextitem (borrow-model iterator, spec 1727)
 test_dictviews	ready	v0.2.0	16/16 pass
 test_float	ready	v0.4.0	54/54 pass
 test_funcattrs	ready	v0.5.0	35/35 pass
-test_int	ready	v0.2.0	52/52 pass
+test_int	ready	v0.13.6	52/52 pass (skipped=7); 1726 bridge: per-interpreter int_max_str_digits snapshot/restore
 test_list	ready	v0.2.0	68/68 pass
 test_long	ready	v0.2.0	47/47 pass
 test_memoryview	ready	v0.4.0	171/171 pass (skipped=18)
