@@ -193,6 +193,14 @@ func appendConstKey(b *strings.Builder, value any) {
 			appendConstKey(b, item)
 		}
 		b.WriteString(")")
+	case ast.FrozenSet:
+		// A frozenset constant must never share a cache slot with the
+		// equivalent tuple, so it carries its own bracketing tag.
+		b.WriteString("{")
+		for _, item := range x {
+			appendConstKey(b, item)
+		}
+		b.WriteString("}")
 	default:
 		// Inner code units and any other reference-typed value get a
 		// pointer-identity tag so two distinct objects never collide

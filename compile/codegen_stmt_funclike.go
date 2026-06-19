@@ -329,10 +329,13 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 }
 
 // declareArgs registers each parameter in the per-unit varnames pool
-// in declaration order: posonly, args, varargs, kwonly, kwargs.
-// Mirrors CPython's compiler_arguments.
+// in the same order the symtable adds them: posonly, args, kwonly,
+// vararg, kwarg. This is what fixes co_varnames so *args / **kwargs
+// land after the keyword-only slots, matching CPython's
+// symtable_visit_arguments name order (which is what compile.c reads
+// to build u_varnames).
 //
-// CPython: Python/compile.c compiler_arguments
+// CPython: Python/symtable.c:2884 symtable_visit_arguments
 func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	for _, a := range args.Posonlyargs {
 		c.declareArg(a.Arg)
@@ -340,11 +343,11 @@ func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	for _, a := range args.Args {
 		c.declareArg(a.Arg)
 	}
-	if args.Vararg != nil {
-		c.declareArg(args.Vararg.Arg)
-	}
 	for _, a := range args.Kwonlyargs {
 		c.declareArg(a.Arg)
+	}
+	if args.Vararg != nil {
+		c.declareArg(args.Vararg.Arg)
 	}
 	if args.Kwarg != nil {
 		c.declareArg(args.Kwarg.Arg)

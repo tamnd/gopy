@@ -150,6 +150,39 @@ func getStackEffects(op Opcode, oparg int32, jump bool, effects *stackEffects) e
 	return nil
 }
 
+// InvalidStackEffect marks an opcode/oparg pair with no defined stack
+// effect, mirroring PY_INVALID_STACK_EFFECT (INT_MAX).
+//
+// CPython: Include/cpython/compile.h:48 PY_INVALID_STACK_EFFECT
+const InvalidStackEffect = int(^uint32(0) >> 1)
+
+// OpcodeStackEffectWithJump returns the net stack effect of opcode for
+// the given oparg. jump selects the branch column: -1 (None, the
+// default), 0 (not taken), or 1 (taken). Unknown opcodes or opargs
+// return InvalidStackEffect.
+//
+// CPython: Python/flowgraph.c:4086 PyCompile_OpcodeStackEffectWithJump
+func OpcodeStackEffectWithJump(opcode int, oparg int32, jump int) int {
+	if opcode < 0 || opcode > maxPseudoOpcode {
+		return InvalidStackEffect
+	}
+	op := Opcode(opcode)
+	// Specialized instructions (FOR_ITER_LIST, LOAD_ATTR_SLOT, ...) carry
+	// no arity row and fall out of getStackEffects as invalid, matching
+	// CPython's _PyOpcode_Deopt[opcode] != opcode early-out.
+	var effects stackEffects
+	if err := getStackEffects(op, oparg, jump != 0, &effects); err != nil {
+		return InvalidStackEffect
+	}
+	return effects.Net
+}
+
+// maxPseudoOpcode bounds the pseudo-opcode range; IS_VALID_OPCODE
+// accepts opcode < 267.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h IS_VALID_OPCODE
+const maxPseudoOpcode = 266
+
 // isBlockPushOpcode mirrors IS_BLOCK_PUSH_OPCODE: SETUP_FINALLY,
 // SETUP_WITH, SETUP_CLEANUP push a try/with handler onto the block
 // stack and contribute a non-zero effect only when the implicit
@@ -233,6 +266,8 @@ func constI(n int) func(int32) int { return func(int32) int { return n } }
 // CPython: Include/internal/pycore_opcode_metadata.h
 // _PyOpcode_num_popped / _PyOpcode_num_pushed switches.
 var opcodeArity = map[Opcode]arityEntry{
+	CACHE:                             arity(0, 0),
+	EXTENDED_ARG:                      arity(0, 0),
 	NOP:                               arity(0, 0),
 	RESUME:                            arity(0, 0),
 	POP_TOP:                           arity(1, 0),

@@ -119,6 +119,42 @@ func stringsAsTuple(ss []string) *Tuple {
 	return NewTuple(items)
 }
 
+// WrapConstStr lifts a string constant into a *Unicode, interning it
+// when it qualifies. CPython interns identifier-like string constants
+// when the code object is built (intern_constants, recursing into
+// tuples and frozensets); gopy materializes consts lazily, so every
+// path that turns a const string into an Object routes through here so
+// the interning is uniform whether the const is read via co_consts or
+// loaded by the VM.
+//
+// CPython: Objects/codeobject.c:203 intern_constants
+func WrapConstStr(s string) Object {
+	if shouldInternString(s) {
+		return InternFromString(s)
+	}
+	return NewStr(s)
+}
+
+// shouldInternString reports whether a string constant qualifies for
+// interning: ASCII and made up only of [a-zA-Z0-9_]. This is the
+// default-build (non free-threaded) predicate; the free-threaded build
+// interns every string constant.
+//
+// CPython: Objects/codeobject.c:117 should_intern_string
+func shouldInternString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			return false
+		}
+		isalnum := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !isalnum && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 // wrapConstAttr lifts one raw constant into an Object. Mirrors
 // vm.wrapConst for the scalar types marshal recovers, but lives in
 // objects/ so codeGetAttr can use it without an import cycle. Compile
@@ -143,7 +179,7 @@ func wrapConstAttr(v any) Object {
 	case complex128:
 		return NewComplex(real(x), imag(x))
 	case string:
-		return NewStr(x)
+		return WrapConstStr(x)
 	case []byte:
 		return NewBytes(x)
 	case *Code:

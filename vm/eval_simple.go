@@ -169,7 +169,7 @@ func wrapConst(v any) (objects.Object, error) {
 	case float64:
 		return objects.NewFloat(x), nil
 	case string:
-		return objects.NewStr(x), nil
+		return objects.WrapConstStr(x), nil
 	case *compile.ConstTuple:
 		items := make([]objects.Object, len(x.Values))
 		for i, raw := range x.Values {

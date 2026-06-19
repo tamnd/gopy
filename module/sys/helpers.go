@@ -355,10 +355,10 @@ func isTypeError(err error) bool {
 	return strings.HasPrefix(err.Error(), "TypeError:")
 }
 
-// makeIntern ports sys.intern. The interned table lands with the
-// unicodeobject port (1616); until then gopy returns the input string
-// unchanged so callers see the round-trip semantics. Non-str input
-// raises TypeError per CPython.
+// makeIntern ports sys.intern. It runs the argument through the global
+// intern table (PyUnicode_InternInPlace) and hands back the canonical
+// pointer, so two equal strings that are both interned compare identical.
+// Non-str input raises TypeError per CPython.
 //
 // CPython: Python/sysmodule.c:1004 sys_intern_impl
 func makeIntern(ts *state.Thread) func([]objects.Object, map[string]objects.Object) (objects.Object, error) {
@@ -371,6 +371,8 @@ func makeIntern(ts *state.Thread) func([]objects.Object, map[string]objects.Obje
 			errors.SetString(ts, errors.PyExc_TypeError, msg)
 			return nil, fmt.Errorf("TypeError: %s", msg)
 		}
-		return args[0], nil
+		s := args[0]
+		objects.InternInPlace(&s)
+		return s, nil
 	}
 }

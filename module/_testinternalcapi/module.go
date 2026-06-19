@@ -37,6 +37,10 @@ func buildModule() (*objects.Module, error) {
 		{"run_in_subinterp_with_config", runInSubinterpWithConfig},
 		{"clear_extension", clearExtension},
 		{"dict_getitem_knownhash", dictGetitemKnownhash},
+		{"get_code_var_counts", getCodeVarCounts},
+		{"get_co_localskinds", getCoLocalskinds},
+		{"code_returns_only_none", codeReturnsOnlyNone},
+		{"verify_stateless_code", verifyStatelessCode},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {

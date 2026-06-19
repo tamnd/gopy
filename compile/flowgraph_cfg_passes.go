@@ -1819,7 +1819,7 @@ func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
 //
 // CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
 func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
-	if consts == nil || len(bb.Instr) < 3 {
+	if consts == nil || len(bb.Instr) == 0 {
 		return 0
 	}
 	folded := 0
@@ -1828,17 +1828,53 @@ func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
 		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
 			continue
 		}
+		var nextop Opcode
+		if i+1 < len(bb.Instr) {
+			nextop = bb.Instr[i+1].Op
+		}
+		// A literal list/set feeding a "for" loop, comprehension or
+		// "in"/"not in" test can become an immutable tuple/frozenset
+		// constant regardless of length; otherwise the prelude rewrite
+		// only pays off at MIN_CONST_SEQUENCE_SIZE elements.
+		containsOrIter := nextop == GET_ITER || nextop == CONTAINS_OP
 		n := int(ins.Oparg)
-		if n < minConstSequenceSize || i < n {
+		if n > stackUseGuideline || (n < minConstSequenceSize && !containsOrIter) {
+			continue
+		}
+		if i < n {
 			continue
 		}
 		start := i - n
 		ok, values := basicblockCollectConstLoaders(bb, *consts, start, n)
 		if !ok {
+			// Not a const sequence: a list feeding for/in can still drop
+			// to a tuple, which is cheaper to build than a list.
+			if containsOrIter && ins.Op == BUILD_LIST {
+				ins.Op = BUILD_TUPLE
+			}
 			continue
 		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
-		idx := appendConst(consts, tuple)
+		var constResult any
+		if ins.Op == BUILD_SET {
+			constResult = ast.FrozenSet(append([]any(nil), values...))
+		} else {
+			constResult = &ConstTuple{Values: append([]any(nil), values...)}
+		}
+		idx := appendConst(consts, constResult)
+		if containsOrIter {
+			// Replace the whole `LOAD_CONST...; BUILD_x N` run with a
+			// single LOAD_CONST of the folded constant.
+			for k := start; k < i; k++ {
+				bb.Instr[k].Op = NOP
+				bb.Instr[k].Oparg = 0
+				bb.Instr[k].Target = nil
+				bb.Instr[k].Loc = noLocation
+			}
+			ins.Op = LOAD_CONST
+			ins.Oparg = int32(idx)
+			folded++
+			continue
+		}
 		for k := start; k < i-2; k++ {
 			bb.Instr[k].Op = NOP
 			bb.Instr[k].Oparg = 0

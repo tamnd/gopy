@@ -723,7 +723,9 @@ func internShim(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if args[0].Type() != objects.StrType() {
 		return nil, errInternType(args[0].Type().Name)
 	}
-	return args[0], nil
+	s := args[0]
+	objects.InternInPlace(&s)
+	return s, nil
 }
 
 func errInternArity(n int) error {
