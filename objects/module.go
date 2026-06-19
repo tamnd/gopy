@@ -15,6 +15,10 @@ type Module struct {
 	Header
 	dict  *Dict
 	state any // per-module state for Go-implemented modules
+	// dictReleased records that tp_clear or tp_dealloc has already dropped
+	// the module's reference to md_dict, so the second of the two (the
+	// collector clears then the last Decref deallocs) does not double-drop.
+	dictReleased bool
 	// Initializing is true while the module body is executing. When set,
 	// moduleGetAnnotations does not cache its result so that circular
 	// imports see the annotations that existed at the point of access
@@ -41,6 +45,16 @@ func init() {
 	//
 	// CPython: Objects/moduleobject.c:1416 PyModule_Type (tp_dictoffset set)
 	ModuleType.HasDict = true
+	// PyModule_Type ships a __dict__ getset in module_getset. A bare module
+	// answers __dict__ through moduleGetattr, but a ModuleType subclass that
+	// reaches __dict__ via the generic path (importlib.util._LazyModule does
+	// `object.__getattribute__(self, '__dict__')`) needs the descriptor in
+	// the MRO. type_new_descriptors skips installing one on the subclass
+	// because the dict slot is inherited, so the descriptor must live on
+	// ModuleType itself.
+	//
+	// CPython: Objects/moduleobject.c:728 module_getset (__dict__ getset)
+	installInstanceDictDescr(ModuleType)
 	// A module also carries md_weaklist (a non-zero tp_weaklistoffset), so
 	// a subclass inherits the weakref slot rather than adding its own. This
 	// keeps a ModuleType subclass layout-compatible with module, which
@@ -50,6 +64,27 @@ func init() {
 	ModuleType.HasWeakref = true
 	ModuleType.Repr = moduleRepr
 	ModuleType.Str = moduleRepr
+	// A module owns its md_dict, so the cycle collector must follow that
+	// edge: a module whose __dict__ holds functions whose __globals__ is
+	// that same dict forms a reference cycle (the common case for any
+	// executed module). Without tp_traverse the collector treats md_dict
+	// as externally rooted and never reclaims the cycle, so __del__ of a
+	// cyclic object defined in the module body would never run.
+	//
+	// CPython: Objects/moduleobject.c:739 module_traverse
+	ModuleType.TpTraverse = moduleTraverse
+	// module_clear releases md_dict so a module caught in a reference cycle
+	// (its __dict__ holds a function whose __globals__ is that same dict)
+	// can be torn down by the collector. module_dealloc drops the same
+	// reference on the last refcount, which is the path `del m` takes: the
+	// module is not itself part of the cycle, so it reaches refcount zero
+	// directly, and without dealloc its +1 on md_dict would stay live and
+	// pin the whole {dict, classes, functions} cycle as externally rooted.
+	//
+	// CPython: Objects/moduleobject.c:737 module_clear
+	// CPython: Objects/moduleobject.c:752 module_dealloc
+	ModuleType.TpClear = moduleClear
+	ModuleType.Dealloc = moduleDealloc
 	// Modules are hashable by identity in CPython (tp_hash = PyObject_GenericHash).
 	// CPython: Objects/moduleobject.c:766 PyModule_Type (tp_hash not overridden → id-based)
 	ModuleType.Hash = IdentityHash
@@ -62,6 +97,9 @@ func init() {
 	ModuleType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
 		m := &Module{dict: NewDict()}
 		m.init(cls)
+		if h := GCTrackHook; h != nil {
+			h(m)
+		}
 		return m, nil
 	}
 
@@ -162,6 +200,9 @@ func NewModule(name string) *Module {
 	m := &Module{dict: NewDict()}
 	m.init(ModuleType)
 	_ = m.dict.SetItem(NewStr("__name__"), NewStr(name))
+	if h := GCTrackHook; h != nil {
+		h(m)
+	}
 	return m
 }
 
@@ -180,7 +221,69 @@ func NewModuleWithDict(name string, d *Dict) *Module {
 	if has, _ := d.Contains(NewStr("__name__")); !has {
 		_ = d.SetItem(NewStr("__name__"), NewStr(name))
 	}
+	if h := GCTrackHook; h != nil {
+		h(m)
+	}
 	return m
+}
+
+// moduleTraverse visits the module's __dict__ (md_dict) and per-module
+// state so the cycle collector can account for the references a module
+// holds. CPython's module_traverse also visits md_dict.
+//
+// CPython: Objects/moduleobject.c:739 module_traverse
+func moduleTraverse(o Object, visit Visitor) error {
+	m := o.(*Module)
+	if m.dict != nil {
+		if err := visit(m.dict); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// moduleClear is the tp_clear slot. It releases md_dict so a module
+// trapped in a reference cycle becomes collectible once the collector
+// proves it unreachable.
+//
+// CPython: Objects/moduleobject.c:737 module_clear
+func moduleClear(o Object) {
+	m, ok := o.(*Module)
+	if !ok || m.dictReleased {
+		return
+	}
+	// Drop the reference but keep the pointer: gopy leaves refcount-zero
+	// objects on the Go heap, so a stray borrowed reference that still
+	// reaches this module after teardown reads a valid (if logically dead)
+	// namespace rather than dereferencing nil. Py_CLEAR nulls md_dict
+	// because CPython frees the storage immediately; gopy cannot.
+	//
+	// CPython: Objects/moduleobject.c:737 module_clear (Py_CLEAR md_dict)
+	if m.dict != nil {
+		m.dictReleased = true
+		Decref(m.dict)
+	}
+}
+
+// moduleDealloc is the tp_dealloc slot. It untracks the module from the
+// collector and drops its reference to md_dict. `del m` on a module that
+// is not itself part of a cycle takes this path; releasing md_dict here
+// removes the external +1 that would otherwise keep a module-body cycle
+// (functions whose __globals__ is md_dict) from ever collapsing.
+//
+// CPython: Objects/moduleobject.c:752 module_dealloc
+func moduleDealloc(o Object) {
+	m, ok := o.(*Module)
+	if !ok {
+		return
+	}
+	if h := GCUntrackHook; h != nil {
+		h(m)
+	}
+	if m.dict != nil && !m.dictReleased {
+		m.dictReleased = true
+		Decref(m.dict)
+	}
 }
 
 // Dict returns the module's attribute dict (__dict__).
@@ -252,6 +355,16 @@ func (m *Module) State() any { return m.state }
 //
 // CPython: Objects/moduleobject.c:486 PyModule_SetState (gopy analog)
 func (m *Module) SetState(s any) { m.state = s }
+
+// ModuleAttrErrorHook, when set, builds the AttributeError raised for a
+// module attribute miss. The import system (package imp) installs it so
+// the message can surface the stdlib-shadowing and circular-import hints
+// from _Py_module_getattro_impl, which depend on sys state the objects
+// package cannot reach directly. Nil in unit tests that exercise objects
+// in isolation; module.go then falls back to the plain message.
+//
+// CPython: Objects/moduleobject.c:1024 _Py_module_getattro_impl
+var ModuleAttrErrorHook func(m *Module, name string) error
 
 // moduleGetattr implements __getattr__ for module objects. It checks
 // __dict__ first, then falls back to the PEP 562 __getattr__ callable
@@ -335,9 +448,16 @@ func moduleGetattr(o Object, name Object) (Object, error) {
 	if gaErr == nil {
 		return callOneArg(gaObj, name)
 	}
-	// Best-effort error message mirroring module_getattro's tail.
+	// Best-effort error message mirroring module_getattro's tail. The
+	// import system registers ModuleAttrErrorHook to surface the
+	// stdlib-shadowing and circular-import hints (_Py_module_getattro_impl),
+	// which need sys.path / sys.flags / sys.stdlib_module_names access the
+	// objects package cannot reach without an import cycle.
 	//
-	// CPython: Objects/moduleobject.c:1042 PyErr_Format module has no attribute
+	// CPython: Objects/moduleobject.c:1024 _Py_module_getattro_impl (error tail)
+	if ModuleAttrErrorHook != nil {
+		return nil, ModuleAttrErrorHook(m, key)
+	}
 	if modName := moduleStrAttr(m, "__name__"); modName != "" {
 		return nil, fmt.Errorf("AttributeError: module '%s' has no attribute '%s'", modName, key)
 	}
@@ -418,30 +538,41 @@ func moduleSetattr(o Object, name, value Object) error {
 	return m.dict.SetItem(name, value)
 }
 
-// moduleRepr returns the canonical module repr.
-// Four forms mirror CPython:
-//   - <module 'name' from 'file'> when __file__ is set
-//   - <module 'name' (built-in)> when __spec__.origin == 'built-in'
-//   - <module 'name' (frozen)> when __spec__.origin == 'frozen'
-//   - <module 'name'> otherwise
+// moduleRepr returns a module's repr by forwarding to the vendored
+// importlib._bootstrap._module_repr, exactly as CPython's C module_repr
+// delegates through _PyImport_ImportlibModuleRepr. The Python
+// implementation handles the __spec__, __loader__ and __file__ variants
+// (including namespace packages and the '?' name fallback) so the
+// rendering matches CPython byte-for-byte.
 //
-// CPython: Objects/moduleobject.c:228 module_repr
+// During early bootstrap (before vm.init wires the hook) the importlib
+// machinery is not yet usable, so fall back to a minimal Go rendering
+// that mirrors the catch-all branch of _module_repr.
+//
+// CPython: Objects/moduleobject.c:848 module_repr
+// CPython: Python/import.c:3346 _PyImport_ImportlibModuleRepr
 func moduleRepr(o Object) (string, error) {
+	if ModuleReprHook != nil {
+		return ModuleReprHook(o)
+	}
+	return ModuleReprFallback(o)
+}
+
+// ModuleReprFallback renders the catch-all branch of
+// importlib._bootstrap._module_repr without importing anything, for use
+// before the import machinery is available.
+//
+// CPython: Lib/importlib/_bootstrap.py:544 _module_repr
+func ModuleReprFallback(o Object) (string, error) {
 	m := o.(*Module)
-	name := moduleStrAttr(m, "__name__")
+	name := "?"
+	if n, err := m.dict.GetItem(NewStr("__name__")); err == nil && n != nil {
+		if s, ok := n.(*Unicode); ok {
+			name = s.v
+		}
+	}
 	if file := moduleStrAttr(m, "__file__"); file != "" {
 		return fmt.Sprintf("<module '%s' from '%s'>", name, file), nil
-	}
-	if spec, err := m.dict.GetItem(NewStr("__spec__")); err == nil && spec != nil {
-		if sm, ok := spec.(*Module); ok {
-			origin := moduleStrAttr(sm, "origin")
-			if origin == "built-in" {
-				return fmt.Sprintf("<module '%s' (built-in)>", name), nil
-			}
-			if origin == "frozen" {
-				return fmt.Sprintf("<module '%s' (frozen)>", name), nil
-			}
-		}
 	}
 	return fmt.Sprintf("<module '%s'>", name), nil
 }

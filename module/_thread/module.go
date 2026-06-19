@@ -50,6 +50,7 @@ func buildModule() (*objects.Module, error) {
 		{"_is_main_interpreter", threadIsMainInterpreter},
 		{"stack_size", threadStackSize},
 		{"_count", threadCount},
+		{"_excepthook", threadExceptHook},
 	}
 	for _, e := range entries {
 		bf := objects.NewBuiltinFunction(e.name, e.fn)
@@ -94,6 +95,13 @@ func buildModule() (*objects.Module, error) {
 	}
 	// _local is the thread-local storage type; provide a minimal stub.
 	if err := d.SetItem(objects.NewStr("_local"), localType); err != nil {
+		return nil, err
+	}
+
+	// _ExceptHookArgs: struct-sequence threading.excepthook receives.
+	//
+	// CPython: Modules/_threadmodule.c:2710 PyStructSequence_NewType
+	if err := d.SetItem(objects.NewStr("_ExceptHookArgs"), exceptHookArgsType); err != nil {
 		return nil, err
 	}
 
@@ -491,9 +499,21 @@ func threadStartNewThread(args []objects.Object, kwargs map[string]objects.Objec
 	go func() {
 		defer atomic.AddInt64(&activeThreadCount, -1)
 		if enter != nil {
+			// The identity is already known synchronously (the spawn hook
+			// returned it on the parent goroutine), so hand it back before
+			// enter() takes the GIL. enter() blocks until the GIL is free,
+			// and the parent is the holder: it only releases the lock once
+			// it returns from start_new_thread and later blocks (on a join,
+			// lock, or sleep) through Py_BEGIN_ALLOW_THREADS. Sending the id
+			// first lets the parent get that far instead of deadlocking
+			// against a child that cannot publish its id until it owns a GIL
+			// the parent still holds.
+			//
+			// CPython: Modules/_threadmodule.c:1166 thread_PyThread_start_new_thread
+			// returns the ident before the bootstrap thread runs.
+			idCh <- ident
 			enter()
 			defer leave()
-			idCh <- ident
 		} else {
 			idCh <- goid()
 		}

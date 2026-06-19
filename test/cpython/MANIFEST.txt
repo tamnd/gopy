@@ -173,18 +173,18 @@ test__interpchannels	ready	post-0.12	73/73 pass (skipped=5)
 test__interpreters	ready	post-0.12	69/69 pass (skipped=3)
 test_crossinterp	ready	post-0.12	102/102 pass (skipped=1)
 test_frozen	ready	v0.8.0	3/3 pass
-test_import/	ready	v0.8.0	full import system panel
-test_importlib/	ready	v0.8.0	importlib package — run via python -m test from CPython tree
+test_import/	ready	v0.8.0	118/118 pass (skipped=4); run via -m unittest test.test_import
+test_importlib/	ready	v0.8.0	1346/1346 pass (skipped=10); run via -m unittest test.test_importlib
 test_interpreters/	ready	post-0.12	167/167 pass (skipped=5)
 test_module	ready	v0.7.0	package dir only (no flat test_module.py in CPython 3.14); see test_module/
-test_module/	ready	v0.7.0	module-level fixtures
+test_module/	ready	v0.7.0	39/39 pass; run via -m unittest test.test_module
 test_modulefinder	ready	v0.8.0	17/17 pass
 test_pkg	ready	v0.8.0	8/8 pass
 test_pkgutil	ready	v0.8.0	21/21 pass; requires test_import/data/package3+4 fixtures (vendored alongside)
 test_pyclbr	ready	v0.8.0	6/6 pass
 test_runpy	ready	v0.10.1	40/40 pass
 test_zipapp	ready	v0.10.1	35/35 pass
-test_zipimport	ready	v0.8.0	91/91 pass (skipped=2)
+test_zipimport	ready	v0.8.0	91/91 pass (skipped=4)
 test_zipimport_support	ready	v0.8.0	4/4 pass
 
 # ---- GC / weakref --------------------------------------------------

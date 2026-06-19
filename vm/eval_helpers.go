@@ -275,12 +275,24 @@ func (e *evalState) importName(name, fromlist, level objects.Object) objects.Obj
 	mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, lvl)
 	if ierr != nil {
 		if errors.Is(ierr, imp.ErrModuleNotFound) {
-			pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
-				fmt.Sprintf("No module named %q", modname))
+			pyerrors.SetModuleNotFound(e.ts, modname)
 		}
 		e.pendingErr = ierr
 		return nil
 	}
+	// A non-empty fromlist drives _handle_fromlist: force-import any
+	// submodule named in the fromlist that is not already an attribute,
+	// so a later IMPORT_FROM/import_all_from finds it via plain getattr.
+	// CPython runs this inside __import__ before returning the module.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1463 _handle_fromlist
+	if !isEmptyFromlist(fromlist) {
+		if herr := e.handleFromlist(mod, fromlist, false); herr != nil {
+			e.pendingErr = herr
+			return nil
+		}
+	}
+
 	// When fromlist is empty (`import a.b.c`) return the top-level
 	// package; otherwise return the deepest module so IMPORT_FROM can
 	// extract attributes.

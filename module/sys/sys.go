@@ -16,9 +16,13 @@
 package sys
 
 import (
+	"fmt"
+	"runtime"
+	"sort"
 	"strconv"
 
 	"github.com/tamnd/gopy/build"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -51,6 +55,18 @@ func Init() (*objects.Dict, error) {
 	if err := setStr(d, "float_repr_style", "short"); err != nil {
 		return nil, err
 	}
+	// sys.winver is the Windows-only DLL version string (MS_DLL_ID, the
+	// major.minor "3.14"). site._get_path reads it to build the per-user
+	// site-packages path under os.name == 'nt', so the bootstrap needs it
+	// before site runs. CPython sets it only on Windows.
+	//
+	// CPython: Python/sysmodule.c:3869 SET_SYS_FROM_STRING("winver", PyWin_DLLVersionString)
+	if runtime.GOOS == "windows" {
+		winver := strconv.Itoa(build.PythonMajorVersion) + "." + strconv.Itoa(build.PythonMinorVersion)
+		if err := setStr(d, "winver", winver); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := setInt(d, "hexversion", hexVersion()); err != nil {
 		return nil, err
@@ -74,7 +90,15 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "builtin_module_names", builtinModuleNames()); err != nil {
 		return nil, err
 	}
-	if err := setItem(d, "stdlib_module_names", objects.NewTuple(nil)); err != nil {
+	stdlibNames := make([]objects.Object, len(stdlibModuleNames))
+	for i, n := range stdlibModuleNames {
+		stdlibNames[i] = objects.NewStr(n)
+	}
+	stdlibSet, err := objects.NewFrozenset(stdlibNames)
+	if err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "stdlib_module_names", stdlibSet); err != nil {
 		return nil, err
 	}
 	if err := setItem(d, "hash_info", hashInfo()); err != nil {
@@ -117,6 +141,69 @@ func Init() (*objects.Dict, error) {
 	if err := setItem(d, "getdefaultencoding", objects.NewBuiltinFunction("getdefaultencoding", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		return objects.NewStr("utf-8"), nil
 	})); err != nil {
+		return nil, err
+	}
+
+	// Private helper that strips the __dict__ and __weakref__ descriptors
+	// from a mutable type's dict and refreshes its caches. dataclasses
+	// calls it in _add_slots before rebuilding the class with __slots__,
+	// so the original (descriptor-bearing) class can be garbage collected
+	// (gh-135228). Immutable types are rejected.
+	//
+	// CPython: Python/sysmodule.c:2658 sys__clear_type_descriptors_impl
+	if err := setItem(d, "_clear_type_descriptors", objects.NewBuiltinFunction("_clear_type_descriptors", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: _clear_type_descriptors() takes exactly one argument (%d given)", len(args))
+		}
+		t, ok := args[0].(*objects.Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: _clear_type_descriptors() argument 1 must be type, not %s", args[0].Type().Name)
+		}
+		if t.TpFlags&objects.TpFlagImmutable != 0 {
+			return nil, fmt.Errorf("TypeError: argument is immutable")
+		}
+		objects.DelTypeDescr(t, "__dict__")
+		objects.DelTypeDescr(t, "__weakref__")
+		// Fire PyType_Modified unconditionally, matching CPython which
+		// calls it after the pops even when neither descriptor was present.
+		t.InvalidateVersionTag()
+		return objects.None(), nil
+	})); err != nil {
+		return nil, err
+	}
+
+	// Import-system state the runtime exposes at the top level. CPython
+	// stamps these in PySys_Create / the import bootstrap; runpy and
+	// pkgutil read them directly. gopy's import is Go-side so the hooks
+	// list and the importer cache stay empty, but the source loaders do
+	// write __pycache__/<name>.<tag>.pyc files, so the default matches
+	// CPython: bytecode writing is on unless -B / PYTHONDONTWRITEBYTECODE.
+	//
+	// CPython: Python/sysmodule.c _PySys_AddObject path_hooks/path_importer_cache
+	if err := setItem(d, "dont_write_bytecode", objects.NewBool(false)); err != nil {
+		return nil, err
+	}
+	// pycache_prefix controls where the import machinery writes .pyc
+	// caches; None means alongside the source. cache_from_source reads it.
+	//
+	// CPython: Python/sysmodule.c sets sys.pycache_prefix from PyConfig
+	if err := setItem(d, "pycache_prefix", objects.None()); err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "path_hooks", objects.NewList(nil)); err != nil {
+		return nil, err
+	}
+	// meta_path is the meta-path finder list. CPython seeds it with
+	// BuiltinImporter, FrozenImporter and PathFinder; gopy resolves those
+	// three Go-side, so the list starts empty. It still has to exist as a
+	// real list: import_helper saves and restores it around every test,
+	// and user code is free to append custom finders.
+	//
+	// CPython: Python/pylifecycle.c init_importlib (sys.meta_path)
+	if err := setItem(d, "meta_path", objects.NewList(nil)); err != nil {
+		return nil, err
+	}
+	if err := setItem(d, "path_importer_cache", objects.NewDict()); err != nil {
 		return nil, err
 	}
 
@@ -193,13 +280,28 @@ func maxsize() int64 {
 	return 1<<31 - 1
 }
 
-// versionInfo returns sys.version_info as a five-tuple
-// (major, minor, micro, releaselevel, serial). The struct-sequence
-// named-tuple lands with 1651-sys-C; v0.7 uses a plain tuple.
+// versionInfoType is the struct-sequence type behind sys.version_info:
+// a five-field named tuple (major, minor, micro, releaselevel, serial)
+// whose type repr reads sys.version_info(major=3, minor=14, ...). It
+// subclasses tuple so isinstance(sys.version_info, tuple) holds and the
+// values stay index-addressable, while sys.version_info.minor and the
+// other named members resolve through the struct-sequence members.
+//
+// CPython: Python/sysmodule.c:850 version_info_type / make_version_info
+var versionInfoType = objects.NewStructSeqType("sys.version_info", []objects.StructSeqField{
+	{Name: "major", Doc: "Major release number"},
+	{Name: "minor", Doc: "Minor release number"},
+	{Name: "micro", Doc: "Patch release number"},
+	{Name: "releaselevel", Doc: "'alpha', 'beta', 'candidate', or 'final'"},
+	{Name: "serial", Doc: "Serial release number"},
+})
+
+// versionInfo returns sys.version_info as the named struct-sequence
+// (major, minor, micro, releaselevel, serial).
 //
 // CPython: Python/sysmodule.c:3884 make_version_info
-func versionInfo() *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
+func versionInfo() *objects.StructSeq {
+	return objects.NewStructSeq(versionInfoType, []objects.Object{
 		objects.NewInt(int64(build.PythonMajorVersion)),
 		objects.NewInt(int64(build.PythonMinorVersion)),
 		objects.NewInt(0),
@@ -242,17 +344,29 @@ func implementation() *objects.Namespace {
 	return n
 }
 
-// builtinModuleNames returns the tuple of module names that are
-// compiled into the interpreter. Until 1623 lands the import system
-// the list contains just the modules gopy initializes statically
-// (builtins, sys). The slice grows as 1651 lands more modules.
+// builtinModuleNames returns the sorted tuple of module names compiled
+// into the interpreter. CPython builds this directly from
+// PyImport_Inittab; gopy statically links every extension module into
+// the binary, so the table is the inittab snapshot minus the handful of
+// pure-Python modules gopy registers there only as an import shortcut
+// (imp.ShadowedByStdlib), keeping this list in lockstep with
+// _imp.is_builtin.
 //
 // CPython: Python/sysmodule.c:3859 list_builtin_module_names
 func builtinModuleNames() *objects.Tuple {
-	return objects.NewTuple([]objects.Object{
-		objects.NewStr("builtins"),
-		objects.NewStr("sys"),
-	})
+	names := make([]string, 0, 64)
+	for _, e := range imp.InittabSnapshot() {
+		if imp.ShadowedByStdlib(e.Name) {
+			continue
+		}
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	items := make([]objects.Object, len(names))
+	for i, n := range names {
+		items[i] = objects.NewStr(n)
+	}
+	return objects.NewTuple(items)
 }
 
 // hashInfo is sys.hash_info as a SimpleNamespace. The field order

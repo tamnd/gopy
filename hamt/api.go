@@ -25,6 +25,7 @@ type Hamt struct {
 func New() *Hamt {
 	h := &Hamt{root: emptyBitmap}
 	h.Init(HamtType)
+	objects.Incref(emptyBitmap) // h owns +1 on its root (no-op: immortal)
 	return h
 }
 
@@ -43,9 +44,11 @@ func (h *Hamt) Assoc(key, val objects.Object) (*Hamt, error) {
 		return nil, err
 	}
 	if newRoot == h.root {
+		objects.Decref(newRoot) // drop the Incref(self) from the unchanged path
+		objects.Incref(h)       // _PyHamt_Assoc returns a new reference
 		return h, nil
 	}
-	out := &Hamt{root: newRoot, count: h.count}
+	out := &Hamt{root: newRoot, count: h.count} // adopt owned newRoot
 	if addedLeaf {
 		out.count++
 	}
@@ -67,11 +70,12 @@ func (h *Hamt) Without(key objects.Object) (*Hamt, bool, error) {
 	case wError:
 		return nil, false, err
 	case wNotFound:
+		objects.Incref(h) // _PyHamt_Without returns a new reference
 		return h, false, nil
 	case wEmpty:
 		return New(), true, nil
 	case wNewNode:
-		out := &Hamt{root: newRoot, count: h.count - 1}
+		out := &Hamt{root: newRoot, count: h.count - 1} // adopt owned newRoot
 		out.Init(HamtType)
 		return out, true, nil
 	default:

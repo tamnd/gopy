@@ -17,6 +17,7 @@ import (
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/monitor"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
@@ -408,6 +409,28 @@ func (e *evalState) run() (objects.Object, error) {
 			if e.handleException(err) {
 				continue
 			}
+			// No handler in this frame: the exception propagates to the
+			// caller and this activation record is about to be torn down.
+			// CPython's exception_unwind clears the whole frame (every
+			// remaining operand-stack temporary is Py_XDECREF'd) before
+			// _PyEvalFrameClearAndPop hands control up. gopy otherwise
+			// defers that release to FrameStack.Pop -> frame.Clear, which
+			// runs only after chunk.Pop has snapshotted the frame for any
+			// live tb_frame wrapper. A traceback attached during this same
+			// unwind wraps this very frame, so a stale exc-info temporary
+			// still sitting on the operand stack would be copied (and
+			// Incref'd) into the snapshot, forming a traceback -> snapshot
+			// -> operand-stack -> traceback cycle that pins the frame's
+			// locals (e.g. a `with _ModuleLockManager(name)` manager) long
+			// after the exception itself is gone. Releasing the operand
+			// stack here matches CPython and leaves the snapshot to capture
+			// only fast locals / cells / frees, exactly what tb_frame
+			// exposes.
+			//
+			// CPython: Python/ceval.c exception_unwind (_PyEvalFrameClearAndPop)
+			if e.f.Owner != frame.OwnedByGenerator {
+				e.f.DropStack(e.f.StackTop)
+			}
 			return nil, err
 		}
 		e.f.InstrPtr = next
@@ -474,6 +497,24 @@ func (e *evalState) advance() int {
 		return ip + 2
 	}
 	op := compile.Opcode(code[ip])
+	// Under monitoring the live byte at ip may be INSTRUMENTED_LINE (a
+	// marker left in place while dispatch runs the hidden opcode),
+	// INSTRUMENTED_INSTRUCTION (opcode tracing hides the real opcode in
+	// the per-instruction side table), or an INSTRUMENTED_<X> variant.
+	// All three preserve the base opcode's inline cache layout, but the
+	// cache table is keyed by base opcode, so a stride computed off the
+	// raw instrumented byte would count zero cache codeunits and land one
+	// codeunit short. GetBaseCodeUnit walks the line table, then the
+	// per-instruction table, then the de-instrument / deopt maps, so it
+	// recovers the true base opcode whichever marker is on top.
+	//
+	// CPython: the JUMPBY stride is the base arm's compile-time
+	// INLINE_CACHE_ENTRIES_<OP>, independent of the instrumented byte.
+	if monitor.IsInstrumented(op) {
+		op = monitor.GetBaseCodeUnit(e.f.Code, ip/2)
+	} else {
+		op = monitor.DeInstrument(op)
+	}
 	return ip + 2 + 2*compile.CacheCount(op)
 }
 

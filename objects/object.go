@@ -38,6 +38,17 @@ func init() {
 	objectType.Repr = objectRepr
 	objectType.Str = objectStr
 	objectType.Hash = identityHash
+	// tp_getattro / tp_setattro. PyBaseObject_Type wires both to the
+	// generic implementations, so every type that does not override them
+	// inherits GenericGetAttr / GenericSetAttr. A plain object() therefore
+	// raises AttributeError ("'object' object has no attribute %r and no
+	// __dict__ for setting new attributes") on attribute assignment, not a
+	// bare TypeError.
+	//
+	// CPython: Objects/typeobject.c:7970 PyBaseObject_Type (tp_getattro =
+	// PyObject_GenericGetAttr, tp_setattro = PyObject_GenericSetAttr)
+	objectType.Getattro = GenericGetAttr
+	objectType.Setattro = GenericSetAttr
 
 	// object_methods table.
 	//
@@ -986,6 +997,28 @@ func objectGetWeakref(o Object) (Object, error) {
 
 func objectGetDict(o Object) (Object, error) {
 	switch v := o.(type) {
+	case *Module:
+		// A module always carries md_dict, even a user subclass of
+		// ModuleType that never sets tp_dictoffset (HasDict false). The
+		// generic object.__getattribute__ path reaches here for
+		// `object.__getattribute__(mod, '__dict__')` (importlib's
+		// _LazyModule does exactly this), so return md_dict directly
+		// rather than gating on HasDict like the AttrDictHolder arm below.
+		//
+		// CPython: Objects/moduleobject.c module_dict getset (md_dict)
+		//
+		// PyObject_GenericGetDict hands back a new reference; the eval
+		// loop treats a getset getter's result as owned and decrefs it,
+		// so a borrowed md_dict here would drive a live module's
+		// namespace toward refcount zero and defeat the cycle collector
+		// (the module __dict__ <-> class-method __globals__ cycle never
+		// loses the under-counted reference, so __del__ never fires).
+		//
+		// CPython: Objects/object.c:1226 _PyObject_GenericGetDict
+		// (Py_XINCREF(dict) before return)
+		d := v.Dict()
+		Incref(d)
+		return d, nil
 	case *Instance:
 		if v.dict == nil {
 			if !v.Type().HasDict {
@@ -1005,6 +1038,19 @@ func objectGetDict(o Object) (Object, error) {
 		// managed dict over the inline values, leaving them to be detached
 		// in _PyObject_FreeInstanceAttributes at dealloc.
 		v.dictExposed = true
+		// Handing the dict to Python code drops the inline-values fast
+		// path: code can now store straight into the mapping (e.g.
+		// vars(self).update(...)) without routing through instanceSetAttr,
+		// so gopy can no longer keep the type's cached keys in sync. CPython
+		// materializes a combined dict here and clears values->valid, which
+		// deopts the LOAD_ATTR_*_WITH_VALUES arms; mirror that by flipping
+		// inlineValid so a class attribute can no longer be served from the
+		// cache while a direct instance store shadows it.
+		//
+		// CPython: Objects/dictobject.c:6857 make_dict_from_instance_attributes
+		//          (PyDictValues stops being valid once the dict is built)
+		v.inlineValid = false
+		Incref(v.dict)
 		return v.dict, nil
 	case *Int:
 		// The builtin int type has no tp_dictoffset, so (42).__dict__
@@ -1016,6 +1062,7 @@ func objectGetDict(o Object) (Object, error) {
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}
+		Incref(v.attrs)
 		return v.attrs, nil
 	case *Unicode:
 		if !v.Type().HasDict {
@@ -1024,6 +1071,7 @@ func objectGetDict(o Object) (Object, error) {
 		if v.attrs == nil {
 			v.attrs = NewDict()
 		}
+		Incref(v.attrs)
 		return v.attrs, nil
 	case AttrDictHolder:
 		// Subclasses of C-port types (list, bytearray, ...) carry their
@@ -1035,7 +1083,9 @@ func objectGetDict(o Object) (Object, error) {
 		if !o.Type().HasDict {
 			return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 		}
-		return v.EnsureAttrDict(), nil
+		d := v.EnsureAttrDict()
+		Incref(d)
+		return d, nil
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '__dict__'", o.Type().Name)
 }

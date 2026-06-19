@@ -64,6 +64,43 @@ func ExtendInittab(entries []InittabEntry) error {
 	return nil
 }
 
+// shadowedByStdlib lists inittab names that CPython ships as pure-Python
+// stdlib modules (.py files on sys.path), so they never appear in
+// CPython's PyImport_Inittab. gopy keeps a Go implementation in the
+// inittab as an early-bootstrap import shortcut, but the live import
+// machinery must treat them as not-built-in: BuiltinImporter declines
+// them and PathFinder loads the vendored source, so e.g.
+// 'fnmatch' in sys.builtin_module_names stays False as on a normal
+// CPython build, and is_builtin agrees with builtin_module_names.
+var shadowedByStdlib = map[string]bool{
+	"os":          true,
+	"warnings":    true,
+	"dataclasses": true,
+	"difflib":     true,
+	"fnmatch":     true,
+}
+
+// ShadowedByStdlib reports whether name is registered in the inittab only
+// as a bootstrap shortcut while CPython ships it as pure-Python stdlib,
+// so it must be reported as not-built-in by is_builtin and excluded from
+// sys.builtin_module_names.
+func ShadowedByStdlib(name string) bool {
+	return shadowedByStdlib[name]
+}
+
+// IsBuiltinName reports whether name resolves to a statically linked
+// built-in module, the membership test behind both _imp.is_builtin and
+// sys.builtin_module_names. Names shadowed by a pure-Python stdlib module
+// are excluded so they load from source the way they do on CPython.
+//
+// CPython: Python/import.c:4720 _imp_is_builtin_impl
+func IsBuiltinName(name string) bool {
+	if shadowedByStdlib[name] {
+		return false
+	}
+	return FindInitFunc(name) != nil
+}
+
 // FindInitFunc returns the InitFunc registered for name, or nil if the
 // module is not in the built-in table.
 //

@@ -1,67 +1,50 @@
-"""importlib.machinery: gopy-side stub.
+"""The machinery of importlib: finders, loaders, hooks, etc."""
 
-The CPython module re-exports loader / finder classes plus suffix
-constants from ._bootstrap and ._bootstrap_external. gopy's import
-system is implemented Go-side, so most loaders and finders aren't
-needed at the Python boundary; the SourceFileLoader re-export is
-necessary because py_compile.compile() drives it directly.
-
-When a future spec lands the full importlib bootstrap port, this file
-becomes the byte-equal vendor of Lib/importlib/machinery.py.
-
-CPython: Lib/importlib/machinery.py
-"""
-
-from importlib._bootstrap_external import (
-    FileLoader,
-    SourceFileLoader,
+from ._bootstrap import ModuleSpec
+from ._bootstrap import BuiltinImporter
+from ._bootstrap import FrozenImporter
+from ._bootstrap_external import (
+    SOURCE_SUFFIXES, BYTECODE_SUFFIXES, EXTENSION_SUFFIXES,
+    DEBUG_BYTECODE_SUFFIXES as _DEBUG_BYTECODE_SUFFIXES,
+    OPTIMIZED_BYTECODE_SUFFIXES as _OPTIMIZED_BYTECODE_SUFFIXES
 )
-
-SOURCE_SUFFIXES = ['.py']
-DEBUG_BYTECODE_SUFFIXES = ['.pyc']
-OPTIMIZED_BYTECODE_SUFFIXES = ['.pyc']
-BYTECODE_SUFFIXES = DEBUG_BYTECODE_SUFFIXES
-EXTENSION_SUFFIXES = []
+from ._bootstrap_external import WindowsRegistryFinder
+from ._bootstrap_external import PathFinder
+from ._bootstrap_external import FileFinder
+from ._bootstrap_external import SourceFileLoader
+from ._bootstrap_external import SourcelessFileLoader
+from ._bootstrap_external import ExtensionFileLoader
+from ._bootstrap_external import AppleFrameworkLoader
+from ._bootstrap_external import NamespaceLoader
 
 
 def all_suffixes():
-    """Returns a list of all recognized module suffixes for this process."""
+    """Returns a list of all recognized module suffixes for this process"""
     return SOURCE_SUFFIXES + BYTECODE_SUFFIXES + EXTENSION_SUFFIXES
 
 
-class FileFinder:
-    """Stub: gopy's import system is Go-side; pkgutil registers an
-    iterator against FileFinder but it's only consulted when the
-    user walks a package, which the spec 1711 test path doesn't.
-    """
-
-    def __init__(self, path, *loader_details):
-        self.path = path
-        self._loaders = loader_details
+__all__ = ['AppleFrameworkLoader', 'BYTECODE_SUFFIXES', 'BuiltinImporter',
+           'DEBUG_BYTECODE_SUFFIXES', 'EXTENSION_SUFFIXES',
+           'ExtensionFileLoader', 'FileFinder', 'FrozenImporter', 'ModuleSpec',
+           'NamespaceLoader', 'OPTIMIZED_BYTECODE_SUFFIXES', 'PathFinder',
+           'SOURCE_SUFFIXES', 'SourceFileLoader', 'SourcelessFileLoader',
+           'WindowsRegistryFinder', 'all_suffixes']
 
 
-class ModuleSpec:
-    """Minimal stand-in for importlib.machinery.ModuleSpec."""
+def __getattr__(name):
+    import warnings
 
-    def __init__(self, name, loader, *, origin=None, loader_state=None,
-                 is_package=None):
-        self.name = name
-        self.loader = loader
-        self.origin = origin
-        self.loader_state = loader_state
-        self.submodule_search_locations = [] if is_package else None
-        self.has_location = origin is not None
-        self.cached = None
+    if name == 'DEBUG_BYTECODE_SUFFIXES':
+        warnings.warn('importlib.machinery.DEBUG_BYTECODE_SUFFIXES is '
+                      'deprecated; use importlib.machinery.BYTECODE_SUFFIXES '
+                      'instead.',
+                      DeprecationWarning, stacklevel=2)
+        return _DEBUG_BYTECODE_SUFFIXES
+    elif name == 'OPTIMIZED_BYTECODE_SUFFIXES':
+        warnings.warn('importlib.machinery.OPTIMIZED_BYTECODE_SUFFIXES is '
+                      'deprecated; use importlib.machinery.BYTECODE_SUFFIXES '
+                      'instead.',
+                      DeprecationWarning, stacklevel=2)
+        return _OPTIMIZED_BYTECODE_SUFFIXES
 
-
-__all__ = [
-    'BYTECODE_SUFFIXES',
-    'DEBUG_BYTECODE_SUFFIXES',
-    'EXTENSION_SUFFIXES',
-    'FileLoader',
-    'ModuleSpec',
-    'OPTIMIZED_BYTECODE_SUFFIXES',
-    'SOURCE_SUFFIXES',
-    'SourceFileLoader',
-    'all_suffixes',
-]
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

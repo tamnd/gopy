@@ -70,6 +70,24 @@ var IsStopIterationHook func(error) bool
 // CPython: Python/errors.c:488 _PyErr_Clear
 var ClearCurrentExceptionHook func()
 
+// SaveRaisedExceptionHook detaches and returns the thread-state's
+// current raised exception (nil when none). RestoreRaisedExceptionHook
+// reinstalls it. slotTpFinalize brackets a __del__ call with this pair
+// so a finalizer that runs while the interpreter is mid-unwind (gopy
+// fires __del__ synchronously from a Decref, which can land inside
+// handle_exception while it is still building the traceback) cannot
+// clear or overwrite the exception being propagated. Installed from vm.
+//
+// CPython: Objects/typeobject.c:9883 slot_tp_finalize
+// (PyErr_GetRaisedException / PyErr_SetRaisedException bracket)
+var SaveRaisedExceptionHook func() Object
+
+// RestoreRaisedExceptionHook reinstalls an exception previously
+// detached by SaveRaisedExceptionHook. Passing nil clears the slot.
+//
+// CPython: Objects/typeobject.c:9883 slot_tp_finalize
+var RestoreRaisedExceptionHook func(Object)
+
 // ClearCurrentExceptionIfIterStopHook drops the thread-state's current
 // exception only when it is an IndexError or StopIteration, the two
 // exception types iteration legitimately swallows: iter_iternext clears

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
@@ -44,11 +45,11 @@ func callerBuiltins(f *frame.Frame) objects.Object {
 // the mapping lacks the key, and (nil, false, err) for a real failure.
 //
 // CPython: Python/ceval.c:2805 PyMapping_GetOptionalItemString(f_builtins, "__import__")
-func optionalImportFunc(builtins objects.Object) (objects.Object, bool, error) {
-	if builtins == nil {
+func optionalImportFunc(builtinsMap objects.Object) (objects.Object, bool, error) {
+	if builtinsMap == nil {
 		return nil, false, nil
 	}
-	return objects.MappingGetOptionalItem(builtins, objects.NewStr("__import__"))
+	return objects.MappingGetOptionalItem(builtinsMap, objects.NewStr("__import__"))
 }
 
 // isDefaultImport reports whether fn is the built-in __import__ the
@@ -58,15 +59,7 @@ func optionalImportFunc(builtins objects.Object) (objects.Object, bool, error) {
 //
 // CPython: Python/ceval.c:2820 import_name (fast-path identity check)
 func isDefaultImport(fn objects.Object) bool {
-	bm, ok := imp.GetModule("builtins")
-	if !ok || bm == nil {
-		return false
-	}
-	def, err := bm.Dict().GetItem(objects.NewStr("__import__"))
-	if err != nil || def == nil {
-		return false
-	}
-	return fn == def
+	return builtins.DefaultImport != nil && fn == builtins.DefaultImport
 }
 
 // frameHasExplicitBuiltins reports whether the frame's globals carry an
@@ -196,10 +189,43 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 
 		level := importLevel(levelObj)
+		// A relative import requires __package__ to be a string. CPython's
+		// _sanity_check raises TypeError before any resolution when level>0
+		// and __package__ is set to a non-string (e.g. an object()).
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1390 _sanity_check
+		if level > 0 {
+			if terr := checkPackageType(e.f.Globals); terr != nil {
+				return 0, true, terr
+			}
+		}
 		pkgname := globalName(e.f.Globals)
 
+		// Route through the live Python importlib the way CPython's
+		// import_name calls the builtin __import__ (=
+		// _frozen_importlib.__import__). _bootstrap.__import__ runs
+		// _find_and_load / _handle_fromlist and returns the head of a dotted
+		// name for an empty fromlist, so the module pushed here is already
+		// the one CPython would push. Delegating keeps a single import path
+		// so a patched loader.exec_module fires and the traceback carries the
+		// <frozen importlib ...> frames. Only when the bootstrap is not yet
+		// installed (early startup) does the Go driver below run.
+		//
+		// CPython: Python/ceval.c:2898 import_name
+		if mod, ok, derr := importViaDelegate(modname, orNone(e.f.Globals), orNone(fromlistObj), level); ok {
+			if derr != nil {
+				// CPython: Python/import.c:3959 import_name trims the importlib
+				// machinery frames off the traceback before the calling frame is
+				// recorded on the way out.
+				removeImportlibFrames(e.ts)
+				return 0, true, derr
+			}
+			e.pushObject(mod)
+			return e.advance(), true, nil
+		}
+
 		exec := &vmExecutor{ts: e.ts, builtins: builtinsNS}
-		mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, level)
+		mod, ierr := imp.ImportModuleLevelObject(exec, modname, pkgname, level)
 		if ierr != nil {
 			// Promote Go-level ErrModuleNotFound into a typed
 			// ModuleNotFoundError so `try: ... except ImportError:`
@@ -208,11 +234,37 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 			// the import-machinery contract.
 			//
 			// CPython: Python/import.c:1759 import_name (sets ImportError)
-			if errors.Is(ierr, imp.ErrModuleNotFound) {
-				pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
-					fmt.Sprintf("No module named %q", modname))
+			//
+			// A failure raised while executing the module body (the imported
+			// module itself ran a failing `import`, etc.) already left the
+			// real exception on the thread state with its own traceback, so
+			// re-synthesizing here would discard it and the inner frame it
+			// points at. Only synthesize for a genuine lookup miss.
+			//
+			// CPython: Python/import.c:1759 import_name only sets the error
+			// when PyImport_ImportModuleLevelObject returns NULL without one.
+			if errors.Is(ierr, imp.ErrBlockedNone) {
+				// sys.modules[name] is None: raise the halted ModuleNotFoundError
+				// with name set, so `except ImportError as exc: exc.name` works.
+				// A blocked sentinel is always an absolute name (level 0), so
+				// modname is already the resolved key in sys.modules.
+				pyerrors.SetModuleNotFoundHalted(e.ts, modname)
+			} else if errors.Is(ierr, imp.ErrModuleNotFound) && !errors.Is(ierr, imp.ErrModuleExecFailed) {
+				pyerrors.SetModuleNotFound(e.ts, modname)
 			}
 			return 0, true, ierr
+		}
+
+		// A non-empty fromlist drives _handle_fromlist: force-import any
+		// submodule named in the fromlist that the package does not already
+		// expose, so the IMPORT_FROM / import_all_from that follows resolves
+		// it via a plain attribute read.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1409 _handle_fromlist
+		if !isEmptyFromlist(fromlistObj) {
+			if herr := e.handleFromlist(mod, fromlistObj, false); herr != nil {
+				return 0, true, herr
+			}
 		}
 
 		// CPython semantics: when fromlist is None/empty (plain `import
@@ -222,7 +274,7 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		//
 		// CPython: Python/bytecodes.c IMPORT_NAME comment "return the
 		// head of the dotted name" when fromlist is empty.
-		result := objects.Object(mod)
+		result := mod
 		if isEmptyFromlist(fromlistObj) && strings.Contains(modname, ".") {
 			top := strings.SplitN(modname, ".", 2)[0]
 			if tm, ok := imp.GetModule(top); ok {
@@ -279,18 +331,25 @@ func (e *evalState) importStar(from objects.Object) error {
 	var all []objects.Object
 	skipUnder := false
 
-	// Check for __all__.
-	allAttr, aerr := objects.GetAttr(from, objects.NewStr("__all__"))
-	if aerr == nil && allAttr != nil {
+	// Prefer __all__; fall back to __dict__ keys (skipping leading "_").
+	// Neither read force-imports anything: _handle_fromlist already
+	// pulled in the fromlist's submodules during IMPORT_NAME.
+	allAttr, allFound, aerr := getOptionalAttr(e, from, "__all__")
+	if aerr != nil {
+		return aerr
+	}
+	if allFound {
 		items, ierr := iterToSlice(allAttr)
 		if ierr != nil {
 			return ierr
 		}
 		all = items
 	} else {
-		// Fall back to __dict__ keys, skipping names starting with "_".
-		dictAttr, derr := objects.GetAttr(from, objects.NewStr("__dict__"))
-		if derr != nil || dictAttr == nil {
+		dictAttr, dictFound, derr := getOptionalAttr(e, from, "__dict__")
+		if derr != nil {
+			return derr
+		}
+		if !dictFound {
 			return fmt.Errorf("ImportError: from-import-* object has no __dict__ and no __all__")
 		}
 		items, ierr := iterToSlice(dictAttr)
@@ -302,26 +361,49 @@ func (e *evalState) importStar(from objects.Object) error {
 	}
 
 	for _, nameObj := range all {
-		name, nerr := objects.Str(nameObj)
-		if nerr != nil {
-			return fmt.Errorf("TypeError: 'import *' name must be str")
+		name, ok := nameObj.(*objects.Unicode)
+		if !ok {
+			return importStarNonStrError(from, nameObj, skipUnder)
 		}
-		if skipUnder && name != "" && name[0] == '_' {
+		s := name.Value()
+		if skipUnder && s != "" && s[0] == '_' {
 			continue
 		}
-		val, verr := objects.GetAttr(from, objects.NewStr(name))
+		val, verr := objects.GetAttr(from, objects.NewStr(s))
 		if verr != nil {
 			return verr
 		}
-		serr := dst.SetItem(objects.NewStr(name), val)
-		// CPython: Python/ceval.c import_star_from — always releases the
-		// GetAttr new-ref after SetItem takes its own.
+		serr := dst.SetItem(objects.NewStr(s), val)
+		// CPython: Python/intrinsics.c import_all_from releases the GetAttr
+		// new-ref after SetItem takes its own.
 		objects.Decref(val)
 		if serr != nil {
 			return serr
 		}
 	}
 	return nil
+}
+
+// importStarNonStrError builds the TypeError import_all_from raises for a
+// non-string entry in __all__ (or non-string key in __dict__). When the
+// module's own __name__ is not a string, the error is about __name__
+// itself.
+//
+// CPython: Python/intrinsics.c:77 import_all_from (non-str name branch)
+func importStarNonStrError(from, name objects.Object, skipUnder bool) error {
+	modNameObj, err := objects.GetAttr(from, objects.NewStr("__name__"))
+	if err != nil {
+		return err
+	}
+	mn, ok := modNameObj.(*objects.Unicode)
+	if !ok {
+		return fmt.Errorf("TypeError: module __name__ must be a string, not %s", modNameObj.Type().Name)
+	}
+	key, container := "Item", "__all__"
+	if skipUnder {
+		key, container = "Key", "__dict__"
+	}
+	return fmt.Errorf("TypeError: %s in %s.%s must be str, not %s", key, mn.Value(), container, name.Type().Name)
 }
 
 // isEmptyFromlist reports whether fromlist is None, the empty tuple, or
@@ -369,6 +451,27 @@ func importLevel(obj objects.Object) int {
 // module path while __package__ correctly points at the parent.
 //
 // CPython: Python/import.c:1665 import_name (read __package__ first)
+// checkPackageType returns a TypeError when globals carries a __package__
+// that is set (not None) but is not a string. A relative import with such a
+// package is rejected before resolution.
+//
+// CPython: Lib/importlib/_bootstrap.py:1390 _sanity_check ("__package__ not
+// set to a string")
+func checkPackageType(globals objects.Object) error {
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	v, _ := d.GetItem(objects.NewStr("__package__"))
+	if v == nil || objects.IsNone(v) {
+		return nil
+	}
+	if _, isStr := v.(*objects.Unicode); !isStr {
+		return fmt.Errorf("TypeError: __package__ not set to a string")
+	}
+	return nil
+}
+
 func globalName(globals objects.Object) string {
 	if globals == nil {
 		return ""
@@ -377,20 +480,45 @@ func globalName(globals objects.Object) string {
 	if !ok {
 		return ""
 	}
+	// __package__ takes precedence and is returned verbatim, even when it
+	// is the empty string: an empty package with a relative import is
+	// exactly the "no known parent package" case resolveAbsName rejects.
+	// Only a missing or None __package__ falls through to derivation.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1350 _calc___package__
 	if v, err := d.GetItem(objects.NewStr("__package__")); err == nil && v != nil && !objects.IsNone(v) {
-		if s, serr := objects.Str(v); serr == nil && s != "" {
+		if s, serr := objects.Str(v); serr == nil {
 			return s
 		}
 	}
+	// __spec__.parent is the next anchor when no explicit __package__ is set.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1358 _calc___package__ (spec.parent)
+	if v, err := d.GetItem(objects.NewStr("__spec__")); err == nil && v != nil && !objects.IsNone(v) {
+		if parent, perr := objects.GetAttr(v, objects.NewStr("parent")); perr == nil && parent != nil && !objects.IsNone(parent) {
+			if s, serr := objects.Str(parent); serr == nil {
+				return s
+			}
+		}
+	}
+	// Fall back to __name__. A package (one carrying __path__) anchors at
+	// its own name; a plain module strips its final dotted component. For
+	// __main__ this yields "" so a relative import raises.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1362 _calc___package__ (rpartition)
 	v, err := d.GetItem(objects.NewStr("__name__"))
 	if err != nil || v == nil {
 		return ""
 	}
-	if tp := v.Type(); tp.Str != nil {
-		s, serr := tp.Str(v)
-		if serr == nil {
-			return s
-		}
+	s, serr := objects.Str(v)
+	if serr != nil {
+		return ""
+	}
+	if hp, herr := d.GetItem(objects.NewStr("__path__")); herr == nil && hp != nil {
+		return s
+	}
+	if dot := strings.LastIndex(s, "."); dot >= 0 {
+		return s[:dot]
 	}
 	return ""
 }
@@ -438,11 +566,18 @@ func isAttributeErrorMsg(err error) bool {
 	return strings.HasPrefix(msg, "AttributeError:")
 }
 
-// evalImportFrom ports _PyEval_ImportFrom. It tries to fetch `name` as
-// an attribute of `v`; on miss it consults sys.modules under
-// "<parent>.<name>" using the parent's __name__. As a gopy-specific
-// extension (we lack importlib's _handle_fromlist plumbing), it
-// force-imports the submodule when sys.modules has not cached it yet.
+// errImportFromRaised is a sentinel returned by evalImportFrom after it
+// has already installed a typed ImportError on the thread state. The VM
+// unwind reads the thread-state exception, so the Go error only needs to
+// be non-nil to signal failure.
+var errImportFromRaised = errors.New("vm: import-from error raised")
+
+// evalImportFrom ports _PyEval_ImportFrom. It fetches `name` as an
+// attribute of `v`; on miss it falls back to reading "<parent>.<name>"
+// straight out of sys.modules (the circular-import path), and when that
+// also misses it raises the "cannot import name X from Y (location)"
+// ImportError, reproducing the stdlib-shadowing and circular-import
+// message variants.
 //
 // CPython: Python/ceval.c:3154 _PyEval_ImportFrom
 func evalImportFrom(e *evalState, v objects.Object, name string) (objects.Object, error) {
@@ -452,33 +587,208 @@ func evalImportFrom(e *evalState, v objects.Object, name string) (objects.Object
 		return x, nil
 	}
 
-	// Issue #17636 fallback: read parent.__name__ and look up
-	// "<parent>.<name>" in sys.modules.
+	// Issue #17636: in case this failed because of a circular relative
+	// import, fall back on reading the module directly from sys.modules.
 	modNameObj, found, err := getOptionalAttr(e, v, "__name__")
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from <unknown module name>", name)
+	// CPython requires PyUnicode_Check (str or subclass); a non-str
+	// __name__ is treated as missing.
+	var modNameStr objects.Object
+	if found && objects.IsSubtype(modNameObj.Type(), objects.StrType()) {
+		modNameStr = modNameObj
 	}
-	parentName, serr := objects.Str(modNameObj)
-	if serr != nil {
-		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from <unknown module name>", name)
+	if modNameStr != nil {
+		if s, ok := modNameStr.(*objects.Unicode); ok {
+			full := s.Value() + "." + name
+			if cached, ok := imp.GetModule(full); ok {
+				return cached, nil
+			}
+		}
 	}
-	full := parentName + "." + name
 
-	if cached, ok := imp.GetModule(full); ok {
-		return cached, nil
+	return nil, e.importFromError(v, name, modNameStr)
+}
+
+// importFromError builds and raises the ImportError for a failed
+// `from v import name`, porting the error block of _PyEval_ImportFrom.
+//
+// CPython: Python/ceval.c:3185 _PyEval_ImportFrom (error label)
+func (e *evalState) importFromError(v objects.Object, name string, modNameObj objects.Object) error {
+	nameRepr, _ := objects.Repr(objects.NewStr(name))
+	// mod_name_or_unknown is the real __name__ object when present, else a
+	// fresh "<unknown module name>" str. It is the object handed to
+	// PySet_Contains so an unhashable __name__ raises through.
+	haveModName := modNameObj != nil
+	modNameOrUnknownObj := modNameObj
+	if !haveModName {
+		modNameOrUnknownObj = objects.NewStr("<unknown module name>")
 	}
-	// gopy extension: no _handle_fromlist runs during IMPORT_NAME, so
-	// the submodule may never have entered sys.modules. Force-import
-	// it here. CPython's _handle_fromlist (Lib/importlib/_bootstrap.py)
-	// performs the same _call_with_frames_removed(import_, ...) per
-	// fromlist entry.
-	exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
-	sub, ierr := imp.ImportModuleLevel(exec, full, "", 0)
-	if ierr != nil {
-		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from %q: %w", name, parentName, ierr)
+	modRepr, _ := objects.Repr(modNameOrUnknownObj)
+
+	// modName is the value forwarded as the ImportError `name` member: the
+	// real module name when __name__ was a string, else unset.
+	modName := ""
+	if haveModName {
+		if s, ok := modNameObj.(*objects.Unicode); ok {
+			modName = s.Value()
+		}
 	}
-	return sub, nil
+
+	spec, specFound, serr := getOptionalAttr(e, v, "__spec__")
+	if serr != nil {
+		return serr
+	}
+	if !specFound {
+		msg := fmt.Sprintf("cannot import name %s from %s (unknown location)", nameRepr, modRepr)
+		pyerrors.SetImportErrorWithNameFrom(e.ts, msg, modName, "", name)
+		return errImportFromRaised
+	}
+
+	origin, originFound, oerr := imp.SpecFileOrigin(spec)
+	if oerr != nil {
+		return oerr
+	}
+
+	shadowing, sherr := imp.ModuleIsPossiblyShadowing(originFound, origin)
+	if sherr != nil {
+		return sherr
+	}
+	shadowingStdlib := false
+	if shadowing {
+		c, cerr := imp.StdlibModuleNamesContains(modNameOrUnknownObj)
+		if cerr != nil {
+			return cerr
+		}
+		shadowingStdlib = c
+	}
+
+	// Fall back to __file__ for diagnostics when the spec carries no
+	// location origin and v is a module.
+	if !originFound {
+		if mod, ok := v.(*objects.Module); ok {
+			if f, ferr := mod.Dict().GetItem(objects.NewStr("__file__")); ferr == nil && f != nil {
+				if fs, ok := f.(*objects.Unicode); ok {
+					origin = fs.Value()
+					originFound = true
+				}
+			}
+		}
+	}
+
+	var msg string
+	switch {
+	case shadowingStdlib:
+		originRepr, _ := objects.Repr(objects.NewStr(origin))
+		msg = fmt.Sprintf("cannot import name %s from %s (consider renaming %s since it has the same name as the standard library module named %s and prevents importing that standard library module)",
+			nameRepr, modRepr, originRepr, modRepr)
+	default:
+		initializing, ierr := imp.SpecIsInitializing(spec)
+		if ierr != nil {
+			return ierr
+		}
+		switch {
+		case initializing && shadowing:
+			originRepr, _ := objects.Repr(objects.NewStr(origin))
+			msg = fmt.Sprintf("cannot import name %s from %s (consider renaming %s if it has the same name as a library you intended to import)",
+				nameRepr, modRepr, originRepr)
+		case initializing && originFound:
+			msg = fmt.Sprintf("cannot import name %s from partially initialized module %s (most likely due to a circular import) (%s)",
+				nameRepr, modRepr, origin)
+		case initializing:
+			msg = fmt.Sprintf("cannot import name %s from partially initialized module %s (most likely due to a circular import)",
+				nameRepr, modRepr)
+		case originFound:
+			msg = fmt.Sprintf("cannot import name %s from %s (%s)", nameRepr, modRepr, origin)
+		default:
+			msg = fmt.Sprintf("cannot import name %s from %s (unknown location)", nameRepr, modRepr)
+		}
+	}
+
+	originArg := ""
+	if originFound {
+		originArg = origin
+	}
+	pyerrors.SetImportErrorWithNameFrom(e.ts, msg, modName, originArg, name)
+	return errImportFromRaised
+}
+
+// handleFromlist ports _handle_fromlist: for a package module (one that
+// carries __path__), force-import each fromlist entry that is not already
+// an attribute so a later attribute read resolves the submodule. A `*`
+// entry recurses over module.__all__; a non-str entry raises TypeError.
+//
+// CPython: Lib/importlib/_bootstrap.py:1409 _handle_fromlist
+func (e *evalState) handleFromlist(mod objects.Object, fromlist objects.Object, recursive bool) error {
+	// _handle_fromlist runs only for packages (hasattr(module, '__path__')).
+	// __import__ guards the call with the same check, and a non-module
+	// cached entry never carries __path__, so it no-ops here.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1503 elif hasattr(module, '__path__')
+	if !recursive {
+		if _, present, herr := getOptionalAttr(e, mod, "__path__"); herr != nil {
+			return herr
+		} else if !present {
+			return nil
+		}
+	}
+
+	items, err := iterToSlice(fromlist)
+	if err != nil {
+		return err
+	}
+	modName := ""
+	if nm, present, _ := getOptionalAttr(e, mod, "__name__"); present {
+		if s, ok := nm.(*objects.Unicode); ok {
+			modName = s.Value()
+		}
+	}
+
+	for _, item := range items {
+		x, ok := item.(*objects.Unicode)
+		if !ok {
+			where := "``from list''"
+			if recursive {
+				where = modName + ".__all__"
+			}
+			return fmt.Errorf("TypeError: Item in %s must be str, not %s", where, item.Type().Name)
+		}
+		entry := x.Value()
+		switch entry {
+		case "*":
+			if !recursive {
+				if allObj, present, _ := getOptionalAttr(e, mod, "__all__"); present && allObj != nil {
+					if rerr := e.handleFromlist(mod, allObj, true); rerr != nil {
+						return rerr
+					}
+				}
+			}
+		default:
+			_, present, gerr := getOptionalAttr(e, mod, entry)
+			if gerr != nil {
+				return gerr
+			}
+			if present {
+				continue
+			}
+			fromName := modName + "." + entry
+			exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
+			if _, ierr := imp.ImportModuleLevel(exec, fromName, "", 0); ierr != nil {
+				// Backwards-compatibility: ignore a fromlist-triggered import
+				// of a submodule that simply does not exist, but only when the
+				// miss is for exactly this submodule.
+				//
+				// CPython: Lib/importlib/_bootstrap.py:1433 except ModuleNotFoundError
+				if errors.Is(ierr, imp.ErrModuleNotFound) {
+					if _, cached := imp.GetModule(fromName); !cached {
+						pyerrors.Clear(e.ts)
+						continue
+					}
+				}
+				return ierr
+			}
+		}
+	}
+	return nil
 }

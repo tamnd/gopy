@@ -174,6 +174,20 @@ import (
 	// CPython: Modules/_testcapi/vectorcall.c:1 vectorcall fixtures
 	_ "github.com/tamnd/gopy/module/_testcapi"
 
+	// Built-in module: _testmultiphase. Registers itself via
+	// module/_testmultiphase/module.go init(). Reproduces the PEP 489
+	// multi-phase init extension's main module so test.test_importlib.util
+	// imports instead of raising SkipTest.
+	// CPython: Modules/_testmultiphase.c:447 PyInit__testmultiphase
+	_ "github.com/tamnd/gopy/module/_testmultiphase"
+
+	// Built-in module: _testsinglephase. Registers itself via
+	// module/_testsinglephase/module.go init(). Reproduces the legacy
+	// single-phase init extension and the gh-144601 raise-on-init fixture
+	// the SubinterpImportTests drive through ExtensionFileLoader.
+	// CPython: Modules/_testsinglephase.c:533 PyInit__testsinglephase
+	_ "github.com/tamnd/gopy/module/_testsinglephase"
+
 	// Built-in module: _json. Registers itself via
 	// module/_json/module.go init(). Accelerates json.py with
 	// scanstring and encode_basestring helpers.
@@ -310,6 +324,13 @@ import (
 	// and stdlib/subprocess.py import at module top level on Windows.
 	// CPython: Modules/_winapi.c:3023 _winapi_exec
 	_ "github.com/tamnd/gopy/module/_winapi"
+
+	// Built-in module: winreg. Registers itself via module/winreg/
+	// module.go init(). Exposes the HKEY_*/KEY_*/REG_* constants and the
+	// error alias that importlib._bootstrap_external imports at module top
+	// level on Windows.
+	// CPython: PC/winreg.c:2121 exec_module
+	_ "github.com/tamnd/gopy/module/winreg"
 
 	// Built-in module: _hashlib. Registers itself via
 	// module/_hashlib/module.go init(). Backs Lib/hashlib.py with the

@@ -15,17 +15,40 @@ type importCall struct {
 	fromlist []string
 }
 
+// fromlistStrings flattens the raw fromlist object the hook now
+// receives into the []string the assertions below compare against. It
+// mirrors how _handle_fromlist iterates the object, stopping at the
+// first non-str entry (none of these tests pass one).
+func fromlistStrings(o objects.Object) []string {
+	var out []string
+	switch v := o.(type) {
+	case *objects.Tuple:
+		for i := 0; i < v.Len(); i++ {
+			if u, ok := v.Item(i).(*objects.Unicode); ok {
+				out = append(out, u.Value())
+			}
+		}
+	case *objects.List:
+		for i := 0; i < v.Len(); i++ {
+			if u, ok := v.Item(i).(*objects.Unicode); ok {
+				out = append(out, u.Value())
+			}
+		}
+	}
+	return out
+}
+
 func captureImporter(t *testing.T, mod objects.Object, returnErr error) *importCall {
 	t.Helper()
 	prev := currentImporter
 	t.Cleanup(func() { SetImporter(prev) })
 
 	got := &importCall{}
-	SetImporter(func(name, pkgname string, level int, fromlist []string) (objects.Object, error) {
+	SetImporter(func(name, pkgname string, level int, fromlist objects.Object, _ objects.Object) (objects.Object, error) {
 		got.name = name
 		got.pkgname = pkgname
 		got.level = level
-		got.fromlist = fromlist
+		got.fromlist = fromlistStrings(fromlist)
 		return mod, returnErr
 	})
 	return got
@@ -198,16 +221,26 @@ func TestImportNegativeLevel(t *testing.T) {
 	}
 }
 
-func TestImportFromlistRejectsString(t *testing.T) {
-	captureImporter(t, nil, nil)
-	_, err := Import([]objects.Object{
+func TestImportFromlistPassesThroughRawObject(t *testing.T) {
+	// CPython's builtin___import__ never type-checks fromlist; it hands the
+	// object straight to _handle_fromlist, which iterates it. A str is a
+	// valid (if unusual) fromlist, so __import__ must not reject it early.
+	mod := objects.NewModule("a")
+	got := captureImporter(t, mod, nil)
+	out, err := Import([]objects.Object{
 		objects.NewStr("a"),
 		objects.None(),
 		objects.None(),
-		objects.NewStr("notalist"),
+		objects.NewStr("xy"),
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "fromlist must be a tuple or list") {
-		t.Fatalf("__import__: err=%v, want fromlist TypeError", err)
+	if err != nil {
+		t.Fatalf("__import__: %v", err)
+	}
+	if out != mod {
+		t.Fatalf("__import__ returned %v, want %v", out, mod)
+	}
+	if got.name != "a" {
+		t.Fatalf("hook name = %q, want a", got.name)
 	}
 }
 

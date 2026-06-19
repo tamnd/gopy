@@ -231,6 +231,16 @@ func collectMain(gen int) (int, []pendingCallback) {
 	if state.debug&DebugSaveAll != 0 && state.garbage != nil {
 		appendGarbage(state.garbage, stillUnreachable)
 	}
+	// delete_garbage runs tp_clear on the proven-unreachable set. tp_clear
+	// decrefs members, and a member dropping to zero re-enters Untrack
+	// (which locks state.mu), so drop the collector mutex across the clear
+	// pass exactly as the finalize pass above does. state.collecting stays
+	// set, so maybeAutoCollect will not start a nested collection.
+	//
+	// CPython: Python/gc.c:1198 delete_garbage (tp_clear call)
+	state.mu.Unlock()
+	clearGarbage(stillUnreachable)
+	state.mu.Lock()
 	reclaimUnreachable(stillUnreachable, state.tracked, state.finalized)
 	clearUnreachableMask(young)
 	clearAllFreeLists()

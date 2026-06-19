@@ -207,7 +207,7 @@ func baseExceptionInit(args []objects.Object, _ map[string]objects.Object) (obje
 	if !ok {
 		return objects.None(), nil
 	}
-	e.setArgs(objects.NewTuple(args[1:]))
+	e.setArgsSteal(objects.NewTuple(args[1:]))
 	return objects.None(), nil
 }
 
@@ -251,7 +251,7 @@ func argsSet(owner objects.Object, value objects.Object) error {
 		}
 		items = append(items, next)
 	}
-	e.setArgs(objects.NewTuple(items))
+	e.setArgsSteal(objects.NewTuple(items))
 	return nil
 }
 

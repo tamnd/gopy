@@ -36,13 +36,30 @@ func NewContext() *Context {
 }
 
 // newContextFromVars wraps vars in a freshly-allocated Context. Used
-// by Copy and CopyCurrent.
+// by Copy and CopyCurrent. The Context takes its own reference on the
+// shared HAMT (Py_NewRef), so two contexts sharing a HAMT version each
+// own +1 and the version survives until both release it.
 //
 // CPython: Python/context.c:458 context_new_from_vars
 func newContextFromVars(vars *hamt.Hamt) *Context {
 	c := &Context{vars: vars}
 	c.Init(ContextType)
+	objects.Incref(vars)
 	return c
+}
+
+// setVars replaces c.vars with the owned reference newVars, dropping
+// the reference the context held on the prior HAMT version. The store
+// happens before the decref so a shared version cannot be torn down
+// mid-swap.
+//
+// CPython: Python/context.c:795 Py_SETREF(ctx->ctx_vars, new_vars)
+func (c *Context) setVars(newVars *hamt.Hamt) {
+	old := c.vars
+	c.vars = newVars
+	if old != nil {
+		objects.Decref(old)
+	}
 }
 
 // Copy returns a shallow snapshot of c. The new Context shares the
@@ -165,6 +182,32 @@ func (c *Context) Eq(other *Context) (bool, error) {
 func contextRepr(c *Context) string {
 	r, _ := objects.Repr(c)
 	return r
+}
+
+// contextDealloc releases the reference the context holds on its HAMT.
+// prev is a borrowed back-link onto the thread's context stack (gopy's
+// ts.SetContext is non-owning, mirroring Go's tracing GC), so it is not
+// refcounted here.
+//
+// CPython: Python/context.c:495 context_tp_dealloc
+func contextDealloc(o objects.Object) {
+	c := o.(*Context)
+	if c.vars != nil {
+		objects.Decref(c.vars)
+		c.vars = nil
+	}
+}
+
+// contextTraverse visits the HAMT for the cyclic collector. prev is a
+// borrowed back-link (see contextDealloc) so it is not visited.
+//
+// CPython: Python/context.c:481 context_tp_traverse
+func contextTraverse(o objects.Object, visit objects.Visitor) error {
+	c := o.(*Context)
+	if c.vars != nil {
+		return visit(c.vars)
+	}
+	return nil
 }
 
 // Sentinels returned by Enter / Exit alongside the SetException

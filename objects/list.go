@@ -310,7 +310,8 @@ func listGetItem(o Object, i int) (Object, error) {
 		i += len(l.items)
 	}
 	if i < 0 || i >= len(l.items) {
-		return nil, errIndexOutOfRange
+		// CPython: Objects/listobject.c:469 list_item ("list index out of range")
+		return nil, errors.New("IndexError: list index out of range")
 	}
 	return l.items[i], nil
 }
@@ -498,7 +499,8 @@ func listSetItem(o Object, i int, v Object) error {
 		i += len(l.items)
 	}
 	if i < 0 || i >= len(l.items) {
-		return errIndexOutOfRange
+		// CPython: Objects/listobject.c:3041 list_ass_item ("list assignment index out of range")
+		return errors.New("IndexError: list assignment index out of range")
 	}
 	// Route through SetItem so the displaced item is decreffed and the new
 	// value increfed (list_ass_item's Py_SETREF), keeping the per-item
@@ -564,7 +566,8 @@ func listDelIndex(l *List, i int) error {
 		i += len(l.items)
 	}
 	if i < 0 || i >= len(l.items) {
-		return errIndexOutOfRange
+		// CPython: Objects/listobject.c:3041 list_ass_item ("list assignment index out of range")
+		return errors.New("IndexError: list assignment index out of range")
 	}
 	// Release the list's reference on the removed item.
 	//

@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -88,14 +87,17 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		executable = execs[0]
 	}
 
-	// args[4]: cwd - string or None
+	// args[4]: cwd - PyUnicode_FSConverter accepts str, bytes, or any
+	// os.PathLike (pathlib.Path), so subprocess.run(cwd=Path(...)) works.
+	//
+	// CPython: Modules/_posixsubprocess.c subprocess_fork_exec ("O&" cwd_obj)
 	cwd := ""
 	if args[4] != nil && args[4] != objects.None() {
-		s, ok := args[4].(*objects.Unicode)
-		if !ok {
-			return nil, fmt.Errorf("TypeError: cwd must be str or None")
+		s, err := fsConvert(args[4])
+		if err != nil {
+			return nil, err
 		}
-		cwd = s.Value()
+		cwd = s
 	}
 
 	// args[5]: env_list - list of "KEY=VALUE" strings or None.
@@ -137,11 +139,12 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// owned by Python's subprocess machinery (subprocess.py closes them
 	// explicitly after fork_exec returns). If Go's GC fires the default
 	// finalizer before Python calls os.close(), the fd is closed out from
-	// under the caller and subsequent os.close() raises EBADF.
-	// Pattern mirrors module/os/stat_darwin.go osFstat runtime.SetFinalizer.
+	// under the caller and subsequent os.close() raises EBADF. The finalizer
+	// is armed on the inner *os.file, so objects.ClearOSFileFinalizer reaches
+	// it rather than the outer handle (a SetFinalizer no-op).
 	if p2cread >= 0 {
 		f := os.NewFile(uintptr(p2cread), "pipe:stdin")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stdin = f
 	} else {
 		cmd.Stdin = io.NopCloser(os.Stdin)
@@ -151,7 +154,7 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// CPython: Modules/_posixsubprocess.c:730 dup2(c2pwrite, 1)
 	if c2pwrite >= 0 {
 		f := os.NewFile(uintptr(c2pwrite), "pipe:stdout")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stdout = f
 	} else {
 		cmd.Stdout = os.Stdout
@@ -161,7 +164,7 @@ func forkExec(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	// CPython: Modules/_posixsubprocess.c:737 dup2(errwrite, 2)
 	if errwrite >= 0 {
 		f := os.NewFile(uintptr(errwrite), "pipe:stderr")
-		runtime.SetFinalizer(f, nil)
+		objects.ClearOSFileFinalizer(f)
 		cmd.Stderr = f
 	} else {
 		cmd.Stderr = os.Stderr
@@ -216,16 +219,47 @@ func toStringSlice(obj objects.Object) ([]string, error) {
 	return out, nil
 }
 
-// objectToString converts a Python str or bytes object to a Go string.
+// objectToString converts a Python str, bytes, or os.PathLike object to a
+// Go string. CPython runs each argv member through fsconvert_strdup, which
+// is PyUnicode_FSConverter, so pathlib.Path arguments are accepted too.
+//
+// CPython: Modules/_posixsubprocess.c:130 fsconvert_strdup
 func objectToString(obj objects.Object) (string, error) {
 	switch v := obj.(type) {
 	case *objects.Unicode:
 		return v.Value(), nil
 	case *objects.Bytes:
 		return string(v.Bytes()), nil
-	default:
-		return "", fmt.Errorf("expected str, got %s", obj.Type().Name)
 	}
+	if fspath, err := objects.GetAttr(obj, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return objectToString(result)
+	}
+	return "", fmt.Errorf("expected str, got %s", obj.Type().Name)
+}
+
+// fsConvert mirrors PyUnicode_FSConverter: it accepts a str, bytes, or
+// any os.PathLike (pathlib.Path) by invoking __fspath__ and recursing.
+//
+// CPython: Modules/posixmodule.c PyUnicode_FSConverter / PyOS_FSPath
+func fsConvert(obj objects.Object) (string, error) {
+	switch v := obj.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	if fspath, err := objects.GetAttr(obj, objects.NewStr("__fspath__")); err == nil {
+		result, err := objects.CallNoArgs(fspath)
+		if err != nil {
+			return "", err
+		}
+		return fsConvert(result)
+	}
+	return "", fmt.Errorf("TypeError: cwd must be str or None")
 }
 
 // toIntFd extracts a file descriptor integer from a Python int object.

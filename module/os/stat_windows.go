@@ -5,11 +5,32 @@
 package os
 
 import (
+	"fmt"
 	goos "os"
+	"runtime"
 	"syscall"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// fstatResult stats an open descriptor. Windows resolves the fd through a
+// temporary os.File whose Stat goes via GetFileInformationByHandle; the
+// netpoll-vs-finalizer hazard that motivates the POSIX raw-syscall path
+// does not apply to Windows handles, so the wrapper is reused here.
+//
+// CPython: Modules/posixmodule.c:3399 os_fstat_impl
+func fstatResult(fdVal int64) (*objects.StructSeq, error) {
+	f := goos.NewFile(uintptr(fdVal), "")
+	runtime.SetFinalizer(f, nil)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	ino, dev, nlink, uid, gid, atime, ctime := statSysFields(info)
+	mtime := info.ModTime().UnixNano()
+	blksize, blocks, rdev := statBlockFields(info)
+	return newStatResult(statMode(info), int64(ino), int64(dev), int64(nlink), int64(uid), int64(gid), info.Size(), atime, mtime, ctime, blksize, blocks, rdev), nil
+}
 
 // statSysFields extracts platform fields from a Windows FileInfo's
 // Win32FileAttributeData. Windows reports CreationTime / LastAccessTime
@@ -21,7 +42,7 @@ import (
 //
 // CPython: Modules/posixmodule.c:1924 win32_stat
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	atime = mtime
 	ctime = mtime
 	nlink = 1
@@ -29,8 +50,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	if !ok || sys == nil {
 		return
 	}
-	atime = sys.LastAccessTime.Nanoseconds() / 1e9
-	ctime = sys.CreationTime.Nanoseconds() / 1e9
+	atime = sys.LastAccessTime.Nanoseconds()
+	ctime = sys.CreationTime.Nanoseconds()
 	return
 }
 

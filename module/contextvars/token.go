@@ -54,13 +54,69 @@ func init() {
 	TokenType.Hash = func(objects.Object) (int64, error) {
 		return 0, fmt.Errorf("TypeError: unhashable type: 'Token'")
 	}
+	TokenType.Dealloc = tokenDealloc
+	TokenType.TpTraverse = tokenTraverse
 	TokenType.TpFlags &^= objects.TpFlagBasetype
 }
 
+// newToken records the binding to undo. The token owns +1 on the
+// context, the variable, and the prior value, mirroring CPython's
+// Py_NewRef(ctx) / Py_NewRef(var) / Py_XNewRef(val). The reference on
+// oldVal is essential: the cv.Set that mints the token replaces oldVal
+// in the HAMT immediately, so without this hold the old value could
+// drop to refcount 0 before Reset replays it.
+//
+// CPython: Python/context.c:1135 token_new
 func newToken(ctx *Context, cv *ContextVar, oldVal objects.Object, hadOld bool) *Token {
 	t := &Token{ctx: ctx, cv: cv, oldVal: oldVal, hadOld: hadOld}
 	t.Init(TokenType)
+	objects.Incref(ctx)
+	objects.Incref(cv)
+	if oldVal != nil {
+		objects.Incref(oldVal)
+	}
 	return t
+}
+
+// tokenDealloc releases the references the token holds.
+//
+// CPython: Python/context.c:1147 token_tp_dealloc
+func tokenDealloc(o objects.Object) {
+	t := o.(*Token)
+	if t.ctx != nil {
+		objects.Decref(t.ctx)
+		t.ctx = nil
+	}
+	if t.cv != nil {
+		objects.Decref(t.cv)
+		t.cv = nil
+	}
+	if t.oldVal != nil {
+		objects.Decref(t.oldVal)
+		t.oldVal = nil
+	}
+}
+
+// tokenTraverse visits the token's held references for the cyclic
+// collector.
+//
+// CPython: Python/context.c:1153 token_tp_traverse
+func tokenTraverse(o objects.Object, visit objects.Visitor) error {
+	t := o.(*Token)
+	if t.ctx != nil {
+		if err := visit(t.ctx); err != nil {
+			return err
+		}
+	}
+	if t.cv != nil {
+		if err := visit(t.cv); err != nil {
+			return err
+		}
+	}
+	if t.oldVal != nil {
+		return visit(t.oldVal)
+	}
+	return nil
 }
 
 // Var returns the ContextVar this token was minted by.

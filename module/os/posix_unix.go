@@ -280,3 +280,15 @@ func posixIdentityEntries() []struct {
 		{"getgroups", objects.NewBuiltinFunction("getgroups", osGetgroups)},
 	}
 }
+
+// winPathEntries is empty on POSIX: posixmodule.c registers _path_splitroot
+// and the listdrives family only inside its #ifdef MS_WINDOWS block, so on
+// POSIX os._path_splitroot raises AttributeError just like CPython.
+//
+// CPython: Modules/posixmodule.c:4707 #ifdef MS_WINDOWS
+func winPathEntries() []struct {
+	name string
+	val  objects.Object
+} {
+	return nil
+}

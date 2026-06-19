@@ -88,6 +88,50 @@ func SetPath(path []string) {
 	}
 }
 
+// pendingStdlibDir records the stdlib root the next sys-module build
+// should expose as sys._stdlib_dir. FrozenImporter._resolve_filename
+// reads it to locate the on-disk copy of a frozen module. SetStdlibDir
+// also refreshes the live attribute when sys is already imported.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+var pendingStdlibDir string
+
+// SetStdlibDir records the stdlib root and exposes it as
+// sys._stdlib_dir, refreshing the live attribute when sys is already
+// imported.
+//
+// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+func SetStdlibDir(dir string) {
+	pendingStdlibDir = dir
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("_stdlib_dir"), objects.NewStr(dir))
+	}
+}
+
+// pendingSafePath records the safe_path flag supplied on the command
+// line (-P / -I / PYTHONSAFEPATH) before sys is built. buildModule
+// reads it when stamping sys.flags; SetSafePath also refreshes the live
+// flags struct-sequence when sys is already imported.
+//
+// CPython: Python/initconfig.c:1828 config_init_safe_path
+var pendingSafePath bool
+
+// SetSafePath records safe_path and, when sys is already live, rebuilds
+// sys.flags so sys.flags.safe_path reads True.
+//
+// CPython: Python/sysmodule.c:3478 set_flags_from_config (safe_path)
+func SetSafePath(on bool) {
+	pendingSafePath = on
+	if md := liveSysDict(); md != nil {
+		cfg := &initconfig.PyConfig{}
+		cfg.InitPythonConfig()
+		if on {
+			cfg.SafePath = 1
+		}
+		_ = md.SetItem(objects.NewStr("flags"), makeFlags(cfg))
+	}
+}
+
 // LivePath returns the current sys.path entries as a Go slice, or nil
 // when sys has not been imported yet (PathFinder then falls back to
 // its static Paths snapshot, which is what unit tests that drive
@@ -302,6 +346,9 @@ func buildModule() (*objects.Module, error) {
 	// CPython: Python/sysmodule.c:3478 set_flags_from_config
 	defaultCfg := &initconfig.PyConfig{}
 	defaultCfg.InitPythonConfig()
+	if pendingSafePath {
+		defaultCfg.SafePath = 1
+	}
 	if err := setItem(md, "flags", makeFlags(defaultCfg)); err != nil {
 		return nil, err
 	}
@@ -335,6 +382,15 @@ func buildModule() (*objects.Module, error) {
 	}
 	if pendingBaseExecutable != "" {
 		if err := setStr(md, "_base_executable", pendingBaseExecutable); err != nil {
+			return nil, err
+		}
+	}
+	// sys._stdlib_dir lets FrozenImporter._resolve_filename find the
+	// on-disk copy of a frozen module.
+	//
+	// CPython: Python/sysmodule.c:3951 _PySys_UpdateConfig (stdlib_dir)
+	if pendingStdlibDir != "" {
+		if err := setStr(md, "_stdlib_dir", pendingStdlibDir); err != nil {
 			return nil, err
 		}
 	}

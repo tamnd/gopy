@@ -25,19 +25,49 @@ func osChmod(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: chmod() missing required arguments")
 	}
-	path, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: chmod() path must be str")
+	p, err := pathStringArg(args[0], "chmod")
+	if err != nil {
+		return nil, err
 	}
 	mode, ok := args[1].(*objects.Int)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: chmod() mode must be int")
 	}
 	m, _ := mode.Int64()
-	if err := goos.Chmod(path.Value(), goos.FileMode(m)); err != nil {
+	if err := goos.Chmod(p, goos.FileMode(m)); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
+}
+
+// pathStringArg coerces a path argument the way CPython's path_converter
+// does: a str is taken verbatim, bytes are decoded, and any other object is
+// run through os.fspath (__fspath__) so pathlib.Path and other PathLike
+// objects are accepted.
+//
+// CPython: Modules/posixmodule.c:1093 path_converter
+func pathStringArg(o objects.Object, fname string) (string, error) {
+	switch v := o.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	m, err := objects.GetAttr(o, objects.NewStr("__fspath__"))
+	if err != nil {
+		return "", fmt.Errorf("TypeError: %s: path should be string, bytes or os.PathLike, not %s", fname, o.Type().Name)
+	}
+	r, err := objects.Call(m, objects.NewTuple(nil), nil)
+	if err != nil {
+		return "", err
+	}
+	switch v := r.(type) {
+	case *objects.Unicode:
+		return v.Value(), nil
+	case *objects.Bytes:
+		return string(v.Bytes()), nil
+	}
+	return "", fmt.Errorf("TypeError: expected __fspath__ to return str or bytes, not %s", r.Type().Name)
 }
 
 // osSymlink creates a symbolic link at link_name pointing at src.
@@ -47,15 +77,15 @@ func osSymlink(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: symlink() requires src and dst")
 	}
-	src, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: symlink() src must be str")
+	src, err := pathStringArg(args[0], "symlink")
+	if err != nil {
+		return nil, err
 	}
-	dst, ok := args[1].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: symlink() dst must be str")
+	dst, err := pathStringArg(args[1], "symlink")
+	if err != nil {
+		return nil, err
 	}
-	if err := goos.Symlink(src.Value(), dst.Value()); err != nil {
+	if err := goos.Symlink(src, dst); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
@@ -68,11 +98,11 @@ func osReadlink(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: readlink() missing path")
 	}
-	path, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: readlink() path must be str")
+	path, err := pathStringArg(args[0], "readlink")
+	if err != nil {
+		return nil, err
 	}
-	target, err := goos.Readlink(path.Value())
+	target, err := goos.Readlink(path)
 	if err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
@@ -86,15 +116,15 @@ func osLink(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	if len(args) < 2 {
 		return nil, fmt.Errorf("TypeError: link() requires src and dst")
 	}
-	src, ok := args[0].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: link() src must be str")
+	src, err := pathStringArg(args[0], "link")
+	if err != nil {
+		return nil, err
 	}
-	dst, ok := args[1].(*objects.Unicode)
-	if !ok {
-		return nil, fmt.Errorf("TypeError: link() dst must be str")
+	dst, err := pathStringArg(args[1], "link")
+	if err != nil {
+		return nil, err
 	}
-	if err := goos.Link(src.Value(), dst.Value()); err != nil {
+	if err := goos.Link(src, dst); err != nil {
 		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.None(), nil
@@ -152,12 +182,17 @@ func osCPUCount(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	return objects.NewInt(int64(n)), nil
 }
 
-// osIsatty returns True if fd is a tty. The implementation Stats the
-// fd through the goos package and tests the char-device bit, which
-// matches what `isatty(3)` reports for the common cases _colorize
-// cares about.
+// osIsatty returns True if fd is a tty. It fstats the descriptor and
+// tests the char-device type bit, which matches what `isatty(3)` reports
+// for the common cases _colorize cares about. The stat goes through the
+// platform fstatResult helper, which calls fstat(2) directly rather than
+// borrowing the fd in a temporary os.File. A borrowed os.File arms a
+// finalizer on its inner handle that runtime.SetFinalizer on the outer
+// struct cannot clear, so a GC of the wrapper would close a descriptor we
+// do not own and unrelated writes would later fail with EBADF.
 //
-// CPython: Modules/posixmodule.c:11947 os_isatty_impl
+// CPython: Modules/posixmodule.c:11947 os_isatty_impl borrows the fd
+// and never closes it.
 func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: isatty() missing required argument: 'fd'")
@@ -167,18 +202,18 @@ func osIsatty(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 		return nil, fmt.Errorf("TypeError: an integer is required")
 	}
 	fdVal, _ := fdObj.Int64()
-	f := goos.NewFile(uintptr(fdVal), "")
-	if f == nil {
-		return objects.NewBool(false), nil
-	}
-	info, err := f.Stat()
+	st, err := fstatResult(fdVal)
 	if err != nil {
 		// CPython os.isatty returns False on any error rather than
-		// raising; a Stat failure here means the fd is not a real
+		// raising; a stat failure here means the fd is not a real
 		// device, which is exactly what callers want to know.
 		return objects.NewBool(false), nil //nolint:nilerr // CPython os.isatty parity
 	}
-	return objects.NewBool((info.Mode() & goos.ModeCharDevice) != 0), nil
+	// st_mode is the first stat_result slot. S_IFMT masks the file-type
+	// nibble; S_IFCHR marks a character device.
+	const sIFMT, sIFCHR = 0o170000, 0o020000
+	mode, _ := st.Items()[0].(*objects.Int).Int64()
+	return objects.NewBool(mode&sIFMT == sIFCHR), nil
 }
 
 // osFsdecode decodes filename from the filesystem encoding (utf-8 on

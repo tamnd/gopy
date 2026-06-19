@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"unsafe"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -74,6 +75,30 @@ const flagRef = 0x80
 //
 // CPython: Python/marshal.c WFERR_UNMARSHALLABLE
 var ErrUnmarshallable = errors.New("marshal: object cannot be marshaled")
+
+// The three EOF sentinels mirror the EOFError messages CPython's r_object /
+// r_byte / r_string raise when the wire data runs out. The marshal module
+// surface maps them to EOFError, every other decode error to ValueError.
+//
+// CPython: Python/marshal.c:833 r_string ("marshal data too short")
+// CPython: Python/marshal.c:916 r_byte ("EOF read where not expected")
+// CPython: Python/marshal.c:1172 r_object ("EOF read where object expected")
+var (
+	ErrEOFObjectExpected = errors.New("EOF read where object expected")
+	ErrEOFNotExpected    = errors.New("EOF read where not expected")
+	ErrDataTooShort      = errors.New("marshal data too short")
+)
+
+// IsEOF reports whether err is one of the marshal EOF sentinels (or a raw
+// io.EOF / io.ErrUnexpectedEOF that escaped conversion). The module surface
+// uses it to choose EOFError over ValueError.
+func IsEOF(err error) bool {
+	return errors.Is(err, ErrEOFObjectExpected) ||
+		errors.Is(err, ErrEOFNotExpected) ||
+		errors.Is(err, ErrDataTooShort) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
+}
 
 // Dump writes v to w in the version-5 wire format.
 //
@@ -330,6 +355,14 @@ func (e *encoder) write(v any) error {
 		}
 		return e.writeByte(typeFalse)
 	}
+	// The Ellipsis singleton (the `...` const) is short-circuited before
+	// the FLAG_REF memo, exactly like None / True / False. gopy spells the
+	// const as ast.EllipsisType; the runtime ellipsis object maps here too.
+	//
+	// CPython: Python/marshal.c:476 w_object (v == Py_Ellipsis)
+	if isEllipsisValue(v) {
+		return e.writeByte(typeEllipsis)
+	}
 
 	e.depth++
 	defer func() { e.depth-- }()
@@ -560,7 +593,16 @@ func (b *byteReader) ReadByte() (byte, error) {
 }
 
 func (d *decoder) readByte() (byte, error) {
-	return d.r.ReadByte()
+	b, err := d.r.ReadByte()
+	if err != nil {
+		// CPython's r_byte raises EOFError "EOF read where not expected".
+		// CPython: Python/marshal.c:916 r_byte
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, ErrEOFNotExpected
+		}
+		return 0, err
+	}
+	return b, nil
 }
 
 func (d *decoder) readN(n int) ([]byte, error) {
@@ -568,6 +610,12 @@ func (d *decoder) readN(n int) ([]byte, error) {
 	for i := 0; i < n; i++ {
 		b, err := d.r.ReadByte()
 		if err != nil {
+			// CPython reads byte strings through r_string, which raises
+			// EOFError "marshal data too short" when the buffer underruns.
+			// CPython: Python/marshal.c:833 r_string
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, ErrDataTooShort
+			}
 			return nil, err
 		}
 		out[i] = b
@@ -598,6 +646,13 @@ func (d *decoder) readInt64() (int64, error) {
 func (d *decoder) read() (any, error) {
 	tag, err := d.readByte()
 	if err != nil {
+		// r_object reads the type code first; an EOF here is reported as
+		// "EOF read where object expected", distinct from r_byte's own
+		// "EOF read where not expected" used mid-object.
+		// CPython: Python/marshal.c:1172 r_object
+		if errors.Is(err, ErrEOFNotExpected) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrEOFObjectExpected
+		}
 		return nil, err
 	}
 
@@ -632,6 +687,13 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 		return true, nil
 	case typeFalse:
 		return false, nil
+	case typeEllipsis:
+		// Decode to ast.EllipsisType, the same `...` const the compiler
+		// emits, so a marshaled-then-loaded code object round-trips
+		// identically to a freshly compiled one.
+		//
+		// CPython: Python/marshal.c r_object TYPE_ELLIPSIS
+		return ast.Ellipsis, nil
 	case typeInt:
 		v, err := d.readInt32()
 		return int64(v), err
@@ -835,10 +897,29 @@ func toObject(v any) (objects.Object, error) {
 		return objects.NewFloat(x), nil
 	case string:
 		return objects.NewStr(x), nil
+	case ast.EllipsisType:
+		return objects.Ellipsis(), nil
 	case objects.Object:
 		return x, nil
 	}
 	return nil, fmt.Errorf("marshal: cannot convert %T to Object", v)
+}
+
+// isEllipsisValue reports whether v is the marshalable Ellipsis const,
+// in either of the two spellings gopy uses: the compiler emits the
+// ast.EllipsisType node for a `...` literal, while a code object built
+// at runtime (e.g. via code.replace) may carry the runtime ellipsis
+// singleton instead. Both serialize to TYPE_ELLIPSIS.
+//
+// CPython: Python/marshal.c:476 w_object (v == Py_Ellipsis)
+func isEllipsisValue(v any) bool {
+	if _, ok := v.(ast.EllipsisType); ok {
+		return true
+	}
+	if obj, ok := v.(objects.Object); ok {
+		return obj == objects.Ellipsis()
+	}
+	return false
 }
 
 // fromObject converts an objects.Object back to a plain Go marshal
@@ -859,6 +940,20 @@ func fromObject(obj objects.Object) (any, error) {
 		return x, nil
 	case *objects.Code:
 		return x, nil
+	case *objects.Complex:
+		return x.Complex128(), nil
+	case *objects.Bytes:
+		return x.Bytes(), nil
+	case *objects.Tuple:
+		out := make([]any, x.Len())
+		for i := 0; i < x.Len(); i++ {
+			n, err := fromObject(x.Item(i))
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
+		}
+		return out, nil
 	}
 	// None and str use unexported concrete types; dispatch via type slots.
 	if obj.Type() == objects.NoneType() {

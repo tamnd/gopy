@@ -223,6 +223,11 @@ func newPartialType() *objects.Type {
 			return objects.NewGenericAlias(cls, args[1]), nil
 		}),
 	))
+	// Expose __get__ so partial registers as a method descriptor, matching
+	// add_operators installing the tp_descr_get wrapper for the C type.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	objects.AddDescriptorSlotWrappers(t)
 	return t
 }
 
@@ -1376,6 +1381,12 @@ func newLruCacheWrapperType() *objects.Type {
 			return objects.GetAttr(args[0], objects.NewStr("__qualname__"))
 		},
 	))
+	// Expose __get__ so inspect.ismethoddescriptor (and the descriptor
+	// attribute path) recognises the wrapper, matching add_operators
+	// installing the tp_descr_get wrapper for the C lru_cache type.
+	//
+	// CPython: Objects/typeobject.c add_operators (tp_descr_get row)
+	objects.AddDescriptorSlotWrappers(t)
 	return t
 }
 

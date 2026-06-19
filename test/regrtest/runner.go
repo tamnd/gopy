@@ -66,11 +66,14 @@ type Runner struct {
 // Run drives one manifest entry through the gopy binary. Skip /
 // missing decisions are made before exec; otherwise the binary is
 // called as `<Binary> <corpus>/<entry.Name>` for a file entry, or
-// against the package's __main__-equivalent for a directory entry.
+// as `<Binary> -m unittest test.<entry.Name>` for a directory entry.
 //
-// Directory entries are not yet supported (CPython's regrtest invokes
-// `python -m unittest <package>`; gopy's import side has to land
-// before that works) and surface as OutcomeError.
+// CPython's regrtest runs a directory test via `python -m test <name>`,
+// which loads the package through unittest discovery. gopy mirrors that
+// with `-m unittest test.<name>`: the `test` package resolves from the
+// vendored stdlib. The command runs with the corpus directory as its
+// working directory so the repo-root `module/` Go source tree does not
+// shadow stdlib imports on sys.path[0].
 func (r *Runner) Run(ctx context.Context, e Entry) Result {
 	res := Result{Entry: e}
 
@@ -97,17 +100,6 @@ func (r *Runner) Run(ctx context.Context, e Entry) Result {
 		return res
 	}
 
-	if e.IsPackage() {
-		trimmed := strings.TrimSuffix(e.Name, "/")
-		mainFile := filepath.Join(path, trimmed+".py")
-		if _, err := os.Stat(mainFile); err != nil {
-			res.Outcome = OutcomeError
-			res.Err = fmt.Errorf("regrtest: package %s: no entry point %s", e.Name, mainFile)
-			return res
-		}
-		path = mainFile
-	}
-
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -115,7 +107,15 @@ func (r *Runner) Run(ctx context.Context, e Entry) Result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, r.Binary, path) //nolint:gosec // Binary and path come from a vetted manifest, not external user input
+	// Binary, path and entry name come from a vetted manifest, not external user input.
+	var cmd *exec.Cmd
+	if e.IsPackage() {
+		pkg := "test." + strings.TrimSuffix(e.Name, "/")
+		cmd = exec.CommandContext(cctx, r.Binary, "-m", "unittest", pkg) //nolint:gosec // vetted manifest input
+		cmd.Dir = r.Corpus
+	} else {
+		cmd = exec.CommandContext(cctx, r.Binary, path) //nolint:gosec // vetted manifest input
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -23,10 +23,19 @@ var (
 var tokenMissingType = objects.NewType("Token.MISSING", []*objects.Type{objects.ObjectType()})
 
 func init() {
+	// Context owns +1 on its HAMT; release it on dealloc and expose it
+	// to the cyclic collector.
+	//
+	// CPython: Python/context.c:495 context_tp_dealloc / context_tp_traverse
+	ContextType.Dealloc = contextDealloc
+	ContextType.TpTraverse = contextTraverse
+
 	// ContextVar and Token are subscriptable via __class_getitem__.
 	// CPython: Python/context.c contextvar_methods / token_methods
 	objects.BindClassGetitem(ContextVarType)
 	objects.BindClassGetitem(TokenType)
+	ContextVarType.Dealloc = contextVarDealloc
+	ContextVarType.TpTraverse = contextVarTraverse
 	ContextVarType.Hash = func(o objects.Object) (int64, error) {
 		return o.(*ContextVar).hash, nil
 	}

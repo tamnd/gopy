@@ -1068,6 +1068,23 @@ func ReleaseDeadDictContents(d *Dict) {
 	}
 }
 
+// ClearOwnedContents unconditionally drops every value reference the
+// dict owns and resets it to empty. Unlike ReleaseDeadDictContents it
+// does not gate on the dict's own refcount: the caller asserts it is
+// the sole owner of d (an instance __dict__ that was never handed to
+// Python carries no second reference, so its loose refcount is not a
+// reliable sole-owner signal). instanceDealloc uses it to release the
+// references an instance's attribute values hold when the instance is
+// reclaimed, mirroring the Py_CLEAR(*dictptr) -> dict_dealloc ->
+// PyDict_Clear chain that subtype_dealloc runs.
+//
+// CPython: Objects/typeobject.c:2782 subtype_dealloc (clear_dict branch)
+func ClearOwnedContents(d *Dict) {
+	d.lock()
+	d.clearContents()
+	d.unlock()
+}
+
 // dictPopMethod backs dict.pop(key[, default]).
 //
 // CPython: Objects/dictobject.c:3821 dict_pop_impl

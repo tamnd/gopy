@@ -1,8 +1,6 @@
 package errors
 
 import (
-	"syscall"
-
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -43,29 +41,35 @@ var errnomap = map[int]*objects.Type{}
 
 func init() {
 	add := func(code int, t *objects.Type) {
+		// Codes a platform does not define arrive as a negative
+		// sentinel from the errnocodes table; skip them so they never
+		// collide with a real errno (errnos are always positive).
+		if code < 0 {
+			return
+		}
 		if _, dup := errnomap[code]; !dup {
 			errnomap[code] = t
 		}
 	}
-	add(int(syscall.EAGAIN), PyExc_BlockingIOError)
-	add(int(syscall.EALREADY), PyExc_BlockingIOError)
-	add(int(syscall.EINPROGRESS), PyExc_BlockingIOError)
-	add(int(syscall.EWOULDBLOCK), PyExc_BlockingIOError)
-	add(int(syscall.EPIPE), PyExc_BrokenPipeError)
-	add(int(syscall.ESHUTDOWN), PyExc_BrokenPipeError)
-	add(int(syscall.ECHILD), PyExc_ChildProcessError)
-	add(int(syscall.ECONNABORTED), PyExc_ConnectionAbortedError)
-	add(int(syscall.ECONNREFUSED), PyExc_ConnectionRefusedError)
-	add(int(syscall.ECONNRESET), PyExc_ConnectionResetError)
-	add(int(syscall.EEXIST), PyExc_FileExistsError)
-	add(int(syscall.ENOENT), PyExc_FileNotFoundError)
-	add(int(syscall.EISDIR), PyExc_IsADirectoryError)
-	add(int(syscall.ENOTDIR), PyExc_NotADirectoryError)
-	add(int(syscall.EINTR), PyExc_InterruptedError)
-	add(int(syscall.EACCES), PyExc_PermissionError)
-	add(int(syscall.EPERM), PyExc_PermissionError)
-	add(int(syscall.ESRCH), PyExc_ProcessLookupError)
-	add(int(syscall.ETIMEDOUT), PyExc_TimeoutError)
+	add(errEAGAIN, PyExc_BlockingIOError)
+	add(errEALREADY, PyExc_BlockingIOError)
+	add(errEINPROGRESS, PyExc_BlockingIOError)
+	add(errEWOULDBLOCK, PyExc_BlockingIOError)
+	add(errEPIPE, PyExc_BrokenPipeError)
+	add(errESHUTDOWN, PyExc_BrokenPipeError)
+	add(errECHILD, PyExc_ChildProcessError)
+	add(errECONNABORTED, PyExc_ConnectionAbortedError)
+	add(errECONNREFUSED, PyExc_ConnectionRefusedError)
+	add(errECONNRESET, PyExc_ConnectionResetError)
+	add(errEEXIST, PyExc_FileExistsError)
+	add(errENOENT, PyExc_FileNotFoundError)
+	add(errEISDIR, PyExc_IsADirectoryError)
+	add(errENOTDIR, PyExc_NotADirectoryError)
+	add(errEINTR, PyExc_InterruptedError)
+	add(errEACCES, PyExc_PermissionError)
+	add(errEPERM, PyExc_PermissionError)
+	add(errESRCH, PyExc_ProcessLookupError)
+	add(errETIMEDOUT, PyExc_TimeoutError)
 }
 
 // ErrnoSubclass returns the OSError subclass that CPython would pick

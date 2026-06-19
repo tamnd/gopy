@@ -969,7 +969,8 @@ func textIOWrapperGetattr(o objects.Object, name objects.Object) (objects.Object
 			return v, nil
 		}
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.TextIOWrapper' object has no attribute '%s'", n.Value())
+	// Dunders such as __class__/__reduce_ex__ resolve through the MRO walk.
+	return objects.GenericGetAttr(o, name)
 }
 
 // textIOWrapperReadonlyAttrs are the C-level data descriptors that block
@@ -1435,7 +1436,8 @@ func incrementalNLDecoderGetattr(o objects.Object, name objects.Object) (objects
 			return objects.None(), nil
 		}), nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.IncrementalNewlineDecoder' object has no attribute '%s'", n.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(o, name)
 }
 
 // translateNewlines applies universal newline tracking and (optionally)
@@ -1538,10 +1540,13 @@ var TextIOBaseType = objects.NewType("_io._TextIOBase", []*objects.Type{IOBaseTy
 // textIOBaseGetattr dispatches attribute lookups on _TextIOBase instances.
 //
 // CPython: Modules/_io/textio.c:187 textiobase_methods + textiobase_getset
-func textIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object, error) {
+func textIOBaseGetattr(self objects.Object, nameObj objects.Object) (objects.Object, error) {
 	name, ok := nameObj.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	}
+	if v, ok, err := ioUserInstanceAttr(self, nameObj); ok || err != nil {
+		return v, err
 	}
 	switch name.Value() {
 	case "detach":
@@ -1574,7 +1579,8 @@ func textIOBaseGetattr(_ objects.Object, nameObj objects.Object) (objects.Object
 		// CPython: Modules/_io/textio.c:180 _io__TextIOBase_errors_get_impl
 		return objects.None(), nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io._TextIOBase' object has no attribute '%s'", name.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(self, nameObj)
 }
 
 func init() {

@@ -151,7 +151,14 @@ func compressObjFlush(args []objects.Object, _ map[string]objects.Object) (objec
 		return nil, fmt.Errorf("ValueError: compressor has already been flushed")
 	}
 
-	mode := zSyncFlush
+	// flush()'s mode argument defaults to Z_FINISH, not Z_SYNC_FLUSH:
+	// the common `compressobj().compress(x) + flush()` idiom must emit a
+	// complete stream (final deflate block) so a one-shot decompressor can
+	// read it back. zipfile relies on this when it stores compressed
+	// members, and zipimport then decompresses them with raw inflate.
+	//
+	// CPython: Modules/zlibmodule.c:478 zlib_Compress_flush_impl (mode=Z_FINISH)
+	mode := zFinish
 	if len(args) >= 2 {
 		m, err := intFromObj(args[1])
 		if err != nil {
@@ -512,8 +519,11 @@ func zlibCRC32(args []objects.Object, kwargs map[string]objects.Object) (objects
 	}
 
 	result := crc32.Update(prev, crc32.IEEETable, data)
-	// CPython returns a signed 32-bit integer widened to Python int.
-	return objects.NewInt(int64(int32(result))), nil
+	// CPython returns the checksum as an unsigned 32-bit value widened to
+	// a Python int (PyLong_FromUnsignedLong(value & 0xffffffffU)).
+	//
+	// CPython: Modules/zlibmodule.c:1901 zlib_crc32_impl
+	return objects.NewInt(int64(uint64(result))), nil
 }
 
 // zlibAdler32 computes the Adler-32 checksum, optionally updating a previous value.
@@ -545,7 +555,11 @@ func zlibAdler32(args []objects.Object, kwargs map[string]objects.Object) (objec
 	}
 
 	result := adler32Update(prev, data)
-	return objects.NewInt(int64(int32(result))), nil
+	// CPython returns the checksum as an unsigned 32-bit value widened to
+	// a Python int (PyLong_FromUnsignedLong(value & 0xffffffffU)).
+	//
+	// CPython: Modules/zlibmodule.c:1901 zlib_adler32_impl
+	return objects.NewInt(int64(uint64(result))), nil
 }
 
 // zlibCompressobj returns a streaming Compress object.
@@ -751,6 +765,8 @@ func adler32Update(prev uint32, data []byte) uint32 {
 func toBytes(o objects.Object) ([]byte, error) {
 	switch v := o.(type) {
 	case *objects.Bytes:
+		return v.Bytes(), nil
+	case *objects.ByteArray:
 		return v.Bytes(), nil
 	case *objects.Unicode:
 		s, err := objects.Str(o)

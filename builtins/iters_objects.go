@@ -390,10 +390,48 @@ type zipIter struct {
 var ZipType = objects.NewType("zip", []*objects.Type{objects.ObjectType()})
 
 func init() {
-	ZipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
+	ZipType.Iter = objects.SelfIter
 	ZipType.IterNext = zipIterNext
+	ZipType.Dealloc = zipDealloc
+	ZipType.TpTraverse = zipTraverse
 	objects.SetTypeDescr(ZipType, "__reduce__", objects.NewMethodDescrConv(ZipType, "__reduce__", objects.MethNoArgs, zipReduce))
 	objects.SetTypeDescr(ZipType, "__setstate__", objects.NewMethodDescrConv(ZipType, "__setstate__", objects.MethO, zipSetState))
+}
+
+// zipDealloc releases the owned reference on every source iterator.
+// Mirrors zip_dealloc's ittuple release.
+//
+// CPython: Objects/enumobject.c:3201 zip_dealloc
+func zipDealloc(o objects.Object) {
+	z, ok := o.(*zipIter)
+	if !ok {
+		return
+	}
+	for _, it := range z.iters {
+		if it != nil {
+			objects.Decref(it)
+		}
+	}
+}
+
+// zipTraverse lets the cyclic collector trace through the source
+// iterators. Mirrors zip_traverse.
+//
+// CPython: Objects/enumobject.c:3213 zip_traverse
+func zipTraverse(o objects.Object, visit objects.Visitor) error {
+	z, ok := o.(*zipIter)
+	if !ok {
+		return nil
+	}
+	for _, it := range z.iters {
+		if it == nil {
+			continue
+		}
+		if err := visit(it); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CPython: Python/bltinmodule.c:3222 zip_next

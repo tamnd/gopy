@@ -239,6 +239,12 @@ func init() {
 	//
 	// CPython: pycore_frame.h _PyThreadState_GetFrame is the same shape.
 	objects.CurrentFrameHook = currentInterpreterFrame
+	// Arm opcode-level tracing when Python assigns frame.f_trace_opcodes
+	// (bdb / pdb). objects/ cannot reach the monitoring instrumentation
+	// directly, so it routes through this hook.
+	//
+	// CPython: Python/legacy_tracing.c:159 _PyEval_SetOpcodeTrace
+	objects.SetOpcodeTraceHook = setOpcodeTraceHook
 	// Expose the same hook to module/sys for sys._getframe().
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
@@ -256,6 +262,36 @@ func init() {
 			return
 		}
 		ts.SetException(nil)
+	}
+	// Save/restore the thread's raised exception around a __del__ call.
+	// slotTpFinalize uses these to mirror slot_tp_finalize's
+	// PyErr_GetRaisedException / PyErr_SetRaisedException bracket so a
+	// finalizer fired mid-unwind cannot disturb the in-flight exception.
+	//
+	// CPython: Objects/typeobject.c:9883 slot_tp_finalize
+	objects.SaveRaisedExceptionHook = func() objects.Object {
+		ts := currentThread()
+		if ts == nil {
+			return nil
+		}
+		if exc := pyerrors.Occurred(ts); exc != nil {
+			ts.SetException(nil)
+			return exc
+		}
+		return nil
+	}
+	objects.RestoreRaisedExceptionHook = func(o objects.Object) {
+		ts := currentThread()
+		if ts == nil {
+			return
+		}
+		if o == nil {
+			ts.SetException(nil)
+			return
+		}
+		if exc, ok := o.(*pyerrors.Exception); ok {
+			ts.SetException(exc)
+		}
 	}
 	// seqIterNext's fast path returns a Go errIndexOutOfRange without ever
 	// installing an IndexError on the thread state, so it must not blindly

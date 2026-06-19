@@ -355,7 +355,11 @@ func sleep(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 		return nil, fmt.Errorf("ValueError: sleep length must be non-negative")
 	}
 	if secs > 0 {
-		gotime.Sleep(gotime.Duration(secs * float64(gotime.Second)))
+		// Release the GIL while parked so other Python threads run.
+		// CPython: Modules/timemodule.c:394 time_sleep (Py_BEGIN_ALLOW_THREADS)
+		objects.AllowThreads(func() {
+			gotime.Sleep(gotime.Duration(secs * float64(gotime.Second)))
+		})
 	}
 	return objects.None(), nil
 }

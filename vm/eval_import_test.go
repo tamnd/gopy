@@ -217,7 +217,11 @@ func TestImportLevelHelper(t *testing.T) {
 	}
 }
 
-// TestGlobalNameHelper pins globalName for nil, non-dict, and a dict with __name__.
+// TestGlobalNameHelper pins globalName for nil, non-dict, and the
+// __name__ anchoring rules. globalName computes the package anchor the
+// way _calc___package__ does: a plain module strips its final dotted
+// component, while a package (one carrying __path__) anchors at its own
+// name.
 func TestGlobalNameHelper(t *testing.T) {
 	if got := globalName(nil); got != "" {
 		t.Errorf("globalName(nil) = %q, want \"\"", got)
@@ -225,9 +229,23 @@ func TestGlobalNameHelper(t *testing.T) {
 	if got := globalName(objects.NewStr("x")); got != "" {
 		t.Errorf("globalName(str) = %q, want \"\"", got)
 	}
-	d := objects.NewDict()
-	_ = d.SetItem(objects.NewStr("__name__"), objects.NewStr("mypkg"))
-	if got := globalName(d); got != "mypkg" {
-		t.Errorf("globalName(dict) = %q, want \"mypkg\"", got)
+	// A top-level module rpartitions to the empty package.
+	mod := objects.NewDict()
+	_ = mod.SetItem(objects.NewStr("__name__"), objects.NewStr("mypkg"))
+	if got := globalName(mod); got != "" {
+		t.Errorf("globalName(module) = %q, want \"\"", got)
+	}
+	// A submodule strips its final component.
+	sub := objects.NewDict()
+	_ = sub.SetItem(objects.NewStr("__name__"), objects.NewStr("mypkg.sub"))
+	if got := globalName(sub); got != "mypkg" {
+		t.Errorf("globalName(submodule) = %q, want \"mypkg\"", got)
+	}
+	// A package (carrying __path__) anchors at its own name.
+	pkg := objects.NewDict()
+	_ = pkg.SetItem(objects.NewStr("__name__"), objects.NewStr("mypkg"))
+	_ = pkg.SetItem(objects.NewStr("__path__"), objects.NewList(nil))
+	if got := globalName(pkg); got != "mypkg" {
+		t.Errorf("globalName(package) = %q, want \"mypkg\"", got)
 	}
 }

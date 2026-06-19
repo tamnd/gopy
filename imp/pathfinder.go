@@ -19,12 +19,16 @@
 package imp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
+	pyerrors "github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/marshal"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -105,47 +109,352 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			// CPython: Lib/importlib/_bootstrap.py:1227 _find_and_load
 			pm, err := ImportModuleLevel(exec, parent, "", 0)
 			if err != nil {
+				// A parent that was located but raised while executing its
+				// __init__ must surface that exception verbatim (CPython
+				// propagates it from _find_and_load), so do not relabel it
+				// as a finder miss. Only a genuine parent-not-found is a
+				// miss the child lookup can recover from.
+				//
+				// CPython: Lib/importlib/_bootstrap.py:1227 _find_and_load
+				if errors.Is(err, ErrModuleExecFailed) || !errors.Is(err, ErrModuleNotFound) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("%w: parent package %q: %w", errFinderMiss, parent, err)
 			}
 			parentMod = pm
+		}
+		// Importing the parent package may have imported this child as a side
+		// effect (e.g. the parent's __init__ ran `from .child import ...`),
+		// caching it in sys.modules and possibly rebinding the parent's
+		// attribute to something other than the submodule. In that case CPython
+		// returns the already-cached child and never reloads or re-binds it, so
+		// the parent's rebinding survives.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1290 _find_and_load_unlocked
+		if cached, ok := GetModule(name); ok {
+			return cached, nil
 		}
 		paths, err := readPackagePath(parentMod)
 		if err != nil {
 			return nil, err
 		}
 		search = paths
+
+		// Track this child on the parent spec for the duration of the load so a
+		// circular import that does getattr(parent, tail) before tail finishes
+		// loading gets the "cannot access submodule" diagnostic.
+		//
+		// CPython: Lib/importlib/_bootstrap.py:1340 parent_spec._uninitialized_submodules.append(child)
+		pop := pushUninitializedSubmodule(parentMod, tail)
+		defer pop()
 	}
 
+	// PEP 420: a directory matching the tail with no __init__.py and no
+	// flat-file match is a namespace portion. CPython's PathFinder
+	// accumulates portions across every path entry and, only after no
+	// regular module is found anywhere, builds a namespace package whose
+	// __path__ is the collected portions.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:1430 FileFinder.find_spec
+	// (namespace portion path) / Lib/importlib/_bootstrap.py:1167 PathFinder
+	var namespacePortions []string
 	for _, entry := range search {
-		dir := entry
-		if dir == "" {
-			dir = "."
+		mod, err := p.scanEntry(exec, entry, name, parent, tail, &namespacePortions)
+		if err != nil {
+			return nil, err
 		}
-		// Package case: <dir>/<tail>/__init__.py.
-		// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
-		pkgDir := filepath.Join(dir, tail)
-		pkgInit := filepath.Join(pkgDir, "__init__.py")
-		if isFile(pkgInit) {
-			mod, err := loadAsPackage(exec, p.Compiler, pkgInit, pkgDir, name)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
-			return mod, nil
-		}
-		// Module case: <dir>/<tail>.py.
-		// CPython: Lib/importlib/_bootstrap_external.py:1391 suffix loop
-		modFile := filepath.Join(dir, tail+".py")
-		if isFile(modFile) {
-			mod, err := loadAsModule(exec, p.Compiler, modFile, name, parent)
-			if err != nil {
-				return nil, err
-			}
-			bindOnParent(parent, tail, mod)
+		if mod != nil {
 			return mod, nil
 		}
 	}
+	if len(namespacePortions) > 0 {
+		mod := loadAsNamespace(exec, name, parent, namespacePortions)
+		bindOnParent(parent, tail, mod)
+		return mod, nil
+	}
 	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
+}
+
+// scanEntry searches one sys.path entry for name. It returns (mod, nil)
+// when the module was found and loaded, (nil, nil) when this entry did
+// not match (FindModule should keep scanning), or (nil, err) on a load
+// failure that must propagate. A PEP 420 namespace portion contributed
+// by this entry is appended to *namespacePortions, leaving the module
+// unresolved so the caller can fall back to a namespace package.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1357 FileFinder.find_spec
+func (p *PathFinder) scanEntry(exec Executor, entry, name, parent, tail string, namespacePortions *[]string) (*objects.Module, error) {
+	dir := entry
+	if dir == "" {
+		dir = "."
+	}
+	// spec_from_file_location runs the resolved location through
+	// _path_abspath, so every __file__, __path__ and __cached__ a
+	// path-based import produces is absolute even when the sys.path
+	// entry is relative ('', '.', or a relative directory). Absolutize
+	// the directory up front so the file paths joined below, the
+	// bytecode-cache path, and the spec origin all agree and match
+	// CPython's absolute strings.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:782 spec_from_file_location (_path_abspath)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	// A sys.path entry that is not a directory (a zip archive, or a
+	// path that points inside one) is handled by a custom importer
+	// registered on sys.path_hooks, exactly as CPython's PathFinder
+	// routes such entries through zipimport.zipimporter. Only consult
+	// the hooks for non-directories so the directory scan below stays
+	// the fast path for the common case.
+	//
+	// CPython: Lib/importlib/_bootstrap_external.py:1236 _path_importer_cache
+	if !isDir(dir) {
+		spec, handled, herr := pathHookSpec(exec, entry, name)
+		if herr != nil {
+			return nil, herr
+		}
+		if !handled {
+			return nil, nil
+		}
+		// A namespace spec from the importer (loader None, search
+		// locations set) is a PEP 420 portion: collect it and keep
+		// scanning, exactly as CPython's PathFinder extends
+		// namespace_path instead of returning. A spec with a real
+		// loader is a concrete module, so load and return it.
+		//
+		// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+		if portions, isNS := namespacePortionsOf(spec); isNS {
+			*namespacePortions = append(*namespacePortions, portions...)
+			return nil, nil
+		}
+		mod, lerr := loadFromSpec(exec, name, spec)
+		if lerr != nil {
+			return nil, lerr
+		}
+		bindOnParent(parent, tail, mod)
+		return mod, nil
+	}
+	return p.scanDir(exec, dir, name, parent, tail, namespacePortions)
+}
+
+// scanDir searches a single directory sys.path entry for name, trying
+// the source package, sourceless package, source module, and sourceless
+// module loaders in CPython's suffix order. It returns the loaded module,
+// (nil, nil) for a miss, or (nil, err) on a load failure. A bare package
+// directory with no loadable __init__ is recorded as a PEP 420 portion.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1391 FileFinder suffix loop
+func (p *PathFinder) scanDir(exec Executor, dir, name, parent, tail string, namespacePortions *[]string) (*objects.Module, error) {
+	pkgDir := filepath.Join(dir, tail)
+	// (suffix file, loader) tried in CPython's order: source package,
+	// sourceless package, source module, sourceless module.
+	loaders := []struct {
+		file string
+		base string // case-sensitivity check target
+		load func() (*objects.Module, error)
+	}{
+		{filepath.Join(pkgDir, "__init__.py"), pkgDir, func() (*objects.Module, error) {
+			return loadAsPackage(exec, p.Compiler, filepath.Join(pkgDir, "__init__.py"), pkgDir, name)
+		}},
+		{filepath.Join(pkgDir, "__init__.pyc"), pkgDir, func() (*objects.Module, error) {
+			return loadAsPackageBytecode(exec, filepath.Join(pkgDir, "__init__.pyc"), pkgDir, name)
+		}},
+		{filepath.Join(dir, tail+".py"), filepath.Join(dir, tail+".py"), func() (*objects.Module, error) {
+			return loadAsModule(exec, p.Compiler, filepath.Join(dir, tail+".py"), name, parent)
+		}},
+		{filepath.Join(dir, tail+".pyc"), filepath.Join(dir, tail+".pyc"), func() (*objects.Module, error) {
+			return loadAsModuleBytecode(exec, filepath.Join(dir, tail+".pyc"), name, parent)
+		}},
+	}
+	for _, l := range loaders {
+		if !isFile(l.file) || !caseOK(l.base) {
+			continue
+		}
+		mod, err := l.load()
+		if err != nil {
+			return nil, err
+		}
+		bindOnParent(parent, tail, mod)
+		return mod, nil
+	}
+	if isDir(pkgDir) && caseOK(pkgDir) {
+		*namespacePortions = append(*namespacePortions, pkgDir)
+	}
+	return nil, nil
+}
+
+// pathHookSpec consults sys.path_hooks for a custom importer able to load
+// modules out of entry (zipimport.zipimporter for a .zip archive) and asks
+// that importer for name's spec.
+//
+// handled is false when no hook claims entry, or when the importer claims
+// entry but has no spec for name, so FindModule keeps scanning the
+// remaining path entries. herr carries a find_spec failure that must
+// propagate. The spec is returned unloaded so FindModule can tell a
+// concrete module apart from a PEP 420 namespace portion.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+func pathHookSpec(exec Executor, entry, name string) (spec objects.Object, handled bool, herr error) {
+	_ = exec
+	importer, ok := pathHookImporter(entry)
+	if !ok {
+		return nil, false, nil
+	}
+	findSpec, err := objects.GetAttr(importer, objects.NewStr("find_spec"))
+	if err != nil {
+		return nil, false, err
+	}
+	s, err := objects.Call(findSpec, objects.NewTuple([]objects.Object{objects.NewStr(name)}), nil)
+	if err != nil {
+		return nil, true, err
+	}
+	if s == nil || objects.IsNone(s) {
+		// The archive exists but does not contain name: a miss, not an
+		// error. CPython's PathFinder moves on to the next path entry.
+		return nil, false, nil
+	}
+	return s, true, nil
+}
+
+// namespacePortionsOf reports whether spec is a PEP 420 namespace spec
+// (loader None) and, if so, returns its submodule_search_locations as a
+// slice of strings. A spec with a real loader is a concrete module and
+// returns isNS false.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder._get_spec
+// (spec.submodule_search_locations / namespace_path extension)
+func namespacePortionsOf(spec objects.Object) (portions []string, isNS bool) {
+	loader, err := objects.GetAttr(spec, objects.NewStr("loader"))
+	if err != nil || !objects.IsNone(loader) {
+		return nil, false
+	}
+	ssl, err := objects.GetAttr(spec, objects.NewStr("submodule_search_locations"))
+	if err != nil || ssl == nil || objects.IsNone(ssl) {
+		return nil, false
+	}
+	switch v := ssl.(type) {
+	case *objects.List:
+		for i := 0; i < v.Len(); i++ {
+			if s, ok := v.Item(i).(*objects.Unicode); ok {
+				portions = append(portions, s.Value())
+			}
+		}
+	case *objects.Tuple:
+		for i := 0; i < v.Len(); i++ {
+			if s, ok := v.Item(i).(*objects.Unicode); ok {
+				portions = append(portions, s.Value())
+			}
+		}
+	}
+	return portions, true
+}
+
+// pathHookImporter returns the importer object responsible for entry,
+// consulting sys.path_importer_cache first and then sys.path_hooks. A
+// hook that raises (ImportError) declines entry, so the next hook is
+// tried; when none claim it the result is cached as None and ok is false.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1236 PathFinder._path_importer_cache
+func pathHookImporter(entry string) (objects.Object, bool) {
+	sysMod, ok := GetModule("sys")
+	if !ok {
+		return nil, false
+	}
+	key := objects.NewStr(entry)
+	cacheObj, _ := sysMod.Dict().GetItem(objects.NewStr("path_importer_cache"))
+	cache, _ := cacheObj.(*objects.Dict)
+	if cache != nil {
+		if v, err := cache.GetItem(key); err == nil && v != nil {
+			if objects.IsNone(v) {
+				return nil, false
+			}
+			return v, true
+		}
+	}
+	hooksObj, _ := sysMod.Dict().GetItem(objects.NewStr("path_hooks"))
+	hooks, _ := hooksObj.(*objects.List)
+	if hooks == nil {
+		return nil, false
+	}
+	for i := 0; i < hooks.Len(); i++ {
+		importer, err := objects.Call(hooks.Item(i), objects.NewTuple([]objects.Object{key}), nil)
+		if err != nil {
+			// ImportError from a hook means "I do not handle this entry".
+			continue
+		}
+		if importer != nil && !objects.IsNone(importer) {
+			if cache != nil {
+				_ = cache.SetItem(key, importer)
+			}
+			return importer, true
+		}
+	}
+	if cache != nil {
+		_ = cache.SetItem(key, objects.None())
+	}
+	return nil, false
+}
+
+// loadFromSpec builds a module from spec via importlib.util.module_from_spec,
+// registers it in sys.modules, and runs spec.loader.exec_module, mirroring
+// the body of _bootstrap._load_unlocked. gopy cannot call _load itself
+// because that path enters the import lock machinery, which needs the
+// _weakref injection CPython performs in _setup and gopy does not run.
+//
+// CPython: Lib/importlib/_bootstrap.py:921 _load_unlocked
+func loadFromSpec(exec Executor, name string, spec objects.Object) (*objects.Module, error) {
+	util, ok := GetModule("importlib.util")
+	if !ok {
+		util, ok = ensureImportlibUtil(exec)
+		if !ok {
+			return nil, fmt.Errorf("imp: loadFromSpec %q: importlib.util unavailable", name)
+		}
+	}
+	mfs, err := util.Dict().GetItem(objects.NewStr("module_from_spec"))
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec missing: %w", name, err)
+	}
+	modObj, err := objects.Call(mfs, objects.NewTuple([]objects.Object{spec}), nil)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec: %w", name, err)
+	}
+	module, ok := modObj.(*objects.Module)
+	if !ok {
+		return nil, fmt.Errorf("imp: loadFromSpec %q: module_from_spec returned %T", name, modObj)
+	}
+	AddModule(name, module)
+	loader, err := objects.GetAttr(spec, objects.NewStr("loader"))
+	if err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: spec.loader: %w", name, err)
+	}
+	// A namespace-package spec carries loader None: module_from_spec has
+	// already populated __path__ from submodule_search_locations and there
+	// is no body to run, exactly as _load_unlocked skips exec_module when
+	// the loader is None.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:945 _load_unlocked (loader is None)
+	if objects.IsNone(loader) {
+		if final, ok := GetModule(name); ok {
+			return final, nil
+		}
+		return module, nil
+	}
+	execMod, err := objects.GetAttr(loader, objects.NewStr("exec_module"))
+	if err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: loader.exec_module: %w", name, err)
+	}
+	if _, err := objects.Call(execMod, objects.NewTuple([]objects.Object{module}), nil); err != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadFromSpec %q: exec_module: %w: %w", name, err, ErrModuleExecFailed)
+	}
+	// exec_module may reassign sys.modules[name]; re-read it the way
+	// CPython's _load_unlocked returns sys.modules[spec.name].
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return module, nil
 }
 
 // bindOnParent installs child as an attribute on the parent package's
@@ -154,16 +463,63 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 // resolve as an attribute on `a`. Errors are swallowed to match
 // CPython, which also catches AttributeError around the setattr.
 //
-// CPython: Lib/importlib/_bootstrap.py:1234 setattr(parent_module, child, module)
+// CPython: Lib/importlib/_bootstrap.py:1350 setattr(parent_module, child, module)
 func bindOnParent(parent, tail string, child *objects.Module) {
 	if parent == "" {
 		return
 	}
-	pm, ok := GetModule(parent)
-	if !ok {
+	// CPython reads parent_module = sys.modules[parent] verbatim, so a test
+	// (or pathological code) that swaps in a non-module object still receives
+	// the setattr; GetModuleRaw preserves that object, GetModule would drop it.
+	pm, ok := GetModuleRaw(parent)
+	if !ok || objects.IsNone(pm) {
 		return
 	}
-	_ = pm.Dict().SetItem(objects.NewStr(tail), child)
+	// CPython binds `module = sys.modules.pop(spec.name)`, i.e. the object the
+	// body left in sys.modules, not the module shell the loader created. An
+	// __init__ that reassigns sys.modules[__name__] to a custom object is bound
+	// in that swapped form, so re-read the entry by full name and fall back to
+	// the loader's module only when nothing replaced it.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:931 module = sys.modules.pop(spec.name)
+	bound := objects.Object(child)
+	if raw, present := GetModuleRaw(parent + "." + tail); present && !objects.IsNone(raw) {
+		bound = raw
+	}
+	// setattr(parent_module, child, module) runs the parent's real __setattr__
+	// so a custom or unwritable parent participates. An AttributeError is
+	// caught and reported as an ImportWarning, exactly as
+	// _find_and_load_unlocked does.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1350 try: setattr(...) except AttributeError
+	if err := objects.SetAttr(pm, objects.NewStr(tail), bound); err != nil {
+		if isAttributeError(err) && ImportWarnHook != nil {
+			// CPython: Lib/importlib/_bootstrap.py:1352 msg = f"Cannot set ..."
+			msg := fmt.Sprintf("Cannot set an attribute on '%s' for child module '%s'",
+				parent, tail)
+			_ = ImportWarnHook(msg)
+		}
+	}
+}
+
+// isAttributeError reports whether a Go error raised by SetAttr carries a
+// Python AttributeError. SetAttr surfaces the exception wrapped in a
+// RaisedError; an entry that is not an AttributeError propagates as a
+// non-match so it is not silently turned into a warning.
+func isAttributeError(err error) bool {
+	var re *objects.RaisedError
+	if errors.As(err, &re) {
+		if exc, ok := re.Exc.(*pyerrors.Exception); ok {
+			return pyerrors.Match(exc, pyerrors.PyExc_AttributeError)
+		}
+	}
+	// SetAttr also surfaces a missing-slot failure as a plain Go error whose
+	// text leads with the exception name, so match that shape too.
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "vm: "); ok {
+		msg = rest
+	}
+	return strings.HasPrefix(msg, "AttributeError:")
 }
 
 // splitParent splits a dotted module name into (parent, tail).
@@ -251,19 +607,36 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		return nil, fmt.Errorf("imp: loadAsPackage %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
+	// CPython attaches __spec__ before exec_module; do the same so an
+	// __init__.py that imports from its own package during init reads
+	// spec.has_location / spec.origin.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
 
 	src, err := os.ReadFile(initFile) //nolint:gosec // initFile is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: %w", name, err)
 	}
-	code, err := compiler(src, initFile)
-	if err != nil {
-		return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, err)
+	code, ok := readBytecodeCache(initFile)
+	if !ok {
+		var cerr error
+		code, cerr = compiler(src, initFile)
+		if cerr != nil {
+			return nil, fmt.Errorf("imp: loadAsPackage %q: compile: %w", name, cerr)
+		}
+		writeBytecodeCache(initFile, code)
 	}
-	if _, err := exec.ExecCode(code, mod); err != nil {
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w", name, err)
+		return nil, fmt.Errorf("imp: loadAsPackage %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
+	// Executing this package may have completed importlib's self-bootstrap,
+	// which unblocks the deferred spec queue (see maybeFlushPendingSpecs).
+	maybeFlushPendingSpecs(exec)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so an `__init__.py` that reassigns its own entry
 	// (rare for packages, but the same shape as decimal/_pydecimal).
@@ -271,6 +644,129 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 		return final, nil
 	}
 	return mod, nil
+}
+
+// loadAsPackageBytecode is loadAsPackage for a sourceless package: the
+// code object comes from <pkgDir>/__init__.pyc instead of compiling
+// __init__.py. __path__ is set before the body runs so a package whose
+// __init__ does `from .submod import x` can resolve the parent's
+// __path__.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
+func loadAsPackageBytecode(exec Executor, initFile, pkgDir, name string) (*objects.Module, error) {
+	code, err := readPycCode(initFile)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: %w", name, err)
+	}
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	if err := d.SetItem(objects.NewStr("__file__"), objects.NewStr(initFile)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __file__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__path__"),
+		objects.NewList([]objects.Object{objects.NewStr(pkgDir)})); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __path__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__package__"), objects.NewStr(name)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: __package__: %w", name, err)
+	}
+	AddModule(name, mod)
+	attachSpecAttrs(exec, mod, name, initFile, []string{pkgDir})
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsPackageBytecode %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
+	}
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return mod, nil
+}
+
+// loadAsModuleBytecode is loadAsModule for a sourceless module: the code
+// object comes from <dir>/<tail>.pyc instead of compiling <tail>.py.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader
+func loadAsModuleBytecode(exec Executor, file, name, parent string) (*objects.Module, error) {
+	code, err := readPycCode(file)
+	if err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: %w", name, err)
+	}
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	if err := d.SetItem(objects.NewStr("__file__"), objects.NewStr(file)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: __file__: %w", name, err)
+	}
+	if err := d.SetItem(objects.NewStr("__package__"), objects.NewStr(parent)); err != nil {
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: __package__: %w", name, err)
+	}
+	AddModule(name, mod)
+	attachSpecAttrs(exec, mod, name, file, nil)
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
+		RemoveModule(name)
+		return nil, fmt.Errorf("imp: loadAsModuleBytecode %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
+	}
+	if final, ok := GetModule(name); ok {
+		return final, nil
+	}
+	return mod, nil
+}
+
+// readPycCode opens a .pyc file and returns its embedded code object,
+// validating the magic-number header along the way.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1215 SourcelessFileLoader.get_code
+func readPycCode(file string) (*objects.Code, error) {
+	f, err := os.Open(file) //nolint:gosec // file is filepath.Join of a trusted PathFinder.Paths entry.
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	code, _, err := marshal.ReadPyc(f)
+	if err != nil {
+		return nil, err
+	}
+	return code, nil
+}
+
+// loadAsNamespace builds a PEP 420 namespace package: a module with no
+// __file__, a __path__ spanning every contributing directory, and a
+// namespace __spec__ (loader None, origin None). The body is never
+// executed because a namespace package has no __init__.py.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec (namespace) /
+// Lib/importlib/_bootstrap_external.py:1230 NamespaceLoader
+func loadAsNamespace(exec Executor, name, parent string, portions []string) *objects.Module {
+	mod, exists := GetModule(name)
+	if !exists {
+		mod = objects.NewModule(name)
+	}
+	d := mod.Dict()
+	items := make([]objects.Object, len(portions))
+	for i, s := range portions {
+		items[i] = objects.NewStr(s)
+	}
+	_ = d.SetItem(objects.NewStr("__path__"), objects.NewList(items))
+	_ = d.SetItem(objects.NewStr("__package__"), objects.NewStr(name))
+	_ = d.SetItem(objects.NewStr("__file__"), objects.None())
+	if _, err := d.GetItem(objects.NewStr("__doc__")); err != nil {
+		_ = d.SetItem(objects.NewStr("__doc__"), objects.None())
+	}
+	_ = parent
+	AddModule(name, mod)
+	attachNamespaceSpec(exec, mod, name, portions)
+	return mod
 }
 
 // loadAsModule is the flat-file equivalent: load source, set
@@ -291,19 +787,36 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		return nil, fmt.Errorf("imp: loadAsModule %q: __package__: %w", name, err)
 	}
 	AddModule(name, mod)
+	// CPython sets __spec__ in module_from_spec before exec_module runs the
+	// body, so a module that imports from itself during initialization can
+	// read spec.has_location / spec.origin. Attach before exec.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+	attachSpecAttrs(exec, mod, name, file, nil)
 
 	src, err := os.ReadFile(file) //nolint:gosec // file is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: %w", name, err)
 	}
-	code, err := compiler(src, file)
-	if err != nil {
-		return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, err)
+	code, ok := readBytecodeCache(file)
+	if !ok {
+		var cerr error
+		code, cerr = compiler(src, file)
+		if cerr != nil {
+			return nil, fmt.Errorf("imp: loadAsModule %q: compile: %w", name, cerr)
+		}
+		writeBytecodeCache(file, code)
 	}
-	if _, err := exec.ExecCode(code, mod); err != nil {
+	setSpecInitializing(mod, true)
+	_, execErr := exec.ExecCode(code, mod)
+	setSpecInitializing(mod, false)
+	if execErr != nil {
 		RemoveModule(name)
-		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w", name, err)
+		return nil, fmt.Errorf("imp: loadAsModule %q: exec: %w: %w", name, execErr, ErrModuleExecFailed)
 	}
+	// A freshly executed importlib submodule may have completed the package
+	// bootstrap; drain any specs deferred while it was incomplete.
+	maybeFlushPendingSpecs(exec)
 	// CPython: Python/import.c:2715 exec_code_in_module re-reads
 	// sys.modules so a module body that reassigns its own entry
 	// (`sys.modules[__name__] = other`, e.g. decimal/_pydecimal) wins.
@@ -311,6 +824,490 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 		return final, nil
 	}
 	return mod, nil
+}
+
+// attachSpecAttrs populates the module-namespace surface CPython's
+// _init_module_attrs fills from a ModuleSpec: __spec__, __loader__,
+// __cached__ and a default __doc__. gopy's import runs Go-side, so the
+// spec is built by calling importlib.util.spec_from_file_location once
+// the body has run (the same shape CPython's FileFinder produces).
+//
+// importlib.util is itself a .py module, so the modules loaded before
+// (and during) its own import cannot have their spec built yet. Those
+// are queued in pendingSpecs and flushed the moment util becomes
+// available, so importlib and its early dependencies still end up with
+// a __spec__.
+//
+// CPython: Lib/importlib/_bootstrap.py:516 _init_module_attrs
+func attachSpecAttrs(exec Executor, mod *objects.Module, name, origin string, searchLocations []string) {
+	d := mod.Dict()
+	// __doc__ defaults to None when the body stored no docstring.
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	p := pendingSpec{mod: mod, name: name, origin: origin, search: searchLocations}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+// setSpecInitializing flips mod.__spec__._initializing. CPython's
+// module_from_spec wraps exec_module in `spec._initializing = True` /
+// `finally: spec._initializing = False`, so a module that imports from
+// itself during its own body sees a partially-initialized spec. gopy
+// mirrors that around ExecCode so the circular-import and shadowing
+// hints in _Py_module_getattro_impl / _PyEval_ImportFrom fire correctly.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+func setSpecInitializing(mod *objects.Module, on bool) {
+	spec, err := mod.Dict().GetItem(objects.NewStr("__spec__"))
+	if err != nil || spec == nil || objects.IsNone(spec) {
+		return
+	}
+	v := objects.False()
+	if on {
+		v = objects.True()
+	}
+	_ = objects.SetAttr(spec, objects.NewStr("_initializing"), v)
+}
+
+// pushUninitializedSubmodule appends child to parentMod.__spec__.
+// _uninitialized_submodules and returns a pop function that removes the
+// last entry. CPython brackets the child's _load_unlocked with this
+// append/pop so a circular import that reaches getattr(parent, child)
+// while child is mid-load gets the "cannot access submodule" message.
+//
+// CPython: Lib/importlib/_bootstrap.py:1340 parent_spec._uninitialized_submodules.append(child)
+func pushUninitializedSubmodule(parentMod *objects.Module, child string) func() {
+	noop := func() {}
+	if parentMod == nil {
+		return noop
+	}
+	spec, err := parentMod.Dict().GetItem(objects.NewStr("__spec__"))
+	if err != nil || spec == nil || objects.IsNone(spec) {
+		return noop
+	}
+	listObj, err := objects.GetAttr(spec, objects.NewStr("_uninitialized_submodules"))
+	if err != nil {
+		return noop
+	}
+	list, ok := listObj.(*objects.List)
+	if !ok {
+		return noop
+	}
+	list.Append(objects.NewStr(child))
+	return func() {
+		// CPython: Lib/importlib/_bootstrap.py:1345 _uninitialized_submodules.pop()
+		if n := list.Len(); n > 0 {
+			list.SetSlice(n-1, n, nil)
+		}
+	}
+}
+
+// attachNamespaceSpec binds a PEP 420 namespace ModuleSpec (loader None,
+// origin None, submodule_search_locations = the portions) onto mod. Like
+// the file path it defers when importlib.util is not importable yet.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec (namespace)
+func attachNamespaceSpec(exec Executor, mod *objects.Module, name string, portions []string) {
+	p := pendingSpec{mod: mod, name: name, search: portions, namespace: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+// AttachBuiltinSpec gives a built-in (inittab) module the __spec__ /
+// __loader__ surface CPython's BuiltinImporter installs: origin
+// "built-in", no source, no file. It is deferred just like the
+// file-based path when importlib.util is not importable yet.
+//
+// CPython: Lib/importlib/_bootstrap.py:736 BuiltinImporter.exec_module
+func AttachBuiltinSpec(exec Executor, mod *objects.Module, name string) {
+	d := mod.Dict()
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	p := pendingSpec{mod: mod, name: name, builtin: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+// pendingSpec records a module whose spec could not be built yet because
+// importlib.util was not importable at the time.
+type pendingSpec struct {
+	mod       *objects.Module
+	name      string
+	origin    string
+	search    []string
+	builtin   bool
+	namespace bool
+	extension bool
+}
+
+// AttachExtensionSpec gives a Go-implemented extension module the
+// __spec__ / __loader__ / __file__ surface CPython's ExtensionFileLoader
+// installs: an ExtensionFileLoader instance as the loader and the
+// synthesized lib-dynload path as origin / __file__. test_import's
+// require_extension asserts module.__spec__.loader is ExtensionFileLoader,
+// so the loader type must be exactly that.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1032 ExtensionFileLoader
+func AttachExtensionSpec(exec Executor, mod *objects.Module, name, origin string) {
+	d := mod.Dict()
+	docKey := objects.NewStr("__doc__")
+	if _, err := d.GetItem(docKey); err != nil {
+		_ = d.SetItem(docKey, objects.None())
+	}
+	_ = d.SetItem(objects.NewStr("__file__"), objects.NewStr(origin))
+	p := pendingSpec{mod: mod, name: name, origin: origin, extension: true}
+	util, ok := ensureImportlibUtil(exec)
+	if !ok {
+		pendingMu.Lock()
+		pendingSpecs = append(pendingSpecs, p)
+		pendingMu.Unlock()
+		return
+	}
+	applySpec(util, p)
+	flushPendingSpecs(util)
+}
+
+var (
+	pendingMu    sync.Mutex
+	pendingSpecs []pendingSpec
+)
+
+// maybeFlushPendingSpecs drains the deferred-spec queue if anything is
+// queued and importlib.util has become usable. Modules whose specs were
+// deferred during importlib's bootstrap (importlib itself, _bootstrap,
+// _bootstrap_external) are picked up here the moment the package finishes
+// initializing, so a follow-up `import importlib.abc` finds a __spec__ on
+// its parent package.
+func maybeFlushPendingSpecs(exec Executor) {
+	pendingMu.Lock()
+	n := len(pendingSpecs)
+	pendingMu.Unlock()
+	if n == 0 {
+		return
+	}
+	if util, ok := ensureImportlibUtil(exec); ok {
+		flushPendingSpecs(util)
+	}
+}
+
+// flushPendingSpecs drains the deferred-spec queue, building each
+// module's spec now that importlib.util is available.
+func flushPendingSpecs(util *objects.Module) {
+	pendingMu.Lock()
+	queue := pendingSpecs
+	pendingSpecs = nil
+	pendingMu.Unlock()
+	for _, p := range queue {
+		applySpec(util, p)
+	}
+}
+
+// applySpec builds a ModuleSpec for p via importlib.util and binds the
+// resulting __spec__/__loader__/__cached__ onto the module dict.
+// Built-in modules use spec_from_loader with a "built-in" origin; file
+// modules use spec_from_file_location.
+//
+// CPython: Lib/importlib/_bootstrap.py:516 _init_module_attrs
+func applySpec(util *objects.Module, p pendingSpec) {
+	d := p.mod.Dict()
+	// importlib._bootstrap._setup already walks sys.modules and gives every
+	// built-in module a spec whose loader is BuiltinImporter. When that has
+	// run before this deferred flush, a freshly-built spec here would carry
+	// loader=None (importlib.machinery may not be importable yet) and clobber
+	// the correct __loader__. Leave _setup's work in place.
+	//
+	// CPython: Lib/importlib/_bootstrap.py:1517 _setup (built-in spec set-up)
+	if p.builtin {
+		if existing, err := d.GetItem(objects.NewStr("__spec__")); err == nil && existing != nil && !objects.IsNone(existing) {
+			if loader, lerr := objects.GetAttr(existing, objects.NewStr("loader")); lerr == nil && loader != nil && !objects.IsNone(loader) {
+				return
+			}
+		}
+	}
+	spec := buildSpec(util, p)
+	if spec == nil {
+		return
+	}
+	_ = d.SetItem(objects.NewStr("__spec__"), spec)
+	if loader, lerr := objects.GetAttr(spec, objects.NewStr("loader")); lerr == nil {
+		_ = d.SetItem(objects.NewStr("__loader__"), loader)
+	}
+	// __cached__ mirrors spec.cached (None for gopy's bytecode-less load).
+	if cached, cerr := objects.GetAttr(spec, objects.NewStr("cached")); cerr == nil {
+		_ = d.SetItem(objects.NewStr("__cached__"), cached)
+	} else {
+		_ = d.SetItem(objects.NewStr("__cached__"), objects.None())
+	}
+}
+
+// buildSpec calls the appropriate importlib.util constructor for p.
+func buildSpec(util *objects.Module, p pendingSpec) objects.Object {
+	switch {
+	case p.namespace:
+		return buildNamespaceSpec(p)
+	case p.builtin:
+		return buildBuiltinSpec(util, p)
+	case p.extension:
+		return buildExtensionSpec(util, p)
+	default:
+		return buildFileSpec(util, p)
+	}
+}
+
+// buildExtensionSpec builds a spec whose loader is an ExtensionFileLoader
+// instance, mirroring the spec PathFinder produces for a compiled
+// extension. spec_from_file_location with an explicit loader keeps the
+// loader type exactly ExtensionFileLoader and records origin as __file__.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1546 ExtensionFileLoader path hook
+func buildExtensionSpec(util *objects.Module, p pendingSpec) objects.Object {
+	machinery, ok := GetModule("importlib.machinery")
+	if !ok {
+		return nil
+	}
+	loaderCls, err := machinery.Dict().GetItem(objects.NewStr("ExtensionFileLoader"))
+	if err != nil || loaderCls == nil {
+		return nil
+	}
+	loader, lerr := objects.Call(loaderCls,
+		objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)}), nil)
+	if lerr != nil {
+		return nil
+	}
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("loader"), loader)
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)})
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
+}
+
+// buildNamespaceSpec builds a PEP 420 namespace spec: loader None, origin
+// None, the portions as submodule_search_locations. machinery.ModuleSpec is
+// the faithful constructor; util re-exports it.
+//
+// CPython: Lib/importlib/_bootstrap.py:573 module_from_spec
+func buildNamespaceSpec(p pendingSpec) objects.Object {
+	machinery, ok := GetModule("importlib.machinery")
+	if !ok {
+		return nil
+	}
+	ctor, err := machinery.Dict().GetItem(objects.NewStr("ModuleSpec"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("is_package"), objects.True())
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.None()})
+	spec, cerr := objects.Call(ctor, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	items := make([]objects.Object, len(p.search))
+	for i, s := range p.search {
+		items[i] = objects.NewStr(s)
+	}
+	_ = objects.SetAttr(spec, objects.NewStr("submodule_search_locations"), objects.NewList(items))
+	return spec
+}
+
+// buildBuiltinSpec builds the spec for a built-in module. CPython's
+// BuiltinImporter.find_spec passes the importer class itself as the loader,
+// so every built-in module's __loader__ is BuiltinImporter, not None. Mirror
+// that: a None loader would fail test_importlib's test_everyone_has___loader__.
+//
+// CPython: Lib/importlib/_bootstrap.py:760 BuiltinImporter.find_spec
+func buildBuiltinSpec(util *objects.Module, p pendingSpec) objects.Object {
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_loader"))
+	if err != nil {
+		return nil
+	}
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), builtinImporterLoader()})
+	kwargs := objects.NewDict()
+	_ = kwargs.SetItem(objects.NewStr("origin"), objects.NewStr("built-in"))
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
+}
+
+// builtinImporterLoader returns the BuiltinImporter class to use as a
+// built-in module's __loader__. importlib.machinery re-exports
+// _bootstrap.BuiltinImporter, but it may not be imported yet when a built-in
+// module loads early, so fall back to importlib._bootstrap, which is always
+// live by this point. None is the last resort.
+func builtinImporterLoader() objects.Object {
+	for _, modName := range []string{"importlib.machinery", "importlib._bootstrap"} {
+		m, ok := GetModule(modName)
+		if !ok {
+			continue
+		}
+		if bi, lerr := m.Dict().GetItem(objects.NewStr("BuiltinImporter")); lerr == nil && bi != nil {
+			return bi
+		}
+	}
+	return objects.None()
+}
+
+// BuiltinImporterLoader returns the BuiltinImporter class CPython uses as
+// the initial __loader__ for the __main__ module. add_main_module stamps it
+// when __main__'s dict has no __loader__ yet, so test_importlib's
+// test_everyone_has___loader__ finds the attribute on __main__.
+//
+// CPython: Python/pylifecycle.c add_main_module (BuiltinImporter loader)
+func BuiltinImporterLoader() objects.Object {
+	return builtinImporterLoader()
+}
+
+// buildFileSpec builds a file-backed spec via spec_from_file_location.
+func buildFileSpec(util *objects.Module, p pendingSpec) objects.Object {
+	fn, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location"))
+	if err != nil {
+		return nil
+	}
+	kwargs := objects.NewDict()
+	if p.search != nil {
+		items := make([]objects.Object, len(p.search))
+		for i, s := range p.search {
+			items[i] = objects.NewStr(s)
+		}
+		_ = kwargs.SetItem(objects.NewStr("submodule_search_locations"),
+			objects.NewList(items))
+	}
+	args := objects.NewTuple([]objects.Object{objects.NewStr(p.name), objects.NewStr(p.origin)})
+	spec, cerr := objects.Call(fn, args, kwargs)
+	if cerr != nil || spec == objects.None() {
+		return nil
+	}
+	return spec
+}
+
+var (
+	specBootstrapMu  sync.Mutex
+	specBootstrapped bool
+)
+
+// ensureImportlibUtil returns the importlib.util module, importing it on
+// first use. The lazy import is guarded by specBootstrapped so the
+// modules pulled in by importlib.util's own load (os, types,
+// importlib._bootstrap_external) do not re-enter and recurse while that
+// import is still in flight.
+func ensureImportlibUtil(exec Executor) (*objects.Module, bool) {
+	if util, ok := GetModule("importlib.util"); ok {
+		// util is registered before its body runs, so a mid-import
+		// lookup sees the module without spec_from_file_location yet.
+		// Treat that partial state as "not ready" so the caller defers
+		// rather than flushing the pending queue against a stub.
+		if _, err := util.Dict().GetItem(objects.NewStr("spec_from_file_location")); err != nil {
+			return nil, false
+		}
+		// spec_from_file_location dereferences importlib._bootstrap_external's
+		// module-global `_bootstrap` (wired by _set_bootstrap_module). A fresh
+		// importlib re-import (test.support.import_helper.import_fresh_module)
+		// can leave util importable while that global is still None, so verify
+		// the builder is wired before reporting util ready.
+		if !specBuilderReady() {
+			return nil, false
+		}
+		return util, true
+	}
+	// Until importlib's package bootstrap finishes, importing importlib.util
+	// would pull in a fresh importlib._bootstrap_external whose module-global
+	// `_bootstrap` is still None (it is wired by _set_bootstrap_module at
+	// importlib/__init__.py:37). spec_from_file_location dereferences that
+	// global at _bootstrap_external.py:596, so building a spec mid-bootstrap
+	// crashes. Defer: the module loads without a spec now and the pending
+	// queue is flushed once importlib is fully initialized. This mirrors
+	// importlib's own rule ("Until bootstrapping is complete, DO NOT import
+	// any modules that attempt to import importlib._bootstrap").
+	//
+	// CPython: Lib/importlib/__init__.py:6 (bootstrap-complete guard)
+	if !importlibBootstrapComplete() {
+		return nil, false
+	}
+	specBootstrapMu.Lock()
+	if specBootstrapped {
+		specBootstrapMu.Unlock()
+		return nil, false
+	}
+	specBootstrapped = true
+	specBootstrapMu.Unlock()
+	util, err := ImportModule(exec, "importlib.util")
+	specBootstrapMu.Lock()
+	specBootstrapped = false
+	specBootstrapMu.Unlock()
+	if err != nil {
+		return nil, false
+	}
+	return util, true
+}
+
+// importlibBootstrapComplete reports whether the importlib package has
+// finished its self-bootstrap. importlib/__init__.py defines import_module
+// only after wiring _bootstrap / _bootstrap_external (lines 16-48), so the
+// presence of that attribute is a reliable "bootstrap done" sentinel. When
+// importlib is not loaded at all (very early startup), report complete so the
+// legacy lazy-import path is preserved.
+//
+// CPython: Lib/importlib/__init__.py:71 def import_module
+func importlibBootstrapComplete() bool {
+	mod, ok := GetModule("importlib")
+	if !ok {
+		return true
+	}
+	_, err := mod.Dict().GetItem(objects.NewStr("import_module"))
+	return err == nil
+}
+
+// specBuilderReady reports whether importlib._bootstrap_external is wired to
+// importlib._bootstrap. spec_from_file_location dereferences the module-global
+// `_bootstrap` (set by _set_bootstrap_module), so a fresh re-import that has
+// not run that wiring yet must not be asked to build a spec.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1552 _set_bootstrap_module
+func specBuilderReady() bool {
+	be, ok := GetModule("importlib._bootstrap_external")
+	if !ok {
+		// Not yet loaded: util will pull it in wired, so treat as ready.
+		return true
+	}
+	v, err := be.Dict().GetItem(objects.NewStr("_bootstrap"))
+	if err != nil || v == nil {
+		return false
+	}
+	return !objects.IsNone(v)
 }
 
 // isFile reports whether path exists and is a regular file. It is the
@@ -323,6 +1320,62 @@ func isFile(path string) bool {
 		return false
 	}
 	return info.Mode().IsRegular()
+}
+
+// isDir reports whether path exists and is a directory. It is the gopy
+// stand-in for importlib's _path_isdir helper used by namespace-portion
+// detection.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:153 _path_isdir
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
+// caseOK reports whether the final component of an existing candidate path
+// matches a real on-disk directory entry with exact case. On a
+// case-insensitive but case-preserving filesystem (macOS, Windows) os.Stat
+// succeeds for any case spelling, so a plain existence probe would let
+// `import RAnDoM` resolve random.py. CPython's FileFinder guards against
+// this by testing membership in set(os.listdir(dir)), the exact-case path
+// cache, unless _relax_case() is true. caseOK reproduces that membership
+// test by scanning the directory for an exact-case name match.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:1378 cache_module in cache
+func caseOK(path string) bool {
+	if relaxCase() {
+		return true
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	base := filepath.Base(path)
+	for _, e := range entries {
+		if e.Name() == base {
+			return true
+		}
+	}
+	return false
+}
+
+// relaxCase mirrors importlib's _relax_case: case folding is relaxed only
+// on case-insensitive platforms (Windows, macOS) and only when PYTHONCASEOK
+// is present in the environment. Case-sensitive platforms are always
+// strict, where caseOK's directory scan is a redundant but harmless match.
+//
+// CPython: Lib/importlib/_bootstrap_external.py:50 _relax_case
+func relaxCase() bool {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		_, ok := os.LookupEnv("PYTHONCASEOK")
+		return ok
+	default:
+		return false
+	}
 }
 
 var (

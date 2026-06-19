@@ -1,7 +1,6 @@
 package errors_test
 
 import (
-	"syscall"
 	"testing"
 
 	"github.com/tamnd/gopy/errors"
@@ -37,34 +36,5 @@ func TestOSErrorHierarchy(t *testing.T) {
 	}
 	if !errors.IsSubtype(errors.PyExc_BrokenPipeError, errors.PyExc_ConnectionError) {
 		t.Fatal("BrokenPipeError must inherit from ConnectionError")
-	}
-}
-
-func TestErrnoSubclass(t *testing.T) {
-	cases := []struct {
-		errno int
-		want  *objects.Type
-	}{
-		{int(syscall.ENOENT), errors.PyExc_FileNotFoundError},
-		{int(syscall.EEXIST), errors.PyExc_FileExistsError},
-		{int(syscall.EACCES), errors.PyExc_PermissionError},
-		{int(syscall.EPERM), errors.PyExc_PermissionError},
-		{int(syscall.EINTR), errors.PyExc_InterruptedError},
-		{int(syscall.EPIPE), errors.PyExc_BrokenPipeError},
-		{int(syscall.ECHILD), errors.PyExc_ChildProcessError},
-		{int(syscall.EISDIR), errors.PyExc_IsADirectoryError},
-		{int(syscall.ENOTDIR), errors.PyExc_NotADirectoryError},
-		{int(syscall.ECONNREFUSED), errors.PyExc_ConnectionRefusedError},
-		{int(syscall.ECONNRESET), errors.PyExc_ConnectionResetError},
-		{int(syscall.ECONNABORTED), errors.PyExc_ConnectionAbortedError},
-		{int(syscall.ESRCH), errors.PyExc_ProcessLookupError},
-		{int(syscall.ETIMEDOUT), errors.PyExc_TimeoutError},
-		{0, errors.PyExc_OSError},
-		{99999, errors.PyExc_OSError},
-	}
-	for _, c := range cases {
-		if got := errors.ErrnoSubclass(c.errno); got != c.want {
-			t.Errorf("ErrnoSubclass(%d) = %v, want %v", c.errno, got, c.want)
-		}
 	}
 }

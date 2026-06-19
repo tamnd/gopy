@@ -217,13 +217,20 @@ func deriveGroupHere(src *pyerrors.Exception, subset []*pyerrors.Exception) *pye
 	return pyerrors.New(src.ExcType, objects.NewTuple([]objects.Object{message, leaves}))
 }
 
-// CPython: Python/bytecodes.c LOAD_CONST: (-- value) reads from frame->code->co_consts[oparg].
+// LOAD_CONST pushes a NEW (owned) reference to co_consts[oparg]: the
+// const stays alive in the code object, so the stack slot must own its
+// own strong reference. Otherwise an opcode that decrefs its inputs
+// (CALL_KW decrefing the kwnames const, BUILD_* consuming a const,
+// etc.) drives the shared const's refcount to zero and frees an object
+// the code object still references. Mirrors PyStackRef_FromPyObjectNew.
+//
+// CPython: Python/bytecodes.c LOAD_CONST (value = PyStackRef_FromPyObjectNew(GETITEM(...)))
 func (e *evalState) opLOAD_CONST(oparg uint32) (next int, ok bool, err error) {
 	co := e.f.Code
 	if int(oparg) >= len(co.Consts) {
 		return 0, true, fmt.Errorf("vm: LOAD_CONST index %d out of range", oparg)
 	}
-	e.pushObject(e.constAt(int(oparg)))
+	e.push(stackref.FromObjectNew(e.constAt(int(oparg))))
 	return e.advance(), true, nil
 }
 

@@ -30,7 +30,22 @@ import (
 //
 // CPython: Python/gc.c:1067 finalize_garbage
 func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer, finalized map[objects.Object]struct{}) {
+	// Snapshot the node order before running any finalizer. A finalizer
+	// (and, with container tp_clear semantics, the Decref cascade a
+	// tp_dealloc/tp_clear triggers) can free another object whose type
+	// carries a Finalize slot, which routes through Decref ->
+	// GCUntrackHook -> listRemove and unlinks a node mid-list. Walking
+	// the live linked list across that mutation derefs a stale next
+	// pointer. Capturing the nodes up front keeps the iteration stable;
+	// the per-node gcFinalized flag still guards against re-finalizing a
+	// node the cascade already reclaimed.
+	//
+	// CPython: Python/gc.c:1067 finalize_garbage (gc_list_init snapshot)
+	var nodes []*gcHead
 	for g := unreachable.next; g != unreachable; g = g.next {
+		nodes = append(nodes, g)
+	}
+	for _, g := range nodes {
 		if g.flags&gcFinalized != 0 {
 			continue
 		}
@@ -38,6 +53,16 @@ func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalize
 		if finalized != nil {
 			finalized[g.obj] = struct{}{}
 		}
+		// Stamp the header's finalized bit too, not just the gc-layer
+		// flag. PyObject_CallFinalizerFromDealloc sets _PyGC_FINALIZED so
+		// no later teardown re-runs tp_finalize; gopy's eager Decref path
+		// checks exactly this header bit. Syncing it here means a member
+		// decref during the upcoming tp_clear pass (delete_garbage) that
+		// drops this object to zero will not re-fire __del__.
+		//
+		// CPython: Objects/object.c:471 PyObject_CallFinalizerFromDealloc
+		//          (_PyGC_SET_FINALIZED after tp_finalize)
+		g.obj.Hdr().SetFinalized()
 		if fn, ok := finalizers[g.obj]; ok {
 			delete(finalizers, g.obj)
 			fn(g.obj)
@@ -91,6 +116,36 @@ func handleResurrected(unreachable, stillUnreachable *gcHead, tracked map[object
 		return err
 	}
 	return moveUnreachable(unreachable, stillUnreachable, tracked)
+}
+
+// clearGarbage runs tp_clear on every object the collector has proven
+// unreachable, the delete_garbage step that drops each object's held
+// references so cycles break and the held values become collectible.
+// gopy leaves memory to the Go GC, but the reference drop still matters:
+// an instance's __dict__ can pin a value (a module lock, say) whose
+// weakref callback must fire once nothing reaches it. Running tp_clear
+// only here, after the collector has proven the object unreachable, is
+// the sound place for that drop; the eager refcount-zero dealloc path
+// deliberately does not clear, so an object the VM under-counts to zero
+// while still live is left untouched.
+//
+// The caller drops state.mu before calling this, exactly as it does for
+// finalizeGarbage: tp_clear decrefs members, and a member hitting zero
+// routes through Decref -> GCUntrackHook -> Untrack, which locks
+// state.mu. The node order is snapshotted up front because that same
+// cascade can unlink nodes from the list mid-walk.
+//
+// CPython: Python/gc.c:1198 delete_garbage (tp_clear call)
+func clearGarbage(unreachable *gcHead) {
+	var nodes []*gcHead
+	for g := unreachable.next; g != unreachable; g = g.next {
+		nodes = append(nodes, g)
+	}
+	for _, g := range nodes {
+		if t := g.obj.Type(); t != nil && t.TpClear != nil {
+			t.TpClear(g.obj)
+		}
+	}
 }
 
 // reclaimUnreachable drops every entry on unreachable from the

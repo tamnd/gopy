@@ -61,6 +61,12 @@ func UpdateConfig(d *objects.Dict, cfg *initconfig.PyConfig) error {
 		}
 	}
 
+	// CPython: Python/sysmodule.c sets sys.dont_write_bytecode from the
+	// config alongside the flags structseq mirror.
+	if err := setItem(d, "dont_write_bytecode", objects.NewBool(cfg.WriteBytecode == 0)); err != nil {
+		return err
+	}
+
 	if cfg.PycachePrefix != "" {
 		if err := setStr(d, "pycache_prefix", cfg.PycachePrefix); err != nil {
 			return err

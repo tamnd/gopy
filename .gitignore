@@ -31,3 +31,13 @@ TECHNICAL_BRIEF.md
 /compare-baseline
 Tools/bytecodes_gen/bytecodes_gen
 /bytecodes_gen
+
+# test_zipimport scratch artifacts
+junk*.zip
+junk*/
+
+ziptestmodule
+ziptestmodule.py
+
+# test_module_with_large_stack writes this into the cwd
+longlist.py

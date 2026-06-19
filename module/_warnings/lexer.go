@@ -5,9 +5,10 @@ import (
 
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
-	"github.com/tamnd/gopy/parser/lexer"
 	parsererrors "github.com/tamnd/gopy/parser/errors"
+	"github.com/tamnd/gopy/parser/lexer"
 )
 
 // init wires the package-level hooks in parser/lexer and compile so
@@ -29,6 +30,10 @@ func init() {
 	objects.RuntimeWarnHook = func(msg string) error {
 		// CPython: Objects/typeobject.c:4667 PyErr_WarnFormat(..., 1, ...)
 		return WarnUnicode(errors.PyExc_RuntimeWarning, msg, 1, nil)
+	}
+	imp.ImportWarnHook = func(msg string) error {
+		// CPython: Lib/importlib/_bootstrap.py:1353 _warnings.warn(msg, ImportWarning)
+		return WarnUnicode(errors.PyExc_ImportWarning, msg, 1, nil)
 	}
 }
 

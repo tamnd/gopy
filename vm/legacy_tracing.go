@@ -642,17 +642,19 @@ func SetTrace(ts *state.Thread, fn LegacyTraceFunc, arg objects.Object) (objects
 	if err := setMonitoringTraceEvents(interp); err != nil {
 		return old, err
 	}
-	// Instrument the currently-executing frame's code so line events fire
-	// immediately, without waiting for the next RESUME. CPython does this
-	// after set_monitoring_trace_events when func != NULL.
+	// set_monitoring_trace_events stamps only the global event mask; in
+	// CPython the matching re-instrumentation happens one level down in
+	// _PyMonitoring_SetEvents, which runs instrument_all_executing_code_objects
+	// under stop-the-world. gopy's SetEvents only bumps the global
+	// version, and a frame picks new events up at its next RESUME, so a
+	// frame already past its RESUME (the one that called settrace and
+	// its live callers) would otherwise never see them. Walk the live
+	// stack and instrument each frame's code so line / return events
+	// fire on the current call chain.
 	//
-	// CPython: Python/legacy_tracing.c:725 _Py_Instrument(current_frame code)
-	if fn != nil {
-		if f := frameStackFor(ts).Top(); f != nil {
-			if merr := monitor.Instrument(f.Code, interp); merr != nil {
-				return old, merr
-			}
-		}
+	// CPython: Python/instrumentation.c:1941 instrument_all_executing_code_objects
+	if err := instrumentExecutingFrames(ts, interp); err != nil {
+		return old, err
 	}
 	if interp.SysTracingThreads > 0 {
 		if err := maybeSetOpcodeTrace(ts); err != nil {
@@ -660,6 +662,27 @@ func SetTrace(ts *state.Thread, fn LegacyTraceFunc, arg objects.Object) (objects
 		}
 	}
 	return old, nil
+}
+
+// instrumentExecutingFrames re-instruments the code object of every
+// frame currently on the thread's stack, the gopy stand-in for the
+// instrument_all_executing_code_objects pass _PyMonitoring_SetEvents
+// runs under stop-the-world. Walking the f_back chain from the top
+// frame covers the frame that called settrace and every live caller,
+// so events fire on the current call chain instead of waiting for a
+// RESUME those frames have already passed.
+//
+// CPython: Python/instrumentation.c:1941 instrument_all_executing_code_objects
+func instrumentExecutingFrames(ts *state.Thread, interp *monitor.InterpState) error {
+	for f := frameStackFor(ts).Top(); f != nil; f = f.Previous {
+		if f.Code == nil {
+			continue
+		}
+		if err := monitor.Instrument(f.Code, interp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // maybeSetOpcodeTrace turns INSTRUMENTED_INSTRUCTION on for ts's
@@ -672,4 +695,54 @@ func maybeSetOpcodeTrace(ts *state.Thread) error {
 		return nil
 	}
 	return setOpcodeTrace(f, true)
+}
+
+// setOpcodeTraceHook backs objects.SetOpcodeTraceHook. It is invoked
+// when Python code assigns frame.f_trace_opcodes (bdb / pdb does this
+// on the frame it is about to single-step). It toggles the local
+// INSTRUCTION event on the frame's code and re-instruments the live
+// call chain so the marker takes effect on the current instruction
+// rather than only after the next RESUME the frame has already passed.
+//
+// CPython: Python/legacy_tracing.c:159 _PyEval_SetOpcodeTrace
+func setOpcodeTraceHook(w *objects.Frame, enable bool) error {
+	if w == nil {
+		return nil
+	}
+	ip := w.Interp()
+	f, ok := ip.(*frame.Frame)
+	if !ok || f == nil {
+		return nil
+	}
+	// Mirror the wrapper's f_trace_opcodes onto the iframe so the line
+	// trampoline (callTraceFunc) re-arms opcode tracing each time it
+	// dispatches an event for this frame.
+	f.TraceOpcodes = enable
+	// CPython only installs the instrumentation when enabling AND a
+	// trace function is already set on the frame; otherwise the next
+	// dispatched event re-arms it via callTraceFunc. Disabling always
+	// tears the instrumentation down.
+	//
+	// CPython: Objects/frameobject.c:1148 frame_trace_opcodes_set_impl
+	if enable && w.Trace() == objects.None() {
+		return nil
+	}
+	if err := setOpcodeTrace(f, enable); err != nil {
+		return err
+	}
+	ts := currentThread()
+	if ts == nil {
+		return nil
+	}
+	interp := ts.Interp().Monitors
+	if interp == nil {
+		return nil
+	}
+	// SetLocalEvents only bumped the version; the executing frame is
+	// already past its RESUME, so walk the live stack and instrument
+	// each code object now, matching CPython's stop-the-world
+	// instrument_all_executing_code_objects.
+	//
+	// CPython: Python/instrumentation.c:1941 instrument_all_executing_code_objects
+	return instrumentExecutingFrames(ts, interp)
 }

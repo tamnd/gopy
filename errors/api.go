@@ -24,6 +24,68 @@ func SetString(ts *state.Thread, t *objects.Type, msg string) {
 	Set(ts, t, args)
 }
 
+// MakeModuleNotFound builds (without raising) a ModuleNotFoundError
+// instance carrying the `name` member, so a caller that returns it as a
+// Go error preserves the attribute through synthesizeException.
+//
+// CPython: Python/import.c:1759 import_name (ModuleNotFoundError, name=)
+func MakeModuleNotFound(name string) *Exception {
+	msg := "No module named '" + name + "'"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	return exc
+}
+
+// SetModuleNotFound raises ModuleNotFoundError("No module named %r",
+// name=name), stamping the `name` member the import machinery promises
+// on every miss so callers like runpy can read exc.name.
+//
+// CPython: Python/import.c:1759 import_name (ModuleNotFoundError, name=)
+func SetModuleNotFound(ts *state.Thread, name string) {
+	msg := "No module named '" + name + "'"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	Raise(ts, exc)
+}
+
+// SetModuleNotFoundHalted raises ModuleNotFoundError(f'import of {name}
+// halted; None in sys.modules', name=name), the exact exception CPython's
+// _bootstrap._find_and_load produces when sys.modules[name] is None. The
+// `name` member is what importlib/abc.py reads to recognize a blocked
+// _frozen_importlib import.
+//
+// CPython: Lib/importlib/_bootstrap.py:1387 _find_and_load (None sentinel)
+func SetModuleNotFoundHalted(ts *state.Thread, name string) {
+	msg := "import of " + name + " halted; None in sys.modules"
+	exc := New(PyExc_ModuleNotFoundError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	_ = exc.EnsureAttrDict().SetItem(objects.NewStr("name"), objects.NewStr(name))
+	Raise(ts, exc)
+}
+
+// SetImportErrorWithNameFrom raises ImportError(msg, name=modName,
+// path=origin, name_from=nameFrom), stamping the three members the
+// IMPORT_FROM diagnostic promises so a caught exception exposes
+// exc.name / exc.path / exc.name_from. Empty modName/origin leave the
+// corresponding member unset (read back as None), matching the NULL
+// arguments _PyErr_SetImportErrorWithNameFrom forwards to new_importerror.
+//
+// CPython: Python/errors.c:1152 _PyErr_SetImportErrorWithNameFrom
+func SetImportErrorWithNameFrom(ts *state.Thread, msg, modName, origin, nameFrom string) {
+	exc := New(PyExc_ImportError, objects.NewTuple([]objects.Object{objects.NewStr(msg)}))
+	d := exc.EnsureAttrDict()
+	_ = d.SetItem(objects.NewStr("msg"), objects.NewStr(msg))
+	if modName != "" {
+		_ = d.SetItem(objects.NewStr("name"), objects.NewStr(modName))
+	}
+	if origin != "" {
+		_ = d.SetItem(objects.NewStr("path"), objects.NewStr(origin))
+	}
+	if nameFrom != "" {
+		_ = d.SetItem(objects.NewStr("name_from"), objects.NewStr(nameFrom))
+	}
+	Raise(ts, exc)
+}
+
 // Format raises an exception built from a printf-style template.
 // Returns nil so callers can `return errors.Format(ts, ...)`.
 //

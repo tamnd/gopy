@@ -86,6 +86,16 @@ var WriteUnraisableHook func(obj Object, errMsg string, err error)
 // CPython: Python/_warnings.c:1573 _PyErr_WarnUnawaitedCoroutine
 var WarnUnawaitedCoroutineHook func(coro Object)
 
+// SetOpcodeTraceHook toggles per-instruction (opcode) tracing on a
+// frame's code object so the legacy sys.settrace bridge fires
+// PyTrace_OPCODE events for that frame. bdb / pdb sets
+// frame.f_trace_opcodes mid-execution, so the hook must also
+// re-instrument the live call chain immediately. objects/ stays
+// independent of vm via this indirection.
+//
+// CPython: Python/ceval.c:_PyEval_SetOpcodeTrace
+var SetOpcodeTraceHook func(f *Frame, enable bool) error
+
 // WarnUnawaitedAgenMethodHook routes a never-awaited async-generator
 // asend/athrow/aclose awaitable through warnings so the consumer sees a
 // RuntimeWarning of the form "coroutine method 'asend' of '<qualname>'
@@ -306,6 +316,26 @@ func instanceDealloc(o Object) {
 	}
 }
 
+// instanceClear is the tp_clear slot for pure user-class instances. The
+// cycle collector calls it from delete_garbage once the instance is
+// proven unreachable, releasing the references its __dict__ holds so a
+// cycle that runs through instance attributes is broken and the held
+// values become collectible. A dict handed to Python (dictExposed) may
+// be aliased by a live mapping object, so it is left to its own owner;
+// only the sole-owner case is cleared, matching the dealloc path's old
+// guard but firing from the collector instead of from refcount zero.
+//
+// CPython: Objects/typeobject.c:1411 subtype_clear
+func instanceClear(o Object) {
+	inst, ok := o.(*Instance)
+	if !ok {
+		return
+	}
+	if inst.dict != nil && !inst.dictExposed {
+		ClearOwnedContents(inst.dict)
+	}
+}
+
 // instanceTraverse visits every Object reachable from a user-class
 // instance: each non-nil slot value plus the per-instance __dict__.
 // The cycle collector calls this through Type.TpTraverse to detect
@@ -332,6 +362,21 @@ func instanceTraverse(o Object, visit Visitor) error {
 	}
 	if i.dict != nil {
 		if err := visit(i.dict); err != nil {
+			return err
+		}
+	}
+	// For a heap type, the instance holds a counted reference to its
+	// type (NewInstance increfs it, instanceDealloc releases it), so
+	// subtype_traverse visits the type. Without this edge the collector
+	// cannot see the instance->type link, and a class that is only kept
+	// alive by its own instances (a cycle through a method's __globals__,
+	// say) never collapses to unreachable. Static types are immortal and
+	// not gc-tracked, so visiting them is a harmless no-op; restrict to
+	// heap types to mirror CPython exactly.
+	//
+	// CPython: Objects/typeobject.c:1356 subtype_traverse (Py_VISIT(type))
+	if t := i.Type(); t != nil && t.IsUser {
+		if err := visit(t); err != nil {
 			return err
 		}
 	}

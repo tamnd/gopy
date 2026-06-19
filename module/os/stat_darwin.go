@@ -13,10 +13,13 @@ import (
 )
 
 // statSysFields extracts platform fields from a FileInfo's syscall.Stat_t.
-// Darwin/FreeBSD carry atime/ctime in Atimespec/Ctimespec.
+// Darwin/FreeBSD carry atime/ctime in Atimespec/Ctimespec. The returned
+// atime/ctime are full nanoseconds since the epoch so stat_result keeps
+// the sub-second precision CPython's FileFinder relies on for cache
+// invalidation.
 // CPython: Modules/posixmodule.c:3238 os_stat_impl
 func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32, atime, ctime int64) {
-	mtime := info.ModTime().Unix()
+	mtime := info.ModTime().UnixNano()
 	atime = mtime
 	ctime = mtime
 	sys, ok := info.Sys().(*syscall.Stat_t)
@@ -28,8 +31,8 @@ func statSysFields(info goos.FileInfo) (ino, dev, nlink uint64, uid, gid uint32,
 	nlink = uint64(sys.Nlink)
 	uid = sys.Uid
 	gid = sys.Gid
-	atime = sys.Atimespec.Sec
-	ctime = sys.Ctimespec.Sec
+	atime = sys.Atimespec.Sec*1_000_000_000 + sys.Atimespec.Nsec
+	ctime = sys.Ctimespec.Sec*1_000_000_000 + sys.Ctimespec.Nsec
 	return
 }
 
@@ -58,6 +61,25 @@ func statBlockFields(info goos.FileInfo) (blksize, blocks, rdev int64) {
 	blocks = sys.Blocks
 	rdev = int64(sys.Rdev)
 	return
+}
+
+// fstatResult stats an open descriptor via fstat(2) and assembles the
+// stat_result directly from the syscall.Stat_t. It never wraps the fd in
+// an os.File, so no finalizer is armed that could close the live
+// descriptor when the wrapper is garbage-collected.
+//
+// CPython: Modules/posixmodule.c:3399 os_fstat_impl
+func fstatResult(fdVal int64) (*objects.StructSeq, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(fdVal), &st); err != nil {
+		return nil, fmt.Errorf("OSError: %w", err)
+	}
+	atime := st.Atimespec.Sec*1_000_000_000 + st.Atimespec.Nsec
+	mtime := st.Mtimespec.Sec*1_000_000_000 + st.Mtimespec.Nsec
+	ctime := st.Ctimespec.Sec*1_000_000_000 + st.Ctimespec.Nsec
+	return newStatResult(int64(st.Mode), int64(st.Ino), int64(st.Dev), int64(st.Nlink),
+		int64(st.Uid), int64(st.Gid), st.Size, atime, mtime, ctime,
+		int64(st.Blksize), st.Blocks, int64(st.Rdev)), nil
 }
 
 // getuid returns the real user ID of the calling process.

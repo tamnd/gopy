@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/imp"
@@ -439,9 +440,12 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
 		}
+		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	} else {
-		f, err := os.OpenFile(a.file, flag, 0o600)
+		// 0o666 is CPython's default create mode for open(); the process
+		// umask narrows it. CPython: Modules/_io/fileio.c _io_FileIO___init___impl.
+		f, err := os.OpenFile(a.file, flag, 0o666) //nolint:gosec // CPython open() default mode, umask-narrowed
 		if err != nil {
 			// Preserve the os.PathError chain (errno + filename) with %w
 			// so the unwind path builds a FileNotFoundError /
@@ -452,6 +456,20 @@ func ioOpen(a *ioOpenArgs) (objects.Object, error) {
 			// CPython: Modules/_io/fileio.c:451 _io_FileIO___init___impl
 			return nil, fmt.Errorf("OSError: %w", err)
 		}
+		// open() succeeds on a directory on Unix; reject it at construction
+		// with IsADirectoryError (EISDIR) so the failure surfaces here rather
+		// than on the first read.
+		//
+		// CPython: Modules/_io/fileio.c:478 _io_FileIO___init___impl (S_ISDIR check)
+		if info, statErr := f.Stat(); statErr == nil && info.IsDir() {
+			_ = f.Close()
+			return nil, fmt.Errorf("OSError: %w", &os.PathError{
+				Op:   "open",
+				Path: a.file,
+				Err:  syscall.EISDIR,
+			})
+		}
+		clearGoFinalizer(f)
 		raw = NewFileIO(f, a.file, rawMode, readable, writable)
 	}
 

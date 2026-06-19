@@ -17,6 +17,7 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -240,6 +241,10 @@ func buildModule() (*objects.Module, error) {
 		{"bad_get", badGet},
 		{"set_nomemory", setNomemory},
 		{"remove_mem_hooks", removeMemHooks},
+		{"config_get", configGet},
+		{"config_getint", configGetint},
+		{"config_names", configNames},
+		{"run_in_subinterp", runInSubinterp},
 	}
 	for _, w := range wrappers {
 		if err := d.SetItem(objects.NewStr(w.name), objects.NewBuiltinFunction(w.name, w.fn)); err != nil {
@@ -310,6 +315,34 @@ func buildModule() (*objects.Module, error) {
 	}
 
 	return m, nil
+}
+
+// runInSubinterp ports _testcapi.run_in_subinterp(code). CPython creates a
+// fresh subinterpreter with Py_NewInterpreter, runs code through
+// PyRun_SimpleStringFlags, ends the interpreter, and returns the status.
+// gopy has no single-phase C extensions to isolate, so the faithful
+// behaviour is a fresh-namespace exec returning the PyRun_SimpleString
+// status code.
+//
+// CPython: Modules/_testcapimodule.c:1969 run_in_subinterp
+func runInSubinterp(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: run_in_subinterp() takes exactly one argument (%d given)", len(args))
+	}
+	code, ok := args[0].(*objects.Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: run_in_subinterp() argument must be str, not %s", args[0].Type().Name)
+	}
+	// Py_NewInterpreter builds a legacy subinterpreter: it shares the main
+	// GIL and leaves check_multi_interp_extensions off, and it has its own
+	// sys.modules so any extension re-imports through import_find_extension.
+	// Push that interpreter state for the duration of the run so the script's
+	// "assert name not in sys.modules" holds and the re-import copies m_copy.
+	//
+	// CPython: Modules/_testcapimodule.c:1969 run_in_subinterp (Py_NewInterpreter)
+	imp.PushSubinterp(false, false)
+	defer imp.PopSubinterp()
+	return objects.NewInt(int64(builtins.RunInFreshNamespace(code.Value()))), nil
 }
 
 // setNomemory ports _testcapi.set_nomemory(start[, stop]). It arms the

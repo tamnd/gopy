@@ -212,6 +212,12 @@ var frameType = NewType("frame", []*Type{objectType})
 
 func init() {
 	frameType.Repr = frameRepr
+	// Frame objects define no tp_richcompare, so they keep object's
+	// identity-based hash and can be used as dict keys (pdb keys its
+	// display dict on the current frame).
+	//
+	// CPython: Objects/frameobject.c:1238 PyFrame_Type (tp_hash = 0 inherits object's)
+	frameType.Hash = identityHash
 	frameType.TpTraverse = frameTraverse
 	frameType.Getattro = frameGetAttr
 	frameType.Setattro = frameSetAttr
@@ -455,7 +461,16 @@ func frameSetAttr(o Object, name Object, v Object) error {
 		f.SetTraceLines(v == True())
 		return nil
 	case "f_trace_opcodes":
-		f.SetTraceOpcodes(v == True())
+		// CPython: Objects/frameobject.c:1140 frame_trace_opcodes_set_impl.
+		// The wrapper bool records the request; the hook mirrors it onto
+		// the activation record and, when a trace function is installed
+		// (enable) or unconditionally (disable), arms / tears down the
+		// opcode instrumentation on the live frame so events fire on the
+		// current instruction rather than only after the next RESUME.
+		f.traceOpcodes = v == True()
+		if h := SetOpcodeTraceHook; h != nil {
+			return h(f, f.traceOpcodes)
+		}
 		return nil
 	}
 	return fmt.Errorf("AttributeError: 'frame' object attribute %q is read-only", n.v)

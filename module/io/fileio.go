@@ -14,9 +14,30 @@ import (
 	"fmt"
 	"io"
 	stdos "os"
+	"syscall"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// clearGoFinalizer drops the Go runtime finalizer that os.NewFile arms on a
+// borrowed descriptor. gopy owns the lifecycle of these fds through
+// FileIO.Close and the closefd flag, so the descriptor is released
+// deterministically when Python closes the file. Leaving Go's finalizer in
+// place lets a later GC close a descriptor whose integer was already freed
+// and reused by another open file, surfacing as a spurious EBADF
+// ("bad file descriptor") on the unrelated file's next write.
+//
+// CPython: Modules/_io/fileio.c:159 _io_FileIO_close_impl owns the close;
+// there is no background reclaim of the fd.
+//
+// os.NewFile arms the finalizer on the unexported inner *os.file, not on the
+// returned *os.File, so runtime.SetFinalizer(f, nil) on the outer handle is a
+// no-op and leaves the close finalizer live. os.File is struct{ file *file }
+// with the inner pointer at offset 0, so read that pointer and clear the
+// finalizer on the object it actually points at.
+func clearGoFinalizer(f *stdos.File) {
+	objects.ClearOSFileFinalizer(f)
+}
 
 // SMALLCHUNK / DEFAULT_BUFFER_SIZE / LARGE_BUFFER_CUTOFF_SIZE mirror the
 // growth-policy constants used by readall() in CPython.
@@ -245,6 +266,7 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor")
 		}
+		clearGoFinalizer(f)
 		fi := &FileIO{
 			f:         f,
 			nameIsInt: true,
@@ -295,8 +317,12 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 		if f == nil {
 			return nil, fmt.Errorf("OSError: bad file descriptor from opener")
 		}
+		clearGoFinalizer(f)
 	} else {
 		f, err = stdos.OpenFile(name, flag, 0o666)
+		if err == nil {
+			clearGoFinalizer(f)
+		}
 		if err != nil {
 			// Preserve the os.PathError chain (errno + filename) with %w
 			// so the unwind path can build a FileNotFoundError /
@@ -307,6 +333,20 @@ func fileIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objec
 			// CPython: Modules/_io/fileio.c:451 _io_FileIO___init___impl
 			return nil, fmt.Errorf("OSError: %w", err)
 		}
+	}
+	// open() succeeds on a directory on Unix, but a FileIO must never wrap
+	// one: fstat the descriptor and raise IsADirectoryError (EISDIR) when it
+	// names a directory, the way CPython rejects it at construction time
+	// rather than deferring the failure to the first read.
+	//
+	// CPython: Modules/_io/fileio.c:478 _io_FileIO___init___impl (S_ISDIR check)
+	if info, statErr := f.Stat(); statErr == nil && info.IsDir() {
+		_ = f.Close()
+		return nil, fmt.Errorf("OSError: %w", &stdos.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  syscall.EISDIR,
+		})
 	}
 	fi := &FileIO{
 		f:         f,
@@ -759,7 +799,8 @@ func fileIOGetattr(o objects.Object, name objects.Object) (objects.Object, error
 	if fn := fileIOMethod(fi, n.Value()); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io.FileIO' object has no attribute '%s'", n.Value())
+	// Dunders such as __class__/__dict__ resolve through the MRO walk.
+	return objects.GenericGetAttr(o, name)
 }
 
 // fileIOSetattr handles attribute assignment on FileIO. Only .name is

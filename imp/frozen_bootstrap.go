@@ -11,19 +11,26 @@
 package imp
 
 func init() {
-	// _frozen_importlib — Lib/importlib/_bootstrap.py
-	// CPython: Python/frozen.c:L56
+	// _frozen_importlib — Lib/importlib/_bootstrap.py. gopy loads the
+	// bootstrap from disk at startup and caches it in sys.modules, so this
+	// frozen code is never executed; it exists so FrozenImporter.find_spec
+	// reports the module with origname "importlib._bootstrap", matching
+	// the build-time frozen alias.
+	//
+	// CPython: Python/frozen.c:70 bootstrap_modules / :116 aliases
 	RegisterFrozen(&FrozenModule{
 		Name:      "_frozen_importlib",
-		Code:      nil,
+		Embedded:  true,
+		OrigName:  "importlib._bootstrap",
 		IsPackage: false,
 	})
 
 	// _frozen_importlib_external — Lib/importlib/_bootstrap_external.py
-	// CPython: Python/frozen.c:L63
+	// CPython: Python/frozen.c:71 bootstrap_modules / :117 aliases
 	RegisterFrozen(&FrozenModule{
 		Name:      "_frozen_importlib_external",
-		Code:      nil,
+		Embedded:  true,
+		OrigName:  "importlib._bootstrap_external",
 		IsPackage: false,
 	})
 

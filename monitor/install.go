@@ -60,15 +60,33 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 			initializeLineTools(code, data, &active)
 		}
 	}
+	if active.Tools[EventInstruction] != 0 {
+		ensurePerInstruction(code, data)
+		if multipleTools(active.Tools[EventInstruction]) && data.PerInstructionTools == nil {
+			data.PerInstructionTools = make([]uint8, instructionCount(code))
+		}
+	}
 
 	for instr := 0; instr < len(data.Tools); {
-		op := compile.Opcode(byteAt(code.Code, instr))
-		base := DeInstrument(specialize.Deopt(op))
+		base := GetBaseCodeUnit(code, instr)
 		if !OpcodeHasEvent(base) {
 			instr += 1 + cacheCount(base, code)
 			continue
 		}
 		ev := EventForOpcode(base)
+		// RESUME has no static event: it fires PY_START at function
+		// entry (arg 0) and PY_RESUME on a generator / coroutine
+		// re-entry (arg > 0), so the event depends on the oparg.
+		//
+		// CPython: Python/instrumentation.c:1824 force_instrument_lock_held
+		// (base_opcode == RESUME ? instr.op.arg > 0 ...)
+		if base == compile.RESUME {
+			if code.Code[2*instr+1] > 0 {
+				ev = EventPyResume
+			} else {
+				ev = EventPyStart
+			}
+		}
 		if int(ev) < LocalEvents && ev != EventLine {
 			if removed := removedEvents.Tools[ev]; removed != 0 {
 				removeTools(code, data, instr, removed)
@@ -80,6 +98,9 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 		instr += 1 + cacheCount(base, code)
 	}
 
+	// GH-103845: line and instruction instrumentation must both be
+	// removed before either is added, otherwise the add pass clobbers
+	// freshly-installed markers.
 	if removed := removedEvents.Tools[EventLine]; removed != 0 && data.Lines != nil {
 		for instr := 0; instr < instructionCount(code); instr++ {
 			if getOriginalOpcode(data.Lines, instr) != 0 {
@@ -87,11 +108,33 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 			}
 		}
 	}
+	if removed := removedEvents.Tools[EventInstruction]; removed != 0 && data.PerInstructionOpcodes != nil {
+		for instr := firstTraceable(code); instr < instructionCount(code); {
+			base := GetBaseCodeUnit(code, instr)
+			if base == compile.RESUME || base == compile.END_FOR {
+				instr += 1 + cacheCount(base, code)
+				continue
+			}
+			removePerInstructionTools(code, data, instr, removed)
+			instr += 1 + cacheCount(base, code)
+		}
+	}
 	if added := newEvents.Tools[EventLine]; added != 0 && data.Lines != nil {
 		for instr := 0; instr < instructionCount(code); instr++ {
 			if getOriginalOpcode(data.Lines, instr) != 0 {
 				addLineTools(code, data, instr, added)
 			}
+		}
+	}
+	if added := newEvents.Tools[EventInstruction]; added != 0 && data.PerInstructionOpcodes != nil {
+		for instr := firstTraceable(code); instr < instructionCount(code); {
+			base := GetBaseCodeUnit(code, instr)
+			if base == compile.RESUME || base == compile.END_FOR {
+				instr += 1 + cacheCount(base, code)
+				continue
+			}
+			addPerInstructionTools(code, data, instr, added)
+			instr += 1 + cacheCount(base, code)
 		}
 	}
 
@@ -164,19 +207,7 @@ func addTools(code *objects.Code, data *CoMonitoringData, offset int, tools uint
 		data.Tools = make([]uint8, instructionCount(code))
 	}
 	data.Tools[offset] |= tools
-	op := compile.Opcode(byteAt(code.Code, offset))
-	if IsInstrumented(op) {
-		return
-	}
-	base := specialize.Deopt(op)
-	instrumented := InstrumentedFor(base)
-	if instrumented == 0 {
-		return
-	}
-	code.Code[2*offset] = byte(instrumented)
-	if specialize.CacheCount(base) > 0 && code.Quickened {
-		specialize.StoreCounter(code.Code, offset, specialize.AdaptiveCounterWarmup())
-	}
+	instrument(code, data, offset)
 }
 
 // removeTools clears the bits in tools at (offset, event). When the
@@ -192,10 +223,118 @@ func removeTools(code *objects.Code, data *CoMonitoringData, offset int, tools u
 	if data.Tools[offset] != 0 {
 		return
 	}
-	op := compile.Opcode(byteAt(code.Code, offset))
-	if !IsInstrumented(op) {
+	deInstrument(code, data, offset)
+}
+
+// opcodeRefKind selects which backing store currently holds the real
+// opcode for a codeunit. CPython threads this as a bare uint8* opcode_ptr
+// that is redirected into the line table or the per-instruction table as
+// each instrumentation layer is unwrapped; Go cannot alias the three
+// stores behind one pointer, so the backing store is carried explicitly
+// and read/written through get/set.
+//
+// CPython: Python/instrumentation.c:757 instrument (opcode_ptr)
+type opcodeRefKind int
+
+const (
+	refLive     opcodeRefKind = iota // code.Code[2*i]
+	refLine                          // original opcode in the line table
+	refPerInstr                      // per-instruction opcode side table
+)
+
+// opcodeRef is the resolved location of the runnable opcode for codeunit
+// i, mirroring CPython's opcode_ptr after it has been walked through the
+// INSTRUMENTED_LINE and INSTRUMENTED_INSTRUCTION side tables.
+type opcodeRef struct {
+	code *objects.Code
+	data *CoMonitoringData
+	i    int
+	kind opcodeRefKind
+}
+
+func (r opcodeRef) get() compile.Opcode {
+	switch r.kind {
+	case refLine:
+		return compile.Opcode(getOriginalOpcode(r.data.Lines, r.i))
+	case refPerInstr:
+		return compile.Opcode(r.data.PerInstructionOpcodes[r.i])
+	default:
+		return compile.Opcode(byteAt(r.code.Code, r.i))
+	}
+}
+
+func (r opcodeRef) set(op compile.Opcode) {
+	switch r.kind {
+	case refLine:
+		setOriginalOpcode(r.data.Lines, r.i, byte(op))
+	case refPerInstr:
+		r.data.PerInstructionOpcodes[r.i] = byte(op)
+	default:
+		r.code.Code[2*r.i] = byte(op)
+	}
+}
+
+// resolveOpcodeRef walks the live byte through the INSTRUMENTED_LINE and
+// INSTRUMENTED_INSTRUCTION side tables, returning the location that holds
+// the opcode an instrument / de_instrument should rewrite. This is the
+// shared opcode_ptr-walking prologue of CPython's instrument(),
+// de_instrument(), and de_instrument_per_instruction().
+//
+// CPython: Python/instrumentation.c:757 instrument
+func resolveOpcodeRef(code *objects.Code, data *CoMonitoringData, i int) (opcodeRef, compile.Opcode) {
+	ref := opcodeRef{code: code, data: data, i: i, kind: refLive}
+	op := ref.get()
+	if op == compile.INSTRUMENTED_LINE {
+		ref.kind = refLine
+		op = ref.get()
+	}
+	if op == compile.INSTRUMENTED_INSTRUCTION {
+		ref.kind = refPerInstr
+		op = ref.get()
+	}
+	return ref, op
+}
+
+// instrument stamps the matching INSTRUMENTED_<X> opcode for codeunit i,
+// writing through the resolved opcode_ptr so a site already hidden behind
+// INSTRUMENTED_LINE or INSTRUMENTED_INSTRUCTION updates the hidden opcode
+// in its side table rather than clobbering the visible marker. A slot
+// that is already an instrumented variant is left untouched.
+//
+// CPython: Python/instrumentation.c:757 instrument
+func instrument(code *objects.Code, data *CoMonitoringData, i int) {
+	ref, op := resolveOpcodeRef(code, data, i)
+	if IsInstrumented(op) {
 		return
 	}
-	base := DeInstrument(op)
-	code.Code[2*offset] = byte(base)
+	deopt := specialize.Deopt(op)
+	instrumented := InstrumentedFor(deopt)
+	if instrumented == 0 {
+		return
+	}
+	ref.set(instrumented)
+	if specialize.CacheCount(deopt) > 0 && code.Quickened {
+		specialize.StoreCounter(code.Code, i, specialize.AdaptiveCounterWarmup())
+	}
+}
+
+// deInstrument restores the original opcode for codeunit i, writing
+// through the resolved opcode_ptr so a site hidden behind a line or
+// per-instruction marker has its side-table opcode de-instrumented in
+// place. A non-instrumented opcode is left alone.
+//
+// CPython: Python/instrumentation.c:676 de_instrument
+func deInstrument(code *objects.Code, data *CoMonitoringData, i int) {
+	ref, op := resolveOpcodeRef(code, data, i)
+	if int(op) >= len(deinstrument) {
+		return
+	}
+	deinstrumented := deinstrument[op]
+	if deinstrumented == 0 {
+		return
+	}
+	ref.set(deinstrumented)
+	if specialize.CacheCount(deinstrumented) > 0 && code.Quickened {
+		specialize.StoreCounter(code.Code, i, specialize.AdaptiveCounterWarmup())
+	}
 }

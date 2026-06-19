@@ -30,8 +30,23 @@ func (e *evalState) handleResume(op compile.Opcode, oparg uint32) (next int, err
 	//
 	// CPython: Python/bytecodes.c:196 _Py_Instrument(_PyFrame_GetCode(frame), tstate->interp)
 	if interp := e.ts.Interp(); interp != nil && interp.Monitors != nil {
+		before := e.f.Code.Code[e.f.InstrPtr]
 		if merr := monitor.Instrument(e.f.Code, interp.Monitors); merr != nil {
 			return 0, merr
+		}
+		// CPython's RESUME re-reads this_instr after _Py_Instrument and
+		// dispatches straight into INSTRUMENTED_RESUME, so the PY_START /
+		// PY_RESUME event fires before the body runs. When the walk just
+		// rewrote this slot (the frame began after sys.settrace and so
+		// missed the chance to instrument at entry), re-dispatch the same
+		// offset instead of advancing; the second pass fetches the now
+		// INSTRUMENTED_RESUME, fires the event, and the no-op re-instrument
+		// leaves the slot unchanged so this does not loop.
+		//
+		// CPython: Python/bytecodes.c:196 RESUME
+		if e.f.Code.Code[e.f.InstrPtr] != before &&
+			compile.Opcode(e.f.Code.Code[e.f.InstrPtr]) == compile.INSTRUMENTED_RESUME {
+			return e.f.InstrPtr, nil
 		}
 	}
 	if oparg < 2 {

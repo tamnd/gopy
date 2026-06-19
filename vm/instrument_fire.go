@@ -47,6 +47,18 @@ func (e *evalState) fireInstrumented(op compile.Opcode, oparg uint32) error {
 	}
 	base := monitor.DeInstrument(op)
 	ev := monitor.EventForOpcode(base)
+	// RESUME fires PY_START at entry (oparg 0) and PY_RESUME on a
+	// generator / coroutine re-entry (oparg > 0); the event is not in
+	// the static EventForOpcode table because it depends on the oparg.
+	//
+	// CPython: Python/bytecodes.c:245 _MONITOR_RESUME (oparg > 0)
+	if base == compile.RESUME {
+		if oparg > 0 {
+			ev = monitor.EventPyResume
+		} else {
+			ev = monitor.EventPyStart
+		}
+	}
 	if int(ev) >= monitor.Events {
 		return nil
 	}
@@ -92,6 +104,30 @@ func (e *evalState) handleInstrumentedLine() (compile.Opcode, error) {
 	return disp.OriginalOpcode, nil
 }
 
+// handleInstrumentedInstruction resolves an INSTRUMENTED_INSTRUCTION
+// marker at the current instr pointer: it fires INSTRUCTION for any
+// subscribed tool and returns the underlying opcode the dispatcher
+// should run instead of the marker. Returns NOP when no per-instruction
+// data is present.
+//
+// CPython: Python/instrumentation.c:1401 _Py_call_instrumentation_instruction
+func (e *evalState) handleInstrumentedInstruction() (compile.Opcode, error) {
+	co := e.f.Code
+	var interp *monitor.InterpState
+	if it := e.ts.Interp(); it != nil {
+		interp = it.Monitors
+	}
+	instr := e.f.InstrPtr / 2
+	next, err := monitor.CallInstrumentationInstruction(interp, co, instr)
+	if err != nil {
+		return compile.NOP, err
+	}
+	if next == 0 {
+		return compile.NOP, nil
+	}
+	return next, nil
+}
+
 // fireForEvent dispatches to the matching FireXxx entry point in the
 // monitor package. Currently covers the events whose argument
 // signature the eval loop can already supply; the rest land with
@@ -107,6 +143,10 @@ func fireForEvent(
 	e *evalState,
 ) error {
 	switch ev {
+	case monitor.EventPyStart:
+		return monitor.FirePyStart(interp, state, co, offset)
+	case monitor.EventPyResume:
+		return monitor.FirePyResume(interp, state, co, offset)
 	case monitor.EventPyReturn:
 		retval := objects.None()
 		if e.f.StackTop > 0 {

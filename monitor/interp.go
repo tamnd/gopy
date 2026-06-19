@@ -126,6 +126,20 @@ func CheckToolID(tool Tool) error {
 	return nil
 }
 
+// checkTool reports an error when tool is a freely-assignable slot
+// (0..SYS_PROFILE-1) that no use_tool_id call has claimed. The two
+// reserved slots SYS_PROFILE (6) and SYS_TRACE (7) bypass the check:
+// sys.setprofile / sys.settrace own them implicitly, so the event
+// setters never demand an explicit use_tool_id for them.
+//
+// CPython: Python/instrumentation.c:1987 check_tool
+func (s *InterpState) checkTool(tool Tool) error {
+	if tool < ToolSysProfile && s.ToolNames[tool] == nil {
+		return fmt.Errorf("tool %d is not in use", tool)
+	}
+	return nil
+}
+
 // UseToolID claims tool for name. Errors if the slot is already in
 // use. Returns nil and stores the name on success.
 //

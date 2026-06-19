@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -42,10 +43,11 @@ func TestInitVersionInfoShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetItem(version_info): %v", err)
 	}
-	tup, ok := v.(*objects.Tuple)
+	ss, ok := v.(*objects.StructSeq)
 	if !ok {
-		t.Fatalf("version_info is %T, want *Tuple", v)
+		t.Fatalf("version_info is %T, want *StructSeq", v)
 	}
+	tup := ss.AsTuple()
 	if tup.Len() != 5 {
 		t.Fatalf("version_info has %d items, want 5", tup.Len())
 	}
@@ -136,6 +138,15 @@ func TestInitMaxsizePositive(t *testing.T) {
 // builtins and sys are static-init, so they are advertised here.
 // Once 1623 lands the import system, this list grows.
 func TestInitBuiltinModuleNamesIncludesSys(t *testing.T) {
+	// builtin_module_names mirrors the live inittab. The full binary
+	// links the builtins module; register a stub here so the snapshot
+	// advertises it without importing module/builtins (which would form
+	// an import cycle through builtins -> module/sys).
+	if !imp.IsBuiltinName("builtins") {
+		_ = imp.AppendInittab("builtins", func() (*objects.Module, error) {
+			return objects.NewModule("builtins"), nil
+		})
+	}
 	d, err := Init()
 	if err != nil {
 		t.Fatalf("Init: %v", err)

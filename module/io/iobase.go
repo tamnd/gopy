@@ -325,6 +325,29 @@ func IOBaseCannotPickle(self objects.Object) (objects.Object, error) {
 	return nil, fmt.Errorf("TypeError: cannot pickle '%s' instances", name)
 }
 
+// ioUserInstanceAttr resolves attribute lookups for Python subclasses of the
+// io base types. Those instances are *Instance objects, so a method the
+// subclass (or a mix-in) defines must win over the synthesized native method,
+// exactly as PyObject_GenericGetAttr walks the MRO. It returns (value, true,
+// nil) when the generic path resolves the name, (nil, false, nil) when the
+// caller should fall back to the native method synthesis, and an error to
+// propagate verbatim.
+//
+// CPython: Objects/object.c:1389 _PyObject_GenericGetAttrWithDict
+func ioUserInstanceAttr(o objects.Object, name objects.Object) (objects.Object, bool, error) {
+	if _, ok := o.(*objects.Instance); !ok {
+		return nil, false, nil
+	}
+	v, err := objects.GenericGetAttr(o, name)
+	if err == nil {
+		return v, true, nil
+	}
+	if objects.IsAttributeError(err) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
 // iobaseGetattro dispatches attribute lookup for _IOBase objects.
 //
 // CPython: Modules/_io/iobase.c:860 iobase_getset + iobase_methods
@@ -333,6 +356,9 @@ func iobaseGetattro(o objects.Object, name objects.Object) (objects.Object, erro
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
 	}
+	if v, ok, err := ioUserInstanceAttr(o, name); ok || err != nil {
+		return v, err
+	}
 	return iobaseAttr(o, n.Value())
 }
 
@@ -340,6 +366,9 @@ func rawiobaseGetattro(o objects.Object, name objects.Object) (objects.Object, e
 	n, ok := name.(*objects.Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string")
+	}
+	if v, ok, err := ioUserInstanceAttr(o, name); ok || err != nil {
+		return v, err
 	}
 	// Instance dict shadows the type methods so subclasses (and tests) can
 	// override read / readall / readinto / write via setattr, mirroring
@@ -372,7 +401,10 @@ func iobaseAttr(o objects.Object, name string) (objects.Object, error) {
 	if fn := iobaseMethod(o, name); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '_io._IOBase' object has no attribute %q", name)
+	// User subclasses (*Instance) keep their attributes in a managed dict and
+	// resolve dunders (__class__, __dict__) through the MRO; defer to the
+	// generic path rather than raising the bare _IOBase message.
+	return objects.GenericGetAttr(o, objects.NewStr(name))
 }
 
 // iobaseSetattro stores an attribute into the instance dict.
@@ -383,7 +415,10 @@ func iobaseSetattro(o objects.Object, name objects.Object, value objects.Object)
 	}
 	d := iobaseGetDict(o)
 	if d == nil {
-		return fmt.Errorf("AttributeError: cannot set attribute on _IOBase without dict")
+		// User subclasses of the io base types are *Instance objects carrying
+		// their own managed dict; route their attribute stores through the
+		// normal generic path instead of the native _IOBase dict.
+		return objects.GenericSetAttr(o, name, value)
 	}
 	if value == nil {
 		return d.DelItem(objects.NewStr(n.Value()))

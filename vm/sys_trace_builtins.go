@@ -37,20 +37,20 @@ var whatStrings = [8]string{
 }
 
 // callTrampoline invokes a Python-level trace / profile callback
-// with (frame, what, arg). Mirrors call_trampoline in CPython.
+// with (frame, what, arg) and returns whatever the callback returned.
+// Mirrors call_trampoline in CPython.
 //
 // CPython: Python/sysmodule.c:1071 call_trampoline
-func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objects.Object) error {
+func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objects.Object) (objects.Object, error) {
 	if arg == nil {
 		arg = objects.None()
 	}
 	if what < 0 || what >= len(whatStrings) {
-		return fmt.Errorf("invalid trace what %d", what)
+		return nil, fmt.Errorf("invalid trace what %d", what)
 	}
 	frameObj := objects.NewFrame(f)
 	args := []objects.Object{frameObj, objects.NewStr(whatStrings[what]), arg}
-	_, err := objects.Vectorcall(callback, args, uint(len(args)), nil)
-	return err
+	return objects.Vectorcall(callback, args, uint(len(args)), nil)
 }
 
 // profileTrampoline is the LegacyTraceFunc SetProfile installs when
@@ -61,7 +61,7 @@ func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objec
 // CPython: Python/sysmodule.c:1086 profile_trampoline
 func profileTrampoline(callback objects.Object) LegacyTraceFunc {
 	return func(_ objects.Object, f *frame.Frame, what int, arg objects.Object) error {
-		err := callTrampoline(callback, f, what, arg)
+		_, err := callTrampoline(callback, f, what, arg)
 		if err != nil {
 			ts := currentThread()
 			if ts != nil {
@@ -72,23 +72,50 @@ func profileTrampoline(callback objects.Object) LegacyTraceFunc {
 	}
 }
 
-// traceTrampoline is the LegacyTraceFunc SetTrace installs.
-// Mirrors trace_trampoline. The local-callback model is simplified:
-// gopy's frame does not yet expose a per-frame f_trace slot for the
-// trace function to mutate, so the install-time callable services
-// every event until the user clears it again.
+// traceTrampoline is the LegacyTraceFunc SetTrace installs. It is the
+// faithful trace_trampoline: on a CALL event the install-time global
+// callback runs and its return value becomes that frame's local trace
+// function (f_trace); on every other event the frame's own f_trace is
+// invoked, and nothing happens when it is NULL. This per-frame gate is
+// why the frame that called settrace fires no events (no CALL fired
+// for it, so its f_trace stays unset) while a frame whose f_trace was
+// set explicitly still receives line and return events.
+//
+// gopy's frame split keeps f_trace on the Python-level wrapper
+// (objects.Frame), so the trampoline reaches it through
+// objects.NewFrame, which returns the wrapper already registered on
+// the live activation record.
 //
 // CPython: Python/sysmodule.c:1101 trace_trampoline
 func traceTrampoline(callback objects.Object) LegacyTraceFunc {
 	return func(_ objects.Object, f *frame.Frame, what int, arg objects.Object) error {
-		err := callTrampoline(callback, f, what, arg)
+		wrapper := objects.NewFrame(f)
+		var cb objects.Object
+		if what == PyTraceCall {
+			cb = callback
+		} else if local := wrapper.Trace(); local != objects.None() {
+			cb = local
+		}
+		if cb == nil {
+			return nil
+		}
+		result, err := callTrampoline(cb, f, what, arg)
 		if err != nil {
 			ts := currentThread()
 			if ts != nil {
 				_, _ = SetTrace(ts, nil, nil)
 			}
+			wrapper.SetTrace(nil)
+			return err
 		}
-		return err
+		// A None return leaves the existing f_trace in place; any other
+		// value installs it as the frame's local trace function.
+		//
+		// CPython: Python/sysmodule.c:1124 trace_trampoline (Py_XSETREF)
+		if result != objects.None() {
+			wrapper.SetTrace(result)
+		}
+		return nil
 	}
 }
 

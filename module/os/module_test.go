@@ -119,13 +119,21 @@ func TestEnviron(t *testing.T) {
 	if !ok {
 		t.Fatalf("environ is %T, want *Dict", env)
 	}
+	// On POSIX, posix.environ holds bytes keys/values (Lib/os.py decodes
+	// them); the nt build keeps str. Look the key up the same way.
+	keyObj := func(s string) objects.Object {
+		if runtime.GOOS == "windows" {
+			return objects.NewStr(s)
+		}
+		return objects.NewBytes([]byte(s))
+	}
 	pathKey := "PATH"
 	if runtime.GOOS == "windows" {
-		if _, err2 := envDict.GetItem(objects.NewStr("Path")); err2 == nil {
+		if _, err2 := envDict.GetItem(keyObj("Path")); err2 == nil {
 			pathKey = "Path"
 		}
 	}
-	v, err := envDict.GetItem(objects.NewStr(pathKey))
+	v, err := envDict.GetItem(keyObj(pathKey))
 	if err != nil {
 		t.Fatalf("environ[%q]: %v", pathKey, err)
 	}

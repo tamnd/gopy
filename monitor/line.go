@@ -136,8 +136,7 @@ func initializeLines(code *objects.Code, line *LineInstrumentationData) {
 	codeLen := instructionCount(code)
 	currentLine := -1
 	for i := 0; i < codeLen; {
-		op := compile.Opcode(byteAt(code.Code, i))
-		base := DeInstrument(specialize.Deopt(op))
+		base := GetBaseCodeUnit(code, i)
 		line2 := LineForOffset(code, i)
 		setLineDelta(line, i, computeLineDelta(code, line2))
 		length := 1 + cacheCount(base, code)

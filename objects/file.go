@@ -22,7 +22,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"unsafe"
 )
+
+// ClearOSFileFinalizer disarms the close finalizer that os.NewFile /
+// os.OpenFile arm on a borrowed descriptor. The finalizer is set on the
+// unexported inner *os.file, not on the returned *os.File, so
+// runtime.SetFinalizer(f, nil) on the outer handle is a no-op and leaves the
+// close live: a later GC then closes a descriptor whose integer was already
+// freed and reused by another open file, surfacing as a spurious EBADF
+// ("bad file descriptor") on the unrelated file's next write. os.File is
+// struct{ file *file } with the inner pointer at offset 0, so read that
+// pointer and clear the finalizer on the object it actually points at.
+func ClearOSFileFinalizer(f *os.File) {
+	if f == nil {
+		return
+	}
+	inner := *(*unsafe.Pointer)(unsafe.Pointer(f))
+	if inner != nil {
+		runtime.SetFinalizer((*byte)(inner), nil)
+	}
+}
 
 // File mirrors the union of FileIO + the buffer + TextIOWrapper. The
 // read/write side is decided at open time and does not change; mixing
@@ -51,6 +72,16 @@ type File struct {
 	f  *os.File
 	rd *bufio.Reader
 	wr io.Writer
+
+	// noCloseFd marks a borrowed descriptor (the standard streams wrap
+	// os.Stdout/os.Stderr or an inherited pipe). fileno() still reports
+	// f's fd, but Close() must not close it: tearing down the sys.stdout
+	// wrapper, or letting a transient wrapper be collected, must leave the
+	// process's real fd 1/2 open. Mirrors CPython opening the std streams
+	// with closefd=False.
+	//
+	// CPython: Modules/_io/fileio.c:399 _io_FileIO___init___impl (closefd)
+	noCloseFd bool
 }
 
 // FileType is the type singleton for File. CPython exposes three or
@@ -114,6 +145,21 @@ func NewWriterFile(w io.Writer, name, mode string) *File {
 		encoding: "utf-8",
 		errors:   "strict",
 		wr:       w,
+	}
+	// A caller-supplied writer that is really an *os.File (the normal CLI
+	// case, where sys.stdout/stderr wrap os.Stdout/os.Stderr, and the
+	// subprocess case, where they wrap an inherited pipe fd) keeps a live
+	// descriptor. Record it so fileno() returns the real fd, matching
+	// CPython's fd-backed standard streams. Writes still pass straight
+	// through w (no bufio layer) so output ordering is unchanged; only a
+	// non-fd writer such as a test bytes.Buffer leaves f nil and makes
+	// fileno() raise io.UnsupportedOperation, as CPython does for a
+	// stream with no underlying descriptor.
+	//
+	// CPython: Python/sysmodule.c:3795 sys_init_streams (fd-backed FileIO)
+	if osf, ok := w.(*os.File); ok {
+		fi.f = osf
+		fi.noCloseFd = true
 	}
 	fi.init(FileType)
 	return fi
@@ -277,7 +323,7 @@ func (fi *File) Close() error {
 			firstErr = ioErr(err)
 		}
 	}
-	if fi.f != nil {
+	if fi.f != nil && !fi.noCloseFd {
 		if err := fi.f.Close(); err != nil && firstErr == nil {
 			firstErr = ioErr(err)
 		}
@@ -397,7 +443,14 @@ func fileGetattr(o Object, name Object) (Object, error) {
 	if fn := fileMethod(fi, n.v); fn != nil {
 		return fn, nil
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", FileType.Name, n.v)
+	// Anything the custom table does not handle (dunders such as
+	// __class__, __hash__, __eq__, the rich-compare set) resolves through
+	// the type the way PyObject_GenericGetAttr walks the MRO. Without this
+	// fallback, isinstance()/abc.__instancecheck__ probes against a file
+	// object raise spuriously because __class__ is missing.
+	//
+	// CPython: Objects/object.c:1430 _PyObject_GenericGetAttrWithDict
+	return GenericGetAttr(o, name)
 }
 
 // fileSetattr supports a single mutable attribute today: the mode

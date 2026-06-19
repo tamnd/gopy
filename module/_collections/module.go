@@ -1486,7 +1486,18 @@ func defaultDictGetItem(o, key objects.Object) (objects.Object, error) {
 	if err == nil {
 		return v, nil
 	}
-	// Key absent: call __missing__.
+	// Key absent: dict_subscript looks up __missing__ at the type level, so
+	// a defaultdict subclass that overrides it (and declines to insert) is
+	// honoured instead of always running defdict_missing.
+	//
+	// CPython: Objects/dictobject.c:2229 dict_subscript
+	missingFn, merr := objects.LookupSpecial(o, "__missing__")
+	if merr != nil {
+		return nil, merr
+	}
+	if missingFn != nil {
+		return objects.CallOneArg(missingFn, key)
+	}
 	res, merr := defaultDictMissing([]objects.Object{o, key}, nil)
 	if merr != nil {
 		return nil, merr
