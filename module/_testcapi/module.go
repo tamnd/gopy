@@ -241,6 +241,7 @@ func buildModule() (*objects.Module, error) {
 		{"bad_get", badGet},
 		{"set_nomemory", setNomemory},
 		{"remove_mem_hooks", removeMemHooks},
+		{"getbuffer_with_null_view", getbufferWithNullView},
 		{"config_get", configGet},
 		{"config_getint", configGetint},
 		{"config_names", configNames},
@@ -393,6 +394,30 @@ func asSsizeT(o objects.Object) (int64, error) {
 func removeMemHooks(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	objects.RemoveNoMemory()
 	return objects.None(), nil
+}
+
+// getbufferWithNullView ports getbuffer_with_null_view: it calls the
+// buffer protocol with a NULL view pointer (PyObject_GetBuffer(obj, NULL,
+// PyBUF_SIMPLE)). A compliant getbufferproc rejects the obsolete NULL view;
+// bytearray's raises BufferError. Objects that do not export a buffer raise
+// the TypeError PyObject_GetBuffer would.
+//
+// CPython: Modules/_testcapimodule.c:1136 getbuffer_with_null_view
+func getbufferWithNullView(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: getbuffer_with_null_view expected 1 argument, got %d", len(args))
+	}
+	obj := args[0]
+	if _, ok := obj.(*objects.ByteArray); ok {
+		// CPython: Objects/bytearrayobject.c:51 bytearray_getbuffer (view==NULL)
+		return nil, fmt.Errorf("BufferError: bytearray_getbuffer: view==NULL argument is obsolete")
+	}
+	if _, ok := objects.AsBytesLike(obj); ok {
+		// Any other buffer exporter would dereference the NULL view; the
+		// NULL-view argument is obsolete, so report it the same way.
+		return nil, fmt.Errorf("BufferError: view==NULL argument is obsolete")
+	}
+	return nil, fmt.Errorf("TypeError: a bytes-like object is required, not '%s'", obj.Type().Name)
 }
 
 // fastcallArgs unpacks a tuple-or-None argument into a positional slice

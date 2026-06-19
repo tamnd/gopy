@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/tamnd/gopy/errors"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	pegen "github.com/tamnd/gopy/parser/pegen"
 	"github.com/tamnd/gopy/state"
@@ -51,6 +52,18 @@ func init() {
 	// CPython: Objects/longobject.c:2049 long_to_decimal_string_internal,
 	// Objects/longobject.c:2943 long_from_string_base
 	objects.IntMaxStrDigitsHook = intMaxStrDigits.Load
+	// CPython keeps int_max_str_digits per interpreter
+	// (interp->long_state.max_str_digits), so a subinterpreter that calls
+	// sys.set_int_max_str_digits gets its own copy and the parent's value is
+	// untouched. gopy parks the ceiling in a package global, so register a
+	// snapshot/restore pair: capture the parent value when a subinterpreter
+	// is pushed and roll it back when it is popped.
+	//
+	// CPython: Include/internal/pycore_interp.h long_state.max_str_digits
+	imp.RegisterSubinterpSnapshot(func() func() {
+		saved := intMaxStrDigits.Load()
+		return func() { intMaxStrDigits.Store(saved) }
+	})
 }
 
 // Bind stamps the runtime helpers onto d: exit, setrecursionlimit,

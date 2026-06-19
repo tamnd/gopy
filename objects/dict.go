@@ -544,6 +544,24 @@ func (d *Dict) GetItemKnownHash(key Object, h int64) (Object, error) {
 	return d.slotValue(idx), nil
 }
 
+// GetItemKnownHashOrKeyError is GetItemKnownHash with the C-API miss
+// contract: a key that is absent (and no comparison raised) reports
+// KeyError(key) rather than the internal not-found sentinel. A raised
+// __eq__ propagates unchanged. This backs _testinternalcapi's
+// dict_getitem_knownhash probe.
+//
+// CPython: Objects/dictobject.c:1965 _PyDict_GetItem_KnownHash
+func (d *Dict) GetItemKnownHashOrKeyError(key Object, h int64) (Object, error) {
+	v, err := d.GetItemKnownHash(key, h)
+	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			return nil, raiseKeyError(key)
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
 // ContainsKnownHash is Contains with a caller-supplied hash.
 //
 // CPython: Objects/dictobject.c:2530 _PyDict_Contains_KnownHash

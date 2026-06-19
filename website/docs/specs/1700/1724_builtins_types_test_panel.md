@@ -8,12 +8,30 @@ description: "Full audit and port of the 28 Builtins/types test files from spec 
 
 ## Status
 
-Active. Branch `feat/v0.13.0-spec-1724-builtins-types-panel`.
+Active. Branch `feat/v0.13.6-spec-1724-builtins-types-reaudit`.
 
-Re-audited under the [[1726]] bridge on 2026-06-13 (see the re-audit section
-below). Twenty-six of 29 files are fully green; the three with residuals
-(`test_int`, `test_bytes`, `test_dict`) carry only implementation-detail or
-unported-C-subsystem divergences, each documented with a CPython citation.
+Re-audited a second time under the [[1726]] bridge on 2026-06-19 (see the
+re-audit section below). Twenty-eight of 29 files are fully green; only
+`test_dict` carries residuals, and those are the two implementation-detail
+divergences (PEP 412 split-table layout and refcount-exact `__del__` timing)
+documented with CPython citations.
+
+## Checklist
+
+- [x] P0 panics cleared (`test_funcattrs`, `test_structseq`).
+- [x] P1–P8 subsystem ports shipped (range, dict-views, property, memoryview,
+  strtod, unicodedata/ucn, unicode-file, userdict/userlist).
+- [x] First 1726 re-audit (2026-06-13): UCD instantiation refusal, `_pickle`
+  `load_build` slots+dict, `WITH_DOC_STRINGS` sysconfig.
+- [x] Second 1726 re-audit (2026-06-19): per-interpreter `int_max_str_digits`
+  snapshot/restore (`test_int`), `getbuffer_with_null_view` (`test_bytes`),
+  breakpoint `PyErr_Clear` before warn + type-creation namespace order
+  (`test_builtin`), `_testinternalcapi.dict_getitem_knownhash` (`test_dict`).
+- [x] Whole panel re-run for ground truth: 28/29 green.
+- [ ] `test_dict` two residuals (`test_splittable_popitem`,
+  `test_oob_indexing_dictiter_iternextitem`) — architectural, documented below,
+  not planned to port (would reverse the borrow-model iterator / add PEP 412
+  split tables for no Python-visible behaviour).
 
 ## Goal
 
@@ -27,26 +45,55 @@ that tree before porting.
 
 ---
 
-## Zero-skip re-audit under the spec 1726 bridge (audit date: 2026-06-13)
+## Zero-skip re-audit under the spec 1726 bridge (audit dates: 2026-06-13, 2026-06-19)
 
 The table below was written before the [[1726]] bridge, which makes
 `check_impl_detail()` report `cpython=True` so every `@cpython_only` test runs
 on gopy instead of being skipped. Re-running the whole panel under the bridge
 surfaced a handful of `@cpython_only` and missing-module cases the earlier
-all-green pass never executed. Two were genuine gopy bugs and are fixed in this
-branch; the rest are behaviour that depends on a CPython implementation detail
-gopy does not have, or a C subsystem gopy has never carried.
+all-green pass never executed. The genuine gopy bugs are fixed in this branch;
+the rest are behaviour that depends on a CPython implementation detail gopy does
+not have, or a C subsystem gopy has never carried.
 
 Reference interpreter for the skip/run decisions: brew `python@3.14` 3.14.5.
 
-Panel result after the re-audit (run from `test/cpython/`):
+Panel result after the second re-audit (run from `test/cpython/`):
 
-- 26 of 29 files fully green.
-- `test_int`: 2 errors, 7 skips.
-- `test_bytes`: 1 error, 9 skips.
-- `test_dict`: 2 failures, 1 skip.
+- 28 of 29 files fully green.
+- `test_dict`: 2 failures, 1 skip (both failures are documented
+  implementation-detail residuals).
 
-### Fixed in this branch
+### Fixed in the 2026-06-19 re-audit
+
+- **`int_max_str_digits` leaked across subinterpreters.**
+  `test_int_max_str_digits_is_per_interpreter` runs a child interpreter via
+  `_testcapi.run_in_subinterp` and asserts the parent's limit is unchanged.
+  CPython keeps the limit per-interpreter (`interp->long_state.max_str_digits`,
+  `Include/internal/pycore_interp.h`); gopy parked it in a package global. Added
+  a snapshot/restore hook (`imp.RegisterSubinterpSnapshot`) that captures the
+  parent value on `PushSubinterp` and restores it on `PopSubinterp`, registered
+  from `module/sys`. Fixes both `test_int` errors.
+- **`getbuffer_with_null_view` was unported.** `test_bytes.test_obsolete_write_lock`
+  calls a `_testcapi` helper that invokes `PyObject_GetBuffer` with a NULL
+  `Py_buffer*` to force `BufferError`. Ported the helper. Fixes the `test_bytes`
+  error.
+- **`breakpoint()` left a stale thread exception, and type creation ordered the
+  `__dict__`/`__weakref__` descriptors before the class namespace.**
+  `test_builtin.test_envar_unimportable` swallows a `ModuleNotFoundError` in the
+  default breakpoint hook in favour of a warning; gopy did not clear the thread
+  exception the way `sys_breakpointhook` calls `PyErr_Clear`
+  (`Python/sysmodule.c:658`), so a later handler observed the stale error. And
+  `test_namespace_order` requires the managed-dict descriptors to be installed
+  after the class namespace is copied in, so a user-provided `__dict__` wins
+  (`type_new_descriptors` runs `PyDict_SetDefaultRef` after `type_new_set_attrs`,
+  `Objects/typeobject.c:8136`). Deferred the descriptor install behind an
+  `nsHasName` guard. Fixes `test_builtin`.
+- **`_testinternalcapi.dict_getitem_knownhash` was missing.**
+  `test_dict`'s CAPI test calls it. Ported `dict_getitem_knownhash`
+  (`Modules/_testinternalcapi.c:1562`) plus a `GetItemKnownHashOrKeyError`
+  helper. Clears the CAPI failure.
+
+### Fixed in the 2026-06-13 re-audit
 
 - **`unicodedata.UCD.__new__(UCD)` did not refuse instantiation.** A type that
   carries `Py_TPFLAGS_DISALLOW_INSTANTIATION` leaves `tp_new` NULL, and
@@ -75,10 +122,6 @@ mean either reversing gopy's native implementation or porting a C subsystem the
 project has never carried. They run under the bridge and surface as
 errors/failures rather than skips.
 
-- **`test_int` — subinterpreters (2 errors).**
-  `test_int_max_str_digits_is_per_interpreter` calls
-  `_testcapi.run_in_subinterp`. gopy has no subinterpreter runtime (PEP 684 /
-  per-interpreter GIL). Out of scope for a builtins/types panel.
 - **`test_int` — `_pylong` / C `_decimal` whitebox (7 skips).** These
   `@cpython_only` tests assert that huge-int `int`↔`str` and `divmod` delegate
   to the pure-Python `_pylong` module, and several also require the C `_decimal`
@@ -88,18 +131,21 @@ errors/failures rather than skips.
   implementation, and the C `_decimal`/libmpdec subsystem is unported. The
   observable `int` behaviour (results, error messages, `int_max_str_digits`
   limit) is already covered and green; only the delegation mechanism differs.
-- **`test_bytes` — `getbuffer_with_null_view` (1 error).**
-  `test_obsolete_write_lock` calls a `_testcapi` helper that invokes
-  `PyObject_GetBuffer` with a NULL `Py_buffer*` to force `BufferError`. gopy's
-  buffer protocol is modeled with Go interfaces and has no "NULL view pointer"
-  C-API contract to exercise.
 - **`test_dict` — split-table layout + `__del__` timing (2 failures).**
   `test_splittable_popitem` is `@cpython_only` and inspects the PEP 412
   split-table dict layout through `sys.getsizeof`; gopy uses a single combined
-  dict representation. `test_oob_indexing_dictiter_iternextitem` depends on the
-  exact refcount drop that fires `__del__` mid-iteration; gopy's iterator holds
-  the value so the finalizer fires later. Both are interpreter-internal memory
-  layout / refcount-timing details, not Python-visible behaviour.
+  dict representation, so a `popitem()` does not grow `sys.getsizeof` the way a
+  split-to-combined transition does. `test_oob_indexing_dictiter_iternextitem`
+  depends on `dictiter_iternextitem` recycling one `di_result` tuple and
+  decreffing the previously yielded value to refcount zero, firing `__del__`
+  mid-iteration (`Objects/dictobject.c:5697`). gopy's `IterNext` slot returns a
+  **borrowed** reference (spec [[1727]]) and allocates a fresh tuple per advance,
+  so the spent value's finalizer fires under the Go GC rather than synchronously;
+  attempting the in-place reuse instead frees a tuple a generic consumer still
+  holds (it broke `sorted(d.items())`, see `objects/dict_iter.go`). Both are
+  interpreter-internal memory layout / refcount-timing details, not
+  Python-visible behaviour, and matching either would reverse a deliberate gopy
+  design choice. Left as documented residuals.
 - **Environment-gated skips that match CPython under the CI locale/feature
   set:** `test_float.test_float_with_comma` (locale `decimal_point`, skipped
   under `LC_ALL=C` on both interpreters), `test_memoryview` ctypes cast (no

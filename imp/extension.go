@@ -243,6 +243,29 @@ type interpState struct {
 	//
 	// CPython: Include/internal/pycore_interp.h imports.modules
 	hiddenExt map[string]objects.Object
+	// configRestores rolls back the per-interpreter mutable config a
+	// subinterpreter is allowed to change independently (e.g.
+	// int_max_str_digits, which CPython keeps in interp->long_state).
+	// gopy stores those values in package globals, so each registered
+	// snapshotter captures the parent value on push and PopSubinterp
+	// restores it, mirroring a real subinterpreter's own copy.
+	//
+	// CPython: Include/internal/pycore_interp.h long_state.max_str_digits
+	configRestores []func()
+}
+
+// subinterpSnapshotters hold the per-interpreter config capture callbacks
+// other packages register at init time. Each returns a restore closure
+// invoked when the subinterpreter is popped.
+var subinterpSnapshotters []func() func()
+
+// RegisterSubinterpSnapshot registers a callback that captures a piece of
+// mutable interpreter-global config when a subinterpreter is pushed and
+// returns a closure that restores it on pop. Used by module/sys to give
+// int_max_str_digits per-interpreter semantics without threading the value
+// through the import package.
+func RegisterSubinterpSnapshot(fn func() func()) {
+	subinterpSnapshotters = append(subinterpSnapshotters, fn)
 }
 
 var (
@@ -274,6 +297,9 @@ func PushSubinterp(ownGil, checkMulti bool) {
 		modByIndex: map[int]*objects.Module{},
 		hiddenExt:  hideExtModules(),
 	}
+	for _, snap := range subinterpSnapshotters {
+		s.configRestores = append(s.configRestores, snap())
+	}
 	interpMu.Lock()
 	nextInterpID++
 	s.id = nextInterpID
@@ -293,6 +319,11 @@ func PopSubinterp() {
 	interpMu.Unlock()
 	if popped != nil {
 		restoreExtModules(popped.hiddenExt)
+		// Restore in reverse registration order so nested captures unwind
+		// symmetrically.
+		for i := len(popped.configRestores) - 1; i >= 0; i-- {
+			popped.configRestores[i]()
+		}
 	}
 }
 

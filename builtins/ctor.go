@@ -1319,6 +1319,15 @@ func bytesIntContents(arg objects.Object) (buf []byte, handled bool, err error) 
 	iv, ierr := objects.NumberIndex(arg)
 	if ierr != nil {
 		if isTypeError(ierr) {
+			// CPython clears the pending TypeError before falling through
+			// to the buffer / iterable path; without this the swallowed
+			// exception lingers on the thread and a later `with` exit or
+			// except handler observes it.
+			//
+			// CPython: Objects/bytesobject.c:2812 bytes_new_impl (PyErr_Clear)
+			if objects.ClearCurrentExceptionHook != nil {
+				objects.ClearCurrentExceptionHook()
+			}
 			return nil, false, nil
 		}
 		return nil, true, ierr
