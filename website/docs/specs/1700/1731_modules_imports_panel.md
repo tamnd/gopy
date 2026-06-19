@@ -8,7 +8,8 @@ description: "Audit and port of the Modules/imports test panel from spec 1700 (1
 
 ## Status
 
-Active. Branch `feat/v0.13.5-spec-modules-imports`.
+Active. Branch `feat/v0.13.7-spec-1731-imports-reaudit` (re-audit of the
+panel under the current build; original work on `feat/v0.13.5-spec-modules-imports`).
 
 Run under the [[1726]] bridge so every `@cpython_only` test executes on gopy
 instead of being skipped. "No skip" means parity with CPython: if CPython
@@ -185,3 +186,22 @@ CPython 3.14.5 (counts and `-v` lists).
   `test_importlib` 1346/1346.
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
+
+## Re-audit (2026-06-19)
+
+Re-ran the whole panel against the current build, one entry per process the way the
+gate drives it, to confirm ground truth. Every row is green with zero errors and zero
+failures: `test_module` 39, `test_import` 118 (skip 4), `test_importlib` 1346 (skip
+10), `test_frozen` 3, `test_modulefinder` 17, `test_pkg` 8, `test_pkgutil` 21,
+`test_pyclbr` 6, `test_runpy` 40, `test_zipimport` 91 (skip 4), `test_zipimport_support`
+4, `test_zipapp` 35. No code change was needed and the MANIFEST counts already match,
+so this re-audit is documentation only.
+
+One thing worth recording about `test_zipimport`: when several copies of the suite run
+at once in the same working directory it can surface an intermittent
+`EOFError('EOF read where not expected')` out of `zipimport.py`'s `_get_data`. That is a
+harness collision, not a runtime bug. Every test in the file builds its archive under the
+same fixed name (`TEMP_ZIP`, e.g. `junk95142.zip`) in the cwd, so two concurrent processes
+truncate each other's file mid-read. CPython fails the same way under concurrent
+same-directory execution. The gate runs each entry in its own process sequentially, where
+the file passes 91/91 (12/12 test cases) every time.
