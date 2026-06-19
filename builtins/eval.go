@@ -281,7 +281,7 @@ func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*obj
 		}
 		mod = m
 	}
-	cco, err := compile.Compile(mod, "<string>", 0)
+	cco, err := compile.Compile(mod, "<string>", -1)
 	if err != nil {
 		return nil, err
 	}

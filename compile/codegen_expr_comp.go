@@ -421,11 +421,17 @@ func (c *Compiler) emitCompTail(kind compKind, depth int, elt, val ast.Expr) err
 // CPython: Python/codegen.c:L1175 codegen_wrap_in_stopiteration_handler
 func (c *Compiler) wrapInStopIterationHandler() {
 	handler := c.newLabel()
-	c.seq().Insert(0, SETUP_CLEANUP, int32(handler.ID()), ast.Pos{})
+	// All five ops carry NO_LOCATION (Lineno -1), not the zero Pos. A
+	// zero-lineno NOP would survive basicblock_remove_redundant_nops
+	// (which only drops NOPs with lineno < 0), leaving a stray entry NOP.
+	//
+	// CPython: Python/codegen.c:1175 codegen_wrap_in_stopiteration_handler
+	noLoc := ast.Pos{Lineno: -1}
+	c.seq().Insert(0, SETUP_CLEANUP, int32(handler.ID()), noLoc)
 
-	c.addLoadConst(nil, ast.Pos{})
-	c.addOp(RETURN_VALUE, ast.Pos{})
+	c.addLoadConst(nil, noLoc)
+	c.addOp(RETURN_VALUE, noLoc)
 	c.useLabel(handler)
-	c.addOpI(CALL_INTRINSIC_1, intrinsicStopIterationError, ast.Pos{})
-	c.addOpI(RERAISE, 1, ast.Pos{})
+	c.addOpI(CALL_INTRINSIC_1, intrinsicStopIterationError, noLoc)
+	c.addOpI(RERAISE, 1, noLoc)
 }

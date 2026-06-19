@@ -88,6 +88,7 @@ func TestForEmitsGetIterAndForIter(t *testing.T) {
 		"LOAD_NAME", // xs
 		"GET_ITER",
 		"FOR_ITER",   // -> cleanup
+		"NOP",        // line-tracing NOP at the target (codegen_for)
 		"STORE_NAME", // i (module scope)
 		"NOP",        // pass
 		"JUMP",       // -> for_iter

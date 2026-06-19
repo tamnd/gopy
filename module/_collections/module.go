@@ -1899,7 +1899,15 @@ func tupleGetterDescrGet(descr objects.Object, owner objects.Object, _ *objects.
 	if tg.Index < 0 || tg.Index >= tup.Len() {
 		return nil, fmt.Errorf("IndexError: tuple index out of range")
 	}
-	return tup.Item(tg.Index), nil
+	// Hand back an owned reference. PyTuple_GET_ITEM borrows, so the
+	// descriptor must incref before returning, otherwise the VM decrefs the
+	// field as a temporary and over-releases the value still stored in the
+	// tuple.
+	//
+	// CPython: Modules/_collectionsmodule.c:2682 tuplegetter_descr_get
+	result := tup.Item(tg.Index)
+	objects.Incref(result)
+	return result, nil
 }
 
 // tupleGetterDescrSet rejects writes and deletes.

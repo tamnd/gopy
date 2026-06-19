@@ -47,6 +47,12 @@ type fblock struct {
 	// Datum carries the original AST node so
 	// unwindFblock can re-evaluate context expressions.
 	Datum any
+	// Loc mirrors CPython's fblockinfo.fb_loc. The with/async-with
+	// unwind restores it so the exit-protocol ops carry the location
+	// of the with statement rather than the unwinding statement.
+	//
+	// CPython: Python/codegen.c fblockinfo.fb_loc
+	Loc ast.Pos
 }
 
 // pushFblock pushes a frame block onto the active unit's stack.

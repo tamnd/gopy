@@ -38,7 +38,7 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 	if err != nil {
 		return nil, err
 	}
-	cco, err := compile.Compile(mod, filename, 0)
+	cco, err := compile.Compile(mod, filename, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func RunBytes(ts *state.Thread, src []byte, filename string, mode parser.Mode, g
 	if err != nil {
 		return nil, err
 	}
-	cco, err := compile.Compile(mod, filename, 0)
+	cco, err := compile.Compile(mod, filename, -1)
 	if err != nil {
 		return nil, err
 	}

@@ -399,8 +399,16 @@ func normalizeJumpsInBlock(g *cfgBuilder, b *basicblock) {
 	}
 
 	if !last.Target.Visited {
-		// Forward conditional: mark the fall-through edge with NOT_TAKEN
-		// so a later assembler pass can record it precisely.
+		// Forward conditional: append a NOT_TAKEN marker on the
+		// fall-through edge. addOp mirrors basicblock_addop and leaves
+		// the reused slot's Except in place, so a NOT_TAKEN landing on a
+		// slot vacated by NOP compaction inherits that block's handler
+		// (protected fall-through), while one landing on a freshly grown
+		// slot is born unprotected. This reproduces CPython's behaviour,
+		// where the new instruction's i_except is whatever the basicblock
+		// array slot happened to hold.
+		//
+		// CPython: Python/flowgraph.c:546 basicblock_addop(b, NOT_TAKEN, ...)
 		b.addOp(NOT_TAKEN, 0, last.Loc)
 		return
 	}
@@ -539,7 +547,15 @@ func cfgPropagateLineNumbers(g *cfgBuilder) {
 			}
 		}
 		last := b.lastInstr()
-		if hasJumpTarget(last.Op) && last.Target != nil {
+		// CPython propagate_line_numbers keys on is_jump(last), NOT the
+		// is_jump||is_block_push predicate used for predecessor counting.
+		// A block whose last op is SETUP_FINALLY/SETUP_CLEANUP/SETUP_WITH
+		// reaches its handler only via the exception edge, so its handler
+		// block (PUSH_EXC_INFO and the cleanup arms) must keep
+		// NO_LOCATION rather than inheriting the setup's line.
+		//
+		// CPython: Python/flowgraph.c:3640 propagate_line_numbers
+		if isJumpOpcode(last.Op) && last.Target != nil {
 			target := last.Target
 			if target.Predecessors == 1 && len(target.Instr) > 0 && target.Instr[0].Loc.Lineno < 0 {
 				target.Instr[0].Loc = prev
@@ -560,7 +576,11 @@ func cfgDuplicateExitsWithoutLineno(g *cfgBuilder) {
 	nextLbl := getMaxLabel(g) + 1
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		last := b.lastInstr()
-		if last == nil || !hasJumpTarget(last.Op) || last.Target == nil {
+		// is_jump(last), not is_jump||is_block_push: SETUP_* exception
+		// edges do not trigger exit-block duplication.
+		//
+		// CPython: Python/flowgraph.c:3574 duplicate_exits_without_lineno
+		if last == nil || !isJumpOpcode(last.Op) || last.Target == nil {
 			continue
 		}
 		target := nextNonemptyBlock(last.Target)

@@ -74,6 +74,9 @@ func TestCodeVarnameFromOparg(t *testing.T) {
 	c.Varnames = []string{"x", "y"}
 	c.Cellvars = []string{"c"}
 	c.Freevars = []string{"f"}
+	// _varname_from_oparg indexes co_localsplusnames directly, mirroring
+	// CPython's code__varname_from_oparg_impl (Objects/codeobject.c:2955).
+	c.LocalsplusNames = []string{"x", "y", "c", "f"}
 
 	check := func(arg int64, want string) {
 		t.Helper()

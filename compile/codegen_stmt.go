@@ -345,7 +345,7 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 		l = loc(s)
 		c.addOp(NOP, l)
 	}
-	c.unwindForReturn(preserveTOS, l)
+	c.unwindForReturn(preserveTOS, &l)
 	if s.Value == nil {
 		c.addLoadConst(nil, l)
 	} else if !preserveTOS {

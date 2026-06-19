@@ -116,6 +116,29 @@ func SetStdlibDir(dir string) {
 // CPython: Python/initconfig.c:1828 config_init_safe_path
 var pendingSafePath bool
 
+// pendingOptimize records the optimization level supplied on the command
+// line (-O / -OO / PYTHONOPTIMIZE) before sys is built. buildModule reads
+// it through pendingConfig when stamping sys.flags.
+//
+// CPython: Python/initconfig.c:1700 config_init_optimization_level
+var pendingOptimize int
+
+// pendingConfig builds a default PyConfig carrying the command-line knobs
+// captured before sys was imported (safe_path, optimization level), so
+// every sys.flags rebuild reflects all of them rather than clobbering one
+// when another is set.
+//
+// CPython: Python/sysmodule.c:3478 set_flags_from_config
+func pendingConfig() *initconfig.PyConfig {
+	cfg := &initconfig.PyConfig{}
+	cfg.InitPythonConfig()
+	if pendingSafePath {
+		cfg.SafePath = 1
+	}
+	cfg.OptimizationLevel = pendingOptimize
+	return cfg
+}
+
 // SetSafePath records safe_path and, when sys is already live, rebuilds
 // sys.flags so sys.flags.safe_path reads True.
 //
@@ -123,12 +146,18 @@ var pendingSafePath bool
 func SetSafePath(on bool) {
 	pendingSafePath = on
 	if md := liveSysDict(); md != nil {
-		cfg := &initconfig.PyConfig{}
-		cfg.InitPythonConfig()
-		if on {
-			cfg.SafePath = 1
-		}
-		_ = md.SetItem(objects.NewStr("flags"), makeFlags(cfg))
+		_ = md.SetItem(objects.NewStr("flags"), makeFlags(pendingConfig()))
+	}
+}
+
+// SetOptimize records the optimization level and, when sys is already
+// live, rebuilds sys.flags so sys.flags.optimize reads the new level.
+//
+// CPython: Python/sysmodule.c:3478 set_flags_from_config (optimize)
+func SetOptimize(level int) {
+	pendingOptimize = level
+	if md := liveSysDict(); md != nil {
+		_ = md.SetItem(objects.NewStr("flags"), makeFlags(pendingConfig()))
 	}
 }
 

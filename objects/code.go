@@ -837,6 +837,13 @@ func (c *Code) Replace(r CodeReplace) (*Code, error) {
 	if r.SetCellvars {
 		out.Cellvars = cloneStrings(r.Cellvars)
 	}
+	if r.SetVarnames || r.SetCellvars || r.SetFreevars {
+		// One of the name tables changed, so the flat localsplus layout
+		// Copy carried over is stale. Rebuild it the way the constructor
+		// would. CPython: Objects/codeobject.c:2932 routes replace through
+		// PyCode_NewWithPosOnlyArgs, which recomputes co_localsplusnames.
+		out.rebuildLocalsplus()
+	}
 	if r.Filename != nil {
 		out.Filename = *r.Filename
 	}
@@ -879,11 +886,67 @@ func (c *Code) Copy() *Code {
 	out.Varnames = cloneStrings(c.Varnames)
 	out.Freevars = cloneStrings(c.Freevars)
 	out.Cellvars = cloneStrings(c.Cellvars)
+	// The flat localsplus layout (and its derived counts) is part of the
+	// code object's identity: co_localsplusnames is what _varname_from_oparg,
+	// the frame allocator, and dis all index. CPython rebuilds it in the
+	// constructor; carrying it here keeps an unmodified Copy / no-arg
+	// replace() truly identical instead of dropping the layout and tripping
+	// "_varname_from_oparg(): oparg out of range".
+	//
+	// CPython: Objects/codeobject.c:536 _PyCode_New (co_localsplusnames)
+	out.LocalsplusNames = cloneStrings(c.LocalsplusNames)
+	out.LocalsplusKinds = cloneBytes(c.LocalsplusKinds)
+	out.Nlocalsplus = c.Nlocalsplus
+	out.Nlocals = c.Nlocals
+	out.Ncellvars = c.Ncellvars
+	out.Nfreevars = c.Nfreevars
 	out.Linetable = cloneBytes(c.Linetable)
 	out.ExceptionTable = cloneBytes(c.ExceptionTable)
 	out.SyncNameObjs()
 	out.SyncConstObjs()
 	return out
+}
+
+// rebuildLocalsplus recomputes LocalsplusNames / LocalsplusKinds and the
+// derived counts from Varnames / Cellvars / Freevars, mirroring the flat
+// layout the constructor builds: varnames first (CO_FAST_LOCAL), then
+// cellvars (CO_FAST_CELL, merged into the matching arg slot when a cell
+// shares a name with a varname), then freevars (CO_FAST_FREE). Replace
+// calls this whenever one of those three name tables changes so the
+// localsplus view stays consistent, exactly as code_replace_impl does by
+// routing through PyCode_NewWithPosOnlyArgs.
+//
+// CPython: Objects/codeobject.c:802 _PyCode_New localsplus build
+func (c *Code) rebuildLocalsplus() {
+	names := make([]string, 0, len(c.Varnames)+len(c.Cellvars)+len(c.Freevars))
+	kinds := make([]byte, 0, cap(names))
+	for _, name := range c.Varnames {
+		names = append(names, name)
+		kinds = append(kinds, CoFastLocal)
+	}
+	for _, cell := range c.Cellvars {
+		argoffset := -1
+		for j, v := range c.Varnames {
+			if v == cell {
+				argoffset = j
+				break
+			}
+		}
+		if argoffset >= 0 {
+			// Cell shares a slot with the argument of the same name.
+			kinds[argoffset] |= CoFastCell
+			continue
+		}
+		names = append(names, cell)
+		kinds = append(kinds, CoFastCell)
+	}
+	for _, free := range c.Freevars {
+		names = append(names, free)
+		kinds = append(kinds, CoFastFree)
+	}
+	c.LocalsplusNames = names
+	c.LocalsplusKinds = kinds
+	c.SyncLocalsplusCounts()
 }
 
 func nonNegative(p *int, name string) error {

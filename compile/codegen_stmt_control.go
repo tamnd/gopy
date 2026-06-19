@@ -61,7 +61,12 @@ func (c *Compiler) visitWhile(s *ast.While) error {
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}
-	c.addOpJump(JUMP, loop, loc(s))
+	// The loop backedge is artificial: NO_LOCATION lets it inherit the
+	// line of the body instruction it follows via propagate_line_numbers,
+	// instead of stamping the whole tail block with the while-test line.
+	//
+	// CPython: Python/codegen.c:2178 ADDOP_JUMP(c, NO_LOCATION, JUMP, loop)
+	c.addOpJump(JUMP, loop, ast.Pos{Lineno: -1})
 
 	c.useLabel(anchor)
 	if err := c.popFblock(fblockWhileLoop); err != nil {
@@ -103,6 +108,15 @@ func (c *Compiler) visitFor(s *ast.For) error {
 	c.pushFblock(fblockForLoop, start, end, s)
 
 	c.addOpJump(FOR_ITER, cleanup, iterLoc)
+
+	// NOP carrying the target's location keeps line tracing correct for
+	// multiline for statements; remove_redundant_nops drops it later when
+	// it adds nothing. Without it a `pass` body's NOP and the artificial
+	// JUMP_BACKWARD mis-attribute their lines.
+	//
+	// CPython: Python/codegen.c:2091 ADDOP(c, LOC(s->v.For.target), NOP)
+	c.addOp(NOP, loc(s.Target))
+
 	c.useLabel(body)
 	if err := c.assignTo(s.Target, loc(s.Target)); err != nil {
 		return err
@@ -110,13 +124,19 @@ func (c *Compiler) visitFor(s *ast.For) error {
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}
-	c.addOpJump(JUMP, start, loc(s))
+	// The loop-back jump is artificial: NO_LOCATION lets it inherit the
+	// line of whatever precedes it (the removed body NOP donates forward).
+	//
+	// CPython: Python/codegen.c:2097 ADDOP_JUMP(c, NO_LOCATION, JUMP, start)
+	noLoc := ast.Pos{Lineno: -1}
+	c.addOpJump(JUMP, start, noLoc)
 
-	// CPython: Python/codegen.c:2101 END_FOR comes first so instrumentation
-	// can attach to it, then POP_ITER drops the exhausted iterator.
+	// CPython: Python/codegen.c:2105 END_FOR comes first so instrumentation
+	// can attach to it, then POP_ITER drops the exhausted iterator. Both
+	// carry NO_LOCATION and inherit their line via propagate_line_numbers.
 	c.useLabel(cleanup)
-	c.addOp(END_FOR, loc(s))
-	c.addOp(POP_ITER, loc(s))
+	c.addOp(END_FOR, noLoc)
+	c.addOp(POP_ITER, noLoc)
 	if err := c.popFblock(fblockForLoop); err != nil {
 		return err
 	}
@@ -195,9 +215,9 @@ func (c *Compiler) visitBreak(s *ast.Break) error {
 	if idx < 0 {
 		return c.errorAt(l, "'break' outside loop")
 	}
-	c.unwindToLoop(idx, l)
+	c.unwindToLoop(idx, &l)
 	loop := &c.fblocks[idx]
-	c.unwindFblock(loop, l, false)
+	c.unwindFblock(loop, &l, false)
 	c.addOpJump(JUMP, loop.Exit, l)
 	return nil
 }
@@ -211,7 +231,7 @@ func (c *Compiler) visitContinue(s *ast.Continue) error {
 	if idx < 0 {
 		return c.errorAt(l, "'continue' not properly in loop")
 	}
-	c.unwindToLoop(idx, l)
+	c.unwindToLoop(idx, &l)
 	c.addOpJump(JUMP, c.fblocks[idx].Block, l)
 	return nil
 }
@@ -221,9 +241,9 @@ func (c *Compiler) visitContinue(s *ast.Continue) error {
 // unwound.
 //
 // CPython: Python/codegen.c:L622 codegen_unwind_fblock_stack
-func (c *Compiler) unwindToLoop(loopIdx int, l ast.Pos) {
+func (c *Compiler) unwindToLoop(loopIdx int, ploc *ast.Pos) {
 	for i := len(c.fblocks) - 1; i > loopIdx; i-- {
-		c.unwindFblock(&c.fblocks[i], l, false)
+		c.unwindFblock(&c.fblocks[i], ploc, false)
 	}
 }
 
@@ -234,9 +254,9 @@ func (c *Compiler) unwindToLoop(loopIdx int, l ast.Pos) {
 // popping (CPython's codegen_unwind_fblock preserve_tos branch).
 //
 // CPython: Python/codegen.c:L622 codegen_unwind_fblock_stack
-func (c *Compiler) unwindForReturn(preserveTos bool, l ast.Pos) {
+func (c *Compiler) unwindForReturn(preserveTos bool, ploc *ast.Pos) {
 	for i := len(c.fblocks) - 1; i >= 0; i-- {
-		c.unwindFblock(&c.fblocks[i], l, preserveTos)
+		c.unwindFblock(&c.fblocks[i], ploc, preserveTos)
 	}
 }
 
@@ -244,7 +264,8 @@ func (c *Compiler) unwindForReturn(preserveTos bool, l ast.Pos) {
 // CPython's codegen_unwind_fblock.
 //
 // CPython: Python/codegen.c:L518 codegen_unwind_fblock
-func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
+func (c *Compiler) unwindFblock(fb *fblock, ploc *ast.Pos, preserveTos bool) {
+	l := *ploc
 	switch fb.Kind {
 	case fblockWhileLoop,
 		fblockExceptionHandler,
@@ -260,6 +281,7 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 	case fblockTryExcept:
 		c.addOp(POP_BLOCK, l)
 	case fblockFinallyTry:
+		// This POP_BLOCK gets the line number of the unwinding statement.
 		c.addOp(POP_BLOCK, l)
 		// Datum is ast.Seq[ast.Stmt], not []ast.Stmt. Go does not consider
 		// named generic types (type Seq[T] []T) identical to their base
@@ -303,6 +325,12 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 			}
 			c.fblocks = origFblocks
 		}
+		// The finally block should appear to execute after the statement
+		// causing the unwinding, so make the unwinding instruction
+		// artificial.
+		//
+		// CPython: Python/codegen.c:557 codegen_unwind_fblock FB_FINALLY_TRY
+		*ploc = noLocation
 	case fblockFinallyEnd:
 		if preserveTos {
 			c.addOpI(SWAP, 2, l)
@@ -314,6 +342,12 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 		c.addOp(POP_BLOCK, l)
 		c.addOp(POP_EXCEPT, l)
 	case fblockWith, fblockAsyncWith:
+		// The with exit ops carry the location of the with statement,
+		// not the unwinding statement.
+		//
+		// CPython: Python/codegen.c:570 codegen_unwind_fblock FB_WITH
+		*ploc = fb.Loc
+		l = *ploc
 		c.addOp(POP_BLOCK, l)
 		if preserveTos {
 			// Each with-statement preamble pushes __exit__ AND its
@@ -338,6 +372,11 @@ func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos, preserveTos bool) {
 			c.addYieldFromLoop(l)
 		}
 		c.addOp(POP_TOP, l)
+		// The exit block should appear to execute after the unwinding
+		// statement, so make the unwinding instruction artificial.
+		//
+		// CPython: Python/codegen.c:604 codegen_unwind_fblock FB_WITH
+		*ploc = noLocation
 	case fblockHandlerCleanup:
 		name, hasName := fb.Datum.(string)
 		if hasName {

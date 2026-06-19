@@ -32,6 +32,17 @@ var DeprecWarnHook func(msg string) error
 // CPython: Objects/typeobject.c:4667 type_new (PyErr_WarnFormat RuntimeWarning)
 var RuntimeWarnHook func(msg string) error
 
+// CodeDeoptHook is set by the specialize package at init time so the
+// co_code getter can return the deoptimized form of the executable
+// bytecode without importing specialize (which imports objects). The
+// hook rewrites every specialized opcode back to its adaptive parent
+// and zeroes the inline cache cells, returning a fresh slice. nil when
+// specialization is not wired (tests / minimal builds), in which case
+// co_code returns the raw bytes unchanged.
+//
+// CPython: Objects/codeobject.c:2310 _PyCode_GetCode (runs deopt_code)
+var CodeDeoptHook func(code []byte) []byte
+
 func init() {
 	SetTypeDescr(CodeType, "co_lines", NewMethodDescr(CodeType, "co_lines", codeCoLinesMethod))
 	SetTypeDescr(CodeType, "co_positions", NewMethodDescr(CodeType, "co_positions", codeCoPositionsMethod))
@@ -45,6 +56,15 @@ func init() {
 func codeAttrLookup(c *Code, name string) (Object, bool) {
 	switch name {
 	case "co_code":
+		// co_code is the deoptimized snapshot: specialized opcodes the
+		// adaptive interpreter wrote in place are mapped back to their
+		// adaptive parent and the inline cache cells zeroed, so dis and
+		// marshal observe a stable, specialization-independent form.
+		//
+		// CPython: Objects/codeobject.c:2310 _PyCode_GetCode
+		if CodeDeoptHook != nil {
+			return NewBytes(CodeDeoptHook(c.Code)), true
+		}
 		return NewBytes(c.Code), true
 	case "_co_code_adaptive":
 		// CPython: Objects/codeobject.c:2777 code_getcodeadaptive
@@ -294,19 +314,15 @@ func codeVarnameFromOpargMethod(args []Object, kwargs map[string]Object) (Object
 	}
 	i64, _ := idxObj.Int64()
 	idx := int(i64)
-	if idx < 0 {
+	// The oparg is a localsplus offset, so it indexes co_localsplusnames
+	// directly. Reconstructing from varnames+cellvars+freevars would
+	// double-count arg-cells (an argument that is also a cell shares one
+	// localsplus slot), shifting freevars by the number of such cells.
+	//
+	// CPython: Objects/codeobject.c:2955 code__varname_from_oparg_impl
+	// (PyTuple_GET_ITEM(co->co_localsplusnames, oparg))
+	if idx < 0 || idx >= len(c.LocalsplusNames) {
 		return nil, fmt.Errorf("IndexError: _varname_from_oparg(): oparg out of range")
 	}
-	if idx < len(c.Varnames) {
-		return NewStr(c.Varnames[idx]), nil
-	}
-	idx -= len(c.Varnames)
-	if idx < len(c.Cellvars) {
-		return NewStr(c.Cellvars[idx]), nil
-	}
-	idx -= len(c.Cellvars)
-	if idx < len(c.Freevars) {
-		return NewStr(c.Freevars[idx]), nil
-	}
-	return nil, fmt.Errorf("IndexError: _varname_from_oparg(): oparg out of range")
+	return NewStr(c.LocalsplusNames[idx]), nil
 }

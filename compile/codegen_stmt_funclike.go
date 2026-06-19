@@ -59,6 +59,18 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 		return err
 	}
 
+	// A decorated function's co_firstlineno is the line of its first
+	// decorator, not the `def` line. enterScope derives firstlineno
+	// from the symtable entry (the def line), so override it for both
+	// the type-params wrapper and the function body below.
+	//
+	// CPython: Python/codegen.c:1420 codegen_function (firstlineno =
+	// decos[0]->lineno when the decorator list is non-empty)
+	funcFirstLineno := 0
+	if len(decorators) > 0 {
+		funcFirstLineno = loc(decorators[0]).Lineno
+	}
+
 	// Evaluate defaults in the outer scope. They land on the stack
 	// and are folded into MAKE_FUNCTION via the flags oparg.
 	flags, err := c.emitDefaults(args, loc(scopeKey))
@@ -106,6 +118,9 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 		outerCaches = c.savedCaches()
 
 		c.enterScope(wrapperScope)
+		if funcFirstLineno > 0 {
+			c.unit().FirstLineno = funcFirstLineno
+		}
 		first := c.unit().FirstLineno
 		c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
@@ -170,7 +185,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	}
 	flags |= closureFlag
 
-	if err := c.emitInnerFunctionCode(innerScope, name, args, body, scopeKey); err != nil {
+	if err := c.emitInnerFunctionCode(innerScope, name, args, body, scopeKey, funcFirstLineno); err != nil {
 		return err
 	}
 
@@ -243,6 +258,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 // CPython: Python/codegen.c:L1311 codegen_function_body
 func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	name string, args *ast.Arguments, body ast.Seq[ast.Stmt], key any,
+	funcFirstLineno int,
 ) error {
 	// Save the outer scope so we can restore it after the inner body.
 	outerScope := c.scope
@@ -250,6 +266,16 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
+
+	// A decorated function's co_firstlineno is the line of its first
+	// decorator, not the `def` line. enterScope derives firstlineno from
+	// the symtable entry (the def line), so override it here.
+	//
+	// CPython: Python/codegen.c:1420 codegen_function (firstlineno =
+	// decos[0]->lineno when the decorator list is non-empty)
+	if funcFirstLineno > 0 {
+		c.unit().FirstLineno = funcFirstLineno
+	}
 
 	// Pin the docstring at consts[0] before RESUME / declareArgs run,
 	// so the first const slot belongs to the docstring (functions surface

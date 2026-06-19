@@ -48,12 +48,19 @@ func appendSeqToGraph(g *cfgBuilder, seq *Sequence) {
 	// to *basicblock pointers.
 	//
 	// After each jump, force the next instruction into a fresh block.
-	// CPython relies on IS_TERMINATOR_OPCODE (jumps OR scope exits) in
-	// cfg_builder_current_block_is_terminated, so every jump is always
-	// the last instruction in its block. gopy's narrower isTerminator
-	// predicate already handles scope exits; the explicit useNextBlock
-	// closes the gap for jumps so passes like cfgLabelExceptionTargets,
-	// which assume a jump terminates its block, see the same invariant.
+	// CPython terminates a block on IS_TERMINATOR_OPCODE, which is
+	// OPCODE_HAS_JUMP OR IS_SCOPE_EXIT_OPCODE. Crucially it does NOT
+	// include the block-push pseudos (SETUP_FINALLY / SETUP_WITH /
+	// SETUP_CLEANUP): those carry an exception-edge target but fall
+	// through to the protected region, which stays in the same block.
+	// gopy's narrower isTerminator predicate already handles scope
+	// exits; the explicit useNextBlock closes the gap for real jumps so
+	// passes like cfgLabelExceptionTargets, which assume a jump
+	// terminates its block, see the same invariant. We must mirror the
+	// OPCODE_HAS_JUMP boundary exactly: splitting after a SETUP_* would
+	// sever the with/try setup from its body, and optimize_load_fast
+	// would then see the bound __exit__ self as unconsumed at the false
+	// block end and refuse to emit LOAD_FAST_BORROW.
 	idxToBlock := make([]*basicblock, len(seq.Instrs))
 	idxToInstr := make([]*cfgInstr, len(seq.Instrs))
 	for i, ins := range seq.Instrs {
@@ -63,7 +70,7 @@ func appendSeqToGraph(g *cfgBuilder, seq *Sequence) {
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
 		idxToInstr[i] = g.CurBlock.lastInstr()
-		if hasJumpTarget(ins.Op) {
+		if hasJumpTarget(ins.Op) && !isBlockPushOpcode(ins.Op) {
 			g.useNextBlock(g.newBlock())
 		}
 	}

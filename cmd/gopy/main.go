@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 
 	"github.com/tamnd/gopy/build"
@@ -105,6 +106,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		hasC, hasM  bool
 		xOptions    []string
 		safePath    bool
+		optimize    int
 	)
 
 opts:
@@ -130,6 +132,14 @@ opts:
 			break opts
 		case 'X':
 			xOptions = append(xOptions, st.OptArg)
+		case 'O':
+			// -O / -OO raise the optimization level. CPython's
+			// config_parse_cmdline increments optimization_level per 'O';
+			// the compiler reads it through _Py_GetConfig() to drop
+			// asserts (level 1) and docstrings (level 2).
+			//
+			// CPython: Python/initconfig.c:2068 config_parse_cmdline ('O')
+			optimize++
 		case 'P':
 			// -P sets safe_path: the script directory / cwd / '' is not
 			// prepended to sys.path[0].
@@ -157,6 +167,26 @@ opts:
 	if hasXOption(xOptions, "dev") || os.Getenv("PYTHONDEVMODE") != "" {
 		codecs.SetDevMode(true)
 	}
+
+	// optimization level: -O / -OO on the command line plus PYTHONOPTIMIZE
+	// in the environment. CPython folds the environment value in
+	// (taking the max) and exposes the result as both sys.flags.optimize
+	// and _Py_GetConfig()->optimization_level; the compiler resolves an
+	// optimize == -1 request against it. Without -E the env value still
+	// applies.
+	//
+	// CPython: Python/initconfig.c:1700 config_init_optimization_level
+	if env := os.Getenv("PYTHONOPTIMIZE"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil && n > optimize {
+			optimize = n
+		} else if err != nil && len(env) > optimize {
+			// A non-numeric PYTHONOPTIMIZE counts its length, matching
+			// CPython's _PyLong_FromString fallback for the env knob.
+			optimize = len(env)
+		}
+	}
+	compile.SetConfigOptimize(optimize)
+	sys.SetOptimize(optimize)
 
 	// safe_path: -P, -I, or PYTHONSAFEPATH suppresses prepending the
 	// script directory / cwd / "" to sys.path[0], and is exposed as

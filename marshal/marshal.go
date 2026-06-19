@@ -423,8 +423,32 @@ func (e *encoder) writeBody(v any, flag byte) error {
 		return nil
 	case []any:
 		return e.writeTuple(x, flag)
+	case ast.FrozenSet:
+		return e.writeFrozenSetConst(x, flag)
 	}
 	return fmt.Errorf("%w: %T", ErrUnmarshallable, v)
+}
+
+// writeFrozenSetConst encodes the compiler's ast.FrozenSet constant as
+// TYPE_FROZENSET. The compiler folds a membership test against a set
+// display (`x in {1, 2, 3}`) into a frozenset constant; its items are
+// already plain marshal values, so they dispatch straight back through
+// write. Counterpart to writeSet, which handles a live *objects.Set.
+//
+// CPython: Python/marshal.c w_object PyFrozenSet_Type
+func (e *encoder) writeFrozenSetConst(items ast.FrozenSet, flag byte) error {
+	if err := e.writeByte(typeFrozenset | flag); err != nil {
+		return err
+	}
+	if err := e.writeInt32(int32(len(items))); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := e.write(item); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeTuple emits a tuple body. CPython picks TYPE_SMALL_TUPLE for

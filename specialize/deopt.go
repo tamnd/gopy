@@ -17,7 +17,10 @@
 
 package specialize
 
-import "github.com/tamnd/gopy/compile"
+import (
+	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/objects"
+)
 
 // CacheCount returns the number of trailing codeunits reserved as
 // inline cache after op. Zero means op carries no cache. Source of
@@ -50,6 +53,12 @@ func init() {
 	for variant, parent := range DeoptParent {
 		deoptTable[variant] = parent
 	}
+	// Wire the co_code getter so it returns the deoptimized snapshot.
+	// objects cannot import specialize (specialize imports objects), so
+	// the dependency is inverted through this hook.
+	//
+	// CPython: Objects/codeobject.c:2310 _PyCode_GetCode
+	objects.CodeDeoptHook = DeoptCode
 }
 
 // Deopt returns the adaptive parent of op. For an unspecialized

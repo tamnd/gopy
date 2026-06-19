@@ -149,9 +149,26 @@ func (s *Sequence) Addop(op Opcode, oparg int32, loc ast.Pos) {
 	s.Instrs = append(s.Instrs, Instr{
 		Op:      op,
 		Oparg:   oparg,
-		Loc:     loc,
+		Loc:     normalizeLoc(loc),
 		Handler: ExceptHandlerInfo{Label: -1},
 	})
+}
+
+// normalizeLoc maps the zero-value ast.Pos that codegen passes for an
+// artificial instruction onto NO_LOCATION (lineno -1). CPython spells
+// these ADDOP(c, NO_LOCATION, ...); gopy's codegen idiom is ast.Pos{}.
+// A real source span always has lineno >= 1, and the module RESUME
+// carries lineno 0 with end_lineno 1, so a fully-zero Pos is
+// unambiguously the artificial sentinel. Keeping it as lineno 0 would
+// serialize a bogus (0, 0, 0, 0) span and defeat the flowgraph
+// propagate_line_numbers pass, which only fills lineno < 0 holes.
+//
+// CPython: Python/flowgraph.c:50 NO_LOCATION
+func normalizeLoc(loc ast.Pos) ast.Pos {
+	if loc == (ast.Pos{}) {
+		return noLocation
+	}
+	return loc
 }
 
 // Insert inserts at pos and shifts following entries right by one.
