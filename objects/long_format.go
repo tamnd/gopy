@@ -42,6 +42,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -97,7 +98,7 @@ func intFormat(o Object, spec string) (string, error) {
 	}
 	parsed, err := format.ParseSpec(spec)
 	if err != nil {
-		return "", fmt.Errorf("ValueError: %w", err)
+		return "", formatSpecError(err, spec, o.Type().Name)
 	}
 	switch parsed.Type {
 	case 0, 'b', 'c', 'd', 'o', 'x', 'X', 'n':
@@ -134,6 +135,23 @@ func unknownPresentationType(presentationType byte, typeName string) error {
 		return fmt.Errorf("ValueError: Unknown format code '%c' for object of type '%s'", presentationType, typeName)
 	}
 	return fmt.Errorf("ValueError: Unknown format code '\\x%x' for object of type '%s'", uint(presentationType), typeName)
+}
+
+// formatSpecError converts a format.ParseSpec error into the
+// type-aware ValueError CPython raises. The ErrInvalidSpecifier
+// sentinel (more than one char remained for the type field) carries no
+// type context, so it is rendered here as the full
+// "Invalid format specifier '<spec>' for object of type '<type>'"
+// message using the original spec string and the object's type name.
+// Every other parse error keeps its own text behind a "ValueError:"
+// prefix.
+//
+// CPython: Python/formatter_unicode.c:314 PyErr_Format(Invalid format specifier)
+func formatSpecError(err error, spec, typeName string) error {
+	if errors.Is(err, format.ErrInvalidSpecifier) {
+		return fmt.Errorf("ValueError: Invalid format specifier '%s' for object of type '%s'", spec, typeName)
+	}
+	return fmt.Errorf("ValueError: %w", err)
 }
 
 // bigIntFromIntLike unwraps an Int or Bool into its underlying big.Int.

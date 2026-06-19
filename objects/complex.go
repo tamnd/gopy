@@ -623,7 +623,7 @@ func complexFormat(o Object, spec string) (string, error) {
 	}
 	s, err := format.ParseSpec(spec)
 	if err != nil {
-		return "", fmt.Errorf("ValueError: invalid format spec for complex")
+		return "", formatSpecError(err, spec, o.Type().Name)
 	}
 	if s.Fill == '0' {
 		return "", fmt.Errorf("ValueError: Zero padding is not allowed in complex format specifier")
@@ -636,6 +636,11 @@ func complexFormat(o Object, spec string) (string, error) {
 	case 0, 'e', 'E', 'f', 'F', 'g', 'G', 'n':
 	default:
 		return "", fmt.Errorf("ValueError: Unknown format code '%c' for object of type 'complex'", origType)
+	}
+
+	// CPython: Python/formatter_unicode.c:1338 precision > INT_MAX
+	if s.Precision > math.MaxInt32 {
+		return "", fmt.Errorf("ValueError: %w", format.ErrPrecisionTooBig)
 	}
 
 	v := o.(*Complex).v

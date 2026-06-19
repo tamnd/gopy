@@ -76,7 +76,7 @@ func unicodeFormat(o Object, spec string) (string, error) {
 	}
 	parsed, err := format.ParseSpec(spec)
 	if err != nil {
-		return "", fmt.Errorf("ValueError: %w", err)
+		return "", formatSpecError(err, spec, o.Type().Name)
 	}
 	switch parsed.Type {
 	case 0, 's':

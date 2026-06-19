@@ -76,7 +76,7 @@ func FormatFloat(f float64, code byte, precision int, flags FloatFormatFlag) str
 func formatFloatShort(f float64, code byte, precision int, flags FloatFormatFlag) string {
 	var sign string
 	switch {
-	case math.Signbit(f) && !(flags&FlagNoNegZero != 0 && f == 0):
+	case math.Signbit(f):
 		sign = "-"
 	case flags&FlagAlwaysSign != 0:
 		sign = "+"
@@ -107,6 +107,24 @@ func formatFloatShort(f float64, code byte, precision int, flags FloatFormatFlag
 	}
 
 	digits, decpt := shortestDigits(f, code, precision)
+
+	// Py_DTSF_NO_NEG_0 (the 'z' format flag) coerces a value that
+	// rounds to zero back to a positive zero. The sign was taken from
+	// the original (unrounded) value above, so a small negative input
+	// like -0.01 at .1f keeps the '-' here even though its digits are
+	// all zero; clear it once the rounded digit string is known.
+	//
+	// CPython: Python/pystrtod.c:1059 format_float_short (NO_NEG_0)
+	if flags&FlagNoNegZero != 0 && sign == "-" && allZeroDigits(digits) {
+		switch {
+		case flags&FlagAlwaysSign != 0:
+			sign = "+"
+		case flags&FlagSpaceSign != 0:
+			sign = " "
+		default:
+			sign = ""
+		}
+	}
 
 	body := layoutFloat(digits, decpt, code, precision, flags)
 	if addPercent {
@@ -148,6 +166,17 @@ func shortestDigits(f float64, code byte, precision int) (digits string, decpt i
 			// Re-render at fixed precision when shorter than the natural one.
 			buf = strconv.AppendFloat(nil, abs, 'e', precision-1, 64)
 			mantissa, exp = splitScientific(buf)
+		}
+		// dtoa mode 2 (which 'g' uses) returns the minimal digit string:
+		// trailing zeros produced by the fixed-precision re-render above
+		// are not significant and must be dropped. The '#'/ALT path
+		// re-pads them in layoutFloat via vdigitsEnd, so stripping here
+		// is safe for both forms.
+		//
+		// CPython: Python/pystrtod.c:1009 format_float_short (mode 2 digits)
+		mantissa = strings.TrimRight(mantissa, "0")
+		if mantissa == "" {
+			mantissa = "0"
 		}
 		return mantissa, exp + 1
 	case 'e':
@@ -271,6 +300,17 @@ func layoutFloat(digits string, decpt int, code byte, precision int, flags Float
 	}
 
 	return b.String()
+}
+
+// allZeroDigits reports whether the digit string is composed entirely
+// of '0' (i.e. the value rounded to zero).
+func allZeroDigits(digits string) bool {
+	for i := 0; i < len(digits); i++ {
+		if digits[i] != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 func writeDigitsClipped(b *strings.Builder, digits string, start, end int) {

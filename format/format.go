@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -25,6 +24,36 @@ import (
 // ErrInvalidSpec is returned by ParseSpec when the spec violates the
 // grammar.
 var ErrInvalidSpec = errors.New("format: invalid format specifier")
+
+// ErrInvalidSpecifier is returned by ParseSpec when more than one
+// character remains for the type field, i.e. the spec is unparseable.
+// CPython raises this with the offending object's type name appended,
+// so callers (which hold the object) wrap it into the full
+// "Invalid format specifier '<spec>' for object of type '<type>'"
+// ValueError.
+//
+// CPython: Python/formatter_unicode.c:305 (end-pos > 1 branch)
+var ErrInvalidSpecifier = errors.New("format: invalid format specifier (trailing characters)")
+
+// ErrTooManyDigits mirrors the "Too many decimal digits in format
+// string" ValueError get_integer raises when a width or precision digit
+// run overflows the platform integer.
+//
+// CPython: Python/formatter_unicode.c:78 Too many decimal digits
+var ErrTooManyDigits = errors.New("Too many decimal digits in format string") //nolint:staticcheck // Mirror CPython error text.
+
+// ErrPrecisionTooBig mirrors the "precision too big" ValueError raised
+// when the requested float/complex precision exceeds INT_MAX.
+//
+// CPython: Python/formatter_unicode.c:1166 precision too big
+var ErrPrecisionTooBig = errors.New("precision too big") //nolint:staticcheck // Mirror CPython error text.
+
+// ErrMissingPrecision mirrors the "Format specifier missing precision"
+// ValueError raised when a '.' is not followed by a precision or a
+// fractional grouping separator.
+//
+// CPython: Python/formatter_unicode.c:296 Format specifier missing precision
+var ErrMissingPrecision = errors.New("Format specifier missing precision") //nolint:staticcheck // Mirror CPython error text.
 
 // errCommaAndUnderscore mirrors invalid_comma_and_underscore from
 // formatter_unicode.c: the user requested both grouping styles in the
@@ -86,45 +115,52 @@ type Spec struct {
 	Type          byte // 0 if unspecified
 }
 
-func isAlignToken(c byte) bool {
+func isAlignToken(c rune) bool {
 	return c == '<' || c == '>' || c == '=' || c == '^'
 }
 
-func isSignToken(c byte) bool {
+func isSignToken(c rune) bool {
 	return c == '+' || c == '-' || c == ' '
 }
 
 // ParseSpec mirrors parse_internal_render_format_spec.
 //
+// The spec is decoded to code points up front: every grammar element
+// except the fill character is ASCII, but the fill character may be any
+// code point (e.g. a multi-byte alignment fill like "🖤>6"), so the
+// parser must index by rune, not byte, exactly like CPython's
+// READ_spec over a PyUnicode buffer.
+//
 // CPython: Python/formatter_unicode.c:L150 parse_internal_render_format_spec
 func ParseSpec(s string) (Spec, error) {
 	spec := Spec{Fill: -1, Width: -1, Precision: -1}
+	r := []rune(s)
 
 	i := 0
 	// [[fill]align]
-	if len(s)-i >= 2 && isAlignToken(s[i+1]) {
-		spec.Fill = rune(s[i])
-		spec.Align = s[i+1]
+	if len(r)-i >= 2 && isAlignToken(r[i+1]) {
+		spec.Fill = r[i]
+		spec.Align = byte(r[i+1])
 		i += 2
-	} else if len(s)-i >= 1 && isAlignToken(s[i]) {
-		spec.Align = s[i]
+	} else if len(r)-i >= 1 && isAlignToken(r[i]) {
+		spec.Align = byte(r[i])
 		i++
 	}
 
 	// [sign]
-	if i < len(s) && isSignToken(s[i]) {
-		spec.Sign = s[i]
+	if i < len(r) && isSignToken(r[i]) {
+		spec.Sign = byte(r[i])
 		i++
 	}
 
 	// [z] - coerce -0.0 to 0.0 for floats
-	if i < len(s) && s[i] == 'z' {
+	if i < len(r) && r[i] == 'z' {
 		spec.NoNegZero = true
 		i++
 	}
 
 	// [#]
-	if i < len(s) && s[i] == '#' {
+	if i < len(r) && r[i] == '#' {
 		spec.Alt = true
 		i++
 	}
@@ -132,7 +168,7 @@ func ParseSpec(s string) (Spec, error) {
 	// [0] zero-pad shortcut
 	// CPython: Python/formatter_unicode.c:213 !fill_char_specified
 	// Always sets fill='0'; only sets align='=' if align was not explicit.
-	if i < len(s) && s[i] == '0' && spec.Fill == -1 {
+	if i < len(r) && r[i] == '0' && spec.Fill == -1 {
 		spec.Fill = '0'
 		if spec.Align == 0 {
 			spec.Zero = true
@@ -142,7 +178,7 @@ func ParseSpec(s string) (Spec, error) {
 	}
 
 	// [width]
-	width, consumed, err := parseInt(s, i)
+	width, consumed, err := parseInt(r, i)
 	if err != nil {
 		return spec, err
 	}
@@ -156,18 +192,18 @@ func ParseSpec(s string) (Spec, error) {
 	// messages can fire.
 	//
 	// CPython: Python/formatter_unicode.c:236 grouping section
-	if i < len(s) && s[i] == ',' {
+	if i < len(r) && r[i] == ',' {
 		spec.Thousands = ','
 		i++
 	}
-	if i < len(s) && s[i] == '_' {
+	if i < len(r) && r[i] == '_' {
 		if spec.Thousands != 0 {
 			return spec, errCommaAndUnderscore
 		}
 		spec.Thousands = '_'
 		i++
 	}
-	if i < len(s) && s[i] == ',' {
+	if i < len(r) && r[i] == ',' {
 		if spec.Thousands == '_' {
 			return spec, errCommaAndUnderscore
 		}
@@ -179,9 +215,9 @@ func ParseSpec(s string) (Spec, error) {
 	// [.precision][frac_thousands]
 	// CPython: Python/formatter_unicode.c:257 Parse field precision
 	// CPython 3.14: Python/formatter_unicode.c:265 frac_thousands_separator
-	if i < len(s) && s[i] == '.' {
+	if i < len(r) && r[i] == '.' {
 		i++
-		prec, consumed, err := parseInt(s, i)
+		prec, consumed, err := parseInt(r, i)
 		if err != nil {
 			return spec, err
 		}
@@ -189,15 +225,23 @@ func ParseSpec(s string) (Spec, error) {
 			spec.Precision = prec
 			i += consumed
 		}
-		// Optional frac thousands separator after the (optional) precision.
-		if i < len(s) && s[i] == ',' {
+		// Optional frac thousands separator after the (optional)
+		// precision. CPython parses the comma and the underscore in two
+		// separate `if` blocks (not else-if) so a "comma then
+		// underscore" run (e.g. ".,_f") hits the
+		// invalid_comma_and_underscore branch instead of silently
+		// taking only the comma.
+		//
+		// CPython: Python/formatter_unicode.c:266 frac comma/underscore
+		if i < len(r) && r[i] == ',' {
 			if consumed == 0 {
 				spec.Precision = -1
 			}
 			spec.FracThousands = ','
 			i++
 			consumed++
-		} else if i < len(s) && s[i] == '_' {
+		}
+		if i < len(r) && r[i] == '_' {
 			if spec.FracThousands != 0 {
 				return spec, errCommaAndUnderscore
 			}
@@ -209,22 +253,28 @@ func ParseSpec(s string) (Spec, error) {
 			consumed++
 		}
 		// Trailing comma after underscore → error
-		if i < len(s) && s[i] == ',' && spec.FracThousands == '_' {
+		if i < len(r) && r[i] == ',' && spec.FracThousands == '_' {
 			return spec, errCommaAndUnderscore
 		}
 		if consumed == 0 {
-			return spec, ErrInvalidSpec
+			return spec, ErrMissingPrecision
 		}
 	}
 
 	// [type]
-	if i < len(s) {
-		spec.Type = s[i]
+	if i < len(r) {
+		spec.Type = byte(r[i])
 		i++
 	}
 
-	if i != len(s) {
-		return spec, ErrInvalidSpec
+	// More than one character remains for the type field: the spec is
+	// invalid. CPython raises "Invalid format specifier '<spec>' for
+	// object of type '<type>'"; ParseSpec is type-agnostic, so it
+	// returns the sentinel and the caller appends the type name.
+	//
+	// CPython: Python/formatter_unicode.c:305 (end-pos > 1 branch)
+	if i != len(r) {
+		return spec, ErrInvalidSpecifier
 	}
 	if spec.Type != 0 {
 		if err := validateThousands(spec.Thousands, spec.Type); err != nil {
@@ -238,19 +288,28 @@ func ParseSpec(s string) (Spec, error) {
 	return spec, nil
 }
 
-func parseInt(s string, i int) (val, consumed int, err error) {
+// parseInt ports get_integer: it consumes a run of decimal digits and
+// accumulates them as a (signed) integer, detecting overflow before it
+// happens. Overflow past the platform word size raises "Too many
+// decimal digits in format string" rather than a generic invalid-spec
+// error, matching CPython's PY_SSIZE_T_MAX guard.
+//
+// CPython: Python/formatter_unicode.c:61 get_integer
+func parseInt(r []rune, i int) (val, consumed int, err error) {
 	start := i
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+	acc := 0
+	for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+		d := int(r[i] - '0')
+		if acc > (math.MaxInt-d)/10 {
+			return 0, i - start, ErrTooManyDigits
+		}
+		acc = acc*10 + d
 		i++
 	}
 	if i == start {
 		return 0, 0, nil
 	}
-	v, err := strconv.Atoi(s[start:i])
-	if err != nil {
-		return 0, 0, ErrInvalidSpec
-	}
-	return v, i - start, nil
+	return acc, i - start, nil
 }
 
 // FormatString renders s under spec. Mirrors format_string_internal.
@@ -263,6 +322,11 @@ func FormatString(s string, spec Spec) (string, error) {
 	}
 	if err := validateThousands(spec.Thousands, t); err != nil {
 		return "", err
+	}
+	// CPython: Python/formatter_unicode.c:888 negative-0 coercion is not
+	// allowed on strings.
+	if spec.NoNegZero {
+		return "", errors.New("Negative zero coercion (z) not allowed in string format specifier") //nolint:staticcheck // Mirror CPython error text.
 	}
 	if spec.Sign == ' ' {
 		return "", fmt.Errorf("ValueError: Space not allowed in string format specifier")
@@ -539,6 +603,14 @@ func FormatFloat(v float64, spec Spec) (string, error) {
 	}
 	if err := validateThousands(spec.Thousands, checkType); err != nil {
 		return "", err
+	}
+
+	// A precision wider than a C int cannot be honoured by the digit
+	// generator. CPython rejects it up front with "precision too big".
+	//
+	// CPython: Python/formatter_unicode.c:1165 precision > INT_MAX
+	if spec.Precision > math.MaxInt32 {
+		return "", ErrPrecisionTooBig
 	}
 
 	precision := spec.Precision
