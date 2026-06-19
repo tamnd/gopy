@@ -291,7 +291,7 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	stampMetaclass(t, meta)
 	installSubclassAttrSlots(t)
 	noSlotsDeclared := hasNoSlotsDeclared(ns)
-	configureManagedDict(t, bases, noSlotsDeclared)
+	needDictDescr, needWeakrefDescr := configureManagedDict(t, bases, noSlotsDeclared)
 	// type_new_set_attrs copies the namespace into tp_dict (slots, classcell,
 	// plain attributes) BEFORE type_ready -> mro_internal invokes the
 	// metaclass mro(). A metaclass that overrides mro() can therefore read
@@ -301,6 +301,20 @@ func NewUserTypeMetaE(name string, bases []*Type, ns *Dict, kwargs map[string]Ob
 	// CPython: Objects/typeobject.c:4526 type_new_set_attrs (before type_ready)
 	if err := processClassNamespace(t, ns); err != nil {
 		return nil, err
+	}
+	// type_new_descriptors stamps the __dict__ and __weakref__ getsets AFTER
+	// the namespace was copied into tp_dict, so they sort after the user's
+	// class-body names in dict order (bpo-34320 test_namespace_order). The
+	// add uses PyDict_SetDefaultRef, so a class body that already binds
+	// __dict__ or __weakref__ (e.g. `__dict__ = property(...)`) keeps its own
+	// value rather than being overwritten by the managed-dict getset.
+	//
+	// CPython: Objects/typeobject.c:8136 type_add_getset (PyDict_SetDefaultRef)
+	if needDictDescr && !nsHasName(ns, "__dict__") {
+		installInstanceDictDescr(t)
+	}
+	if needWeakrefDescr && !nsHasName(ns, "__weakref__") {
+		installInstanceWeakrefDescr(t)
 	}
 	if err := applyMetaclassMRO(t, meta); err != nil {
 		return nil, err
@@ -593,7 +607,18 @@ func hasNoSlotsDeclared(ns *Dict) bool {
 // CPython: Objects/typeobject.c:4153 type_new (sets
 // Py_TPFLAGS_INLINE_VALUES + Py_TPFLAGS_MANAGED_DICT on heap types with
 // a managed dict)
-func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
+// nsHasName reports whether the class-body namespace bound name, the
+// signal type_new_descriptors reads (via PyDict_SetDefaultRef) to leave a
+// user-provided __dict__ / __weakref__ untouched.
+func nsHasName(ns *Dict, name string) bool {
+	if ns == nil {
+		return false
+	}
+	has, _ := ns.Contains(NewStr(name))
+	return has
+}
+
+func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) (needDictDescr, needWeakrefDescr bool) {
 	inheritedDict := false
 	for _, b := range bases {
 		if b != nil && b.HasDict {
@@ -611,9 +636,7 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	// `class C: pass` but not for a subclass of C.
 	//
 	// CPython: Objects/typeobject.c type_new_descriptors (add_dict gate)
-	if t.HasDict && !inheritedDict {
-		installInstanceDictDescr(t)
-	}
+	needDictDescr = t.HasDict && !inheritedDict
 	// HasWeakref tracks tp_weaklistoffset. It inherits from any base that
 	// provides weak-reference support, and the no-__slots__ case adds it
 	// for the new type whenever the solid base is not a variable-size
@@ -640,16 +663,15 @@ func configureManagedDict(t *Type, bases []*Type, noSlotsDeclared bool) {
 	// already sees it through the MRO.
 	//
 	// CPython: Objects/typeobject.c type_new_descriptors (add_weak gate)
-	if t.HasWeakref && !inheritedWeakref {
-		installInstanceWeakrefDescr(t)
-	}
+	needWeakrefDescr = t.HasWeakref && !inheritedWeakref
 	if !t.HasDict {
-		return
+		return needDictDescr, needWeakrefDescr
 	}
 	t.TpFlags |= TpFlagManagedDict
 	if basesAllowInlineValues(bases, noSlotsDeclared) {
 		t.TpFlags |= TpFlagInlineValues
 	}
+	return needDictDescr, needWeakrefDescr
 }
 
 // mroHasDict reports whether any class in b's MRO carries a per-instance

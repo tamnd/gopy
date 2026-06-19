@@ -113,6 +113,16 @@ func importBreakpointModule(modulepath string) (objects.Object, error) {
 //
 // CPython: Python/sysmodule.c:658 sys_breakpointhook warn label
 func breakpointWarn(envar string) (objects.Object, error) {
+	// The import or attribute lookup that brought us here raised a Python
+	// exception (ModuleNotFoundError / AttributeError) which gopy swallows
+	// in favor of a warning. CPython's sys_breakpointhook calls PyErr_Clear
+	// before warning, so clear the lingering thread exception too; otherwise
+	// a later contextmanager exit or except handler observes the stale error.
+	//
+	// CPython: Python/sysmodule.c:658 sys_breakpointhook (PyErr_Clear before warn)
+	if objects.ClearCurrentExceptionHook != nil {
+		objects.ClearCurrentExceptionHook()
+	}
 	message := fmt.Sprintf("Ignoring unimportable $PYTHONBREAKPOINT: %q", envar)
 	if err := emitRuntimeWarning(message); err != nil {
 		return nil, err
