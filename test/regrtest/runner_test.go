@@ -115,16 +115,34 @@ func TestRunnerMissingFile(t *testing.T) {
 	}
 }
 
-func TestRunnerPackageEntryUnsupported(t *testing.T) {
+// TestModulesImportsPanelPackages runs the three directory suites of
+// the Modules/imports panel (test_import/, test_importlib/,
+// test_module/) from the real corpus. The runner drives each through
+// `gopy -m unittest test.<name>` and the suites are expected to pass
+// end-to-end. This is the regrtest entry point for spec 1731's
+// package rows.
+func TestModulesImportsPanelPackages(t *testing.T) {
+	requireSignalModule(t)
+	requireNonRace(t)
 	bin := buildGopy(t)
-	corpus := t.TempDir()
-	if err := os.Mkdir(filepath.Join(corpus, "test_pkg"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
 	}
-	r := &Runner{Binary: bin, Corpus: corpus, Timeout: 5 * time.Second}
-	res := r.Run(context.Background(), Entry{Name: "test_pkg/", Status: StatusReady})
-	if res.Outcome != OutcomeError {
-		t.Fatalf("Outcome = %s, want error (package entries not yet wired)", res.Outcome)
+	corpus := filepath.Join(repoRoot, "test", "cpython")
+	for _, name := range []string{"test_import/", "test_module/", "test_importlib/"} {
+		t.Run(strings.TrimSuffix(name, "/"), func(t *testing.T) {
+			r := &Runner{Binary: bin, Corpus: corpus, Timeout: 300 * time.Second}
+			res := r.Run(context.Background(), Entry{Name: name, Status: StatusReady})
+			if res.Outcome != OutcomePass {
+				t.Fatalf("Outcome = %s (err=%v stderr=%q)", res.Outcome, res.Err, res.Stderr)
+			}
+			combined := res.Stdout + res.Stderr
+			if !strings.Contains(combined, "OK") {
+				t.Fatalf("output missing unittest OK summary:\nstdout=%q\nstderr=%q",
+					res.Stdout, res.Stderr)
+			}
+		})
 	}
 }
 
