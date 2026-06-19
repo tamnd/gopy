@@ -176,5 +176,12 @@ CPython 3.14.5 (counts and `-v` lists).
   `Lib/__hello__.py` filename). The two agree when the suite runs in its natural location under the
   stdlib (12/12 green); they only diverge if the corpus is relocated, which moves `STDLIB_DIR` away from
   the real stdlib. Run-mode artifact, not a gopy defect.
+- [x] P5: the regrtest runner drives the three directory suites the way CPython's regrtest does, with
+  `gopy -m unittest test.<name>`, instead of looking for a non-existent `<pkg>/<pkg>.py` entry point.
+  The command runs from the corpus directory so the repo-root `module/` Go-port tree does not shadow
+  stdlib imports on `sys.path[0]` (otherwise `find_spec('module.name')` resolves `module/` as a PEP 420
+  namespace package and the two `test_find_submodule_in_module` rows stop raising `ModuleNotFoundError`).
+  `TestModulesImportsPanelPackages` pins all three: `test_import` 118/118, `test_module` 39/39,
+  `test_importlib` 1346/1346.
 - [ ] P7: live importlib finders on `sys.meta_path` + `_imp` C functions (architectural)
 - [ ] P6: `test__interpreters` / `test__interpchannels` parity with CPython skip/run
