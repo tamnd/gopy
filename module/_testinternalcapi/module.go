@@ -36,6 +36,7 @@ func buildModule() (*objects.Module, error) {
 		{"get_recursion_depth", getRecursionDepth},
 		{"run_in_subinterp_with_config", runInSubinterpWithConfig},
 		{"clear_extension", clearExtension},
+		{"dict_getitem_knownhash", dictGetitemKnownhash},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {
@@ -117,6 +118,33 @@ func runInSubinterpWithConfig(args []objects.Object, _ map[string]objects.Object
 	imp.PushSubinterp(ownGil, checkMulti)
 	defer imp.PopSubinterp()
 	return objects.NewInt(int64(builtins.RunInFreshNamespace(code.Value()))), nil
+}
+
+// dictGetitemKnownhash ports dict_getitem_knownhash(mp, key, hash): it
+// looks up key in mp with the caller-supplied hash. A non-dict first
+// argument is a SystemError (the C code passes a non-dict to
+// _PyDict_GetItem_KnownHash, which trips its assert/bad-internal-call);
+// a missing key reports KeyError(key); a __eq__ that raises propagates.
+//
+// CPython: Modules/_testinternalcapi.c:1562 dict_getitem_knownhash
+func dictGetitemKnownhash(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("TypeError: dict_getitem_knownhash expected 3 arguments, got %d", len(args))
+	}
+	d, ok := args[0].(*objects.Dict)
+	if !ok {
+		return nil, fmt.Errorf("SystemError: bad argument to internal function")
+	}
+	h, err := objects.NumberIndex(args[2])
+	if err != nil {
+		return nil, err
+	}
+	hi, ok := h.(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("SystemError: bad argument to internal function")
+	}
+	hv, _ := hi.Int64()
+	return d.GetItemKnownHashOrKeyError(args[1], hv)
 }
 
 // clearExtension ports clear_extension(name, filename): it clears all
