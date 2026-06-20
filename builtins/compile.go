@@ -122,6 +122,16 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	if err != nil {
 		return compileArgs{}, err
 	}
+	// When the source is an AST object, its top node must match the
+	// requested mode: exec wants Module, eval Expression, single
+	// Interactive. PyAST_obj2mod rejects a mismatch before conversion.
+	//
+	// CPython: Python/Python-ast.c:18427 PyAst_CheckMode
+	if astMod != nil {
+		if err := checkASTMode(astMod, bound[0], mode); err != nil {
+			return compileArgs{}, err
+		}
+	}
 	flags, err := parseCompileFlags(bound[3])
 	if err != nil {
 		return compileArgs{}, err
@@ -300,6 +310,37 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 		return parser.ModeFunc, nil
 	}
 	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval', 'single' or 'func_type'")
+}
+
+// checkASTMode enforces that an AST source object's top node matches the
+// requested compile mode: exec wants Module, eval Expression, single
+// Interactive. CPython does this with an isinstance() check against the
+// per-mode required type and raises TypeError("expected %s node, got
+// %.400s") on a mismatch.
+//
+// CPython: Python/Python-ast.c:18427 PyAst_CheckMode
+func checkASTMode(astMod ast.Mod, src objects.Object, mode parser.Mode) error {
+	var reqName string
+	var match bool
+	switch mode {
+	case parser.ModeFile:
+		reqName = "Module"
+		_, match = astMod.(*ast.Module)
+	case parser.ModeEval:
+		reqName = "Expression"
+		_, match = astMod.(*ast.Expression)
+	case parser.ModeSingle:
+		reqName = "Interactive"
+		_, match = astMod.(*ast.Interactive)
+	default:
+		// func_type and any future mode have no Module/Expression/
+		// Interactive requirement; leave validation to conversion.
+		return nil
+	}
+	if match {
+		return nil
+	}
+	return fmt.Errorf("TypeError: expected %s node, got %.400s", reqName, src.Type().Name)
 }
 
 // PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.

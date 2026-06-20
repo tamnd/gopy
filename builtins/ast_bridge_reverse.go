@@ -123,7 +123,7 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 	if !ok {
 		return nil
 	}
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "stmt")
 	switch inst.Type().Name {
 	case "Assign":
 		targets := r.exprList(r.getAttr(inst, "targets"))
@@ -137,6 +137,17 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		op := r.convertOperator(r.getAttr(inst, "op"))
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.AugAssign{Target: target, Op: op, Value: value, Pos: pos}
+	case "AnnAssign":
+		target := r.convertExpr(r.getAttr(inst, "target"))
+		annotation := r.convertExpr(r.getAttr(inst, "annotation"))
+		value := r.optionalExpr(inst, "value")
+		return &ast.AnnAssign{
+			Target:     target,
+			Annotation: annotation,
+			Value:      value,
+			Simple:     r.getAttrInt(inst, "simple"),
+			Pos:        pos,
+		}
 	case "Return":
 		val := r.getAttr(inst, "value")
 		var retVal ast.Expr
@@ -248,7 +259,7 @@ func (r *reverseASTBridge) convertExceptHandlers(o objects.Object) ast.Seq[ast.E
 		if !ok {
 			continue
 		}
-		pos := r.getPos(inst)
+		pos := r.getPos(inst, "excepthandler")
 		var typ ast.Expr
 		if t := r.getAttr(inst, "type"); t != nil && t != objects.None() {
 			typ = r.convertExpr(t)
@@ -320,7 +331,7 @@ func (r *reverseASTBridge) convertPattern(o objects.Object) ast.Pattern {
 		panic(astRecursionSentinel{})
 	}
 	defer func() { r.depth++ }()
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "pattern")
 	switch inst.Type().Name {
 	case "MatchValue":
 		value := r.convertExpr(r.getAttr(inst, "value"))
@@ -491,7 +502,7 @@ func (r *reverseASTBridge) convertTypeParams(o objects.Object) ast.Seq[ast.TypeP
 		if !ok {
 			continue
 		}
-		pos := r.getPos(inst)
+		pos := r.getPos(inst, "type_param")
 		name := r.getAttrString(inst, "name")
 		switch inst.Type().Name {
 		case "TypeVar":
@@ -581,7 +592,7 @@ func (r *reverseASTBridge) convertArg(o objects.Object) *ast.Arg {
 	}
 	a := &ast.Arg{
 		Arg: r.getAttrString(inst, "arg"),
-		Pos: r.getPos(inst),
+		Pos: r.getPos(inst, "arg"),
 	}
 	if ann := r.getAttr(inst, "annotation"); ann != nil && ann != objects.None() {
 		a.Annotation = r.convertExpr(ann)
@@ -641,7 +652,7 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 		panic(astRecursionSentinel{})
 	}
 	defer func() { r.depth++ }()
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "expr")
 	switch inst.Type().Name {
 	case "Name":
 		id := r.getAttrIdentifier(inst, "id")
@@ -815,7 +826,7 @@ func (r *reverseASTBridge) convertKeywords(o objects.Object) ast.Seq[*ast.Keywor
 			arg = &s
 		}
 		val := r.convertExpr(r.getAttr(inst, "value"))
-		out = append(out, &ast.Keyword{Arg: arg, Value: val, Pos: r.getPos(inst)})
+		out = append(out, &ast.Keyword{Arg: arg, Value: val, Pos: r.getPos(inst, "keyword")})
 	}
 	return out
 }
@@ -852,7 +863,7 @@ func (r *reverseASTBridge) convertAliases(o objects.Object) ast.Seq[*ast.Alias] 
 			s := r.getAttrString(inst, "asname")
 			asname = &s
 		}
-		out = append(out, &ast.Alias{Name: name, Asname: asname, Pos: r.getPos(inst)})
+		out = append(out, &ast.Alias{Name: name, Asname: asname, Pos: r.getPos(inst, "alias")})
 	}
 	return out
 }
@@ -1032,8 +1043,12 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 	case *objects.Unicode:
 		return v.Value()
 	case *objects.Int:
-		i64, _ := v.Int64()
-		return i64
+		// Constants that overflow int64 must round-trip as *big.Int, the
+		// same representation the parser emits, so co_consts compares equal.
+		if i64, ok := v.Int64(); ok {
+			return i64
+		}
+		return v.BigInt()
 	case *objects.Float:
 		return v.Float64()
 	case *objects.Complex:
@@ -1126,13 +1141,24 @@ func (r *reverseASTBridge) getAttrPresent(inst *objects.Instance, name string) (
 // matching CPython's Python/Python-ast.c:11187 obj2ast_stmt.
 //
 // CPython: Python/ast.c:1043 validate_stmt LOCATION macro
-func (r *reverseASTBridge) getPos(inst *objects.Instance) ast.Pos {
+// getPos reads the source-location attributes that every located AST node
+// (stmt, expr, excepthandler, pattern, type_param, arg, keyword, alias)
+// carries. lineno and col_offset are required: a missing attribute raises
+// TypeError("required field \"lineno\" missing from <kind>"), matching the
+// obj2ast PyObject_GetOptionalAttr == NULL path. end_lineno / end_col_offset
+// default to lineno / col_offset when absent or None.
+//
+// CPython: Python/Python-ast.c:11149 obj2ast_stmt attribute block
+func (r *reverseASTBridge) getPos(inst *objects.Instance, kind string) ast.Pos {
 	linenoVal, linenoPresent := r.getAttrPresent(inst, "lineno")
 	if !linenoPresent {
-		return ast.NoPos
+		panic(astTypeError{fmt.Sprintf("required field \"lineno\" missing from %s", kind)})
 	}
 	if linenoVal == objects.None() {
 		panic(astValidationError{"invalid integer value: None"})
+	}
+	if _, colPresent := r.getAttrPresent(inst, "col_offset"); !colPresent {
+		panic(astTypeError{fmt.Sprintf("required field \"col_offset\" missing from %s", kind)})
 	}
 	lineno := r.getAttrInt(inst, "lineno")
 	colOffset := r.getAttrInt(inst, "col_offset")
