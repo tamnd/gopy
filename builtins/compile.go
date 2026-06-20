@@ -370,18 +370,17 @@ func parseCompileFlags(o objects.Object) (int, error) {
 
 // checkDontInherit accepts dont_inherit for signature parity. gopy has
 // no surrounding compiler-flags context to inherit, so the value is a
-// no-op either way; only the type is validated.
+// no-op either way, but the argument is still run through the truth test
+// so a misbehaving __bool__ / __len__ surfaces the same error CPython's
+// PyObject_IsTrue conversion does.
+//
+// CPython: Python/clinic/bltinmodule.c.h:341 dont_inherit = PyObject_IsTrue(args[4])
 func checkDontInherit(o objects.Object) error {
 	if o == nil {
 		return nil
 	}
-	if _, ok := o.(*objects.Int); ok {
-		return nil
-	}
-	if _, ok := o.(*objects.Bool); ok {
-		return nil
-	}
-	return fmt.Errorf("TypeError: compile() arg 5 (dont_inherit) must be int or bool")
+	_, err := objects.IsTruthy(o)
+	return err
 }
 
 // parseCompileOptimize reads the optional optimize arg. -1 is the
@@ -448,7 +447,7 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 	// CPython: Python/bltinmodule.c:843 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
-		return nil, fmt.Errorf("ValueError: %w", err)
+		return nil, ast.WrapValidationError(err)
 	}
 	// CPython: Python/bltinmodule.c:846
 	// syntax_check_only = ((flags & PyCF_OPTIMIZED_AST) == PyCF_ONLY_AST)

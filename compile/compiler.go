@@ -71,7 +71,7 @@ func CompileFlags(mod ast.Mod, filename string, optimize, flags int) (*Code, err
 	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
 	// CPython: Python/ast.c:1047 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
-		return nil, fmt.Errorf("ValueError: %s", err.Error())
+		return nil, ast.WrapValidationError(err)
 	}
 	ff, err := future.FromAST(mod, filename)
 	if err != nil {

@@ -5,7 +5,26 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"strings"
 )
+
+// WrapValidationError tags a Validate failure with the Python exception
+// type it must surface as. Most validation failures are ValueError; a
+// handful (NamedExpr / AnnAssign / TypeAlias targets, Constant type) are
+// TypeError and already carry that prefix in their message, so they pass
+// straight through. Callers that turn a Validate error into a Python
+// exception route it through here instead of hardcoding ValueError.
+//
+// CPython: Python/ast.c PyErr_SetString(PyExc_TypeError/ValueError, ...)
+func WrapValidationError(err error) error {
+	msg := err.Error()
+	for _, p := range []string{"TypeError: ", "SystemError: "} {
+		if strings.HasPrefix(msg, p) {
+			return errors.New(msg)
+		}
+	}
+	return errors.New("ValueError: " + msg)
+}
 
 // Validate is the gopy port of _PyAST_Validate. It walks mod and
 // returns nil if the tree is well-formed, or an error matching
@@ -141,7 +160,7 @@ func validateStmt(s Stmt) error {
 	case *AnnAssign:
 		if n.Target != nil {
 			if _, ok := n.Target.(*Name); !ok && n.Simple != 0 {
-				return errors.New("AnnAssign with simple non-Name target")
+				return errors.New("TypeError: AnnAssign with simple non-Name target")
 			}
 		}
 		if err := validateExpr(n.Target, Store); err != nil {
@@ -156,7 +175,7 @@ func validateStmt(s Stmt) error {
 	case *TypeAlias:
 		if n.Name != nil {
 			if _, ok := n.Name.(*Name); !ok {
-				return errors.New("TypeAlias with non-Name name")
+				return errors.New("TypeError: TypeAlias with non-Name name")
 			}
 		}
 		if err := validateExpr(n.Name, Store); err != nil {
@@ -446,7 +465,7 @@ func validateExpr(e Expr, ctx ExprContext) error {
 		return validateExprs(n.Values, Load, false)
 	case *NamedExpr:
 		if _, ok := n.Target.(*Name); !ok {
-			return errors.New("NamedExpr target must be a Name")
+			return errors.New("TypeError: NamedExpr target must be a Name")
 		}
 		return validateExpr(n.Value, Load)
 	case *BinOp:
@@ -818,7 +837,7 @@ func validateConstant(v any) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("got an invalid type in Constant: %s", reflect.TypeOf(v))
+	return fmt.Errorf("TypeError: got an invalid type in Constant: %s", reflect.TypeOf(v))
 }
 
 // EllipsisType is the singleton type used to spell Python's `...` as
