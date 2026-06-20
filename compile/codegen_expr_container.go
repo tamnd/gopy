@@ -6,6 +6,7 @@ package compile
 
 import (
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/symtable"
@@ -239,20 +240,55 @@ func (c *Compiler) visitAttribute(e *ast.Attribute) error {
 	// CPython: Python/codegen.c codegen_visit_expr (Attribute_kind, mangle branch)
 	attr := symtable.Mangle(c.unit().Private, e.Attr)
 	pool := poolNames
+	// The attribute opcodes are located on the attribute name, not the
+	// whole `value.attr` span, so a multi-line receiver does not drag the
+	// opcode's lineno back to where the receiver started.
+	//
+	// CPython: Python/codegen.c:5285 loc = update_start_location_to_match_attr(c, LOC(e), e)
+	l := updateStartLocationToMatchAttr(loc(e), e)
 	switch e.Ctx {
 	case ast.Load:
 		// LOAD_ATTR oparg low bit is the "push self" hint used by
 		// LOAD_METHOD; codegen leaves it clear and the flowgraph
 		// optimizes it.
-		c.addOpName(LOAD_ATTR, &pool, attr, loc(e))
+		c.addOpName(LOAD_ATTR, &pool, attr, l)
 	case ast.Store:
-		c.addOpName(STORE_ATTR, &pool, attr, loc(e))
+		c.addOpName(STORE_ATTR, &pool, attr, l)
 	case ast.Del:
-		c.addOpName(DELETE_ATTR, &pool, attr, loc(e))
+		c.addOpName(DELETE_ATTR, &pool, attr, l)
 	default:
 		return fmt.Errorf("compile: Attribute with unknown context %v", e.Ctx)
 	}
 	return nil
+}
+
+// updateStartLocationToMatchAttr moves an attribute opcode's start
+// location onto the attribute name's line. When the located span begins
+// on a different line than the attribute ends (a receiver split across
+// lines), the start is pulled to the attribute's end line and the start
+// column is backed off by the attribute name's length so the opcode
+// points at the name itself. Weird ASTs whose name is longer than the
+// end column drop their columns, matching GH-94694.
+//
+// CPython: Python/codegen.c:3824 update_start_location_to_match_attr
+func updateStartLocationToMatchAttr(l ast.Pos, e *ast.Attribute) ast.Pos {
+	if l.Lineno != e.Pos.EndLineno {
+		l.Lineno = e.Pos.EndLineno
+		n := utf8.RuneCountInString(e.Attr)
+		if n <= e.Pos.EndColOffset {
+			l.ColOffset = e.Pos.EndColOffset - n
+		} else {
+			l.ColOffset = -1
+			l.EndColOffset = -1
+		}
+		if l.Lineno > l.EndLineno {
+			l.EndLineno = l.Lineno
+		}
+		if l.Lineno == l.EndLineno && l.ColOffset > l.EndColOffset {
+			l.EndColOffset = l.ColOffset
+		}
+	}
+	return l
 }
 
 // maybeAddStaticAttribute walks the active unit stack and, when the

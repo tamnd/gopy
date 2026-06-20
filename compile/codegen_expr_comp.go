@@ -310,19 +310,26 @@ func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 		c.addOpJump(POP_JUMP_IF_FALSE, ifCleanup, loc(ifx))
 	}
 
+	eltLoc := loc(elt)
 	if idx+1 < len(gens) {
 		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l, false); err != nil {
 			return err
 		}
 	} else {
-		if err := c.emitCompTail(kind, depth, elt, val); err != nil {
+		tailLoc, err := c.emitCompTail(kind, depth, elt, val)
+		if err != nil {
 			return err
 		}
+		eltLoc = tailLoc
 	}
 
 	c.useLabel(ifCleanup)
 	if hasLoop {
-		c.addOpJump(JUMP, start, loc(gen.Iter))
+		// The loop-closing JUMP is located on the element, not the
+		// iterable, so the back-edge points at the produced value.
+		//
+		// CPython: Python/codegen.c:4508 ADDOP_JUMP(c, elt_loc, JUMP, start)
+		c.addOpJump(JUMP, start, eltLoc)
 		c.useLabel(anchor)
 		c.addOp(END_FOR, ast.Pos{})
 		c.addOp(POP_ITER, ast.Pos{})
@@ -368,9 +375,15 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 
 	if !iterOnStack {
 		if idx == 0 {
+			// gen_index 0 receives the outermost iter as the implicit
+			// `.0` argument; CPython locates LOAD_FAST at the whole-
+			// comprehension loc, not the iterable.
+			//
+			// CPython: Python/codegen.c:4546 ADDOP_I(c, loc, LOAD_FAST, 0)
 			pool := poolVarNames
-			c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
+			c.addOpName(LOAD_FAST, &pool, ".0", l)
 		} else {
+			// CPython: Python/codegen.c:4544 ADDOP(c, LOC(gen->iter), GET_AITER)
 			if err := c.visitExpr(gen.Iter); err != nil {
 				return err
 			}
@@ -378,13 +391,17 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 		}
 	}
 
+	// The async-for scaffolding (SETUP_FINALLY .. END_ASYNC_FOR) carries
+	// the whole-comprehension loc in CPython, not the iterable's.
+	//
+	// CPython: Python/codegen.c:4549 codegen_async_comprehension_generator
 	c.useLabel(start)
 	c.pushFblock(fblockAsyncComprehensionGenerator, start, NoLabel, nil)
-	c.addOpJump(SETUP_FINALLY, except, loc(gen.Iter))
-	c.addOp(GET_ANEXT, loc(gen.Iter))
-	c.addLoadConst(nil, loc(gen.Iter))
-	c.addYieldFromLoop(loc(gen.Iter))
-	c.addOp(POP_BLOCK, loc(gen.Iter))
+	c.addOpJump(SETUP_FINALLY, except, l)
+	c.addOp(GET_ANEXT, l)
+	c.addLoadConst(nil, l)
+	c.addYieldFromLoop(l)
+	c.addOp(POP_BLOCK, l)
 
 	if err := c.assignTo(gen.Target, loc(gen.Target)); err != nil {
 		return err
@@ -398,63 +415,80 @@ func (c *Compiler) compileAsyncGenerator(gens ast.Seq[*ast.Comprehension],
 	}
 
 	depth++
+	eltLoc := loc(elt)
 	if idx+1 < len(gens) {
 		if err := c.compileGenerator(gens, idx+1, depth, elt, val, kind, l, false); err != nil {
 			return err
 		}
 	} else {
-		if err := c.emitCompTail(kind, depth, elt, val); err != nil {
+		tailLoc, err := c.emitCompTail(kind, depth, elt, val)
+		if err != nil {
 			return err
 		}
+		eltLoc = tailLoc
 	}
 
 	c.useLabel(ifCleanup)
-	c.addOpJump(JUMP, start, loc(gen.Iter))
+	// CPython: Python/codegen.c:4611 ADDOP_JUMP(c, elt_loc, JUMP, start)
+	c.addOpJump(JUMP, start, eltLoc)
 	if err := c.popFblock(fblockAsyncComprehensionGenerator); err != nil {
 		return err
 	}
 
 	c.useLabel(except)
-	c.addOpJump(END_ASYNC_FOR, start, loc(gen.Iter))
+	// CPython: Python/codegen.c:4617 ADDOP_JUMP(c, loc, END_ASYNC_FOR, send)
+	c.addOpJump(END_ASYNC_FOR, start, l)
 	return nil
 }
 
 // emitCompTail writes the per-kind result accumulation step at the
-// innermost generator depth.
+// innermost generator depth. It returns the element location used for the
+// accumulation opcode, which the caller reuses for the loop-closing JUMP.
 //
 // CPython: Python/codegen.c codegen_sync_comprehension_generator
 // (last-generator switch)
-func (c *Compiler) emitCompTail(kind compKind, depth int, elt, val ast.Expr) error {
+func (c *Compiler) emitCompTail(kind compKind, depth int, elt, val ast.Expr) (ast.Pos, error) {
+	eltLoc := loc(elt)
 	switch kind {
 	case compGenExp:
 		if err := c.visitExpr(elt); err != nil {
-			return err
+			return eltLoc, err
 		}
 		// CPython: Python/codegen.c:4478 ADDOP_YIELD in comp_genexp tail.
-		c.addopYield(loc(elt))
-		c.addOp(POP_TOP, loc(elt))
+		c.addopYield(eltLoc)
+		c.addOp(POP_TOP, eltLoc)
 	case compListComp:
 		if err := c.visitExpr(elt); err != nil {
-			return err
+			return eltLoc, err
 		}
-		c.addOpI(LIST_APPEND, int32(depth+1), loc(elt))
+		c.addOpI(LIST_APPEND, int32(depth+1), eltLoc)
 	case compSetComp:
 		if err := c.visitExpr(elt); err != nil {
-			return err
+			return eltLoc, err
 		}
-		c.addOpI(SET_ADD, int32(depth+1), loc(elt))
+		c.addOpI(SET_ADD, int32(depth+1), eltLoc)
 	case compDictComp:
 		if err := c.visitExpr(elt); err != nil {
-			return err
+			return eltLoc, err
 		}
 		if err := c.visitExpr(val); err != nil {
-			return err
+			return eltLoc, err
 		}
-		c.addOpI(MAP_ADD, int32(depth+1), loc(elt))
+		// With '{k: v}', k is evaluated before v; the MAP_ADD location
+		// spans from the key's start to the value's end.
+		//
+		// CPython: Python/codegen.c:4496 elt_loc = LOCATION(...)
+		eltLoc = ast.Pos{
+			Lineno:       loc(elt).Lineno,
+			ColOffset:    loc(elt).ColOffset,
+			EndLineno:    loc(val).EndLineno,
+			EndColOffset: loc(val).EndColOffset,
+		}
+		c.addOpI(MAP_ADD, int32(depth+1), eltLoc)
 	default:
-		return fmt.Errorf("compile: unknown comprehension kind %d", kind)
+		return eltLoc, fmt.Errorf("compile: unknown comprehension kind %d", kind)
 	}
-	return nil
+	return eltLoc, nil
 }
 
 // wrapInStopIterationHandler bolts a SETUP_CLEANUP at offset 0 plus a

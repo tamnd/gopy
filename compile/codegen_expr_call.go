@@ -91,14 +91,14 @@ func (c *Compiler) maybeOptimizeMethodCall(e *ast.Call) (bool, error) {
 	pool := poolNames
 	mangled := symtable.Mangle(c.unit().Private, attr.Attr)
 	nameIdx := c.poolIndex(&pool, mangled)
-	c.addOpI(LOAD_ATTR, int32((nameIdx<<1)|1), loc(attr))
+	c.addOpI(LOAD_ATTR, int32((nameIdx<<1)|1), updateStartLocationToMatchAttr(loc(attr), attr))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
 			return false, err
 		}
 	}
 	if len(e.Keywords) == 0 {
-		c.addOpI(CALL, int32(len(e.Args)), loc(e))
+		c.addOpI(CALL, int32(len(e.Args)), updateStartLocationToMatchAttr(loc(e), attr))
 		return true, nil
 	}
 	names := make([]any, 0, len(e.Keywords))
@@ -108,8 +108,8 @@ func (c *Compiler) maybeOptimizeMethodCall(e *ast.Call) (bool, error) {
 		}
 		names = append(names, *kw.Arg)
 	}
-	c.addLoadConst(tupleOf(names), loc(e))
-	c.addOpI(CALL_KW, int32(len(e.Args)+len(e.Keywords)), loc(e))
+	c.addLoadConst(tupleOf(names), updateStartLocationToMatchAttr(loc(attr), attr))
+	c.addOpI(CALL_KW, int32(len(e.Args)+len(e.Keywords)), updateStartLocationToMatchAttr(loc(e), attr))
 	return true, nil
 }
 

@@ -39,7 +39,11 @@ func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 //
 // CPython: Python/codegen.c:L1999 codegen_lambda
 func (c *Compiler) visitLambda(e *ast.Lambda) error {
-	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: e.Pos}}
+	// The implicit RETURN_VALUE is located on the lambda body, not the
+	// whole `lambda ...:` span, so its position stays inside the body.
+	//
+	// CPython: Python/codegen.c:2027 loc = LOC(e->v.Lambda.body)
+	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: loc(e.Body)}}
 	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, nil, true, e)
 }
 

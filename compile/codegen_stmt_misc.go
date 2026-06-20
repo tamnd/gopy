@@ -92,7 +92,11 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 		}
 		c.addOpI(COPY, 1, targetLoc)
 		pool := poolNames
-		c.addOpName(LOAD_ATTR, &pool, t.Attr, targetLoc)
+		// The attribute opcodes attach to the attribute name, not the
+		// receiver's first line.
+		// CPython: Python/codegen.c:5358 update_start_location_to_match_attr
+		attrLoc := updateStartLocationToMatchAttr(targetLoc, t)
+		c.addOpName(LOAD_ATTR, &pool, t.Attr, attrLoc)
 		if err := c.visitExpr(s.Value); err != nil {
 			return err
 		}
@@ -101,8 +105,8 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 			return err
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
-		c.addOpI(SWAP, 2, targetLoc)
-		c.addOpName(STORE_ATTR, &pool, t.Attr, targetLoc)
+		c.addOpI(SWAP, 2, attrLoc)
+		c.addOpName(STORE_ATTR, &pool, t.Attr, attrLoc)
 		return nil
 	case *ast.Subscript:
 		if err := c.visitExpr(t.Value); err != nil {
