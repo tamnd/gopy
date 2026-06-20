@@ -11,15 +11,18 @@ import (
 
 // visitBoolOp emits the short-circuit form for `and` / `or`.
 //
-//	A and B and C  ->  evaluate A; copy + to_bool; if false jump to
-//	                   end with the first falsy value on top.
-//	A or  B or  C  ->  same shape with POP_JUMP_IF_TRUE.
+//	A and B and C  ->  evaluate A; pseudo JUMP_IF_FALSE to end with the
+//	                   first falsy value on top; otherwise POP_TOP.
+//	A or  B or  C  ->  same shape with the pseudo JUMP_IF_TRUE.
 //
-// CPython emits the pseudo JUMP_IF_FALSE / JUMP_IF_TRUE here and
-// convert_pseudo_conditional_jumps later expands it to COPY 1 + TO_BOOL
-// + POP_JUMP_IF_X. gopy emits the expanded form inline because its
-// flowgraph has no pseudo-conditional pass; the resulting bytecode is
-// identical.
+// We emit the pseudo JUMP_IF_FALSE / JUMP_IF_TRUE exactly as CPython
+// does. convert_pseudo_conditional_jumps later expands each into
+// COPY 1 + TO_BOOL + POP_JUMP_IF_X. Keeping the pseudo form through the
+// optimizer lets jump threading collapse `a and b or c`-style chains
+// (gh-124285): a JUMP_IF_FALSE whose target re-tests the same value
+// with the opposite-sense JUMP_IF_TRUE is threaded past the re-test.
+// Emitting the expanded form here would hide those pseudo jumps from
+// the threader and double-evaluate the operand.
 //
 // CPython: Python/codegen.c:3290 codegen_boolop
 // CPython: Python/flowgraph.c:3485 convert_pseudo_conditional_jumps
@@ -28,9 +31,9 @@ func (c *Compiler) visitBoolOp(e *ast.BoolOp) error {
 		return fmt.Errorf("compile: BoolOp needs at least two values")
 	}
 	end := c.newLabel()
-	jump := POP_JUMP_IF_FALSE
+	jump := JUMP_IF_FALSE
 	if e.Op == ast.Or {
-		jump = POP_JUMP_IF_TRUE
+		jump = JUMP_IF_TRUE
 	}
 	for i, v := range e.Values {
 		if err := c.visitExpr(v); err != nil {
@@ -39,8 +42,6 @@ func (c *Compiler) visitBoolOp(e *ast.BoolOp) error {
 		if i == len(e.Values)-1 {
 			break
 		}
-		c.addOpI(COPY, 1, loc(e))
-		c.addOp(TO_BOOL, loc(e))
 		c.addOpJump(jump, end, loc(e))
 		c.addOp(POP_TOP, loc(e))
 	}
