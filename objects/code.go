@@ -709,11 +709,39 @@ func constsEqual(a, b []any) bool {
 		return false
 	}
 	for i := range a {
-		if !reflect.DeepEqual(a[i], b[i]) {
+		if !constElemEqual(a[i], b[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// constElemEqual compares two co_consts entries the way CPython's
+// _PyCode_ConstantKey + PyObject_RichCompareBool does: nested code
+// objects fall through to code_richcompare (so co_filename and other
+// fields it ignores do not break equality), and tuples recurse so a
+// code object buried inside a const tuple is handled the same way.
+// Everything else uses reflect.DeepEqual on the Go representation.
+//
+// CPython: Objects/codeobject.c:2634 _PyCode_ConstantKey comparison
+func constElemEqual(a, b any) bool {
+	if ca, ok := a.(*Code); ok {
+		cb, ok := b.(*Code)
+		return ok && codeEqual(ca, cb)
+	}
+	if ta, ok := a.(*Tuple); ok {
+		tb, ok := b.(*Tuple)
+		if !ok || ta.Len() != tb.Len() {
+			return false
+		}
+		for i := 0; i < ta.Len(); i++ {
+			if !constElemEqual(ta.Item(i), tb.Item(i)) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 func stringsHash(ss []string) int64 {
