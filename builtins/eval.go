@@ -321,6 +321,17 @@ func sourceAsString(cmd objects.Object, fnName string) (string, bool, error) {
 		s = string(v.Bytes())
 	case *objects.ByteArray:
 		s = string(v.Bytes())
+	case *objects.MemoryView:
+		// _Py_SourceAsString accepts any object exposing the buffer
+		// protocol; memoryview is the gopy surface for that, so a
+		// sliced memoryview feeds eval()/exec()/compile() straight
+		// through here.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString (PyObject_CheckBuffer)
+		if err := objects.CheckBufferReleased(v); err != nil {
+			return "", false, err
+		}
+		s = string(v.Bytes())
 	default:
 		return "", false, fmt.Errorf("TypeError: %s() arg 1 must be a string, bytes or code object", fnName)
 	}

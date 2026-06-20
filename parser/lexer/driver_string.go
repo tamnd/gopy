@@ -80,6 +80,21 @@ func FromString(src string, mode Mode) *State {
 		)
 		s.done = eEncoding
 	}
+	// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
+	// CPython runs the null-byte scan per-line inside tok_nextc after every
+	// refill. gopy loads the whole source upfront so the equivalent check is
+	// a single pre-scan that finds the offending line and records the
+	// canonical SyntaxError.
+	if s.err == nil {
+		if line, ok := firstNullByteLine(buf); ok {
+			s.lineno = line
+			s.recordErrorWithText(
+				"source code cannot contain null bytes",
+				nthLine(buf, line),
+			)
+			s.done = eSyntax
+		}
+	}
 	// exec-input (Py_file_input) gets a trailing newline injection so the
 	// lexer closes the indent stack at EOF via the normal atbol path.
 	// single-input and eval-input do NOT inject: pegen rewrites the first
@@ -150,36 +165,40 @@ func FromBytes(src []byte, mode Mode) *State {
 			}
 		}
 	}
-	// CPython runs _PyTokenizer_ensure_utf8 on the source whenever the
-	// declared encoding is utf-8 (default, BOM, or explicit cookie). The
-	// non-utf-8 cookie path skips validation because the codec decode
-	// already produced canonical utf-8 above.
+	// CPython interleaves both diagnostics: tok_nextc reads a line, the
+	// codec/ensure_utf8 step rejects an undecodable line, and
+	// contains_null_bytes rejects an embedded NUL, all on the same line
+	// before the next line is read. So the fault on the earlier line wins,
+	// and a NUL beats a non-UTF-8 byte sitting on the same line. gopy
+	// buffers the whole source upfront, so compute both candidate lines
+	// and report whichever the per-line tokenizer would have hit first.
 	//
 	// CPython: Parser/tokenizer/string_tokenizer.c:108 ensure_utf8 call
+	// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
+	utf8Line, utf8Bad, utf8OK := 0, byte(0), false
 	if s.err == nil && !nonUTF8Cookie {
 		if line, bad, ok := ValidateUTF8(src); !ok {
-			s.lineno = line
-			s.recordErrorWithText(
-				nonUTF8ErrorMessage(bad, line),
-				nthLine(src, line),
-			)
-			s.done = eEncoding
+			utf8Line, utf8Bad, utf8OK = line, bad, true
 		}
 	}
-	// CPython: Parser/lexer/lexer.c:89 contains_null_bytes
-	// CPython runs the null-byte scan per-line inside tok_nextc after
-	// every refill. gopy loads the whole source upfront in FromBytes so
-	// the equivalent check is a single pre-scan that finds the offending
-	// line and records the canonical SyntaxError.
+	nullLine, nullOK := 0, false
 	if s.err == nil {
-		if line, ok := firstNullByteLine(src); ok {
-			s.lineno = line
-			s.recordErrorWithText(
-				"source code cannot contain null bytes",
-				nthLine(src, line),
-			)
-			s.done = eSyntax
-		}
+		nullLine, nullOK = firstNullByteLine(src)
+	}
+	if nullOK && (!utf8OK || nullLine <= utf8Line) {
+		s.lineno = nullLine
+		s.recordErrorWithText(
+			"source code cannot contain null bytes",
+			nthLine(src, nullLine),
+		)
+		s.done = eSyntax
+	} else if utf8OK {
+		s.lineno = utf8Line
+		s.recordErrorWithText(
+			nonUTF8ErrorMessage(utf8Bad, utf8Line),
+			nthLine(src, utf8Line),
+		)
+		s.done = eEncoding
 	}
 	// CPython: Parser/pegen.c:1048 exec_input = start_rule == Py_file_input
 	src = TranslateNewlines(src, mode == ModeFile)
