@@ -183,6 +183,24 @@ type Code struct {
 	// CPython: Include/cpython/code.h:90 co_version
 	Version uint32
 
+	// filenameObj / linetableObj / exceptiontableObj / constsObj are
+	// the interned Python-object forms of Filename / Linetable /
+	// ExceptionTable / Consts, populated by InternConstants at the
+	// lift boundary so co_filename, co_linetable, co_exceptiontable
+	// and co_consts return a stable, shared object. CPython holds each
+	// of these as a single PyObject merged through the per-compile
+	// const_cache (so two functions with identical linetables or
+	// consts share one object, and a nested code object's co_filename
+	// is its parent's). When nil, the getset falls back to building a
+	// fresh object from the Go field, which covers hand-built and
+	// marshal-loaded code that never passed through the interner.
+	//
+	// CPython: Python/compile.c:318 const_cache_insert
+	filenameObj       Object
+	linetableObj      Object
+	exceptiontableObj Object
+	constsObj         *Tuple
+
 	// CacheObjects is gopy's stand-in for CPython's in-cache pointer
 	// slots. CPython packs the cached descriptor / function object
 	// pointer into 4 codeunits of the inline cache (write_obj +
@@ -413,6 +431,9 @@ func codeGetAttr(o Object, name Object) (Object, error) {
 	}
 	switch n.v {
 	case "co_filename":
+		if c.filenameObj != nil {
+			return c.filenameObj, nil
+		}
 		return NewStr(c.Filename), nil
 	case "co_name":
 		return NewStr(c.Name), nil

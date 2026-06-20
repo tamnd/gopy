@@ -70,6 +70,9 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		// CPython: Objects/codeobject.c:2777 code_getcodeadaptive
 		return NewBytes(c.Code), true
 	case "co_consts":
+		if c.constsObj != nil {
+			return c.constsObj, true
+		}
 		return constsAsTuple(c.Consts), true
 	case "co_names":
 		return stringsAsTuple(c.Names), true
@@ -104,6 +107,9 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		// CPython: Include/cpython/code.h:92 co_localsplusnames
 		return stringsAsTuple(c.LocalsplusNames), true
 	case "co_linetable":
+		if c.linetableObj != nil {
+			return c.linetableObj, true
+		}
 		return NewBytes(c.Linetable), true
 	case "co_lnotab":
 		// Deprecated since Python 3.12; emit DeprecationWarning.
@@ -113,6 +119,9 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		}
 		return NewBytes(c.Linetable), true
 	case "co_exceptiontable":
+		if c.exceptiontableObj != nil {
+			return c.exceptiontableObj, true
+		}
 		return NewBytes(c.ExceptionTable), true
 	}
 	return nil, false

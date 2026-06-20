@@ -67,7 +67,7 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	if err != nil {
 		return nil, err
 	}
-	return liftCompileCode(cco), nil
+	return LiftCompileCode(cco), nil
 }
 
 type compileArgs struct {
@@ -509,9 +509,16 @@ func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 
 // LiftCompileCode exposes liftCompileCode so the _testinternalcapi
 // compiler-pipeline helpers can turn an assembled compile.Code into the
-// objects.Code that CPython's _PyCompile_Assemble hands back.
+// objects.Code that CPython's _PyCompile_Assemble hands back. It is the
+// top-level lift boundary, so it also runs the per-compile constant
+// merge that shares equal co_consts / co_linetable / co_filename
+// objects across the whole code tree.
+//
+// CPython: Python/compile.c:1707 const_cache lifetime
 func LiftCompileCode(c *compile.Code) *objects.Code {
-	return liftCompileCode(c)
+	top := liftCompileCode(c)
+	objects.InternCodeConstants(top)
+	return top
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the

@@ -42,7 +42,7 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 	if err != nil {
 		return nil, err
 	}
-	return vm.EvalCode(ts, liftCode(cco), globals, locals)
+	return vm.EvalCode(ts, liftTopCode(cco), globals, locals)
 }
 
 // RunBytes is the bytes-input variant of RunString. The PEP 263
@@ -66,7 +66,7 @@ func RunBytes(ts *state.Thread, src []byte, filename string, mode parser.Mode, g
 	if err != nil {
 		return nil, err
 	}
-	return vm.EvalCode(ts, liftCode(cco), globals, locals)
+	return vm.EvalCode(ts, liftTopCode(cco), globals, locals)
 }
 
 // RunSimpleString parses, compiles, and runs command as a Python
@@ -141,6 +141,17 @@ func printRunError(ts *state.Thread, err error, w io.Writer) int {
 	}
 	fmt.Fprintln(w, err)
 	return 1
+}
+
+// liftTopCode lifts a freshly compiled top-level code unit and runs the
+// per-compile constant merge so co_consts / co_linetable / co_filename
+// are shared across the whole tree, matching CPython's const_cache.
+//
+// CPython: Python/compile.c:1707 const_cache lifetime
+func liftTopCode(c *compile.Code) *objects.Code {
+	out := liftCode(c)
+	objects.InternCodeConstants(out)
+	return out
 }
 
 // liftCode adapts compile.Code into objects.Code. The two structs

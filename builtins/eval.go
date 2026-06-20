@@ -286,7 +286,7 @@ func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*obj
 	if err != nil {
 		return nil, err
 	}
-	return liftCompileCode(cco), nil
+	return LiftCompileCode(cco), nil
 }
 
 // sourceAsString is the gopy port of CPython's _Py_SourceAsString.
