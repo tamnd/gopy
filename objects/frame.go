@@ -472,6 +472,16 @@ func frameSetAttr(o Object, name Object, v Object) error {
 			return h(f, f.traceOpcodes)
 		}
 		return nil
+	case "f_lineno":
+		// Settable f_lineno is the debugger line-jump feature: a trace
+		// function assigns it to relocate the instruction pointer to a
+		// chosen source line. The vm installs the hook; without one
+		// (e.g. objects-only tests) the slot stays read-only.
+		//
+		// CPython: Objects/frameobject.c:1640 frame_lineno_set_impl
+		if h := SetLinenoHook; h != nil {
+			return h(f, v)
+		}
 	}
 	return fmt.Errorf("AttributeError: 'frame' object attribute %q is read-only", n.v)
 }

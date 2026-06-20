@@ -244,6 +244,12 @@ func init() {
 	//
 	// CPython: Python/legacy_tracing.c:159 _PyEval_SetOpcodeTrace
 	objects.SetOpcodeTraceHook = setOpcodeTraceHook
+	// Back frame.f_lineno's setter (the debugger line jump). objects/
+	// cannot reach the mark_stacks / instruction-pointer machinery, so
+	// it routes through this hook.
+	//
+	// CPython: Objects/frameobject.c:1640 frame_lineno_set_impl
+	objects.SetLinenoHook = frameLinenoSetHook
 	// Expose the same hook to module/sys for sys._getframe().
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl

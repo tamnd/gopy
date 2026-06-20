@@ -60,6 +60,19 @@ type Frame struct {
 	InstrPtr  int
 	PrevInstr int
 
+	// LinenoJumped is set when the f_lineno setter (the debugger line
+	// jump) relocates InstrPtr during a trace callback. The dispatch
+	// loop consults it after the INSTRUMENTED_LINE event to resume at
+	// the new target instead of running the hidden opcode, then clears
+	// it. A bare InstrPtr-before/after comparison would also trip on the
+	// EXTENDED_ARG-prefix advance fetchExtended performs, so the jump
+	// needs its own explicit signal.
+	//
+	// CPython: Objects/frameobject.c:1640 frame_lineno_set_impl sets
+	// frame->instr_ptr, which Python/bytecodes.c INSTRUMENTED_LINE then
+	// detects via instr_ptr != this_instr.
+	LinenoJumped bool
+
 	// StackTop is the index into LocalsPlus where the live value
 	// stack ends. The stack starts at StackBase.
 	StackTop int

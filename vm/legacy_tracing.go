@@ -121,13 +121,40 @@ func callTraceFunc(event int, arg objects.Object) (objects.Object, error) {
 		}
 	}
 	ts.EnterTracing()
+	ts.WhatEvent = legacyTraceToEvent(event)
 	err := fn(obj, f, event, arg)
+	ts.WhatEvent = -1
 	ts.LeaveTracing()
 	if err != nil {
 		return nil, err
 	}
 	f.Lineno = 0
 	return objects.None(), nil
+}
+
+// legacyTraceToEvent maps a legacy PyTrace_* event to the PEP 669
+// monitoring event the f_lineno setter switches on. The setter only
+// permits a line jump from a 'line' event; the other events resolve to
+// the monitoring IDs whose setter arms raise the matching diagnostic
+// (PY_START for 'call', PY_RETURN for 'return', and so on).
+//
+// CPython: Python/legacy_tracing.c the per-event sys_trace_* shims set
+// tstate->what_event before invoking the Python callback.
+func legacyTraceToEvent(event int) int {
+	switch event {
+	case PyTraceLine:
+		return int(monitor.EventLine)
+	case PyTraceCall:
+		return int(monitor.EventPyStart)
+	case PyTraceReturn:
+		return int(monitor.EventPyReturn)
+	case PyTraceException:
+		return int(monitor.EventRaise)
+	case PyTraceOpcode:
+		return int(monitor.EventInstruction)
+	default:
+		return int(monitor.EventPyStart)
+	}
 }
 
 // setOpcodeTrace toggles per-instruction tracing on f.Code so the
@@ -299,7 +326,9 @@ func sysTraceInstructionFunc(args []objects.Object, _ map[string]objects.Object)
 		return objects.None(), nil
 	}
 	ts.EnterTracing()
+	ts.WhatEvent = int(monitor.EventInstruction)
 	err := fn(obj, f, PyTraceOpcode, objects.None())
+	ts.WhatEvent = -1
 	ts.LeaveTracing()
 	if err != nil {
 		return nil, err
@@ -328,7 +357,9 @@ func traceLine(ts *state.Thread, f *frame.Frame, line int) (objects.Object, erro
 	}
 	f.Lineno = line
 	ts.EnterTracing()
+	ts.WhatEvent = int(monitor.EventLine)
 	err := fn(obj, f, PyTraceLine, objects.None())
+	ts.WhatEvent = -1
 	ts.LeaveTracing()
 	if err != nil {
 		return nil, err
