@@ -127,68 +127,98 @@ const intrinsicListToTuple int32 = 6
 // Include/internal/pycore_intrinsics.h).
 const intrinsicUnaryPositive int32 = 5
 
-// visitDict emits a dict literal. CPython lays this out as a series
-// of LOAD_CONST keys + BUILD_MAP for each contiguous run, with
-// DICT_UPDATE for `**other` splat keys.
+// codegenSubdict emits the [begin,end) run of key/value pairs as one
+// BUILD_MAP. A run whose stack footprint (2 entries per pair) exceeds
+// the guideline opens with BUILD_MAP 0 and folds each pair in with
+// MAP_ADD so the value stack stays bounded.
 //
-// CPython: Python/codegen.c:L3497 codegen_dict
-func (c *Compiler) visitDict(e *ast.Dict) error {
-	if len(e.Keys) != len(e.Values) {
-		return fmt.Errorf("compile: Dict keys/values mismatch %d/%d",
-			len(e.Keys), len(e.Values))
+// CPython: Python/codegen.c:3474 codegen_subdict
+func (c *Compiler) codegenSubdict(e *ast.Dict, begin, end int) error {
+	n := end - begin
+	big := n*2 > stackUseGuideline
+	if big {
+		c.addOpI(BUILD_MAP, 0, loc(e))
 	}
-	hasSplat := false
-	for _, k := range e.Keys {
-		if k == nil {
-			hasSplat = true
-			break
-		}
-	}
-	if !hasSplat {
-		for i, k := range e.Keys {
-			if err := c.visitExpr(k); err != nil {
-				return err
-			}
-			if err := c.visitExpr(e.Values[i]); err != nil {
-				return err
-			}
-		}
-		c.addOpI(BUILD_MAP, int32(len(e.Keys)), loc(e))
-		return nil
-	}
-	// Splat path: BUILD_MAP 0, accumulate runs of non-splat keys,
-	// then DICT_UPDATE for each `**v`.
-	c.addOpI(BUILD_MAP, 0, loc(e))
-	pending := 0
-	flush := func() error {
-		if pending == 0 {
-			return nil
-		}
-		c.addOpI(BUILD_MAP, int32(pending), loc(e))
-		c.addOpI(DICT_UPDATE, 1, loc(e))
-		pending = 0
-		return nil
-	}
-	for i, k := range e.Keys {
-		if k == nil {
-			if err := flush(); err != nil {
-				return err
-			}
-			if err := c.visitExpr(e.Values[i]); err != nil {
-				return err
-			}
-			c.addOpI(DICT_UPDATE, 1, loc(e))
-			continue
-		}
-		if err := c.visitExpr(k); err != nil {
+	for i := begin; i < end; i++ {
+		if err := c.visitExpr(e.Keys[i]); err != nil {
 			return err
 		}
 		if err := c.visitExpr(e.Values[i]); err != nil {
 			return err
 		}
-		pending++
+		if big {
+			c.addOpI(MAP_ADD, 1, loc(e))
+		}
 	}
-	return flush()
+	if !big {
+		c.addOpI(BUILD_MAP, int32(n), loc(e))
+	}
+	return nil
+}
+
+// visitDict emits a dict literal. Contiguous runs of non-splat keys are
+// chunked through codegenSubdict so a large literal keeps a bounded
+// evaluation stack; `**other` splat keys flush the pending run and fold
+// in with DICT_UPDATE.
+//
+// CPython: Python/codegen.c:3496 codegen_dict
+func (c *Compiler) visitDict(e *ast.Dict) error {
+	if len(e.Keys) != len(e.Values) {
+		return fmt.Errorf("compile: Dict keys/values mismatch %d/%d",
+			len(e.Keys), len(e.Values))
+	}
+	n := len(e.Values)
+	haveDict := false
+	elements := 0
+	for i := range n {
+		isUnpacking := e.Keys[i] == nil
+		if isUnpacking {
+			if elements != 0 {
+				if err := c.codegenSubdict(e, i-elements, i); err != nil {
+					return err
+				}
+				if haveDict {
+					c.addOpI(DICT_UPDATE, 1, loc(e))
+				}
+				haveDict = true
+				elements = 0
+			}
+			if !haveDict {
+				c.addOpI(BUILD_MAP, 0, loc(e))
+				haveDict = true
+			}
+			if err := c.visitExpr(e.Values[i]); err != nil {
+				return err
+			}
+			c.addOpI(DICT_UPDATE, 1, loc(e))
+		} else {
+			if elements*2 > stackUseGuideline {
+				if err := c.codegenSubdict(e, i-elements, i+1); err != nil {
+					return err
+				}
+				if haveDict {
+					c.addOpI(DICT_UPDATE, 1, loc(e))
+				}
+				haveDict = true
+				elements = 0
+			} else {
+				elements++
+			}
+		}
+	}
+	if elements != 0 {
+		if err := c.codegenSubdict(e, n-elements, n); err != nil {
+			return err
+		}
+		if haveDict {
+			c.addOpI(DICT_UPDATE, 1, loc(e))
+		}
+		haveDict = true
+	}
+	if !haveDict {
+		c.addOpI(BUILD_MAP, 0, loc(e))
+	}
+	return nil
 }
 
 // visitAttribute emits a LOAD_ATTR / STORE_ATTR / DELETE_ATTR

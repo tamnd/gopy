@@ -74,6 +74,14 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	if err := setBuiltin(dict, "Ellipsis", objects.Ellipsis()); err != nil {
 		return nil, err
 	}
+	// __debug__ is True unless the interpreter runs with -O. gopy has no
+	// optimize flag yet, so it is always True, matching CPython's
+	// bltinmod_exec which stores Py_True under "__debug__".
+	//
+	// CPython: Python/bltinmodule.c:3197 _PyBuiltin_Init
+	if err := setBuiltin(dict, "__debug__", objects.True()); err != nil {
+		return nil, err
+	}
 
 	for _, t := range typeSingletons() {
 		if err := setBuiltin(dict, t.name, t.t); err != nil {

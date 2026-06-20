@@ -33,6 +33,16 @@ func (c *Compiler) visitCall(e *ast.Call) error {
 	if ok {
 		return nil
 	}
+	// A call whose positional + keyword footprint exceeds the stack
+	// guideline routes through the CALL_FUNCTION_EX path so the
+	// arguments accumulate into a tuple / dict instead of piling onto
+	// the evaluation stack.
+	//
+	// CPython: Python/codegen.c:4258 codegen_call_helper_impl
+	// (nelts + nkwelts*2 > _PY_STACK_USE_GUIDELINE -> ex_call)
+	if len(e.Args)+len(e.Keywords)*2 > stackUseGuideline {
+		return c.emitCallEx(e)
+	}
 	if hasKeyword(e.Keywords) {
 		return c.emitCallKw(e)
 	}
@@ -176,32 +186,16 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 			return c.emitCallExKwargs(e)
 		}
 	}
-	c.addOpI(BUILD_LIST, 0, loc(e))
-	pending := 0
-	flushArgs := func() {
-		if pending == 0 {
-			return
-		}
-		c.addOpI(BUILD_LIST, int32(pending), loc(e))
-		c.addOpI(LIST_EXTEND, 1, loc(e))
-		pending = 0
+	// Gather the positional args into a tuple, going through the shared
+	// starunpack helper so a large or starred list builds with a bounded
+	// evaluation stack (BUILD_LIST 0 + LIST_APPEND / LIST_EXTEND, then
+	// INTRINSIC_LIST_TO_TUPLE).
+	//
+	// CPython: Python/codegen.c codegen_call_helper_impl (ex_call ->
+	// starunpack_helper_impl with build=BUILD_LIST, tuple=1)
+	if err := c.emitStarunpack(e.Args, BUILD_LIST, LIST_APPEND, LIST_EXTEND, true, loc(e)); err != nil {
+		return err
 	}
-	for _, a := range e.Args {
-		if star, ok := a.(*ast.Starred); ok {
-			flushArgs()
-			if err := c.visitExpr(star.Value); err != nil {
-				return err
-			}
-			c.addOpI(LIST_EXTEND, 1, loc(e))
-			continue
-		}
-		if err := c.visitExpr(a); err != nil {
-			return err
-		}
-		pending++
-	}
-	flushArgs()
-	c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, loc(e))
 	return c.emitCallExKwargs(e)
 }
 
@@ -215,34 +209,73 @@ func (c *Compiler) emitCallExKwargs(e *ast.Call) error {
 	flag := int32(0)
 	if hasKeyword(e.Keywords) {
 		flag = 1
-		c.addOpI(BUILD_MAP, 0, loc(e))
-		pendingKw := 0
-		flushKw := func() {
-			if pendingKw == 0 {
-				return
-			}
-			c.addOpI(BUILD_MAP, int32(pendingKw), loc(e))
-			c.addOpI(DICT_MERGE, 1, loc(e))
-			pendingKw = 0
-		}
-		for _, kw := range e.Keywords {
+		kws := e.Keywords
+		haveDict := false
+		nseen := 0
+		for i, kw := range kws {
 			if kw.Arg == nil {
-				flushKw()
+				// A `**mapping` splat: pack up any pending run of plain
+				// keywords, then merge the mapping in.
+				if nseen != 0 {
+					if err := c.codegenSubkwargs(kws, i-nseen, i, loc(e)); err != nil {
+						return err
+					}
+					if haveDict {
+						c.addOpI(DICT_MERGE, 1, loc(e))
+					}
+					haveDict = true
+					nseen = 0
+				}
+				if !haveDict {
+					c.addOpI(BUILD_MAP, 0, loc(e))
+					haveDict = true
+				}
 				if err := c.visitExpr(kw.Value); err != nil {
 					return err
 				}
 				c.addOpI(DICT_MERGE, 1, loc(e))
 				continue
 			}
-			c.addLoadConst(*kw.Arg, loc(e))
-			if err := c.visitExpr(kw.Value); err != nil {
+			nseen++
+		}
+		if nseen != 0 {
+			if err := c.codegenSubkwargs(kws, len(kws)-nseen, len(kws), loc(e)); err != nil {
 				return err
 			}
-			pendingKw++
+			if haveDict {
+				c.addOpI(DICT_MERGE, 1, loc(e))
+			}
+			haveDict = true
 		}
-		flushKw()
 	}
 	c.addOpI(CALL_FUNCTION_EX, flag, loc(e))
+	return nil
+}
+
+// codegenSubkwargs emits the [begin,end) run of plain keyword arguments
+// as one BUILD_MAP. A run whose stack footprint exceeds the guideline
+// opens with BUILD_MAP 0 and folds each pair in with MAP_ADD so the
+// value stack stays bounded.
+//
+// CPython: Python/codegen.c:4198 codegen_subkwargs
+func (c *Compiler) codegenSubkwargs(kws ast.Seq[*ast.Keyword], begin, end int, l ast.Pos) error {
+	n := end - begin
+	big := n*2 > stackUseGuideline
+	if big {
+		c.addOpI(BUILD_MAP, 0, l)
+	}
+	for i := begin; i < end; i++ {
+		c.addLoadConst(*kws[i].Arg, l)
+		if err := c.visitExpr(kws[i].Value); err != nil {
+			return err
+		}
+		if big {
+			c.addOpI(MAP_ADD, 1, l)
+		}
+	}
+	if !big {
+		c.addOpI(BUILD_MAP, int32(n), l)
+	}
 	return nil
 }
 
