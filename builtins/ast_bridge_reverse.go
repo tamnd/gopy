@@ -227,6 +227,11 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		subject := r.convertExpr(r.getAttr(inst, "subject"))
 		cases := r.convertMatchCases(r.getAttr(inst, "cases"))
 		return &ast.Match{Subject: subject, Cases: cases, Pos: pos}
+	case "TypeAlias":
+		name := r.convertExpr(r.getAttr(inst, "name"))
+		typeParams := r.convertTypeParams(r.getAttr(inst, "type_params"))
+		value := r.convertExpr(r.getAttr(inst, "value"))
+		return &ast.TypeAlias{Name: name, TypeParams: typeParams, Value: value, Pos: pos}
 	}
 	// Unknown statement: emit a Pass so the body remains valid.
 	return &ast.Pass{Pos: pos}
@@ -425,6 +430,7 @@ func (r *reverseASTBridge) convertFunctionDef(inst *objects.Instance, pos ast.Po
 		Body:          body,
 		DecoratorList: decorators,
 		Returns:       returns,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
 }
@@ -445,6 +451,7 @@ func (r *reverseASTBridge) convertAsyncFunctionDef(inst *objects.Instance, pos a
 		Body:          body,
 		DecoratorList: decorators,
 		Returns:       returns,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
 }
@@ -461,8 +468,67 @@ func (r *reverseASTBridge) convertClassDef(inst *objects.Instance, pos ast.Pos) 
 		Keywords:      keywords,
 		Body:          body,
 		DecoratorList: decorators,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
+}
+
+// convertTypeParams reverses convertTypeParams in the forward bridge:
+// it rebuilds the Go PEP 695 type-parameter nodes (TypeVar / TypeVarTuple
+// / ParamSpec) from their _ast instances so a compile()-from-AST request
+// carrying generic functions, classes, or type aliases reaches codegen
+// (and the validator) with its type_params intact.
+//
+// CPython: Python/Python-ast.c obj2ast_type_param
+func (r *reverseASTBridge) convertTypeParams(o objects.Object) ast.Seq[ast.TypeParam] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[ast.TypeParam], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		pos := r.getPos(inst)
+		name := r.getAttrString(inst, "name")
+		switch inst.Type().Name {
+		case "TypeVar":
+			var bound ast.Expr
+			if b := r.getAttr(inst, "bound"); b != nil && b != objects.None() {
+				bound = r.convertExpr(b)
+			}
+			out = append(out, &ast.TypeVar{
+				Name:         name,
+				Bound:        bound,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		case "TypeVarTuple":
+			out = append(out, &ast.TypeVarTuple{
+				Name:         name,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		case "ParamSpec":
+			out = append(out, &ast.ParamSpec{
+				Name:         name,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		}
+	}
+	return out
+}
+
+// optionalExpr converts attr name to a Go expr, returning nil when the
+// attribute is missing or None.
+func (r *reverseASTBridge) optionalExpr(inst *objects.Instance, name string) ast.Expr {
+	if v := r.getAttr(inst, name); v != nil && v != objects.None() {
+		return r.convertExpr(v)
+	}
+	return nil
 }
 
 func (r *reverseASTBridge) convertArguments(o objects.Object) *ast.Arguments {
