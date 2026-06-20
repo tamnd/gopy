@@ -283,6 +283,9 @@ func formatConstRepr(v any) string {
 		return pyReprBytes(x)
 	case *ConstTuple:
 		return formatTupleRepr(x.Values)
+	case *ConstSlice:
+		return "slice(" + formatConstRepr(x.Start) + ", " +
+			formatConstRepr(x.Stop) + ", " + formatConstRepr(x.Step) + ")"
 	case *Unit:
 		return fmt.Sprintf("<code '%s' firstlineno=%d>", x.Qualname, x.FirstLineno)
 	case *Code:

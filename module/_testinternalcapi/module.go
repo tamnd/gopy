@@ -41,6 +41,10 @@ func buildModule() (*objects.Module, error) {
 		{"get_co_localskinds", getCoLocalskinds},
 		{"code_returns_only_none", codeReturnsOnlyNone},
 		{"verify_stateless_code", verifyStatelessCode},
+		{"new_instruction_sequence", newInstructionSequence},
+		{"compiler_codegen", compilerCodegen},
+		{"optimize_cfg", optimizeCfg},
+		{"assemble_code_object", assembleCodeObject},
 	}
 	for _, f := range fns {
 		if err := d.SetItem(objects.NewStr(f.name), objects.NewBuiltinFunction(f.name, f.fn)); err != nil {

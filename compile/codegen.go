@@ -202,6 +202,16 @@ type Compiler struct {
 	// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
 	// c->c_nestlevel <= 1 fires PRINT_EXPR)
 	interactive bool
+
+	// saveNestedSeqs makes leaveScope hang each finished scope's
+	// instruction sequence off its parent unit's Seq.Nested, so a
+	// caller can walk the recursive pre-flowgraph instruction tree.
+	// Only the _testinternalcapi.compiler_codegen helper sets it; the
+	// normal compile path leaves it false (nested scopes flow through
+	// the const pool as *Unit instead).
+	//
+	// CPython: Python/compile.c:103 compiler.c_save_nested_seqs
+	saveNestedSeqs bool
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built
@@ -518,11 +528,19 @@ func (c *Compiler) leaveScope() {
 	if len(c.units) == 0 {
 		return
 	}
+	child := c.units[len(c.units)-1]
 	c.units = c.units[:len(c.units)-1]
 	if len(c.units) > 0 {
 		// scope tracking only matters for the active unit. The
 		// driver re-enters the parent scope explicitly.
 		c.scope = nil
+		// _PyCompile_ExitScope appends the finished child sequence to
+		// the parent under c_save_nested_seqs, in scope-exit order.
+		//
+		// CPython: Python/compile.c:719 _PyCompile_ExitScope
+		if c.saveNestedSeqs && child != nil && child.Seq != nil {
+			c.units[len(c.units)-1].Seq.AddNested(child.Seq)
+		}
 	}
 }
 

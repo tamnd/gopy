@@ -467,6 +467,13 @@ func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 	return astModToObject(mod), nil
 }
 
+// LiftCompileCode exposes liftCompileCode so the _testinternalcapi
+// compiler-pipeline helpers can turn an assembled compile.Code into the
+// objects.Code that CPython's _PyCompile_Assemble hands back.
+func LiftCompileCode(c *compile.Code) *objects.Code {
+	return liftCompileCode(c)
+}
+
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the
 // helper pythonrun keeps for the same purpose; both go away once spec
 // 1687 retires compile.Code in favor of objects.Code directly.
@@ -523,6 +530,17 @@ func liftCompileConst(v any) any {
 	case *compile.ConstTuple:
 		items := make([]any, len(x.Values))
 		for i, raw := range x.Values {
+			items[i] = liftCompileConst(raw)
+		}
+		return items
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step)
+	case ast.FrozenSet:
+		// A frozenset const may hold tuple elements that codegen left as
+		// *compile.ConstTuple; lift each one so marshal and the runtime
+		// see only native values.
+		items := make(ast.FrozenSet, len(x))
+		for i, raw := range x {
 			items[i] = liftCompileConst(raw)
 		}
 		return items

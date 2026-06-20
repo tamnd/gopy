@@ -200,6 +200,8 @@ func liftRunConst(v any) any {
 			items[i] = liftRunConst(raw)
 		}
 		return items
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step)
 	}
 	return v
 }

@@ -57,6 +57,8 @@ func init() {
 				items[i] = item
 			}
 			return objects.NewTuple(items), true
+		case *compile.ConstSlice:
+			return objects.NewSliceFromConst(x.Start, x.Stop, x.Step), true
 		case ast.EllipsisType:
 			return objects.Ellipsis(), true
 		case ast.FrozenSet:
@@ -144,6 +146,8 @@ func liftConst(v any) any {
 			items[i] = liftConst(raw)
 		}
 		return items
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step)
 	}
 	return v
 }
@@ -193,6 +197,8 @@ func wrapConst(v any) (objects.Object, error) {
 			items[i] = item
 		}
 		return objects.NewTuple(items), nil
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step), nil
 	case *compile.Code:
 		return liftNestedCode(x), nil
 	case []byte:

@@ -326,6 +326,35 @@ func TestSubscriptLoadEmitsBinaryOpSubscr(t *testing.T) {
 }
 
 func TestSliceEmitsBuildSlice(t *testing.T) {
+	// x[a:b:c]. A three-part slice with a step still builds the slice on
+	// the stack via BUILD_SLICE; the two-element subscript optimization
+	// (BINARY_SLICE) only applies when there is no step.
+	// CPython: Python/codegen.c:5610 codegen_slice
+	e := &ast.Subscript{
+		Value: nameLoad("x"),
+		Slice: &ast.Slice{Lower: nameLoad("a"), Upper: nameLoad("b"), Step: nameLoad("c")},
+		Ctx:   ast.Load,
+	}
+	u := compileMod(t, exprMod(e))
+	got := opNames(u)
+	wantPrefix := []string{
+		"LOAD_NAME", "LOAD_NAME", "LOAD_NAME", "LOAD_NAME", "BUILD_SLICE", "BINARY_OP",
+	}
+	if len(got) < len(wantPrefix) {
+		t.Fatalf("ops too short: %v", got)
+	}
+	for i, op := range wantPrefix {
+		if got[i] != op {
+			t.Errorf("ops[%d] = %s, want %s (full=%v)", i, got[i], op, got)
+		}
+	}
+}
+
+// TestConstantSliceFoldsToLoadConst pins the CPython 3.14 behavior where a
+// fully constant slice subscript loads a slice constant and folds through
+// NB_SUBSCR rather than emitting BUILD_SLICE.
+// CPython: Python/codegen.c:5326 is_constant_slice
+func TestConstantSliceFoldsToLoadConst(t *testing.T) {
 	// x[1:2]
 	e := &ast.Subscript{
 		Value: nameLoad("x"),
@@ -334,9 +363,7 @@ func TestSliceEmitsBuildSlice(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
-	wantPrefix := []string{
-		"LOAD_NAME", "LOAD_CONST", "LOAD_CONST", "BUILD_SLICE", "BINARY_OP",
-	}
+	wantPrefix := []string{"LOAD_NAME", "LOAD_CONST", "BINARY_OP"}
 	if len(got) < len(wantPrefix) {
 		t.Fatalf("ops too short: %v", got)
 	}

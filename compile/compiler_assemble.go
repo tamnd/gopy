@@ -35,10 +35,28 @@ import "fmt"
 //
 // CPython: Python/compile.c:1411 optimize_and_assemble_code_unit
 // CPython: Python/compile.c:1429 nparams = PyList_GET_SIZE(u_ste->ste_varnames)
+// nparamsForUnit counts the function's parameter slots, matching
+// CPython's PyList_GET_SIZE(ste_varnames): the positional-only, regular,
+// and keyword-only named parameters, plus the *args and **kwargs slots
+// when present. The optimizer treats these slots as defined on entry, so
+// loads of them borrow (LOAD_FAST_BORROW) rather than check.
+//
+// CPython: Python/compile.c:1429 nparams = PyList_GET_SIZE(u_ste->ste_varnames)
+func nparamsForUnit(unit *Unit) int {
+	nparams := unit.PosOnlyArgCount + unit.Argcount + unit.KwOnlyArgCount
+	if unit.Flags&CoVarargs != 0 {
+		nparams++
+	}
+	if unit.Flags&CoVarkeywords != 0 {
+		nparams++
+	}
+	return nparams
+}
+
 func optimizeAndAssembleCodeUnit(unit *Unit, codeFlags uint32, filename string) (*Code, error) {
 	g := cfgFromSequence(unit.Seq)
 	nlocals := len(unit.VarNames)
-	nparams := unit.PosOnlyArgCount + unit.Argcount + unit.KwOnlyArgCount
+	nparams := nparamsForUnit(unit)
 	if err := cfgOptimizeCodeUnit(g, &unit.Consts, nlocals, nparams, unit.FirstLineno); err != nil {
 		return nil, fmt.Errorf("compile: %s: cfg optimize: %w", unit.Name, err)
 	}

@@ -152,6 +152,15 @@ func NewSlice(start, stop, step Object) *Slice {
 	return s
 }
 
+// NewSliceFromConst builds a slice from native constant-pool bounds,
+// lifting each through wrapConstAttr so scalars, nested tuples, and
+// codegen-side const placeholders all surface as Objects. A nil bound
+// becomes None. This is the lift path for a slice constant emitted by
+// codegen_slice for a fully constant slice.
+func NewSliceFromConst(start, stop, step any) *Slice {
+	return NewSlice(wrapConstAttr(start), wrapConstAttr(stop), wrapConstAttr(step))
+}
+
 // sliceTraverse visits start, stop, and step so the cycle collector
 // can see references the slice owns. Required for cases like
 // `o.s = slice(o)` (test_slice.test_cycle) where the slice itself

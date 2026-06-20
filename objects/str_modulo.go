@@ -516,9 +516,12 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 func formatFloat(v Object, arg *fmtArg) (string, error) {
 	f, ok := asFloat(v)
 	if !ok {
+		// formatfloat calls PyFloat_AsDouble, which raises this message
+		// directly rather than the "%c format: ..." wrapper used by the
+		// integer path (mainformatlong).
+		// CPython: Objects/floatobject.c:283 PyFloat_AsDouble
 		return "", fmt.Errorf(
-			"TypeError: %%%c format: a real number is required, not %s",
-			arg.ch, v.Type().Name)
+			"TypeError: must be real number, not %s", v.Type().Name)
 	}
 	prec := arg.prec
 	if prec < 0 {

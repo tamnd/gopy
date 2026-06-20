@@ -264,22 +264,41 @@ func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 	ifCleanup := c.newLabel()
 	anchor := c.newLabel()
 
+	// hasLoop tracks whether this generator emits a real FOR_ITER loop.
+	// The temporary-variable assignment idiom (`for y in [f(x)]`) elides
+	// the loop entirely: the single element is pushed and assigned once.
+	hasLoop := true
+
 	if !iterOnStack {
 		if idx == 0 {
 			// Implicit `.0` parameter holds the outermost iter.
 			pool := poolVarNames
 			c.addOpName(LOAD_FAST, &pool, ".0", loc(gen.Iter))
 		} else {
-			if err := c.visitExpr(gen.Iter); err != nil {
-				return err
+			// Fast path for the temporary variable assignment idiom:
+			//     for y in [f(x)]
+			// A one-element list/tuple iter (non-starred) folds to a
+			// direct push + assign, dropping the FOR_ITER loop.
+			// CPython: Python/codegen.c:4420
+			if elt := singleNonStarredElt(gen.Iter); elt != nil {
+				if err := c.visitExpr(elt); err != nil {
+					return err
+				}
+				hasLoop = false
+			} else {
+				if err := c.visitExpr(gen.Iter); err != nil {
+					return err
+				}
+				c.addOp(GET_ITER, loc(gen.Iter))
 			}
-			c.addOp(GET_ITER, loc(gen.Iter))
 		}
 	}
-	depth++
 
-	c.useLabel(start)
-	c.addOpJump(FOR_ITER, anchor, loc(gen.Iter))
+	if hasLoop {
+		depth++
+		c.useLabel(start)
+		c.addOpJump(FOR_ITER, anchor, loc(gen.Iter))
+	}
 	if err := c.assignTo(gen.Target, loc(gen.Target)); err != nil {
 		return err
 	}
@@ -302,11 +321,37 @@ func (c *Compiler) compileGenerator(gens ast.Seq[*ast.Comprehension],
 	}
 
 	c.useLabel(ifCleanup)
-	c.addOpJump(JUMP, start, loc(gen.Iter))
-	c.useLabel(anchor)
-	c.addOp(END_FOR, ast.Pos{})
-	c.addOp(POP_ITER, ast.Pos{})
+	if hasLoop {
+		c.addOpJump(JUMP, start, loc(gen.Iter))
+		c.useLabel(anchor)
+		c.addOp(END_FOR, ast.Pos{})
+		c.addOp(POP_ITER, ast.Pos{})
+	}
 	return nil
+}
+
+// singleNonStarredElt returns the sole element of a one-element list or
+// tuple display when that element is not a starred expression, else nil.
+// It backs the comprehension assignment-idiom fast path.
+//
+// CPython: Python/codegen.c:4423 codegen_comprehension_generator
+func singleNonStarredElt(iter ast.Expr) ast.Expr {
+	var elts ast.Seq[ast.Expr]
+	switch it := iter.(type) {
+	case *ast.List:
+		elts = it.Elts
+	case *ast.Tuple:
+		elts = it.Elts
+	default:
+		return nil
+	}
+	if len(elts) != 1 {
+		return nil
+	}
+	if _, ok := elts[0].(*ast.Starred); ok {
+		return nil
+	}
+	return elts[0]
 }
 
 // compileAsyncGenerator emits an async-for generator clause.

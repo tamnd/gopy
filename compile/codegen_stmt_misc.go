@@ -108,12 +108,23 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 		if err := c.visitExpr(t.Value); err != nil {
 			return err
 		}
-		if err := c.visitExpr(t.Slice); err != nil {
-			return err
+		twoPart := shouldApplyTwoElementSliceOptimization(t.Slice)
+		if twoPart {
+			if err := c.codegenSliceTwoParts(t.Slice.(*ast.Slice)); err != nil {
+				return err
+			}
+			c.addOpI(COPY, 3, targetLoc)
+			c.addOpI(COPY, 3, targetLoc)
+			c.addOpI(COPY, 3, targetLoc)
+			c.addOp(BINARY_SLICE, targetLoc)
+		} else {
+			if err := c.visitExpr(t.Slice); err != nil {
+				return err
+			}
+			c.addOpI(COPY, 2, targetLoc)
+			c.addOpI(COPY, 2, targetLoc)
+			c.addOpI(BINARY_OP, nbSubscr, targetLoc)
 		}
-		c.addOpI(COPY, 2, targetLoc)
-		c.addOpI(COPY, 2, targetLoc)
-		c.addOpI(BINARY_OP, nbSubscr, targetLoc)
 		if err := c.visitExpr(s.Value); err != nil {
 			return err
 		}
@@ -122,9 +133,16 @@ func (c *Compiler) visitAugAssign(s *ast.AugAssign) error {
 			return err
 		}
 		c.addOpI(BINARY_OP, op, loc(s))
-		c.addOpI(SWAP, 3, targetLoc)
-		c.addOpI(SWAP, 2, targetLoc)
-		c.addOp(STORE_SUBSCR, targetLoc)
+		if twoPart {
+			c.addOpI(SWAP, 4, targetLoc)
+			c.addOpI(SWAP, 3, targetLoc)
+			c.addOpI(SWAP, 2, targetLoc)
+			c.addOp(STORE_SLICE, targetLoc)
+		} else {
+			c.addOpI(SWAP, 3, targetLoc)
+			c.addOpI(SWAP, 2, targetLoc)
+			c.addOp(STORE_SUBSCR, targetLoc)
+		}
 		return nil
 	}
 	return fmt.Errorf("compile: AugAssign target %T not supported", s.Target)
