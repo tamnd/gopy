@@ -70,7 +70,15 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		// CPython: Objects/codeobject.c:2777 code_getcodeadaptive
 		return NewBytes(c.Code), true
 	case "co_consts":
+		// The cached tuple is a counted reference owned by the code
+		// object; hand the reader a fresh reference so a transient read
+		// (e.g. LOAD_ATTR followed by a DECREF) does not draw the pinned
+		// object down to zero and clear it. CPython's getter returns
+		// Py_NewRef(co->co_consts).
+		//
+		// CPython: Objects/codeobject.c:2724 code_memberlist (T_OBJECT)
 		if c.constsObj != nil {
+			Incref(c.constsObj)
 			return c.constsObj, true
 		}
 		return constsAsTuple(c.Consts), true
@@ -108,6 +116,7 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		return stringsAsTuple(c.LocalsplusNames), true
 	case "co_linetable":
 		if c.linetableObj != nil {
+			Incref(c.linetableObj)
 			return c.linetableObj, true
 		}
 		return NewBytes(c.Linetable), true
@@ -120,6 +129,7 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		return NewBytes(c.Linetable), true
 	case "co_exceptiontable":
 		if c.exceptiontableObj != nil {
+			Incref(c.exceptiontableObj)
 			return c.exceptiontableObj, true
 		}
 		return NewBytes(c.ExceptionTable), true

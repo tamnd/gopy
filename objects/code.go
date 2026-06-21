@@ -432,6 +432,7 @@ func codeGetAttr(o Object, name Object) (Object, error) {
 	switch n.v {
 	case "co_filename":
 		if c.filenameObj != nil {
+			Incref(c.filenameObj)
 			return c.filenameObj, nil
 		}
 		return NewStr(c.Filename), nil
