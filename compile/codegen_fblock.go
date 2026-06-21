@@ -60,6 +60,12 @@ type fblock struct {
 // CPython: Python/codegen.c codegen_push_fblock
 func (c *Compiler) pushFblock(kind fblockKind, block, exit JumpTargetLabel, datum any) {
 	c.fblocks = append(c.fblocks, fblock{Kind: kind, Block: block, Exit: exit, Datum: datum})
+	// The FINALLY_END fblock guards the second (exception-path) copy of
+	// a finally body; suppress duplicate SyntaxWarnings while it is live.
+	// CPython: Python/compile.c:769 _PyCompile_PushFBlock
+	if kind == fblockFinallyEnd {
+		c.disableWarning++
+	}
 }
 
 // popFblock pops the top frame block. Asserts the kind matches what
@@ -76,6 +82,10 @@ func (c *Compiler) popFblock(kind fblockKind) error {
 			c.fblocks[n-1].Kind, kind)
 	}
 	c.fblocks = c.fblocks[:n-1]
+	// CPython: Python/compile.c:783 _PyCompile_PopFBlock
+	if kind == fblockFinallyEnd {
+		c.disableWarning--
+	}
 	return nil
 }
 

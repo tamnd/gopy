@@ -193,6 +193,15 @@ type Compiler struct {
 	// enterScope.
 	fblocks []fblock
 
+	// disableWarning suppresses compile-time SyntaxWarnings while
+	// non-zero. The exception-path copy of a finally body is compiled a
+	// second time (under a FINALLY_END fblock), so without this guard a
+	// warning inside the finally clause would be emitted twice. Pushing
+	// the FINALLY_END fblock bumps this counter; popping it restores it.
+	//
+	// CPython: Python/compile.c:106 compiler.c_disable_warning
+	disableWarning int
+
 	// interactive marks compile-mode='single' (REPL / doctest). When
 	// set, expression-statements at module nest level emit
 	// CALL_INTRINSIC_1 INTRINSIC_PRINT so each result reaches
