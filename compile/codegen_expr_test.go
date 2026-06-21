@@ -21,14 +21,15 @@ func TestBoolOpAndShortCircuits(t *testing.T) {
 		Values: []ast.Expr{nameLoad("x"), nameLoad("y")},
 	}
 	u := compileMod(t, exprMod(e))
+	// Codegen emits the pseudo JUMP_IF_FALSE; convert_pseudo_conditional_jumps
+	// in the CFG pass later expands it to COPY 1 + TO_BOOL + POP_JUMP_IF_FALSE.
+	// compileMod returns the pre-optimization unit, so the pseudo form shows.
 	want := []string{
-		"LOAD_NAME",         // x
-		"COPY",              // dup for jump check
-		"TO_BOOL",           // normalize before POP_JUMP_IF_X
-		"POP_JUMP_IF_FALSE", // -> end (x falsy: leave x)
-		"POP_TOP",           // discard the dup
-		"LOAD_NAME",         // y
-		"POP_TOP",           // ExprStmt discard
+		"LOAD_NAME",     // x
+		"JUMP_IF_FALSE", // -> end (x falsy: leave x)
+		"POP_TOP",       // discard x
+		"LOAD_NAME",     // y
+		"POP_TOP",       // ExprStmt discard
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
@@ -44,8 +45,10 @@ func TestBoolOpOrUsesPopJumpIfTrue(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
-	if got[3] != "POP_JUMP_IF_TRUE" {
-		t.Errorf("expected POP_JUMP_IF_TRUE for `or`, got %s", got[3])
+	// Raw codegen emits the pseudo JUMP_IF_TRUE (index 1, right after the
+	// LOAD_NAME for x); the CFG pass later expands it to POP_JUMP_IF_TRUE.
+	if got[1] != "JUMP_IF_TRUE" {
+		t.Errorf("expected JUMP_IF_TRUE for `or`, got %s", got[1])
 	}
 }
 

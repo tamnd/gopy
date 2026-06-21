@@ -116,6 +116,16 @@ func (c *Compiler) emitTypeParamDefault(expr ast.Expr, astNode any, slot int, l 
 	outerFblocks := c.fblocks
 	outerCaches := c.savedCaches()
 
+	// CPython loads a (1,) defaults tuple in the outer scope before the
+	// closure const, then makes the closure with MAKE_FUNCTION_DEFAULTS so
+	// the lazy thunk's lone "format" parameter defaults to 1 (VALUE).
+	//
+	// CPython: Python/codegen.c:1199 codegen_type_param_bound_or_default
+	// (PyTuple_Pack(1, _PyLong_GetOne())). Emit the prebuilt (1,) const so
+	// it lands in co_consts ahead of the thunk code objects, matching
+	// CPython's const ordering.
+	c.addLoadConst(&ConstTuple{Values: []any{int64(1)}}, l)
+
 	closureFlag, err := c.emitClosure(innerScope, l)
 	if err != nil {
 		return err
@@ -124,6 +134,22 @@ func (c *Compiler) emitTypeParamDefault(expr ast.Expr, astNode any, slot int, l 
 	c.enterScope(innerScope)
 	first := c.unit().FirstLineno
 	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
+
+	// The thunk takes a single positional-only "format" argument and
+	// raises NotImplementedError for format > VALUE_WITH_FAKE_GLOBALS (2),
+	// matching codegen_setup_annotations_scope. annotationlib drives the
+	// FORWARDREF/STRING paths through the higher format values.
+	//
+	// CPython: Python/codegen.c:666 codegen_setup_annotations_scope
+	c.declareArg("format")
+	guardBody := c.newLabel()
+	c.addOpI(LOAD_FAST, 0, l)
+	c.addLoadConst(int64(2), l) // VALUE_WITH_FAKE_GLOBALS
+	c.addOpI(COMPARE_OP, int32(cmpGt), l)
+	c.addOpJump(POP_JUMP_IF_FALSE, guardBody, l)
+	c.addOpI(LOAD_COMMON_CONSTANT, constantNotImplementedError, l)
+	c.addOpI(RAISE_VARARGS, 1, l)
+	c.useLabel(guardBody)
 
 	// For starred TypeVarTuple defaults (*U), unwrap the starred value.
 	if starExpr, ok := expr.(*ast.Starred); ok {
@@ -157,6 +183,11 @@ func (c *Compiler) emitTypeParamDefault(expr ast.Expr, astNode any, slot int, l 
 	c.addOp(RETURN_VALUE, l)
 
 	innerUnit := c.unit()
+	// "format" is positional-only, like the __annotate__ scope.
+	// CPython: Python/codegen.c:669 codegen_setup_annotations_scope
+	innerUnit.Argcount = 0
+	innerUnit.PosOnlyArgCount = 1
+	innerUnit.KwOnlyArgCount = 0
 
 	c.leaveScope()
 	c.scope = outerScope
@@ -164,6 +195,8 @@ func (c *Compiler) emitTypeParamDefault(expr ast.Expr, astNode any, slot int, l 
 	c.restoreCaches(outerCaches)
 
 	c.addLoadConst(innerUnit, l)
-	c.emitMakeFunction(closureFlag, l)
+	// MAKE_FUNCTION_DEFAULTS (0x01) attaches the (1,) defaults tuple so the
+	// thunk's "format" parameter defaults to 1 (VALUE).
+	c.emitMakeFunction(closureFlag|0x01, l)
 	return nil
 }

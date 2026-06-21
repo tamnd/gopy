@@ -43,8 +43,8 @@ func TestIfWithElseEmitsJumpAroundElse(t *testing.T) {
 		"TO_BOOL",
 		"POP_JUMP_IF_FALSE", // -> else
 		"NOP",
-		"JUMP", // -> end (skip else)
-		"NOP",  // else body
+		"JUMP_NO_INTERRUPT", // -> end (skip else)
+		"NOP",               // else body
 		"LOAD_CONST",
 		"RETURN_VALUE",
 	}
