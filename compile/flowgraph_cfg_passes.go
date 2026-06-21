@@ -379,13 +379,44 @@ func cfgDuplicateExitsWithoutLineno(g *cfgBuilder) {
 	}
 }
 
-// isExitWithoutLineno mirrors is_exit_or_eval_check_without_lineno.
-// gopy has no opcodes carrying the HAS_EVAL_BREAK_FLAG yet, so the
-// eval-break leg of the disjunction is always false.
+// opcodeHasEvalBreak mirrors OPCODE_HAS_EVAL_BREAK for the opcodes that
+// can appear at flowgraph-optimization time (pseudo and base ops, before
+// specialization). These are the ops the eval loop polls the eval
+// breaker on: the unconditional jumps, the loop backedge, the calls, and
+// RESUME. A block containing one of these is an "eval check" whose line
+// number PEP 626 requires to be valid after the frame terminates.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h:1049 OPCODE_HAS_EVAL_BREAK
+func opcodeHasEvalBreak(op Opcode) bool {
+	switch op {
+	case JUMP, JUMP_BACKWARD, CALL, CALL_FUNCTION_EX, RESUME:
+		return true
+	}
+	return false
+}
+
+// basicblockHasEvalBreak reports whether any instruction in b polls the
+// eval breaker.
+//
+// CPython: Python/flowgraph.c:347 basicblock_has_eval_break
+func basicblockHasEvalBreak(b *basicblock) bool {
+	for i := range b.Instr {
+		if opcodeHasEvalBreak(b.Instr[i].Op) {
+			return true
+		}
+	}
+	return false
+}
+
+// isExitWithoutLineno mirrors is_exit_or_eval_check_without_lineno: a
+// block that either exits the scope (return/raise/reraise) or contains an
+// eval-breaker check (jump backedge, call, resume), and carries no line
+// number on any instruction. Such blocks are duplicated so each jump into
+// them owns a private copy that can inherit its predecessor's line.
 //
 // CPython: Python/flowgraph.c:3543 is_exit_or_eval_check_without_lineno
 func isExitWithoutLineno(b *basicblock) bool {
-	if !b.exitsScope() {
+	if !b.exitsScope() && !basicblockHasEvalBreak(b) {
 		return false
 	}
 	for i := range b.Instr {

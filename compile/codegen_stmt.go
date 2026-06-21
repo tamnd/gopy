@@ -305,10 +305,14 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 		// CPython: Python/codegen.c codegen_stmt_expr (PRINT_EXPR
 		// branch emits the intrinsic followed by POP_TOP)
 		c.addOpI(CALL_INTRINSIC_1, intrinsicPrint, loc(s))
-		c.addOp(POP_TOP, loc(s))
+		c.addOp(POP_TOP, ast.Pos{Lineno: -1})
 		return nil
 	}
-	c.addOp(POP_TOP, loc(s))
+	// The POP_TOP that discards the expression result is artificial:
+	// emit it at NO_LOCATION so propagateLineNumbers inherits the value
+	// expression's line rather than the statement's opening line.
+	// CPython: Python/codegen.c:2978 codegen_stmt_expr (NO_LOCATION POP_TOP)
+	c.addOp(POP_TOP, ast.Pos{Lineno: -1})
 	return nil
 }
 

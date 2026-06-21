@@ -27,7 +27,13 @@ func (c *Compiler) visitIf(s *ast.If) error {
 		return err
 	}
 	if hasElse {
-		c.addOpJump(JUMP, end, loc(s))
+		// The jump over the else arm is artificial: NO_LOCATION lets it
+		// inherit the line of the preceding body instruction via
+		// propagate_line_numbers, rather than stamping the if-statement
+		// line onto the duplicated scope-exit block.
+		//
+		// CPython: Python/codegen.c:2060 ADDOP_JUMP(c, NO_LOCATION, JUMP_NO_INTERRUPT, end)
+		c.addOpJump(JUMP_NO_INTERRUPT, end, ast.Pos{Lineno: -1})
 		c.useLabel(elseLbl)
 		if err := c.visitStmts(s.Orelse); err != nil {
 			return err
