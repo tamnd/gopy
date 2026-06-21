@@ -146,12 +146,16 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 		Simple:     1,
 	}
 	u := compileMod(t, module(a))
-	// opNames prepends AnnoCode then body (minus RESUME).
+	// opNames prepends AnnoCode then body (minus RESUME). The __annotate__
+	// stash is spliced at the placeholder (right after RESUME), so it lands
+	// before the body's BUILD_SET/STORE __conditional_annotations__ prologue,
+	// matching CPython's module emission order.
 	want := []string{
-		// AnnoCode: conditional-annotations prologue + __annotate__ setup
-		"BUILD_SET", "STORE_NAME",
+		// AnnoCode: __annotate__ setup (spliced at the placeholder)
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
-		// body: x = 1, then record condIdx in __conditional_annotations__
+		// body: conditional-annotations prologue, then x = 1, then record
+		// condIdx in __conditional_annotations__
+		"BUILD_SET", "STORE_NAME",
 		"LOAD_CONST", "STORE_NAME",
 		"LOAD_NAME", "LOAD_CONST", "SET_ADD", "POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
@@ -174,10 +178,10 @@ func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
-		// AnnoCode: conditional-annotations prologue + __annotate__
-		"BUILD_SET", "STORE_NAME",
+		// AnnoCode: __annotate__ setup (spliced at the placeholder)
 		"LOAD_CONST", "MAKE_FUNCTION", "STORE_NAME",
-		// body: record condIdx=0 in __conditional_annotations__
+		// body: conditional-annotations prologue, then record condIdx=0
+		"BUILD_SET", "STORE_NAME",
 		"LOAD_NAME", "LOAD_CONST", "SET_ADD", "POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
 	}

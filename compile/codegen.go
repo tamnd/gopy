@@ -8,6 +8,7 @@ package compile
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/future"
@@ -260,6 +261,20 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 	resumeLoc := ast.Pos{Lineno: 0, EndLineno: c.unit().FirstLineno, ColOffset: 0, EndColOffset: 0}
 	c.addOpI(RESUME, resumeAtFuncStart, resumeLoc)
 
+	// Module scope plants ANNOTATIONS_PLACEHOLDER right after RESUME. The
+	// deferred __annotate__ build (stashed via SetAnnotationsCode) is spliced
+	// in at this marker by cfgFromSequence, so it lands after RESUME and
+	// before the body's BUILD_SET/STORE __conditional_annotations__ prologue.
+	// CPython plants it unconditionally and drops it when no stash exists; we
+	// only plant it when the module carries (always-conditional) annotations,
+	// which is exactly when a stash is produced. The spliced-out result is
+	// byte-identical either way.
+	//
+	// CPython: Python/codegen.c:659 codegen_enter_scope (COMPILE_SCOPE_MODULE)
+	if sc.HasConditionalAnnotations {
+		c.addOp(ANNOTATIONS_PLACEHOLDER, resumeLoc)
+	}
+
 	switch m := mod.(type) {
 	case *ast.Module:
 		if err := c.visitModule(m); err != nil {
@@ -445,6 +460,19 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	}
 	sortStrings(cellNames)
 	sortStrings(freeNames)
+	// __conditional_annotations__ is forced into u_cellvars (after the
+	// sorted cells) when the scope tracks conditional annotations, even
+	// where the symtable left the name GLOBAL. That happens at module
+	// scope: the generated __annotate__ reads the set via LOAD_GLOBAL, so
+	// the name never goes free and never resolves to CELL, yet the code
+	// object still needs the cell so MAKE_CELL runs at the prologue. Class
+	// scopes already resolve it to CELL above (the annotate body uses
+	// LOAD_DEREF), so this add is a no-op there, matching DictAddObj.
+	//
+	// CPython: Python/compile.c:630 compiler_enter_scope (DictAddObj cellvars)
+	if sc.HasConditionalAnnotations && !slices.Contains(cellNames, "__conditional_annotations__") {
+		cellNames = append(cellNames, "__conditional_annotations__")
+	}
 	for _, name := range cellNames {
 		u.CellVars = append(u.CellVars, name)
 		c.cellCache[name] = len(u.CellVars) - 1

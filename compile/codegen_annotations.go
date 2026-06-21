@@ -253,18 +253,12 @@ func (c *Compiler) emitAnnotateBody(innerScope *symtable.Entry, deferred []defer
 // Python/compile.c:762 _PyCompile_EndAnnotationSetup
 func (c *Compiler) stashAnnotationCode(l ast.Pos) error {
 	u := c.unit()
-	hasCondAnno := c.scope != nil && c.scope.HasConditionalAnnotations
-	if len(u.DeferredAnnotations) == 0 && !hasCondAnno {
+	if len(u.DeferredAnnotations) == 0 {
 		return nil
 	}
 	mainSeq := u.Seq
 	annoSeq := &Sequence{}
 	u.Seq = annoSeq
-	if hasCondAnno {
-		pool := poolNames
-		c.addOpI(BUILD_SET, 0, l)
-		c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", l)
-	}
 	if err := c.emitDeferredAnnotations(l); err != nil {
 		u.Seq = mainSeq
 		return err
@@ -276,8 +270,26 @@ func (c *Compiler) stashAnnotationCode(l ast.Pos) error {
 	return nil
 }
 
+// emitConditionalAnnotationsPrologue emits the BUILD_SET / STORE_NAME
+// pair that seeds __conditional_annotations__ at the top of a module
+// body. CPython runs this in _PyCodegen_Module before codegen_body, so
+// the name is registered first (names[0]) and the set exists before any
+// annotated statement records itself into it. Class bodies emit the
+// STORE_DEREF form inline in visitClassBody instead.
+//
+// CPython: Python/codegen.c:858 _PyCodegen_Module (BUILD_SET/STORE_NAME)
+func (c *Compiler) emitConditionalAnnotationsPrologue(l ast.Pos) error {
+	if c.scope == nil || !c.scope.HasConditionalAnnotations {
+		return nil
+	}
+	pool := poolNames
+	c.addOpI(BUILD_SET, 0, l)
+	c.addOpName(STORE_NAME, &pool, "__conditional_annotations__", l)
+	return nil
+}
+
 // emitFunctionAnnotations compiles the __annotate__ function for a
-// function definition and leaves it on the outer stack. Returns 0x04
+// function definition and leaves it on the outer stack. Returns 0x10
 // (MAKE_FUNCTION_ANNOTATE) when annotations exist, 0 otherwise.
 //
 // The AnnotationBlock for the function's args is looked up via
@@ -302,7 +314,7 @@ func (c *Compiler) emitFunctionAnnotations(args *ast.Arguments, returns ast.Expr
 		return 0, err
 	}
 	c.emitMakeFunction(closureFlag, l)
-	return 0x04, nil
+	return 0x10, nil
 }
 
 // emitFunctionAnnotateBody pushes a fresh Unit for the function's

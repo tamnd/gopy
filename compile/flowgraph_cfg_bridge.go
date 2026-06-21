@@ -15,17 +15,18 @@ package compile
 // so subsequent flowgraph passes can ignore label ids entirely.
 //
 // When seq.AnnoCode is set (the PEP 649 annotation stash produced by
-// stashAnnotationCode), its instructions are appended to g first so
-// __annotate__ is defined before any body statement executes.
+// stashAnnotationCode), its instructions replace the ANNOTATIONS_PLACEHOLDER
+// pseudo that codegen planted right after the module RESUME, so __annotate__
+// is defined before any body statement executes but after RESUME. When no
+// stash is present the placeholder is dropped instead.
 //
 // CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
 func cfgFromSequence(seq *Sequence) *cfgBuilder {
 	seq.ApplyLabelMap(hasJumpTarget)
-	g := newCfgBuilder()
 	if seq.AnnoCode != nil {
 		seq.AnnoCode.ApplyLabelMap(hasJumpTarget)
-		appendSeqToGraph(g, seq.AnnoCode)
 	}
+	g := newCfgBuilder()
 	if len(seq.Instrs) > 0 {
 		appendSeqToGraph(g, seq)
 	}
@@ -66,6 +67,22 @@ func appendSeqToGraph(g *cfgBuilder, seq *Sequence) {
 	for i, ins := range seq.Instrs {
 		if isTarget[i] {
 			g.useLabel(JumpTargetLabel{id: i + 1})
+		}
+		// ANNOTATIONS_PLACEHOLDER is the splice point for the stashed
+		// __annotate__ build. Expand the annotation code here (the stash
+		// is purely linear: no labels, no nested seqs, no jump targets),
+		// then drop the placeholder itself. With no stash it just vanishes.
+		//
+		// CPython: Python/flowgraph.c:3945 _PyCfg_FromInstructionSequence
+		if ins.Op == ANNOTATIONS_PLACEHOLDER {
+			if seq.AnnoCode != nil {
+				for _, ann := range seq.AnnoCode.Instrs {
+					g.addOp(ann.Op, ann.Oparg, ann.Loc)
+				}
+			}
+			idxToBlock[i] = g.CurBlock
+			idxToInstr[i] = g.CurBlock.lastInstr()
+			continue
 		}
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock

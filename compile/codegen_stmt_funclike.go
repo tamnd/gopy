@@ -472,6 +472,11 @@ func (c *Compiler) emitMakeFunction(flags int32, l ast.Pos) {
 	if flags&0x04 != 0 {
 		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x04, l)
 	}
+	// MAKE_FUNCTION_ANNOTATE (0x10): the PEP 649 __annotate__ callable.
+	// CPython: Python/codegen.c:950 codegen_make_closure
+	if flags&0x10 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x10, l)
+	}
 	if flags&0x02 != 0 {
 		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x02, l)
 	}

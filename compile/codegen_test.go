@@ -54,6 +54,12 @@ func opNames(u *Unit) []string {
 	if u.ScopeType == symtable.ModuleBlock && len(body) > 0 && body[0].Op == RESUME {
 		body = body[1:]
 	}
+	// Codegen plants ANNOTATIONS_PLACEHOLDER right after the module RESUME
+	// (cfgFromSequence later splices the __annotate__ stash in at it, or
+	// drops it). Skip it too so body-focused want lists keep matching.
+	if u.ScopeType == symtable.ModuleBlock && len(body) > 0 && body[0].Op == ANNOTATIONS_PLACEHOLDER {
+		body = body[1:]
+	}
 	instrs = append(instrs, body...)
 	out := make([]string, len(instrs))
 	for i, in := range instrs {
