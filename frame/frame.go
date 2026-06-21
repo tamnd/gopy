@@ -513,6 +513,13 @@ func (f *Frame) FrameFastLocal(i int) objects.Object {
 	if f.snapshot != nil && i < len(f.snapshot) {
 		return f.snapshot[i].AsObject()
 	}
+	// The cycle collector can traverse a frame whose LocalsPlus has not
+	// yet been grown to its full width (an opcode that builds a container
+	// can trip auto-GC before the slot array is sized). Guard the index so
+	// traversal sees an unbound slot rather than panicking.
+	if i >= len(f.LocalsPlus) {
+		return nil
+	}
 	return f.LocalsPlus[i].AsObject()
 }
 
@@ -526,6 +533,9 @@ func (f *Frame) FrameCellLocal(i int) objects.Object {
 	if f.snapshot != nil && idx < len(f.snapshot) {
 		return f.snapshot[idx].AsObject()
 	}
+	if idx >= len(f.LocalsPlus) {
+		return nil
+	}
 	return f.LocalsPlus[idx].AsObject()
 }
 
@@ -538,6 +548,9 @@ func (f *Frame) FrameFreeLocal(i int) objects.Object {
 	idx := FreesStart(f.Code) + i
 	if f.snapshot != nil && idx < len(f.snapshot) {
 		return f.snapshot[idx].AsObject()
+	}
+	if idx >= len(f.LocalsPlus) {
+		return nil
 	}
 	return f.LocalsPlus[idx].AsObject()
 }
