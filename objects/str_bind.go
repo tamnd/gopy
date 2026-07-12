@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/codecs"
+	"github.com/tamnd/gopy/format"
 )
 
 func init() {
@@ -739,6 +740,15 @@ func strFormatMethod(args []Object, kwargs map[string]Object) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A template with no replacement fields is copied verbatim, which
+	// for an exact str means returning the receiver itself (do_markup
+	// aliases input->str). This matches CPython's "{}".format() identity.
+	//
+	// CPython: Objects/stringlib/unicode_format.h:836 do_markup
+	if u, ok := args[0].(*Unicode); ok && args[0].Type() == strType &&
+		!strings.ContainsAny(s, "{}") {
+		return u, nil
+	}
 	out, ferr := strFormatExpand(s, args[1:], kwargs)
 	if ferr != nil {
 		return nil, ferr
@@ -804,9 +814,34 @@ func strFormatExpandInner(s string, args []Object, kwargs map[string]Object, map
 				return nil, fmt.Errorf("ValueError: Single '{' encountered in format string")
 			}
 			field := s[i+1 : end]
-			rendered, ferr := strFormatFieldInner(field, args, kwargs, mapObj, auto, depth)
+			v, spec, ferr := strFormatFieldInner(field, args, kwargs, mapObj, auto, depth)
 			if ferr != nil {
 				return nil, ferr
+			}
+			// When this field is the last markup token, stop
+			// overallocating so a single aliased str can be returned by
+			// identity (mirrors do_markup clearing overallocate once the
+			// iterator is exhausted).
+			//
+			// CPython: Objects/stringlib/unicode_format.h:836 do_markup
+			lastToken := end+1 >= len(s)
+			if u, ok := v.(*Unicode); ok && v.Type() == strType && strFormatStrSpecIsIdentity(spec, u.length) {
+				if lastToken {
+					w.overallocate = false
+				}
+				if err := w.WriteStr(u); err != nil {
+					return nil, err
+				}
+				i = end + 1
+				continue
+			}
+			// Dispatch through PyObject_Format so each replacement uses
+			// the argument's own __format__ slot.
+			//
+			// CPython: Objects/stringlib/unicode_format.h:1024 output_markup
+			rendered, rerr := Format(v, spec)
+			if rerr != nil {
+				return nil, rerr
 			}
 			if err := writeBodyChunk(&w, rendered); err != nil {
 				return nil, err
@@ -855,7 +890,15 @@ func strFormatMatchBrace(s string, start int) int {
 	return -1
 }
 
-func strFormatFieldInner(field string, args []Object, kwargs map[string]Object, mapObj Object, auto *int, depth int) (string, error) {
+// strFormatFieldInner parses one replacement field, resolves its value
+// (applying any !s/!r/!a conversion), and expands a nested format spec.
+// It returns the value to be formatted together with the final spec
+// string; the caller dispatches through PyObject_Format (or, for an
+// exact-str value with an identity-preserving spec, aliases the value
+// directly so str.format can return its argument by identity).
+//
+// CPython: Objects/stringlib/unicode_format.h:824 output_markup
+func strFormatFieldInner(field string, args []Object, kwargs map[string]Object, mapObj Object, auto *int, depth int) (Object, string, error) {
 	// Find the ':' that separates the field name from the format spec,
 	// skipping any '[...]' subscript components in the name.
 	//
@@ -894,17 +937,17 @@ colonDone:
 	}
 	if bang >= 0 {
 		if bang+1 >= len(name) {
-			return "", fmt.Errorf("ValueError: end of format while looking for conversion specifier")
+			return nil, "", fmt.Errorf("ValueError: end of format while looking for conversion specifier")
 		}
 		conversion = name[bang+1]
 		if len(name) > bang+2 {
-			return "", fmt.Errorf("ValueError: expected ':' after conversion specifier")
+			return nil, "", fmt.Errorf("ValueError: expected ':' after conversion specifier")
 		}
 		name = name[:bang]
 	}
 	v, err := strFormatLookupInner(name, args, kwargs, mapObj, auto)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	switch conversion {
 	case 0:
@@ -912,23 +955,23 @@ colonDone:
 	case 's':
 		sv, sErr := StrObject(v)
 		if sErr != nil {
-			return "", sErr
+			return nil, "", sErr
 		}
 		v = sv
 	case 'r':
 		rv, rErr := ReprObject(v)
 		if rErr != nil {
-			return "", rErr
+			return nil, "", rErr
 		}
 		v = rv
 	case 'a':
 		rv, rErr := Repr(v)
 		if rErr != nil {
-			return "", rErr
+			return nil, "", rErr
 		}
 		v = NewStr(asciiEscape(rv))
 	default:
-		return "", fmt.Errorf("ValueError: Unknown conversion specifier %c", conversion)
+		return nil, "", fmt.Errorf("ValueError: Unknown conversion specifier %c", conversion)
 	}
 	// If the format spec itself contains field references (e.g., {:{}}),
 	// recursively expand them before passing to PyObject_Format.
@@ -937,15 +980,44 @@ colonDone:
 	if strings.ContainsRune(spec, '{') {
 		expanded, expErr := strFormatExpandInner(spec, args, kwargs, mapObj, auto, depth+1)
 		if expErr != nil {
-			return "", expErr
+			return nil, "", expErr
 		}
 		spec = expanded.Value()
 	}
-	// Dispatch through PyObject_Format so each replacement uses the
-	// argument's own __format__ slot.
-	//
-	// CPython: Objects/stringlib/unicode_format.h:1024 output_markup
-	return Format(v, spec)
+	return v, spec, nil
+}
+
+// strFormatStrSpecIsIdentity reports whether spec, applied to an exact
+// str of the given codepoint length, performs no transformation, so the
+// formatter would just copy the value through (format_string_internal's
+// fast path). When true, str.format can alias the argument and return it
+// by identity. An unparsable or non-string-typed spec returns false so
+// the normal Format path raises the right error.
+//
+// CPython: Python/formatter_unicode.c:911 format_string_internal (fast path)
+func strFormatStrSpecIsIdentity(spec string, length int) bool {
+	if spec == "" {
+		return true
+	}
+	parsed, err := format.ParseSpec(spec)
+	if err != nil {
+		return false
+	}
+	if parsed.Type != 0 && parsed.Type != 's' {
+		return false
+	}
+	// Sign / 'z' / '#' / '=' are rejected by the string formatter; let
+	// the slow path surface those errors rather than aliasing.
+	if parsed.Sign != 0 || parsed.NoNegZero || parsed.Alt || parsed.Align == '=' {
+		return false
+	}
+	if parsed.Width != -1 && parsed.Width > length {
+		return false
+	}
+	if parsed.Precision != -1 && parsed.Precision < length {
+		return false
+	}
+	return true
 }
 
 // strFormatLookupInner resolves a field name against args/kwargs (or mapObj

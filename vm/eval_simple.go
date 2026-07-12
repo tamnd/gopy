@@ -57,6 +57,8 @@ func init() {
 				items[i] = item
 			}
 			return objects.NewTuple(items), true
+		case *compile.ConstSlice:
+			return objects.NewSliceFromConst(x.Start, x.Stop, x.Step), true
 		case ast.EllipsisType:
 			return objects.Ellipsis(), true
 		case ast.FrozenSet:
@@ -144,6 +146,8 @@ func liftConst(v any) any {
 			items[i] = liftConst(raw)
 		}
 		return items
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step)
 	}
 	return v
 }
@@ -169,7 +173,7 @@ func wrapConst(v any) (objects.Object, error) {
 	case float64:
 		return objects.NewFloat(x), nil
 	case string:
-		return objects.NewStr(x), nil
+		return objects.WrapConstStr(x), nil
 	case *compile.ConstTuple:
 		items := make([]objects.Object, len(x.Values))
 		for i, raw := range x.Values {
@@ -193,6 +197,8 @@ func wrapConst(v any) (objects.Object, error) {
 			items[i] = item
 		}
 		return objects.NewTuple(items), nil
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step), nil
 	case *compile.Code:
 		return liftNestedCode(x), nil
 	case []byte:
@@ -561,9 +567,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 
 	case compile.SET_FUNCTION_ATTRIBUTE:
 		// Stack: [func, attr]. oparg's bit identifies the attribute:
-		// 0x01 = defaults tuple, 0x02 = kwdefaults dict, 0x04 = annotations,
-		// 0x08 = closure tuple. v0.6 stores the ones we know about and
-		// ignores the rest.
+		// 0x01 = defaults tuple, 0x02 = kwdefaults dict, 0x04 = annotations
+		// dict, 0x08 = closure tuple, 0x10 = __annotate__ callable. CPython
+		// indexes _Py_FunctionAttributeOffsets[oparg] to the matching slot.
 		//
 		// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE
 		fnObj := e.popObject()
@@ -582,7 +588,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, ok boo
 				fn.KwDefaults = d
 			}
 		case 0x04:
-			// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE 0x04
+			// MAKE_FUNCTION_ANNOTATIONS: a literal __annotations__ dict.
+			// CPython: Python/bytecodes.c:4966 SET_FUNCTION_ATTRIBUTE
+			if d, ok := attr.(*objects.Dict); ok {
+				fn.Annotations = d
+			}
+		case 0x10:
+			// MAKE_FUNCTION_ANNOTATE: the PEP 649 __annotate__ callable.
+			// CPython: Python/bytecodes.c:4966 SET_FUNCTION_ATTRIBUTE
 			fn.Annotate = attr
 			fn.Annotations = nil
 			// gh-137814: fix the qualname of the annotation function to

@@ -19,6 +19,16 @@ import (
 // CPython: Python/codegen.c:L868 codegen_body called from
 // _PyCodegen_Module
 func (c *Compiler) visitModule(m *ast.Module) error {
+	// _PyCodegen_Module emits the conditional-annotations set BEFORE the
+	// body so __conditional_annotations__ is registered as names[0] and
+	// the set exists before the first annotated statement runs. The loc is
+	// start_location(stmts): the first statement's line, taken before the
+	// docstring is consumed.
+	//
+	// CPython: Python/codegen.c:858 _PyCodegen_Module
+	if err := c.emitConditionalAnnotationsPrologue(moduleStartLoc(m.Body)); err != nil {
+		return err
+	}
 	docstring, docLoc, hasDoc := moduleDocstring(m.Body)
 	body := c.consumeDocstring(m.Body)
 	// CPython codegen_body emits LOAD_CONST <docstring> / STORE_NAME
@@ -35,24 +45,39 @@ func (c *Compiler) visitModule(m *ast.Module) error {
 		c.addOpName(STORE_NAME, &pool, "__doc__", ast.Pos{Lineno: -1})
 	}
 	// PEP 649: module annotations are deferred. visitAnnAssign records
-	// each annotation into the unit's DeferredAnnotations slice.
-	// After the body, annotation setup code (__conditional_annotations__
-	// + __annotate__) is emitted into a separate stash sequence that
-	// cfgFromSequence prepends at the start of the body, so __annotate__
-	// is available before any body statement executes. This matches
-	// CPython's _PyCompile_StartAnnotationSetup /
-	// _PyCompile_EndAnnotationSetup stash.
+	// each annotation into the unit's DeferredAnnotations slice. After the
+	// body the __annotate__ function is emitted into a separate stash
+	// sequence that cfgFromSequence prepends at the start of the body, so
+	// __annotate__ is available before any body statement executes. This
+	// matches CPython's _PyCompile_StartAnnotationSetup /
+	// _PyCompile_EndAnnotationSetup stash, which wraps only the
+	// __annotate__ build (the conditional set is emitted inline above).
 	//
 	// CPython: Python/compile.c _PyCompile_StartAnnotationSetup (L739)
 	// CPython: Python/flowgraph.c:3946 _PyCfg_FromInstructionSequence
 	if err := c.visitStmts(body); err != nil {
 		return err
 	}
-	if err := c.stashAnnotationCode(ast.Pos{Lineno: 1}); err != nil {
+	// codegen_process_deferred_annotations runs at the tail of codegen_body
+	// with the same start_location, so the stashed __annotate__ build keeps
+	// the first statement's line, not line 1.
+	if err := c.stashAnnotationCode(moduleStartLoc(m.Body)); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
 	return nil
+}
+
+// moduleStartLoc returns start_location(stmts): the location of the first
+// statement, used for the conditional-annotations prologue. Falls back to
+// line 1 for an empty body.
+//
+// CPython: Python/codegen.c:829 _PyCodegen_Module(c, start_location(stmts), ...)
+func moduleStartLoc(body ast.Seq[ast.Stmt]) ast.Pos {
+	if len(body) == 0 {
+		return ast.Pos{Lineno: 1}
+	}
+	return loc(body[0])
 }
 
 // visitInteractive is the REPL form. Every expression statement at
@@ -70,6 +95,9 @@ func (c *Compiler) visitInteractive(m *ast.Interactive) error {
 	prev := c.interactive
 	c.interactive = true
 	defer func() { c.interactive = prev }()
+	if err := c.emitConditionalAnnotationsPrologue(moduleStartLoc(m.Body)); err != nil {
+		return err
+	}
 	for _, s := range m.Body {
 		if err := c.visitStmt(s); err != nil {
 			return err
@@ -83,7 +111,7 @@ func (c *Compiler) visitInteractive(m *ast.Interactive) error {
 	//
 	// CPython: Python/codegen.c:895 codegen_body (runs StartAnnotationSetup /
 	// EndAnnotationSetup for the interactive branch as well)
-	if err := c.stashAnnotationCode(ast.Pos{Lineno: 1}); err != nil {
+	if err := c.stashAnnotationCode(moduleStartLoc(m.Body)); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
@@ -305,10 +333,14 @@ func (c *Compiler) visitExprStmt(s *ast.ExprStmt) error {
 		// CPython: Python/codegen.c codegen_stmt_expr (PRINT_EXPR
 		// branch emits the intrinsic followed by POP_TOP)
 		c.addOpI(CALL_INTRINSIC_1, intrinsicPrint, loc(s))
-		c.addOp(POP_TOP, loc(s))
+		c.addOp(POP_TOP, ast.Pos{Lineno: -1})
 		return nil
 	}
-	c.addOp(POP_TOP, loc(s))
+	// The POP_TOP that discards the expression result is artificial:
+	// emit it at NO_LOCATION so propagateLineNumbers inherits the value
+	// expression's line rather than the statement's opening line.
+	// CPython: Python/codegen.c:2978 codegen_stmt_expr (NO_LOCATION POP_TOP)
+	c.addOp(POP_TOP, ast.Pos{Lineno: -1})
 	return nil
 }
 
@@ -345,7 +377,7 @@ func (c *Compiler) visitReturn(s *ast.Return) error {
 		l = loc(s)
 		c.addOp(NOP, l)
 	}
-	c.unwindForReturn(preserveTOS, l)
+	c.unwindForReturn(preserveTOS, &l)
 	if s.Value == nil {
 		c.addLoadConst(nil, l)
 	} else if !preserveTOS {

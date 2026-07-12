@@ -5,35 +5,10 @@
 package compile
 
 import (
-	"math/bits"
+	"fmt"
 
 	"github.com/tamnd/gopy/ast"
 )
-
-// maxIntFoldBits caps the bit-length of folded integer results. CPython
-// runs unlimited-precision arithmetic and refuses to fold once the
-// product / power / shift exceeds 128 bits; gopy stores constants as
-// int64, so the effective ceiling is 63 (sign bit reserved).
-//
-// CPython: Python/flowgraph.c:1690 MAX_INT_SIZE
-const maxIntFoldBits = 63
-
-// In-place BINARY_OP suboperators not declared in codegen_expr_op.go.
-// Values come from CPython's NB_INPLACE_* enum.
-//
-// CPython: Include/opcode.h NB_INPLACE_ADD etc.
-const (
-	nbInplAdd int32 = 13
-	nbInplAnd int32 = 14
-	nbInplLsh int32 = 16
-	nbInplMul int32 = 18
-	nbInplOr  int32 = 22
-	nbInplRsh int32 = 24
-	nbInplSub int32 = 23
-	nbInplXor int32 = 25
-)
-
-const minInt64 int64 = -1 << 63
 
 // minConstSequenceSize mirrors CPython's MIN_CONST_SEQUENCE_SIZE: a
 // list / set literal shorter than this stays as N pushes + BUILD_X
@@ -48,170 +23,6 @@ const minConstSequenceSize = 3
 //
 // CPython: Python/flowgraph.c:50 NO_LOCATION
 var noLocation = ast.Pos{Lineno: -1, EndLineno: -1, ColOffset: -1, EndColOffset: -1}
-
-// evalIntBinop computes the result of x <op> y for integer operands,
-// or returns ok=false if the operator is one we do not fold (TRUE_DIVIDE,
-// MATRIX_MULTIPLY, FLOOR_DIVIDE on a zero divisor, POWER with a
-// negative exponent, etc.).
-//
-// CPython: Python/flowgraph.c:1791 eval_const_binop
-func evalIntBinop(op int32, x, y int64) (int64, bool) {
-	switch op {
-	case nbAdd, nbInplAdd:
-		return safeAdd(x, y)
-	case nbSubtract, nbInplSub:
-		return safeSub(x, y)
-	case nbMult, nbInplMul:
-		return safeMultiply(x, y)
-	case nbAnd, nbInplAnd:
-		return x & y, true
-	case nbOr, nbInplOr:
-		return x | y, true
-	case nbXor, nbInplXor:
-		return x ^ y, true
-	case nbLShift, nbInplLsh:
-		return safeLshift(x, y)
-	case nbRShift, nbInplRsh:
-		if y < 0 || y >= 64 {
-			return 0, false
-		}
-		return x >> uint(y), true
-	case nbPower:
-		return safePower(x, y)
-	case nbFloorDiv:
-		if y == 0 {
-			return 0, false
-		}
-		q := x / y
-		if (x%y != 0) && ((x < 0) != (y < 0)) {
-			q--
-		}
-		return q, true
-	case nbRemainder:
-		if y == 0 {
-			return 0, false
-		}
-		r := x % y
-		if r != 0 && ((r < 0) != (y < 0)) {
-			r += y
-		}
-		return r, true
-	}
-	return 0, false
-}
-
-// intBitLen reports the bit length of |v|, matching _PyLong_NumBits.
-//
-// CPython: Objects/longobject.c _PyLong_NumBits
-func intBitLen(v int64) int {
-	if v < 0 {
-		v = -v
-	}
-	return bits.Len64(uint64(v))
-}
-
-// safeAdd returns x + y when the result fits in int64. Matches
-// CPython's implicit "fits in MAX_INT_SIZE bits" guard for the
-// gopy int64 const pool.
-//
-// CPython: Python/flowgraph.c:1799 PyNumber_Add (eval_const_binop)
-func safeAdd(x, y int64) (int64, bool) {
-	r := x + y
-	if (y > 0 && r < x) || (y < 0 && r > x) {
-		return 0, false
-	}
-	return r, true
-}
-
-// safeSub returns x - y when the result fits in int64.
-//
-// CPython: Python/flowgraph.c:1802 PyNumber_Subtract (eval_const_binop)
-func safeSub(x, y int64) (int64, bool) {
-	r := x - y
-	if (y > 0 && r > x) || (y < 0 && r < x) {
-		return 0, false
-	}
-	return r, true
-}
-
-// safeMultiply mirrors const_folding_safe_multiply for the int64
-// path. CPython caps at 128 bits combined; we cap at 63 to keep the
-// result in int64.
-//
-// CPython: Python/flowgraph.c:1696 const_folding_safe_multiply
-func safeMultiply(x, y int64) (int64, bool) {
-	if x == 0 || y == 0 {
-		return 0, true
-	}
-	if intBitLen(x)+intBitLen(y) > maxIntFoldBits {
-		return 0, false
-	}
-	return x * y, true
-}
-
-// safeLshift mirrors const_folding_safe_lshift for the int64 path.
-//
-// CPython: Python/flowgraph.c:1761 const_folding_safe_lshift
-func safeLshift(x, y int64) (int64, bool) {
-	if y < 0 {
-		return 0, false
-	}
-	if x == 0 || y == 0 {
-		return x, true
-	}
-	if y > maxIntFoldBits || intBitLen(x)+int(y) > maxIntFoldBits {
-		return 0, false
-	}
-	return x << uint(y), true
-}
-
-// safePower mirrors const_folding_safe_power for the int64 path. Only
-// folds non-negative exponents; negative exponents would produce a
-// float, and gopy keeps the const pool homogeneous per slot.
-//
-// CPython: Python/flowgraph.c:1741 const_folding_safe_power
-func safePower(x, y int64) (int64, bool) {
-	if y < 0 {
-		return 0, false
-	}
-	if x == 0 {
-		if y == 0 {
-			return 1, true
-		}
-		return 0, true
-	}
-	if y == 0 {
-		return 1, true
-	}
-	xbits := intBitLen(x)
-	if xbits == 0 {
-		xbits = 1
-	}
-	if int64(xbits)*y > int64(maxIntFoldBits) {
-		return 0, false
-	}
-	result := int64(1)
-	base := x
-	exp := y
-	for exp > 0 {
-		if exp&1 == 1 {
-			r, ok := safeMultiply(result, base)
-			if !ok {
-				return 0, false
-			}
-			result = r
-		}
-		exp >>= 1
-		if exp > 0 {
-			r, ok := safeMultiply(base, base)
-			if !ok {
-				return 0, false
-			}
-			base = r
-		}
-	}
-	return result, true
-}
 
 // appendConst returns the index of v in *consts, appending if not
 // present. Dedup runs through constCacheKey, the port of CPython's
@@ -246,45 +57,6 @@ func isFoldableUnary(op Opcode, oparg int32) bool {
 		return oparg == intrinsicUnaryPositive
 	}
 	return false
-}
-
-// evalConstUnaryop applies one unary opcode to a const operand, mirroring
-// CPython's PyNumber_Negative / PyNumber_Invert / bool(!x) /
-// PyNumber_Positive dispatch. Returns ok=false when the operand type
-// is not foldable (e.g. unary negate of a string) or would overflow the
-// int64 representation. The CALL_INTRINSIC_1 case is only valid for
-// oparg == INTRINSIC_UNARY_POSITIVE; callers gate via isFoldableUnary.
-//
-// CPython: Python/flowgraph.c:1894 eval_const_unaryop
-func evalConstUnaryop(op Opcode, operand any) (any, bool) {
-	switch op {
-	case UNARY_NEGATIVE:
-		switch v := operand.(type) {
-		case int64:
-			if v == minInt64 {
-				return nil, false
-			}
-			return -v, true
-		case float64:
-			return -v, true
-		}
-	case UNARY_INVERT:
-		if v, ok := operand.(int64); ok {
-			return ^v, true
-		}
-	case UNARY_NOT:
-		b, ok := constTruthValue(operand)
-		if !ok {
-			return nil, false
-		}
-		return !b, true
-	case CALL_INTRINSIC_1:
-		switch operand.(type) {
-		case int64, float64, complex128:
-			return operand, true
-		}
-	}
-	return nil, false
 }
 
 // constTruthValue mirrors PyObject_IsTrue for the const-pool value
@@ -399,8 +171,16 @@ func normalizeJumpsInBlock(g *cfgBuilder, b *basicblock) {
 	}
 
 	if !last.Target.Visited {
-		// Forward conditional: mark the fall-through edge with NOT_TAKEN
-		// so a later assembler pass can record it precisely.
+		// Forward conditional: append a NOT_TAKEN marker on the
+		// fall-through edge. addOp mirrors basicblock_addop and leaves
+		// the reused slot's Except in place, so a NOT_TAKEN landing on a
+		// slot vacated by NOP compaction inherits that block's handler
+		// (protected fall-through), while one landing on a freshly grown
+		// slot is born unprotected. This reproduces CPython's behaviour,
+		// where the new instruction's i_except is whatever the basicblock
+		// array slot happened to hold.
+		//
+		// CPython: Python/flowgraph.c:546 basicblock_addop(b, NOT_TAKEN, ...)
 		b.addOp(NOT_TAKEN, 0, last.Loc)
 		return
 	}
@@ -539,7 +319,15 @@ func cfgPropagateLineNumbers(g *cfgBuilder) {
 			}
 		}
 		last := b.lastInstr()
-		if hasJumpTarget(last.Op) && last.Target != nil {
+		// CPython propagate_line_numbers keys on is_jump(last), NOT the
+		// is_jump||is_block_push predicate used for predecessor counting.
+		// A block whose last op is SETUP_FINALLY/SETUP_CLEANUP/SETUP_WITH
+		// reaches its handler only via the exception edge, so its handler
+		// block (PUSH_EXC_INFO and the cleanup arms) must keep
+		// NO_LOCATION rather than inheriting the setup's line.
+		//
+		// CPython: Python/flowgraph.c:3640 propagate_line_numbers
+		if isJumpOpcode(last.Op) && last.Target != nil {
 			target := last.Target
 			if target.Predecessors == 1 && len(target.Instr) > 0 && target.Instr[0].Loc.Lineno < 0 {
 				target.Instr[0].Loc = prev
@@ -560,7 +348,11 @@ func cfgDuplicateExitsWithoutLineno(g *cfgBuilder) {
 	nextLbl := getMaxLabel(g) + 1
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		last := b.lastInstr()
-		if last == nil || !hasJumpTarget(last.Op) || last.Target == nil {
+		// is_jump(last), not is_jump||is_block_push: SETUP_* exception
+		// edges do not trigger exit-block duplication.
+		//
+		// CPython: Python/flowgraph.c:3574 duplicate_exits_without_lineno
+		if last == nil || !isJumpOpcode(last.Op) || last.Target == nil {
 			continue
 		}
 		target := nextNonemptyBlock(last.Target)
@@ -587,13 +379,44 @@ func cfgDuplicateExitsWithoutLineno(g *cfgBuilder) {
 	}
 }
 
-// isExitWithoutLineno mirrors is_exit_or_eval_check_without_lineno.
-// gopy has no opcodes carrying the HAS_EVAL_BREAK_FLAG yet, so the
-// eval-break leg of the disjunction is always false.
+// opcodeHasEvalBreak mirrors OPCODE_HAS_EVAL_BREAK for the opcodes that
+// can appear at flowgraph-optimization time (pseudo and base ops, before
+// specialization). These are the ops the eval loop polls the eval
+// breaker on: the unconditional jumps, the loop backedge, the calls, and
+// RESUME. A block containing one of these is an "eval check" whose line
+// number PEP 626 requires to be valid after the frame terminates.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h:1049 OPCODE_HAS_EVAL_BREAK
+func opcodeHasEvalBreak(op Opcode) bool {
+	switch op {
+	case JUMP, JUMP_BACKWARD, CALL, CALL_FUNCTION_EX, RESUME:
+		return true
+	}
+	return false
+}
+
+// basicblockHasEvalBreak reports whether any instruction in b polls the
+// eval breaker.
+//
+// CPython: Python/flowgraph.c:347 basicblock_has_eval_break
+func basicblockHasEvalBreak(b *basicblock) bool {
+	for i := range b.Instr {
+		if opcodeHasEvalBreak(b.Instr[i].Op) {
+			return true
+		}
+	}
+	return false
+}
+
+// isExitWithoutLineno mirrors is_exit_or_eval_check_without_lineno: a
+// block that either exits the scope (return/raise/reraise) or contains an
+// eval-breaker check (jump backedge, call, resume), and carries no line
+// number on any instruction. Such blocks are duplicated so each jump into
+// them owns a private copy that can inherit its predecessor's line.
 //
 // CPython: Python/flowgraph.c:3543 is_exit_or_eval_check_without_lineno
 func isExitWithoutLineno(b *basicblock) bool {
-	if !b.exitsScope() {
+	if !b.exitsScope() && !basicblockHasEvalBreak(b) {
 		return false
 	}
 	for i := range b.Instr {
@@ -1397,17 +1220,19 @@ func basicblockFoldConstUnaryop(bb *basicblock, consts *[]any) int {
 		if !isFoldableUnary(ins.Op, ins.Oparg) {
 			continue
 		}
-		operand, ok := cfgLoadsConstValue(&bb.Instr[i-1], *consts)
+		operands, ok := cfgGetConstLoadingInstrs(bb, i-1, 1)
 		if !ok {
 			continue
 		}
-		result, ok := evalConstUnaryop(ins.Op, operand)
+		operand, ok := cfgLoadsConstValue(&bb.Instr[operands[0]], *consts)
 		if !ok {
 			continue
 		}
-		bb.Instr[i-1].Op = NOP
-		bb.Instr[i-1].Oparg = 0
-		bb.Instr[i-1].Target = nil
+		result, ok := cfgEvalConstUnaryop(operand, ins.Op, ins.Oparg)
+		if !ok {
+			continue
+		}
+		cfgNopOut(bb, operands)
 		cfgInstrMakeLoadConst(ins, result, consts)
 		folded++
 	}
@@ -1431,6 +1256,29 @@ func cfgLoadsConstValue(ins *cfgInstr, consts []any) (any, bool) {
 		return int64(ins.Oparg), true
 	}
 	return nil, false
+}
+
+// cfgGetConstValue resolves the constant loaded by opcode/oparg. A
+// LOAD_CONST oparg outside the consts pool raises ValueError, matching
+// CPython's get_const_value which the load-const and fold passes call
+// for every const-loading instruction. LOAD_SMALL_INT returns its oparg
+// as an int.
+//
+// CPython: Python/flowgraph.c:1294 get_const_value
+func cfgGetConstValue(opcode Opcode, oparg int32, consts []any) (any, error) {
+	switch opcode {
+	case LOAD_CONST:
+		n := len(consts)
+		if oparg < 0 || int(oparg) >= n {
+			return nil, cfgError(fmt.Sprintf(
+				"ValueError: LOAD_CONST index %d is out of range for consts (len=%d)",
+				oparg, n))
+		}
+		return consts[oparg], nil
+	case LOAD_SMALL_INT:
+		return int64(oparg), nil
+	}
+	return nil, cfgError("SystemError: Internal error: failed to get value of a constant")
 }
 
 // optimizeBasicBlockCFG runs CPython's per-block peephole/const-fold
@@ -1719,59 +1567,32 @@ func basicblockFoldConstBinop(bb *basicblock, consts *[]any) int {
 		return 0
 	}
 	folded := 0
-	for i := 0; i+2 < len(bb.Instr); i++ {
-		a := &bb.Instr[i]
-		b := &bb.Instr[i+1]
-		c := &bb.Instr[i+2]
+	for i := 0; i < len(bb.Instr); i++ {
+		c := &bb.Instr[i]
 		if c.Op != BINARY_OP {
 			continue
 		}
-		va, okA := cfgLoadsConstValue(a, *consts)
+		operands, ok := cfgGetConstLoadingInstrs(bb, i-1, 2)
+		if !ok {
+			continue
+		}
+		va, okA := cfgLoadsConstValue(&bb.Instr[operands[0]], *consts)
 		if !okA {
 			continue
 		}
-		vb, okB := cfgLoadsConstValue(b, *consts)
+		vb, okB := cfgLoadsConstValue(&bb.Instr[operands[1]], *consts)
 		if !okB {
 			continue
 		}
-		x, xok := va.(int64)
-		y, yok := vb.(int64)
-		if !xok || !yok {
-			continue
-		}
-		result, ok := evalIntBinop(c.Oparg, x, y)
+		result, ok := cfgEvalConstBinop(va, c.Oparg, vb)
 		if !ok {
 			continue
 		}
-		a.Op = NOP
-		a.Oparg = 0
-		a.Target = nil
-		b.Op = NOP
-		b.Oparg = 0
-		b.Target = nil
+		cfgNopOut(bb, operands)
 		cfgInstrMakeLoadConst(c, result, consts)
 		folded++
-		i += 2
 	}
 	return folded
-}
-
-// basicblockCollectConstLoaders walks n instructions starting at start
-// and returns their const values when every slot is a LOAD_CONST or
-// LOAD_SMALL_INT. Within a basic block no slot can be a jump target,
-// so the flat-substrate pinned gate is unnecessary.
-//
-// CPython: Python/flowgraph.c:1430 get_const_loading_instrs
-func basicblockCollectConstLoaders(bb *basicblock, consts []any, start, n int) (bool, []any) {
-	values := make([]any, 0, n)
-	for k := range n {
-		v, ok := cfgLoadsConstValue(&bb.Instr[start+k], consts)
-		if !ok {
-			return false, nil
-		}
-		values = append(values, v)
-	}
-	return true, values
 }
 
 // basicblockFoldTupleOfConstants rewrites `LOAD_CONST c1; ...;
@@ -1790,21 +1611,28 @@ func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
 			continue
 		}
 		n := int(ins.Oparg)
-		if n <= 0 || i < n {
+		if n > stackUseGuideline {
 			continue
 		}
-		start := i - n
-		ok, values := basicblockCollectConstLoaders(bb, *consts, start, n)
+		operands, ok := cfgGetConstLoadingInstrs(bb, i-1, n)
 		if !ok {
 			continue
 		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
-		for k := start; k < i; k++ {
-			bb.Instr[k].Op = NOP
-			bb.Instr[k].Oparg = 0
-			bb.Instr[k].Target = nil
-			bb.Instr[k].Loc = noLocation
+		values := make([]any, n)
+		bad := false
+		for k, idx := range operands {
+			v, vok := cfgLoadsConstValue(&bb.Instr[idx], *consts)
+			if !vok {
+				bad = true
+				break
+			}
+			values[k] = v
 		}
+		if bad {
+			continue
+		}
+		tuple := &ConstTuple{Values: values}
+		cfgNopOut(bb, operands)
 		idx := appendConst(consts, tuple)
 		ins.Op = LOAD_CONST
 		ins.Oparg = int32(idx)
@@ -1819,7 +1647,7 @@ func basicblockFoldTupleOfConstants(bb *basicblock, consts *[]any) int {
 //
 // CPython: Python/flowgraph.c:1597 optimize_lists_and_sets
 func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
-	if consts == nil || len(bb.Instr) < 3 {
+	if consts == nil || len(bb.Instr) == 0 {
 		return 0
 	}
 	folded := 0
@@ -1828,29 +1656,63 @@ func basicblockOptimizeListsAndSets(bb *basicblock, consts *[]any) int {
 		if ins.Op != BUILD_LIST && ins.Op != BUILD_SET {
 			continue
 		}
+		var nextop Opcode
+		if i+1 < len(bb.Instr) {
+			nextop = bb.Instr[i+1].Op
+		}
+		// A literal list/set feeding a "for" loop, comprehension or
+		// "in"/"not in" test can become an immutable tuple/frozenset
+		// constant regardless of length; otherwise the prelude rewrite
+		// only pays off at MIN_CONST_SEQUENCE_SIZE elements.
+		containsOrIter := nextop == GET_ITER || nextop == CONTAINS_OP
 		n := int(ins.Oparg)
-		if n < minConstSequenceSize || i < n {
+		if n > stackUseGuideline || (n < minConstSequenceSize && !containsOrIter) {
 			continue
 		}
-		start := i - n
-		ok, values := basicblockCollectConstLoaders(bb, *consts, start, n)
+		operands, ok := cfgGetConstLoadingInstrs(bb, i-1, n)
 		if !ok {
+			// Not a const sequence: a list feeding for/in can still drop
+			// to a tuple, which is cheaper to build than a list.
+			if containsOrIter && ins.Op == BUILD_LIST {
+				ins.Op = BUILD_TUPLE
+			}
 			continue
 		}
-		tuple := &ConstTuple{Values: append([]any(nil), values...)}
-		idx := appendConst(consts, tuple)
-		for k := start; k < i-2; k++ {
-			bb.Instr[k].Op = NOP
-			bb.Instr[k].Oparg = 0
-			bb.Instr[k].Target = nil
-			bb.Instr[k].Loc = noLocation
+		values := make([]any, n)
+		bad := false
+		for k, idx := range operands {
+			v, vok := cfgLoadsConstValue(&bb.Instr[idx], *consts)
+			if !vok {
+				bad = true
+				break
+			}
+			values[k] = v
+		}
+		if bad {
+			continue
+		}
+		var constResult any
+		if ins.Op == BUILD_SET {
+			constResult = ast.FrozenSet(values)
+		} else {
+			constResult = &ConstTuple{Values: values}
+		}
+		idx := appendConst(consts, constResult)
+		cfgNopOut(bb, operands)
+		if containsOrIter {
+			ins.Op = LOAD_CONST
+			ins.Oparg = int32(idx)
+			folded++
+			continue
 		}
 		preludeOp := ins.Op
 		bb.Instr[i-2].Op = preludeOp
 		bb.Instr[i-2].Oparg = 0
+		bb.Instr[i-2].Target = nil
 		bb.Instr[i-2].Loc = ins.Loc
 		bb.Instr[i-1].Op = LOAD_CONST
 		bb.Instr[i-1].Oparg = int32(idx)
+		bb.Instr[i-1].Target = nil
 		bb.Instr[i-1].Loc = ins.Loc
 		if preludeOp == BUILD_LIST {
 			ins.Op = LIST_EXTEND
@@ -2150,12 +2012,15 @@ func cfgInstrMakeLoadConst(inst *cfgInstr, newconst any, consts *[]any) {
 // CPython: Python/flowgraph.c:2168 basicblock_optimize_load_const
 //
 //nolint:gocognit,gocyclo // direct port of the CPython switch; flattening hurts the 1:1 mapping with flowgraph.c:2168.
-func basicblockOptimizeLoadConst(bb *basicblock, consts *[]any) {
+func basicblockOptimizeLoadConst(bb *basicblock, consts *[]any) error {
 	var opcode Opcode
 	var oparg int32
 	for i := 0; i < len(bb.Instr); i++ {
 		inst := &bb.Instr[i]
 		if inst.Op == LOAD_CONST {
+			if _, err := cfgGetConstValue(inst.Op, inst.Oparg, *consts); err != nil {
+				return err
+			}
 			maybeInstrMakeLoadSmallint(inst, *consts)
 		}
 		isCopyOfLoadConst := opcode == LOAD_CONST && inst.Op == COPY && inst.Oparg == 1
@@ -2241,16 +2106,20 @@ func basicblockOptimizeLoadConst(bb *basicblock, consts *[]any) {
 			bb.Instr[i+1].Oparg = int32(idx)
 		}
 	}
+	return nil
 }
 
 // cfgOptimizeLoadConst is the outer driver: runs
 // basicblockOptimizeLoadConst over every block.
 //
 // CPython: Python/flowgraph.c:2301 optimize_load_const
-func cfgOptimizeLoadConst(g *cfgBuilder, consts *[]any) {
+func cfgOptimizeLoadConst(g *cfgBuilder, consts *[]any) error {
 	for b := g.EntryBlock; b != nil; b = b.Next {
-		basicblockOptimizeLoadConst(b, consts)
+		if err := basicblockOptimizeLoadConst(b, consts); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // setNopCfg clears a cfgInstr to a plain NOP, preserving Loc so the
@@ -2346,7 +2215,9 @@ func cfgOptimizeCfg(g *cfgBuilder, consts *[]any, firstlineno int) error {
 	cfgInlineSmallOrNoLinenoBlocks(g)
 	cfgRemoveUnreachable(g)
 	cfgResolveLineNumbers(g, firstlineno)
-	cfgOptimizeLoadConst(g, consts)
+	if err := cfgOptimizeLoadConst(g, consts); err != nil {
+		return err
+	}
 	for b := g.EntryBlock; b != nil; b = b.Next {
 		optimizeBasicBlockCFG(b, consts)
 	}

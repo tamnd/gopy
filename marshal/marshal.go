@@ -63,6 +63,7 @@ const (
 	typeFrozenset          = '>'
 	typeComplex            = 'x'
 	typeBinaryComplex      = 'y'
+	typeSlice              = ':'
 )
 
 // flagRef is OR'd onto a type tag to signal that the object should be
@@ -214,6 +215,7 @@ const (
 	refKindSmallInt
 	refKindEmptyTuple
 	refKindCode
+	refKindSlice
 )
 
 // refKey is a comparable identity for the marshal refs table.
@@ -282,6 +284,11 @@ func (e *encoder) refKeyFor(v any) (refKey, bool) {
 			return refKey{}, false
 		}
 		return refKey{kind: refKindCode, p: uintptr(unsafe.Pointer(x))}, true
+	case *objects.Slice:
+		// CPython forces a ref reservation for every slice (w_object's
+		// `PyCode_Check(v) || PySlice_Check(v)` branch), so a slice always
+		// goes through the memo keyed on its pointer identity.
+		return refKey{kind: refKindSlice, p: uintptr(unsafe.Pointer(x))}, true
 	}
 	return refKey{}, false
 }
@@ -423,8 +430,55 @@ func (e *encoder) writeBody(v any, flag byte) error {
 		return nil
 	case []any:
 		return e.writeTuple(x, flag)
+	case ast.FrozenSet:
+		return e.writeFrozenSetConst(x, flag)
+	case *objects.Slice:
+		return e.writeSlice(x, flag)
 	}
 	return fmt.Errorf("%w: %T", ErrUnmarshallable, v)
+}
+
+// writeSlice encodes a slice constant as TYPE_SLICE followed by its
+// start, stop, and step. Each bound is converted to a plain marshal
+// value so it dispatches back through write.
+//
+// CPython: Python/marshal.c:719 w_object PySlice_Check arm
+func (e *encoder) writeSlice(s *objects.Slice, flag byte) error {
+	if err := e.writeByte(typeSlice | flag); err != nil {
+		return err
+	}
+	for _, bound := range []objects.Object{s.Start, s.Stop, s.Step} {
+		v, err := fromObject(bound)
+		if err != nil {
+			return err
+		}
+		if err := e.write(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFrozenSetConst encodes the compiler's ast.FrozenSet constant as
+// TYPE_FROZENSET. The compiler folds a membership test against a set
+// display (`x in {1, 2, 3}`) into a frozenset constant; its items are
+// already plain marshal values, so they dispatch straight back through
+// write. Counterpart to writeSet, which handles a live *objects.Set.
+//
+// CPython: Python/marshal.c w_object PyFrozenSet_Type
+func (e *encoder) writeFrozenSetConst(items ast.FrozenSet, flag byte) error {
+	if err := e.writeByte(typeFrozenset | flag); err != nil {
+		return err
+	}
+	if err := e.writeInt32(int32(len(items))); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := e.write(item); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeTuple emits a tuple body. CPython picks TYPE_SMALL_TUPLE for
@@ -764,6 +818,8 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 		return d.readComplexText()
 	case typeBinaryComplex:
 		return d.readBinaryComplex()
+	case typeSlice:
+		return d.readSlice()
 	case typeRef:
 		n, err := d.readInt32()
 		if err != nil {
@@ -775,6 +831,39 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 		return d.refs[n], nil
 	}
 	return nil, fmt.Errorf("marshal: unknown type tag %q (0x%02x)", rune(tag), tag)
+}
+
+// readSlice decodes a TYPE_SLICE: three marshal objects (start, stop,
+// step) reassembled into a runtime slice object. Each bound is lifted
+// through toObject since the slice fields hold Objects.
+//
+// CPython: Python/marshal.c:1691 r_object TYPE_SLICE
+func (d *decoder) readSlice() (any, error) {
+	start, err := d.read()
+	if err != nil {
+		return nil, err
+	}
+	stop, err := d.read()
+	if err != nil {
+		return nil, err
+	}
+	step, err := d.read()
+	if err != nil {
+		return nil, err
+	}
+	startO, err := toObject(start)
+	if err != nil {
+		return nil, err
+	}
+	stopO, err := toObject(stop)
+	if err != nil {
+		return nil, err
+	}
+	stepO, err := toObject(step)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewSlice(startO, stopO, stepO), nil
 }
 
 func (d *decoder) readTuple(n int) ([]any, error) {
@@ -899,6 +988,35 @@ func toObject(v any) (objects.Object, error) {
 		return objects.NewStr(x), nil
 	case ast.EllipsisType:
 		return objects.Ellipsis(), nil
+	case []byte:
+		return objects.NewBytes(x), nil
+	case complex128:
+		return objects.NewComplex(real(x), imag(x)), nil
+	case *big.Int:
+		return objects.NewIntFromBig(x), nil
+	case []any:
+		// A tuple element of a set/frozenset: convert each item and
+		// build an immutable tuple, the only sequence form that can be
+		// a set key.
+		items := make([]objects.Object, len(x))
+		for i, raw := range x {
+			item, err := toObject(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewTuple(items), nil
+	case ast.FrozenSet:
+		items := make([]objects.Object, len(x))
+		for i, raw := range x {
+			item, err := toObject(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewFrozenset(items)
 	case objects.Object:
 		return x, nil
 	}
@@ -958,6 +1076,9 @@ func fromObject(obj objects.Object) (any, error) {
 	// None and str use unexported concrete types; dispatch via type slots.
 	if obj.Type() == objects.NoneType() {
 		return nil, nil
+	}
+	if obj == objects.Ellipsis() {
+		return ast.EllipsisType{}, nil
 	}
 	if obj.Type().Str != nil {
 		s, err := obj.Type().Str(obj)

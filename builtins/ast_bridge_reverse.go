@@ -123,7 +123,7 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 	if !ok {
 		return nil
 	}
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "stmt")
 	switch inst.Type().Name {
 	case "Assign":
 		targets := r.exprList(r.getAttr(inst, "targets"))
@@ -137,6 +137,17 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		op := r.convertOperator(r.getAttr(inst, "op"))
 		value := r.convertExpr(r.getAttr(inst, "value"))
 		return &ast.AugAssign{Target: target, Op: op, Value: value, Pos: pos}
+	case "AnnAssign":
+		target := r.convertExpr(r.getAttr(inst, "target"))
+		annotation := r.convertExpr(r.getAttr(inst, "annotation"))
+		value := r.optionalExpr(inst, "value")
+		return &ast.AnnAssign{
+			Target:     target,
+			Annotation: annotation,
+			Value:      value,
+			Simple:     r.getAttrInt(inst, "simple"),
+			Pos:        pos,
+		}
 	case "Return":
 		val := r.getAttr(inst, "value")
 		var retVal ast.Expr
@@ -227,6 +238,11 @@ func (r *reverseASTBridge) convertStmt(o objects.Object) ast.Stmt {
 		subject := r.convertExpr(r.getAttr(inst, "subject"))
 		cases := r.convertMatchCases(r.getAttr(inst, "cases"))
 		return &ast.Match{Subject: subject, Cases: cases, Pos: pos}
+	case "TypeAlias":
+		name := r.convertExpr(r.getAttr(inst, "name"))
+		typeParams := r.convertTypeParams(r.getAttr(inst, "type_params"))
+		value := r.convertExpr(r.getAttr(inst, "value"))
+		return &ast.TypeAlias{Name: name, TypeParams: typeParams, Value: value, Pos: pos}
 	}
 	// Unknown statement: emit a Pass so the body remains valid.
 	return &ast.Pass{Pos: pos}
@@ -243,7 +259,7 @@ func (r *reverseASTBridge) convertExceptHandlers(o objects.Object) ast.Seq[ast.E
 		if !ok {
 			continue
 		}
-		pos := r.getPos(inst)
+		pos := r.getPos(inst, "excepthandler")
 		var typ ast.Expr
 		if t := r.getAttr(inst, "type"); t != nil && t != objects.None() {
 			typ = r.convertExpr(t)
@@ -315,7 +331,7 @@ func (r *reverseASTBridge) convertPattern(o objects.Object) ast.Pattern {
 		panic(astRecursionSentinel{})
 	}
 	defer func() { r.depth++ }()
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "pattern")
 	switch inst.Type().Name {
 	case "MatchValue":
 		value := r.convertExpr(r.getAttr(inst, "value"))
@@ -425,6 +441,7 @@ func (r *reverseASTBridge) convertFunctionDef(inst *objects.Instance, pos ast.Po
 		Body:          body,
 		DecoratorList: decorators,
 		Returns:       returns,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
 }
@@ -445,6 +462,7 @@ func (r *reverseASTBridge) convertAsyncFunctionDef(inst *objects.Instance, pos a
 		Body:          body,
 		DecoratorList: decorators,
 		Returns:       returns,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
 }
@@ -461,8 +479,67 @@ func (r *reverseASTBridge) convertClassDef(inst *objects.Instance, pos ast.Pos) 
 		Keywords:      keywords,
 		Body:          body,
 		DecoratorList: decorators,
+		TypeParams:    r.convertTypeParams(r.getAttr(inst, "type_params")),
 		Pos:           pos,
 	}
+}
+
+// convertTypeParams reverses convertTypeParams in the forward bridge:
+// it rebuilds the Go PEP 695 type-parameter nodes (TypeVar / TypeVarTuple
+// / ParamSpec) from their _ast instances so a compile()-from-AST request
+// carrying generic functions, classes, or type aliases reaches codegen
+// (and the validator) with its type_params intact.
+//
+// CPython: Python/Python-ast.c obj2ast_type_param
+func (r *reverseASTBridge) convertTypeParams(o objects.Object) ast.Seq[ast.TypeParam] {
+	lst, ok := o.(*objects.List)
+	if !ok {
+		return nil
+	}
+	out := make(ast.Seq[ast.TypeParam], 0, lst.Len())
+	for i := 0; i < lst.Len(); i++ {
+		inst, ok := lst.Item(i).(*objects.Instance)
+		if !ok {
+			continue
+		}
+		pos := r.getPos(inst, "type_param")
+		name := r.getAttrString(inst, "name")
+		switch inst.Type().Name {
+		case "TypeVar":
+			var bound ast.Expr
+			if b := r.getAttr(inst, "bound"); b != nil && b != objects.None() {
+				bound = r.convertExpr(b)
+			}
+			out = append(out, &ast.TypeVar{
+				Name:         name,
+				Bound:        bound,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		case "TypeVarTuple":
+			out = append(out, &ast.TypeVarTuple{
+				Name:         name,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		case "ParamSpec":
+			out = append(out, &ast.ParamSpec{
+				Name:         name,
+				DefaultValue: r.optionalExpr(inst, "default_value"),
+				Pos:          pos,
+			})
+		}
+	}
+	return out
+}
+
+// optionalExpr converts attr name to a Go expr, returning nil when the
+// attribute is missing or None.
+func (r *reverseASTBridge) optionalExpr(inst *objects.Instance, name string) ast.Expr {
+	if v := r.getAttr(inst, name); v != nil && v != objects.None() {
+		return r.convertExpr(v)
+	}
+	return nil
 }
 
 func (r *reverseASTBridge) convertArguments(o objects.Object) *ast.Arguments {
@@ -515,7 +592,7 @@ func (r *reverseASTBridge) convertArg(o objects.Object) *ast.Arg {
 	}
 	a := &ast.Arg{
 		Arg: r.getAttrString(inst, "arg"),
-		Pos: r.getPos(inst),
+		Pos: r.getPos(inst, "arg"),
 	}
 	if ann := r.getAttr(inst, "annotation"); ann != nil && ann != objects.None() {
 		a.Annotation = r.convertExpr(ann)
@@ -575,7 +652,7 @@ func (r *reverseASTBridge) convertExpr(o objects.Object) ast.Expr {
 		panic(astRecursionSentinel{})
 	}
 	defer func() { r.depth++ }()
-	pos := r.getPos(inst)
+	pos := r.getPos(inst, "expr")
 	switch inst.Type().Name {
 	case "Name":
 		id := r.getAttrIdentifier(inst, "id")
@@ -749,7 +826,7 @@ func (r *reverseASTBridge) convertKeywords(o objects.Object) ast.Seq[*ast.Keywor
 			arg = &s
 		}
 		val := r.convertExpr(r.getAttr(inst, "value"))
-		out = append(out, &ast.Keyword{Arg: arg, Value: val, Pos: r.getPos(inst)})
+		out = append(out, &ast.Keyword{Arg: arg, Value: val, Pos: r.getPos(inst, "keyword")})
 	}
 	return out
 }
@@ -786,7 +863,7 @@ func (r *reverseASTBridge) convertAliases(o objects.Object) ast.Seq[*ast.Alias] 
 			s := r.getAttrString(inst, "asname")
 			asname = &s
 		}
-		out = append(out, &ast.Alias{Name: name, Asname: asname, Pos: r.getPos(inst)})
+		out = append(out, &ast.Alias{Name: name, Asname: asname, Pos: r.getPos(inst, "alias")})
 	}
 	return out
 }
@@ -966,8 +1043,12 @@ func (r *reverseASTBridge) convertConstantValue(o objects.Object) any {
 	case *objects.Unicode:
 		return v.Value()
 	case *objects.Int:
-		i64, _ := v.Int64()
-		return i64
+		// Constants that overflow int64 must round-trip as *big.Int, the
+		// same representation the parser emits, so co_consts compares equal.
+		if i64, ok := v.Int64(); ok {
+			return i64
+		}
+		return v.BigInt()
 	case *objects.Float:
 		return v.Float64()
 	case *objects.Complex:
@@ -1060,13 +1141,24 @@ func (r *reverseASTBridge) getAttrPresent(inst *objects.Instance, name string) (
 // matching CPython's Python/Python-ast.c:11187 obj2ast_stmt.
 //
 // CPython: Python/ast.c:1043 validate_stmt LOCATION macro
-func (r *reverseASTBridge) getPos(inst *objects.Instance) ast.Pos {
+// getPos reads the source-location attributes that every located AST node
+// (stmt, expr, excepthandler, pattern, type_param, arg, keyword, alias)
+// carries. lineno and col_offset are required: a missing attribute raises
+// TypeError("required field \"lineno\" missing from <kind>"), matching the
+// obj2ast PyObject_GetOptionalAttr == NULL path. end_lineno / end_col_offset
+// default to lineno / col_offset when absent or None.
+//
+// CPython: Python/Python-ast.c:11149 obj2ast_stmt attribute block
+func (r *reverseASTBridge) getPos(inst *objects.Instance, kind string) ast.Pos {
 	linenoVal, linenoPresent := r.getAttrPresent(inst, "lineno")
 	if !linenoPresent {
-		return ast.NoPos
+		panic(astTypeError{fmt.Sprintf("required field \"lineno\" missing from %s", kind)})
 	}
 	if linenoVal == objects.None() {
 		panic(astValidationError{"invalid integer value: None"})
+	}
+	if _, colPresent := r.getAttrPresent(inst, "col_offset"); !colPresent {
+		panic(astTypeError{fmt.Sprintf("required field \"col_offset\" missing from %s", kind)})
 	}
 	lineno := r.getAttrInt(inst, "lineno")
 	colOffset := r.getAttrInt(inst, "col_offset")

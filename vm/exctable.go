@@ -2,7 +2,10 @@
 // emits one entry per handler region as four varints: start, size,
 // target, depth_lasti. The first byte of each entry has bit 7
 // (entryStartBit, 0x80) set; varints chain via the continuation bit
-// (0x40). Both fields are byte offsets into the bytecode blob.
+// (0x40). The serialized start/size/target fields are code-unit
+// offsets (matching CPython's co_exceptiontable format); findExcHandler
+// scales them to byte offsets so they line up with the VM's byte-based
+// instruction pointer.
 //
 // CPython: Python/ceval.c:L1815 get_exception_handler
 // CPython: Objects/exception_handling_notes.txt format spec
@@ -82,6 +85,13 @@ func findExcHandler(tab []byte, pc int) (excEntry, bool) {
 			return excEntry{}, false
 		}
 		pos += n
+
+		// The table stores code-unit offsets; the VM tracks the
+		// instruction pointer in bytes (two bytes per code unit), so
+		// scale here before comparing against pc.
+		start *= 2
+		size *= 2
+		target *= 2
 
 		end := start + size
 		if pc >= start && pc < end {

@@ -43,8 +43,8 @@ func TestIfWithElseEmitsJumpAroundElse(t *testing.T) {
 		"TO_BOOL",
 		"POP_JUMP_IF_FALSE", // -> else
 		"NOP",
-		"JUMP", // -> end (skip else)
-		"NOP",  // else body
+		"JUMP_NO_INTERRUPT", // -> end (skip else)
+		"NOP",               // else body
 		"LOAD_CONST",
 		"RETURN_VALUE",
 	}
@@ -88,6 +88,7 @@ func TestForEmitsGetIterAndForIter(t *testing.T) {
 		"LOAD_NAME", // xs
 		"GET_ITER",
 		"FOR_ITER",   // -> cleanup
+		"NOP",        // line-tracing NOP at the target (codegen_for)
 		"STORE_NAME", // i (module scope)
 		"NOP",        // pass
 		"JUMP",       // -> for_iter

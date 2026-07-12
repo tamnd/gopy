@@ -46,7 +46,8 @@ func (c *Compiler) tweakInlinedComprehensionScopes(comp *symtable.Entry, state *
 	inClassBlock := c.scope.Type == symtable.ClassBlock && u.InInlinedComp == 0
 	u.InInlinedComp++
 
-	for k, symbol := range comp.Symbols {
+	for _, k := range comp.OrderedSymbols() {
+		symbol := comp.Symbols[k]
 		scope := symbol.Scope()
 		outsymbol := c.scope.GetSymbol(k)
 		outsc := outsymbol.Scope()
@@ -107,7 +108,8 @@ func (c *Compiler) pushInlinedComprehensionLocals(comp *symtable.Entry, state *i
 	u := c.unit()
 	inClassBlock := c.scope.Type == symtable.ClassBlock && u.InInlinedComp == 0
 
-	for k, symbol := range comp.Symbols {
+	for _, k := range comp.OrderedSymbols() {
+		symbol := comp.Symbols[k]
 		scope := symbol.Scope()
 		if (symbol&symtable.DefLocal != 0 && symbol&symtable.DefNonlocal == 0) || inClassBlock {
 			// Push the existing value (which may be NULL if not defined)

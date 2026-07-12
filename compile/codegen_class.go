@@ -57,6 +57,18 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 	return c.nameOpStore(s.Name, loc(s))
 }
 
+// classFirstLineno returns the source line CPython assigns as a class's
+// co_firstlineno: the first decorator's line when the class is
+// decorated, otherwise 0 (meaning "leave the symtable-derived line").
+//
+// CPython: Python/codegen.c:1629 codegen_class
+func classFirstLineno(s *ast.ClassDef) int {
+	if len(s.DecoratorList) > 0 {
+		return loc(s.DecoratorList[0]).Lineno
+	}
+	return 0
+}
+
 // emitClassBuildCall lays out the LOAD_BUILD_CLASS + body fn + name +
 // bases + keywords call. Shared between the non-generic path (called
 // directly from visitClassDef) and the generic path (called inside the
@@ -319,6 +331,9 @@ func (c *Compiler) emitGenericClass(s *ast.ClassDef) error {
 	// CPython: Python/compile.c compiler_enter_scope (private param = class_name
 	// for TypeParams, Python/codegen.c:1623 codegen_class)
 	c.unit().Private = s.Name
+	if ln := classFirstLineno(s); ln > 0 {
+		c.unit().FirstLineno = ln
+	}
 	first := c.unit().FirstLineno
 	c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
@@ -452,6 +467,16 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
+	// A decorated class's co_firstlineno (and __firstlineno__) is the
+	// line of its first decorator, not the `class` line. enterScope
+	// derives firstlineno from the symtable entry (the class line), so
+	// override it here.
+	//
+	// CPython: Python/codegen.c:1629 codegen_class (firstlineno =
+	// decos[0]->lineno when the decorator list is non-empty)
+	if ln := classFirstLineno(s); ln > 0 {
+		c.unit().FirstLineno = ln
+	}
 	// RESUME loc = LOCATION(firstlineno, firstlineno, 0, 0); CPython
 	// drops the def-stmt's columns on the class-entry RESUME.
 	//

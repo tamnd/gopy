@@ -15,17 +15,18 @@ package compile
 // so subsequent flowgraph passes can ignore label ids entirely.
 //
 // When seq.AnnoCode is set (the PEP 649 annotation stash produced by
-// stashAnnotationCode), its instructions are appended to g first so
-// __annotate__ is defined before any body statement executes.
+// stashAnnotationCode), its instructions replace the ANNOTATIONS_PLACEHOLDER
+// pseudo that codegen planted right after the module RESUME, so __annotate__
+// is defined before any body statement executes but after RESUME. When no
+// stash is present the placeholder is dropped instead.
 //
 // CPython: Python/flowgraph.c:3923 _PyCfg_FromInstructionSequence
 func cfgFromSequence(seq *Sequence) *cfgBuilder {
 	seq.ApplyLabelMap(hasJumpTarget)
-	g := newCfgBuilder()
 	if seq.AnnoCode != nil {
 		seq.AnnoCode.ApplyLabelMap(hasJumpTarget)
-		appendSeqToGraph(g, seq.AnnoCode)
 	}
+	g := newCfgBuilder()
 	if len(seq.Instrs) > 0 {
 		appendSeqToGraph(g, seq)
 	}
@@ -48,22 +49,45 @@ func appendSeqToGraph(g *cfgBuilder, seq *Sequence) {
 	// to *basicblock pointers.
 	//
 	// After each jump, force the next instruction into a fresh block.
-	// CPython relies on IS_TERMINATOR_OPCODE (jumps OR scope exits) in
-	// cfg_builder_current_block_is_terminated, so every jump is always
-	// the last instruction in its block. gopy's narrower isTerminator
-	// predicate already handles scope exits; the explicit useNextBlock
-	// closes the gap for jumps so passes like cfgLabelExceptionTargets,
-	// which assume a jump terminates its block, see the same invariant.
+	// CPython terminates a block on IS_TERMINATOR_OPCODE, which is
+	// OPCODE_HAS_JUMP OR IS_SCOPE_EXIT_OPCODE. Crucially it does NOT
+	// include the block-push pseudos (SETUP_FINALLY / SETUP_WITH /
+	// SETUP_CLEANUP): those carry an exception-edge target but fall
+	// through to the protected region, which stays in the same block.
+	// gopy's narrower isTerminator predicate already handles scope
+	// exits; the explicit useNextBlock closes the gap for real jumps so
+	// passes like cfgLabelExceptionTargets, which assume a jump
+	// terminates its block, see the same invariant. We must mirror the
+	// OPCODE_HAS_JUMP boundary exactly: splitting after a SETUP_* would
+	// sever the with/try setup from its body, and optimize_load_fast
+	// would then see the bound __exit__ self as unconsumed at the false
+	// block end and refuse to emit LOAD_FAST_BORROW.
 	idxToBlock := make([]*basicblock, len(seq.Instrs))
 	idxToInstr := make([]*cfgInstr, len(seq.Instrs))
 	for i, ins := range seq.Instrs {
 		if isTarget[i] {
 			g.useLabel(JumpTargetLabel{id: i + 1})
 		}
+		// ANNOTATIONS_PLACEHOLDER is the splice point for the stashed
+		// __annotate__ build. Expand the annotation code here (the stash
+		// is purely linear: no labels, no nested seqs, no jump targets),
+		// then drop the placeholder itself. With no stash it just vanishes.
+		//
+		// CPython: Python/flowgraph.c:3945 _PyCfg_FromInstructionSequence
+		if ins.Op == ANNOTATIONS_PLACEHOLDER {
+			if seq.AnnoCode != nil {
+				for _, ann := range seq.AnnoCode.Instrs {
+					g.addOp(ann.Op, ann.Oparg, ann.Loc)
+				}
+			}
+			idxToBlock[i] = g.CurBlock
+			idxToInstr[i] = g.CurBlock.lastInstr()
+			continue
+		}
 		g.addOp(ins.Op, ins.Oparg, ins.Loc)
 		idxToBlock[i] = g.CurBlock
 		idxToInstr[i] = g.CurBlock.lastInstr()
-		if hasJumpTarget(ins.Op) {
+		if hasJumpTarget(ins.Op) && !isBlockPushOpcode(ins.Op) {
 			g.useNextBlock(g.newBlock())
 		}
 	}

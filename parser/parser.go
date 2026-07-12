@@ -286,6 +286,26 @@ func runParse(st *lexer.State, mode Mode, flags int, featureVersion ...int) (mod
 	if err != nil {
 		return nil, err
 	}
+	// Py_single_input mode rejects source that carries a second statement
+	// past the one the interactive grammar matched. CPython runs this check
+	// in _PyPegen_run_parser after a successful parse, scanning the raw
+	// source past the tokenizer cursor; gopy walks the residual token stream.
+	//
+	// CPython: Parser/pegen.c:754 bad_single_statement
+	if mode == ModeSingle && p.BadSingleStatement() {
+		p.RaiseMultipleStatements()
+		if e := p.PinnedError(); e != nil {
+			if e.Text == "" {
+				if ts := p.Tokenizer(); ts != nil {
+					e.Text = ts.SourceLine(e.Pos.Lineno)
+				}
+			}
+			if e.Filename == "" {
+				e.Filename = st.Filename()
+			}
+			return nil, e
+		}
+	}
 	if mod, ok := node.(ast.Mod); ok {
 		return mod, nil
 	}

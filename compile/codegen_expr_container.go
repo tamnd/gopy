@@ -6,6 +6,7 @@ package compile
 
 import (
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/symtable"
@@ -19,47 +20,40 @@ func (c *Compiler) visitList(e *ast.List) error {
 	if e.Ctx != ast.Load {
 		return fmt.Errorf("compile: List in non-load context handled by assignTo")
 	}
-	return c.emitListOrSet(e.Elts, BUILD_LIST, loc(e))
+	return c.emitStarunpack(e.Elts, BUILD_LIST, LIST_APPEND, LIST_EXTEND, false, loc(e))
 }
 
-// visitTuple emits a tuple literal in load context.
+// visitTuple emits a tuple literal in load context. Like CPython's
+// codegen_tuple it runs through starunpack_helper with tuple=1, so a
+// large or starred tuple opens with BUILD_LIST and finishes with
+// INTRINSIC_LIST_TO_TUPLE; only short, star-free tuples take the
+// direct BUILD_TUPLE n form.
 //
-// CPython: Python/codegen.c codegen_tuple
+// CPython: Python/codegen.c:3449 codegen_tuple
 func (c *Compiler) visitTuple(e *ast.Tuple) error {
 	if e.Ctx != ast.Load {
 		return fmt.Errorf("compile: Tuple in non-load context handled by assignTo")
 	}
-	if !hasStarred(e.Elts) {
-		for _, elt := range e.Elts {
-			if err := c.visitExpr(elt); err != nil {
-				return err
-			}
-		}
-		c.addOpI(BUILD_TUPLE, int32(len(e.Elts)), loc(e))
-		return nil
-	}
-	// Tuple with stars: build a list, splat in, convert to tuple.
-	if err := c.emitListOrSet(e.Elts, BUILD_LIST, loc(e)); err != nil {
-		return err
-	}
-	c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, loc(e))
-	return nil
+	return c.emitStarunpack(e.Elts, BUILD_LIST, LIST_APPEND, LIST_EXTEND, true, loc(e))
 }
 
 // visitSet emits a set literal. Stars splat with SET_UPDATE.
 //
 // CPython: Python/codegen.c:L3467 codegen_set
 func (c *Compiler) visitSet(e *ast.Set) error {
-	return c.emitListOrSet(e.Elts, BUILD_SET, loc(e))
+	return c.emitStarunpack(e.Elts, BUILD_SET, SET_ADD, SET_UPDATE, false, loc(e))
 }
 
-// emitListOrSet handles the BUILD_LIST / BUILD_SET / BUILD_TUPLE-as-list
-// branches by walking elts. The short, no-stars path emits the literal
-// directly with `op n`; the big-or-starred path opens with `BUILD_LIST 0`
-// and appends/extends per element so the value stack stays bounded.
+// emitStarunpack walks elts and emits a list, set, or tuple display.
+// The short, star-free path emits the literal directly: BUILD_TUPLE n
+// when tuple is set, otherwise build n. The big-or-starred path opens
+// with `build 0`, appends/extends per element to keep the value stack
+// bounded, and (for tuples) finishes with INTRINSIC_LIST_TO_TUPLE.
+// Tuples therefore pass build=BUILD_LIST so the spill path uses a list
+// that the flowgraph can fold back into a constant tuple.
 //
 // CPython: Python/codegen.c:3318 starunpack_helper_impl
-func (c *Compiler) emitListOrSet(elts ast.Seq[ast.Expr], op Opcode, l ast.Pos) error {
+func (c *Compiler) emitStarunpack(elts ast.Seq[ast.Expr], build, add, extend Opcode, tuple bool, l ast.Pos) error {
 	n := len(elts)
 	seenStar := hasStarred(elts)
 	big := n > stackUseGuideline
@@ -69,44 +63,39 @@ func (c *Compiler) emitListOrSet(elts ast.Seq[ast.Expr], op Opcode, l ast.Pos) e
 				return err
 			}
 		}
-		c.addOpI(op, int32(n), l)
+		if tuple {
+			c.addOpI(BUILD_TUPLE, int32(n), l)
+		} else {
+			c.addOpI(build, int32(n), l)
+		}
 		return nil
-	}
-	addOp := SET_ADD
-	extendOp := SET_UPDATE
-	if op != BUILD_SET {
-		addOp = LIST_APPEND
-		extendOp = LIST_EXTEND
 	}
 	sequenceBuilt := false
 	if big {
-		c.addOpI(op, 0, l)
+		c.addOpI(build, 0, l)
 		sequenceBuilt = true
 	}
 	for i, elt := range elts {
 		if star, ok := elt.(*ast.Starred); ok {
 			if !sequenceBuilt {
-				c.addOpI(op, int32(i), l)
+				c.addOpI(build, int32(i), l)
 				sequenceBuilt = true
 			}
 			if err := c.visitExpr(star.Value); err != nil {
 				return err
 			}
-			c.addOpI(extendOp, 1, l)
+			c.addOpI(extend, 1, l)
 			continue
 		}
 		if err := c.visitExpr(elt); err != nil {
 			return err
 		}
 		if sequenceBuilt {
-			c.addOpI(addOp, 1, l)
+			c.addOpI(add, 1, l)
 		}
 	}
-	if !sequenceBuilt {
-		// Pure non-star path already handled above; this would only
-		// trip if n == 0 with no stars, but the caller never invokes
-		// us for empty literals. Guard anyway.
-		c.addOpI(op, 0, l)
+	if tuple {
+		c.addOpI(CALL_INTRINSIC_1, intrinsicListToTuple, l)
 	}
 	return nil
 }
@@ -139,68 +128,98 @@ const intrinsicListToTuple int32 = 6
 // Include/internal/pycore_intrinsics.h).
 const intrinsicUnaryPositive int32 = 5
 
-// visitDict emits a dict literal. CPython lays this out as a series
-// of LOAD_CONST keys + BUILD_MAP for each contiguous run, with
-// DICT_UPDATE for `**other` splat keys.
+// codegenSubdict emits the [begin,end) run of key/value pairs as one
+// BUILD_MAP. A run whose stack footprint (2 entries per pair) exceeds
+// the guideline opens with BUILD_MAP 0 and folds each pair in with
+// MAP_ADD so the value stack stays bounded.
 //
-// CPython: Python/codegen.c:L3497 codegen_dict
-func (c *Compiler) visitDict(e *ast.Dict) error {
-	if len(e.Keys) != len(e.Values) {
-		return fmt.Errorf("compile: Dict keys/values mismatch %d/%d",
-			len(e.Keys), len(e.Values))
+// CPython: Python/codegen.c:3474 codegen_subdict
+func (c *Compiler) codegenSubdict(e *ast.Dict, begin, end int) error {
+	n := end - begin
+	big := n*2 > stackUseGuideline
+	if big {
+		c.addOpI(BUILD_MAP, 0, loc(e))
 	}
-	hasSplat := false
-	for _, k := range e.Keys {
-		if k == nil {
-			hasSplat = true
-			break
-		}
-	}
-	if !hasSplat {
-		for i, k := range e.Keys {
-			if err := c.visitExpr(k); err != nil {
-				return err
-			}
-			if err := c.visitExpr(e.Values[i]); err != nil {
-				return err
-			}
-		}
-		c.addOpI(BUILD_MAP, int32(len(e.Keys)), loc(e))
-		return nil
-	}
-	// Splat path: BUILD_MAP 0, accumulate runs of non-splat keys,
-	// then DICT_UPDATE for each `**v`.
-	c.addOpI(BUILD_MAP, 0, loc(e))
-	pending := 0
-	flush := func() error {
-		if pending == 0 {
-			return nil
-		}
-		c.addOpI(BUILD_MAP, int32(pending), loc(e))
-		c.addOpI(DICT_UPDATE, 1, loc(e))
-		pending = 0
-		return nil
-	}
-	for i, k := range e.Keys {
-		if k == nil {
-			if err := flush(); err != nil {
-				return err
-			}
-			if err := c.visitExpr(e.Values[i]); err != nil {
-				return err
-			}
-			c.addOpI(DICT_UPDATE, 1, loc(e))
-			continue
-		}
-		if err := c.visitExpr(k); err != nil {
+	for i := begin; i < end; i++ {
+		if err := c.visitExpr(e.Keys[i]); err != nil {
 			return err
 		}
 		if err := c.visitExpr(e.Values[i]); err != nil {
 			return err
 		}
-		pending++
+		if big {
+			c.addOpI(MAP_ADD, 1, loc(e))
+		}
 	}
-	return flush()
+	if !big {
+		c.addOpI(BUILD_MAP, int32(n), loc(e))
+	}
+	return nil
+}
+
+// visitDict emits a dict literal. Contiguous runs of non-splat keys are
+// chunked through codegenSubdict so a large literal keeps a bounded
+// evaluation stack; `**other` splat keys flush the pending run and fold
+// in with DICT_UPDATE.
+//
+// CPython: Python/codegen.c:3496 codegen_dict
+func (c *Compiler) visitDict(e *ast.Dict) error {
+	if len(e.Keys) != len(e.Values) {
+		return fmt.Errorf("compile: Dict keys/values mismatch %d/%d",
+			len(e.Keys), len(e.Values))
+	}
+	n := len(e.Values)
+	haveDict := false
+	elements := 0
+	for i := range n {
+		isUnpacking := e.Keys[i] == nil
+		if isUnpacking {
+			if elements != 0 {
+				if err := c.codegenSubdict(e, i-elements, i); err != nil {
+					return err
+				}
+				if haveDict {
+					c.addOpI(DICT_UPDATE, 1, loc(e))
+				}
+				haveDict = true
+				elements = 0
+			}
+			if !haveDict {
+				c.addOpI(BUILD_MAP, 0, loc(e))
+				haveDict = true
+			}
+			if err := c.visitExpr(e.Values[i]); err != nil {
+				return err
+			}
+			c.addOpI(DICT_UPDATE, 1, loc(e))
+		} else {
+			if elements*2 > stackUseGuideline {
+				if err := c.codegenSubdict(e, i-elements, i+1); err != nil {
+					return err
+				}
+				if haveDict {
+					c.addOpI(DICT_UPDATE, 1, loc(e))
+				}
+				haveDict = true
+				elements = 0
+			} else {
+				elements++
+			}
+		}
+	}
+	if elements != 0 {
+		if err := c.codegenSubdict(e, n-elements, n); err != nil {
+			return err
+		}
+		if haveDict {
+			c.addOpI(DICT_UPDATE, 1, loc(e))
+		}
+		haveDict = true
+	}
+	if !haveDict {
+		c.addOpI(BUILD_MAP, 0, loc(e))
+	}
+	return nil
 }
 
 // visitAttribute emits a LOAD_ATTR / STORE_ATTR / DELETE_ATTR
@@ -221,20 +240,55 @@ func (c *Compiler) visitAttribute(e *ast.Attribute) error {
 	// CPython: Python/codegen.c codegen_visit_expr (Attribute_kind, mangle branch)
 	attr := symtable.Mangle(c.unit().Private, e.Attr)
 	pool := poolNames
+	// The attribute opcodes are located on the attribute name, not the
+	// whole `value.attr` span, so a multi-line receiver does not drag the
+	// opcode's lineno back to where the receiver started.
+	//
+	// CPython: Python/codegen.c:5285 loc = update_start_location_to_match_attr(c, LOC(e), e)
+	l := updateStartLocationToMatchAttr(loc(e), e)
 	switch e.Ctx {
 	case ast.Load:
 		// LOAD_ATTR oparg low bit is the "push self" hint used by
 		// LOAD_METHOD; codegen leaves it clear and the flowgraph
 		// optimizes it.
-		c.addOpName(LOAD_ATTR, &pool, attr, loc(e))
+		c.addOpName(LOAD_ATTR, &pool, attr, l)
 	case ast.Store:
-		c.addOpName(STORE_ATTR, &pool, attr, loc(e))
+		c.addOpName(STORE_ATTR, &pool, attr, l)
 	case ast.Del:
-		c.addOpName(DELETE_ATTR, &pool, attr, loc(e))
+		c.addOpName(DELETE_ATTR, &pool, attr, l)
 	default:
 		return fmt.Errorf("compile: Attribute with unknown context %v", e.Ctx)
 	}
 	return nil
+}
+
+// updateStartLocationToMatchAttr moves an attribute opcode's start
+// location onto the attribute name's line. When the located span begins
+// on a different line than the attribute ends (a receiver split across
+// lines), the start is pulled to the attribute's end line and the start
+// column is backed off by the attribute name's length so the opcode
+// points at the name itself. Weird ASTs whose name is longer than the
+// end column drop their columns, matching GH-94694.
+//
+// CPython: Python/codegen.c:3824 update_start_location_to_match_attr
+func updateStartLocationToMatchAttr(l ast.Pos, e *ast.Attribute) ast.Pos {
+	if l.Lineno != e.Pos.EndLineno {
+		l.Lineno = e.Pos.EndLineno
+		n := utf8.RuneCountInString(e.Attr)
+		if n <= e.Pos.EndColOffset {
+			l.ColOffset = e.Pos.EndColOffset - n
+		} else {
+			l.ColOffset = -1
+			l.EndColOffset = -1
+		}
+		if l.Lineno > l.EndLineno {
+			l.EndLineno = l.Lineno
+		}
+		if l.Lineno == l.EndLineno && l.ColOffset > l.EndColOffset {
+			l.EndColOffset = l.ColOffset
+		}
+	}
+	return l
 }
 
 // maybeAddStaticAttribute walks the active unit stack and, when the
@@ -260,11 +314,15 @@ func (c *Compiler) maybeAddStaticAttribute(e *ast.Attribute) {
 	}
 }
 
-// visitSubscript emits BINARY_SUBSCR / STORE_SUBSCR / DELETE_SUBSCR.
-// Slice expressions go through visitSlice and still leave a Slice
-// object on the stack.
+// visitSubscript emits the load / store / delete sequence for a
+// subscript. A non-constant two-part slice (`x[a:b]`, step omitted)
+// takes the two-element fast path: the bounds are pushed bare and
+// BINARY_SLICE / STORE_SLICE consume them without building a slice
+// object. Every other subscript visits the slice expression (which
+// for a constant slice is a LOAD_CONST of the slice object) and then
+// folds into BINARY_OP NB_SUBSCR / STORE_SUBSCR / DELETE_SUBSCR.
 //
-// CPython: Python/codegen.c:5548 codegen_subscript
+// CPython: Python/codegen.c:5549 codegen_subscript
 func (c *Compiler) visitSubscript(e *ast.Subscript) error {
 	if e.Ctx == ast.Load {
 		if err := c.checkSubscripter(e.Value); err != nil {
@@ -276,6 +334,20 @@ func (c *Compiler) visitSubscript(e *ast.Subscript) error {
 	}
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
+	}
+	if shouldApplyTwoElementSliceOptimization(e.Slice) && e.Ctx != ast.Del {
+		if err := c.codegenSliceTwoParts(e.Slice.(*ast.Slice)); err != nil {
+			return err
+		}
+		switch e.Ctx {
+		case ast.Load:
+			c.addOp(BINARY_SLICE, loc(e))
+		case ast.Store:
+			c.addOp(STORE_SLICE, loc(e))
+		default:
+			return fmt.Errorf("compile: Subscript with unknown context %v", e.Ctx)
+		}
+		return nil
 	}
 	if err := c.visitExpr(e.Slice); err != nil {
 		return err
@@ -294,15 +366,65 @@ func (c *Compiler) visitSubscript(e *ast.Subscript) error {
 	return nil
 }
 
-// visitSlice emits BUILD_SLICE 2 or 3 depending on whether step is
-// present. Missing lower / upper become LOAD_CONST None.
+// isConstantSlice reports whether every present bound of the slice is a
+// constant literal. Absent bounds count as constant (they become None).
 //
-// CPython: Python/codegen.c codegen_slice
-func (c *Compiler) visitSlice(e *ast.Slice) error {
-	if err := c.visitOptExpr(e.Lower, loc(e)); err != nil {
+// CPython: Python/codegen.c:5326 is_constant_slice
+func isConstantSlice(s *ast.Slice) bool {
+	return isNilOrConstant(s.Lower) &&
+		isNilOrConstant(s.Upper) &&
+		isNilOrConstant(s.Step)
+}
+
+// isNilOrConstant reports whether e is absent or a Constant node.
+func isNilOrConstant(e ast.Expr) bool {
+	if e == nil {
+		return true
+	}
+	_, ok := e.(*ast.Constant)
+	return ok
+}
+
+// shouldApplyTwoElementSliceOptimization reports whether a subscript's
+// slice is a non-constant slice with no step, the shape BINARY_SLICE /
+// STORE_SLICE handle directly.
+//
+// CPython: Python/codegen.c:5338 should_apply_two_element_slice_optimization
+func shouldApplyTwoElementSliceOptimization(e ast.Expr) bool {
+	s, ok := e.(*ast.Slice)
+	if !ok {
+		return false
+	}
+	return !isConstantSlice(s) && s.Step == nil
+}
+
+// codegenSliceTwoParts pushes the lower and upper bounds of a slice,
+// each defaulting to LOAD_CONST None when absent.
+//
+// CPython: Python/codegen.c:5589 codegen_slice_two_parts
+func (c *Compiler) codegenSliceTwoParts(s *ast.Slice) error {
+	if err := c.visitOptExpr(s.Lower, loc(s)); err != nil {
 		return err
 	}
-	if err := c.visitOptExpr(e.Upper, loc(e)); err != nil {
+	return c.visitOptExpr(s.Upper, loc(s))
+}
+
+// visitSlice emits a slice subscript index. A fully constant slice
+// becomes a single LOAD_CONST of the slice object so the flowgraph can
+// fold the enclosing NB_SUBSCR; otherwise the bounds (and optional
+// step) are pushed and BUILD_SLICE 2 / 3 assembles them.
+//
+// CPython: Python/codegen.c:5610 codegen_slice
+func (c *Compiler) visitSlice(e *ast.Slice) error {
+	if isConstantSlice(e) {
+		c.addLoadConst(&ConstSlice{
+			Start: constBoundValue(e.Lower),
+			Stop:  constBoundValue(e.Upper),
+			Step:  constBoundValue(e.Step),
+		}, loc(e))
+		return nil
+	}
+	if err := c.codegenSliceTwoParts(e); err != nil {
 		return err
 	}
 	n := int32(2)
@@ -314,6 +436,27 @@ func (c *Compiler) visitSlice(e *ast.Slice) error {
 	}
 	c.addOpI(BUILD_SLICE, n, loc(e))
 	return nil
+}
+
+// constBoundValue returns the const value of a slice bound: nil (None)
+// when the bound is absent, otherwise the Constant node's value. Only
+// valid for bounds that satisfy isNilOrConstant.
+//
+// CPython: Python/codegen.c:5618 codegen_slice (Constant.value reads)
+func constBoundValue(e ast.Expr) any {
+	if e == nil {
+		return nil
+	}
+	return e.(*ast.Constant).Value
+}
+
+// ConstSlice is the codegen-side placeholder for a Python slice
+// constant. The assembler / lift pass converts it to a real slice
+// object during marshal; the VM lifts it at LOAD_CONST time.
+//
+// CPython: a constant slice is just a PySliceObject in co_consts.
+type ConstSlice struct {
+	Start, Stop, Step any
 }
 
 // visitOptExpr visits an optional expression, emitting LOAD_CONST None

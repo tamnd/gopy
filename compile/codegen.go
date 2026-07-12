@@ -8,6 +8,7 @@ package compile
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/future"
@@ -193,6 +194,15 @@ type Compiler struct {
 	// enterScope.
 	fblocks []fblock
 
+	// disableWarning suppresses compile-time SyntaxWarnings while
+	// non-zero. The exception-path copy of a finally body is compiled a
+	// second time (under a FINALLY_END fblock), so without this guard a
+	// warning inside the finally clause would be emitted twice. Pushing
+	// the FINALLY_END fblock bumps this counter; popping it restores it.
+	//
+	// CPython: Python/compile.c:106 compiler.c_disable_warning
+	disableWarning int
+
 	// interactive marks compile-mode='single' (REPL / doctest). When
 	// set, expression-statements at module nest level emit
 	// CALL_INTRINSIC_1 INTRINSIC_PRINT so each result reaches
@@ -202,6 +212,16 @@ type Compiler struct {
 	// CPython: Python/codegen.c codegen_stmt_expr (c->c_interactive &&
 	// c->c_nestlevel <= 1 fires PRINT_EXPR)
 	interactive bool
+
+	// saveNestedSeqs makes leaveScope hang each finished scope's
+	// instruction sequence off its parent unit's Seq.Nested, so a
+	// caller can walk the recursive pre-flowgraph instruction tree.
+	// Only the _testinternalcapi.compiler_codegen helper sets it; the
+	// normal compile path leaves it false (nested scopes flow through
+	// the const pool as *Unit instead).
+	//
+	// CPython: Python/compile.c:103 compiler.c_save_nested_seqs
+	saveNestedSeqs bool
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built
@@ -240,6 +260,20 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 	// _PyCompile_EnterScope, with loc.lineno = 0 for module scope).
 	resumeLoc := ast.Pos{Lineno: 0, EndLineno: c.unit().FirstLineno, ColOffset: 0, EndColOffset: 0}
 	c.addOpI(RESUME, resumeAtFuncStart, resumeLoc)
+
+	// Module scope plants ANNOTATIONS_PLACEHOLDER right after RESUME. The
+	// deferred __annotate__ build (stashed via SetAnnotationsCode) is spliced
+	// in at this marker by cfgFromSequence, so it lands after RESUME and
+	// before the body's BUILD_SET/STORE __conditional_annotations__ prologue.
+	// CPython plants it unconditionally and drops it when no stash exists; we
+	// only plant it when the module carries (always-conditional) annotations,
+	// which is exactly when a stash is produced. The spliced-out result is
+	// byte-identical either way.
+	//
+	// CPython: Python/codegen.c:659 codegen_enter_scope (COMPILE_SCOPE_MODULE)
+	if sc.HasConditionalAnnotations {
+		c.addOp(ANNOTATIONS_PLACEHOLDER, resumeLoc)
+	}
 
 	switch m := mod.(type) {
 	case *ast.Module:
@@ -426,6 +460,19 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	}
 	sortStrings(cellNames)
 	sortStrings(freeNames)
+	// __conditional_annotations__ is forced into u_cellvars (after the
+	// sorted cells) when the scope tracks conditional annotations, even
+	// where the symtable left the name GLOBAL. That happens at module
+	// scope: the generated __annotate__ reads the set via LOAD_GLOBAL, so
+	// the name never goes free and never resolves to CELL, yet the code
+	// object still needs the cell so MAKE_CELL runs at the prologue. Class
+	// scopes already resolve it to CELL above (the annotate body uses
+	// LOAD_DEREF), so this add is a no-op there, matching DictAddObj.
+	//
+	// CPython: Python/compile.c:630 compiler_enter_scope (DictAddObj cellvars)
+	if sc.HasConditionalAnnotations && !slices.Contains(cellNames, "__conditional_annotations__") {
+		cellNames = append(cellNames, "__conditional_annotations__")
+	}
 	for _, name := range cellNames {
 		u.CellVars = append(u.CellVars, name)
 		c.cellCache[name] = len(u.CellVars) - 1
@@ -518,11 +565,19 @@ func (c *Compiler) leaveScope() {
 	if len(c.units) == 0 {
 		return
 	}
+	child := c.units[len(c.units)-1]
 	c.units = c.units[:len(c.units)-1]
 	if len(c.units) > 0 {
 		// scope tracking only matters for the active unit. The
 		// driver re-enters the parent scope explicitly.
 		c.scope = nil
+		// _PyCompile_ExitScope appends the finished child sequence to
+		// the parent under c_save_nested_seqs, in scope-exit order.
+		//
+		// CPython: Python/compile.c:719 _PyCompile_ExitScope
+		if c.saveNestedSeqs && child != nil && child.Seq != nil {
+			c.units[len(c.units)-1].Seq.AddNested(child.Seq)
+		}
 	}
 }
 

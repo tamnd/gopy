@@ -261,6 +261,12 @@ func (c *Compiler) checkIndex(obj ast.Expr, idx ast.Expr) error {
 //
 // CPython: Python/compile.c:237 _PyCompile_Warn
 func (c *Compiler) warnAt(pos ast.Pos, format string, args ...any) error {
+	// Suppressed while compiling the exception-path copy of a finally
+	// body, so a warning there is not emitted a second time.
+	// CPython: Python/compile.c:1213 _PyCompile_Warn (c_disable_warning)
+	if c.disableWarning > 0 {
+		return nil
+	}
 	if WarnHook == nil {
 		return nil
 	}

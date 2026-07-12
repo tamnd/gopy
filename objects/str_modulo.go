@@ -91,27 +91,47 @@ func unicodeModulo(a, b Object) (Object, error) {
 
 	var out UnicodeWriter
 	out.Init()
+	// CPython: min_length = fmtcnt + 100; overallocate = 1. The buffer
+	// is allocated lazily on the first write so a format string that
+	// produces its result from a single aliased str (e.g. "%s" % s)
+	// can be returned without a copy.
+	//
+	// CPython: Objects/unicodeobject.c:15527 PyUnicode_Format
+	out.minLength = len(ctx.fmt) + 100
 	out.overallocate = true
-	// Pre-size: the literal portion of the format string plus a small
-	// reserve for substitutions. PrepareInternal grows on demand.
-	if err := out.PrepareInternal(len(fmtStr.v)+16, 127); err != nil {
-		return nil, err
-	}
 
-	for ctx.pos < len(ctx.fmt) {
+	n := len(ctx.fmt)
+	for ctx.pos < n {
 		ch := ctx.fmt[ctx.pos]
 		if ch != '%' {
-			if err := out.WriteChar(ch); err != nil {
+			// Gather the maximal non-'%' run and write it as one
+			// substring. When the run reaches the end of the format
+			// string the writer stops overallocating, so a format that
+			// is a single literal run aliases the format string itself
+			// (text % () is text).
+			//
+			// CPython: Objects/unicodeobject.c:15545 (non-'%' run + overallocate=0)
+			start := ctx.pos
+			ctx.pos++
+			for ctx.pos < n && ctx.fmt[ctx.pos] != '%' {
+				ctx.pos++
+			}
+			if ctx.pos == n {
+				out.overallocate = false
+			}
+			if err := out.WriteSubstring(fmtStr, start, ctx.pos); err != nil {
 				return nil, err
 			}
-			ctx.pos++
 			continue
 		}
 		ctx.pos++
-		if ctx.pos >= len(ctx.fmt) {
+		if ctx.pos >= n {
 			return nil, fmt.Errorf("ValueError: incomplete format")
 		}
 		if ctx.fmt[ctx.pos] == '%' {
+			if ctx.pos+1 == n {
+				out.overallocate = false
+			}
 			if err := out.WriteChar('%'); err != nil {
 				return nil, err
 			}
@@ -222,9 +242,35 @@ widthParse:
 	arg.ch = ctx.fmt[ctx.pos]
 	ctx.pos++
 
+	// CPython clears overallocate once the format string is exhausted
+	// (fmtcnt == 0), which lets the final write alias its source object.
+	//
+	// CPython: Objects/unicodeobject.c:15214 unicode_format_arg_format
+	if ctx.pos >= len(ctx.fmt) {
+		out.overallocate = false
+	}
+
 	v, err := nextArg(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Fast path for "%s" % str with an exact str argument: write the
+	// source object straight into the writer (no intermediate copy) so
+	// it can be aliased and returned by identity. The width/precision
+	// guard matches unicode_format_arg_output's fast path: padding or a
+	// truncating precision forces the slow copy below.
+	//
+	// CPython: Objects/unicodeobject.c:15231 (Py_NewRef(v))
+	// CPython: Objects/unicodeobject.c:15336 unicode_format_arg_output (fast path)
+	if arg.ch == 's' {
+		if u, ok := v.(*Unicode); ok && v.Type() == strType {
+			if (arg.width == -1 || arg.width <= u.length) &&
+				(arg.prec == -1 || arg.prec >= u.length) &&
+				arg.flags&(fmtSign|fmtBlank) == 0 {
+				return out.WriteStr(u)
+			}
+		}
 	}
 
 	body, err := formatBody(&arg, v)
@@ -470,9 +516,12 @@ func numberAsBigInt(v Object, ch rune) (*big.Int, error) {
 func formatFloat(v Object, arg *fmtArg) (string, error) {
 	f, ok := asFloat(v)
 	if !ok {
+		// formatfloat calls PyFloat_AsDouble, which raises this message
+		// directly rather than the "%c format: ..." wrapper used by the
+		// integer path (mainformatlong).
+		// CPython: Objects/floatobject.c:283 PyFloat_AsDouble
 		return "", fmt.Errorf(
-			"TypeError: %%%c format: a real number is required, not %s",
-			arg.ch, v.Type().Name)
+			"TypeError: must be real number, not %s", v.Type().Name)
 	}
 	prec := arg.prec
 	if prec < 0 {

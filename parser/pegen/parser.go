@@ -708,3 +708,32 @@ func (p *Parser) IsEndOfSource() bool {
 func (p *Parser) AllowIncompleteInput() bool {
 	return p.flags&FlagAllowIncompleteInput != 0
 }
+
+// BadSingleStatement reports whether a single-input parse left a second
+// statement unconsumed. CPython scans the raw source past the tokenizer
+// cursor for any non-whitespace, non-comment character; gopy walks the
+// token stream from the current mark instead, skipping the trivia tokens
+// (NEWLINE / NL / INDENT / DEDENT / COMMENT / ENDMARKER) that a complete
+// single statement legitimately leaves behind. Any other token means a
+// second statement followed, so "1\n2" and "def f(): pass" in single
+// mode raise SyntaxError just as the interactive compiler requires.
+//
+// CPython: Parser/pegen.c:754 bad_single_statement
+func (p *Parser) BadSingleStatement() bool {
+	mark := p.mark
+	for {
+		t := p.Peek()
+		if t == nil || t.Type == token.ENDMARKER {
+			p.mark = mark
+			return false
+		}
+		switch t.Type {
+		case token.NEWLINE, token.NL, token.INDENT, token.DEDENT,
+			token.COMMENT:
+			p.mark++
+		default:
+			p.mark = mark
+			return true
+		}
+	}
+}

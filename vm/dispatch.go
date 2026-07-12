@@ -49,6 +49,18 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, err err
 	if err != nil {
 		return 0, err
 	}
+	if e.f.LinenoJumped {
+		// A trace callback set f_lineno during the LINE event: resume at
+		// the relocated instruction pointer without executing the opcode
+		// the INSTRUMENTED_LINE marker was hiding. The flag is the explicit
+		// jump signal; a bare InstrPtr-before/after comparison would also
+		// trip on the EXTENDED_ARG-prefix advance fetchExtended performs.
+		//
+		// CPython: Python/bytecodes.c INSTRUMENTED_LINE checks
+		// frame->instr_ptr != this_instr after the line event fires.
+		e.f.LinenoJumped = false
+		return e.f.InstrPtr, nil
+	}
 	// Specializer routing: only Quickened code carries inline-cache
 	// counters and specialized variants; non-Quickened code (raw
 	// compile output before specialize.Quicken) skips the entire

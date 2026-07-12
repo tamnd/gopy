@@ -21,14 +21,15 @@ func TestBoolOpAndShortCircuits(t *testing.T) {
 		Values: []ast.Expr{nameLoad("x"), nameLoad("y")},
 	}
 	u := compileMod(t, exprMod(e))
+	// Codegen emits the pseudo JUMP_IF_FALSE; convert_pseudo_conditional_jumps
+	// in the CFG pass later expands it to COPY 1 + TO_BOOL + POP_JUMP_IF_FALSE.
+	// compileMod returns the pre-optimization unit, so the pseudo form shows.
 	want := []string{
-		"LOAD_NAME",         // x
-		"COPY",              // dup for jump check
-		"TO_BOOL",           // normalize before POP_JUMP_IF_X
-		"POP_JUMP_IF_FALSE", // -> end (x falsy: leave x)
-		"POP_TOP",           // discard the dup
-		"LOAD_NAME",         // y
-		"POP_TOP",           // ExprStmt discard
+		"LOAD_NAME",     // x
+		"JUMP_IF_FALSE", // -> end (x falsy: leave x)
+		"POP_TOP",       // discard x
+		"LOAD_NAME",     // y
+		"POP_TOP",       // ExprStmt discard
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
@@ -44,8 +45,10 @@ func TestBoolOpOrUsesPopJumpIfTrue(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
-	if got[3] != "POP_JUMP_IF_TRUE" {
-		t.Errorf("expected POP_JUMP_IF_TRUE for `or`, got %s", got[3])
+	// Raw codegen emits the pseudo JUMP_IF_TRUE (index 1, right after the
+	// LOAD_NAME for x); the CFG pass later expands it to POP_JUMP_IF_TRUE.
+	if got[1] != "JUMP_IF_TRUE" {
+		t.Errorf("expected JUMP_IF_TRUE for `or`, got %s", got[1])
 	}
 }
 
@@ -326,6 +329,35 @@ func TestSubscriptLoadEmitsBinaryOpSubscr(t *testing.T) {
 }
 
 func TestSliceEmitsBuildSlice(t *testing.T) {
+	// x[a:b:c]. A three-part slice with a step still builds the slice on
+	// the stack via BUILD_SLICE; the two-element subscript optimization
+	// (BINARY_SLICE) only applies when there is no step.
+	// CPython: Python/codegen.c:5610 codegen_slice
+	e := &ast.Subscript{
+		Value: nameLoad("x"),
+		Slice: &ast.Slice{Lower: nameLoad("a"), Upper: nameLoad("b"), Step: nameLoad("c")},
+		Ctx:   ast.Load,
+	}
+	u := compileMod(t, exprMod(e))
+	got := opNames(u)
+	wantPrefix := []string{
+		"LOAD_NAME", "LOAD_NAME", "LOAD_NAME", "LOAD_NAME", "BUILD_SLICE", "BINARY_OP",
+	}
+	if len(got) < len(wantPrefix) {
+		t.Fatalf("ops too short: %v", got)
+	}
+	for i, op := range wantPrefix {
+		if got[i] != op {
+			t.Errorf("ops[%d] = %s, want %s (full=%v)", i, got[i], op, got)
+		}
+	}
+}
+
+// TestConstantSliceFoldsToLoadConst pins the CPython 3.14 behavior where a
+// fully constant slice subscript loads a slice constant and folds through
+// NB_SUBSCR rather than emitting BUILD_SLICE.
+// CPython: Python/codegen.c:5326 is_constant_slice
+func TestConstantSliceFoldsToLoadConst(t *testing.T) {
 	// x[1:2]
 	e := &ast.Subscript{
 		Value: nameLoad("x"),
@@ -334,9 +366,7 @@ func TestSliceEmitsBuildSlice(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
-	wantPrefix := []string{
-		"LOAD_NAME", "LOAD_CONST", "LOAD_CONST", "BUILD_SLICE", "BINARY_OP",
-	}
+	wantPrefix := []string{"LOAD_NAME", "LOAD_CONST", "BINARY_OP"}
 	if len(got) < len(wantPrefix) {
 		t.Fatalf("ops too short: %v", got)
 	}

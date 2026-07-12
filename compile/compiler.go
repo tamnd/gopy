@@ -14,6 +14,23 @@ import (
 	"github.com/tamnd/gopy/symtable"
 )
 
+// configOptimize is the interpreter's optimization level, the analog of
+// PyConfig.optimization_level read by _Py_GetConfig(). The CLI sets it
+// from -O / -OO / PYTHONOPTIMIZE before any source is compiled; a
+// CompileFlags caller that passes optimize == -1 resolves the sentinel
+// against this value, matching CPython's compiler_init.
+//
+// CPython: Python/compile.c:136 compiler_init (c_optimize fallback)
+var configOptimize int
+
+// SetConfigOptimize records the interpreter optimization level. Called
+// once during startup from the command-line / environment parse.
+//
+// CPython: Python/initconfig.c config_init_optimization_level
+func SetConfigOptimize(level int) {
+	configOptimize = level
+}
+
 // Compile runs the full pipeline on a parsed module and returns the
 // top-level Code object plus any nested code objects (one per nested
 // scope).
@@ -41,17 +58,20 @@ func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
 // st_future->ff_features)
 func CompileFlags(mod ast.Mod, filename string, optimize, flags int) (*Code, error) {
 	// optimize == -1 means "use the interpreter's optimization level".
-	// gopy has no -O switch yet, so that level is 0 (asserts kept,
-	// docstrings kept, __debug__ folds to True). Resolve it here so
+	// The CLI records -O / -OO (and PYTHONOPTIMIZE) into the package
+	// configOptimize level; resolve the sentinel against it here so
 	// every downstream pass (preprocess __debug__ fold, assert removal,
 	// docstring stripping) sees a non-negative level.
 	//
 	// CPython: Python/compile.c:353 _PyAST_Compile (optimize == -1 -> config->optimization_level)
+	if optimize < 0 {
+		optimize = configOptimize
+	}
 	optimize = max(optimize, 0)
 	// CPython: Python/compile.c:353 _PyAST_Compile — validate before any other pass.
 	// CPython: Python/ast.c:1047 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
-		return nil, fmt.Errorf("ValueError: %s", err.Error())
+		return nil, ast.WrapValidationError(err)
 	}
 	ff, err := future.FromAST(mod, filename)
 	if err != nil {

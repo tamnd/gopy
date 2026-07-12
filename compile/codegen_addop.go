@@ -193,6 +193,22 @@ func appendConstKey(b *strings.Builder, value any) {
 			appendConstKey(b, item)
 		}
 		b.WriteString(")")
+	case *ConstSlice:
+		// A slice constant carries its own bracketing tag so it never
+		// shares a cache slot with a tuple of the same three values.
+		b.WriteString("[")
+		appendConstKey(b, x.Start)
+		appendConstKey(b, x.Stop)
+		appendConstKey(b, x.Step)
+		b.WriteString("]")
+	case ast.FrozenSet:
+		// A frozenset constant must never share a cache slot with the
+		// equivalent tuple, so it carries its own bracketing tag.
+		b.WriteString("{")
+		for _, item := range x {
+			appendConstKey(b, item)
+		}
+		b.WriteString("}")
 	default:
 		// Inner code units and any other reference-typed value get a
 		// pointer-identity tag so two distinct objects never collide

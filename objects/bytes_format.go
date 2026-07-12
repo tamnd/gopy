@@ -12,6 +12,7 @@ package objects
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -137,7 +138,7 @@ func bytesFormat(format []byte, args Object, useByteArray bool) (Object, error) 
 			pos++
 		}
 	bytesWidth:
-		if err := bytesReadNumOrStar(format, &pos, &arg.width, getnextarg); err != nil {
+		if err := bytesReadNumOrStar(format, &pos, &arg.width, false, getnextarg); err != nil {
 			return nil, err
 		}
 		if arg.width < 0 && arg.width != -1 {
@@ -149,7 +150,7 @@ func bytesFormat(format []byte, args Object, useByteArray bool) (Object, error) 
 		if pos < len(format) && format[pos] == '.' {
 			pos++
 			arg.prec = 0
-			if err := bytesReadNumOrStar(format, &pos, &arg.prec, getnextarg); err != nil {
+			if err := bytesReadNumOrStar(format, &pos, &arg.prec, true, getnextarg); err != nil {
 				return nil, err
 			}
 			if arg.prec < 0 {
@@ -398,7 +399,17 @@ func bytesWritePadded(out []byte, arg *fmtArg, body []byte) ([]byte, error) {
 
 // bytesReadNumOrStar parses a width/precision token at *pos. "*" pulls the
 // next argument; a digit run reads as decimal.
-func bytesReadNumOrStar(format []byte, pos *int, dst *int, getnextarg func() (Object, error)) error {
+//
+// asInt selects the C type the "*" argument is coerced into: width goes
+// through PyLong_AsSsize_t and precision through PyLong_AsInt, so a
+// precision above INT_MAX overflows even though it fits a ssize_t. A
+// literal digit run is bounded by PY_SSIZE_T_MAX for width and INT_MAX
+// for precision, matching the two overflow checks below.
+//
+// CPython: Objects/bytesobject.c:746 (width PyLong_AsSsize_t),
+//
+//	Objects/bytesobject.c:787 (prec PyLong_AsInt)
+func bytesReadNumOrStar(format []byte, pos *int, dst *int, asInt bool, getnextarg func() (Object, error)) error {
 	if *pos >= len(format) {
 		return nil
 	}
@@ -414,7 +425,10 @@ func bytesReadNumOrStar(format []byte, pos *int, dst *int, getnextarg func() (Ob
 		}
 		n, fits := i.Int64()
 		if !fits {
-			return fmt.Errorf("OverflowError: width too big")
+			return fmt.Errorf("OverflowError: Python int too large to convert to C ssize_t")
+		}
+		if asInt && (n > math.MaxInt32 || n < math.MinInt32) {
+			return fmt.Errorf("OverflowError: Python int too large to convert to C int")
 		}
 		*dst = int(n)
 		return nil
@@ -423,19 +437,25 @@ func bytesReadNumOrStar(format []byte, pos *int, dst *int, getnextarg func() (Ob
 	if c < '0' || c > '9' {
 		return nil
 	}
-	n := 0
+	limit := int64(math.MaxInt64)
+	overMsg := "ValueError: width too big"
+	if asInt {
+		limit = math.MaxInt32
+		overMsg = "ValueError: prec too big"
+	}
+	var n int64
 	for *pos < len(format) {
 		c := format[*pos]
 		if c < '0' || c > '9' {
 			break
 		}
-		if n > (1<<31-1-int(c-'0'))/10 {
-			return fmt.Errorf("ValueError: width too big")
+		if n > (limit-int64(c-'0'))/10 {
+			return fmt.Errorf("%s", overMsg)
 		}
-		n = n*10 + int(c-'0')
+		n = n*10 + int64(c-'0')
 		*pos++
 	}
-	*dst = n
+	*dst = int(n)
 	return nil
 }
 

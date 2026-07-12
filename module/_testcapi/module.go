@@ -246,6 +246,7 @@ func buildModule() (*objects.Module, error) {
 		{"config_getint", configGetint},
 		{"config_names", configNames},
 		{"run_in_subinterp", runInSubinterp},
+		{"code_newempty", codeNewempty},
 	}
 	for _, w := range wrappers {
 		if err := d.SetItem(objects.NewStr(w.name), objects.NewBuiltinFunction(w.name, w.fn)); err != nil {

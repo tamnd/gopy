@@ -39,7 +39,11 @@ func (c *Compiler) visitAsyncFunctionDef(s *ast.AsyncFunctionDef) error {
 //
 // CPython: Python/codegen.c:L1999 codegen_lambda
 func (c *Compiler) visitLambda(e *ast.Lambda) error {
-	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: e.Pos}}
+	// The implicit RETURN_VALUE is located on the lambda body, not the
+	// whole `lambda ...:` span, so its position stays inside the body.
+	//
+	// CPython: Python/codegen.c:2027 loc = LOC(e->v.Lambda.body)
+	body := ast.Seq[ast.Stmt]{&ast.Return{Value: e.Body, Pos: loc(e.Body)}}
 	return c.compileFunctionLike("<lambda>", e.Args, body, nil, nil, nil, true, e)
 }
 
@@ -57,6 +61,18 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	// MAKE_FUNCTION in reverse order via CALL.
 	if err := c.visitDecorators(decorators); err != nil {
 		return err
+	}
+
+	// A decorated function's co_firstlineno is the line of its first
+	// decorator, not the `def` line. enterScope derives firstlineno
+	// from the symtable entry (the def line), so override it for both
+	// the type-params wrapper and the function body below.
+	//
+	// CPython: Python/codegen.c:1420 codegen_function (firstlineno =
+	// decos[0]->lineno when the decorator list is non-empty)
+	funcFirstLineno := 0
+	if len(decorators) > 0 {
+		funcFirstLineno = loc(decorators[0]).Lineno
 	}
 
 	// Evaluate defaults in the outer scope. They land on the stack
@@ -106,6 +122,9 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 		outerCaches = c.savedCaches()
 
 		c.enterScope(wrapperScope)
+		if funcFirstLineno > 0 {
+			c.unit().FirstLineno = funcFirstLineno
+		}
 		first := c.unit().FirstLineno
 		c.addOpI(RESUME, 0, ast.Pos{Lineno: first, EndLineno: first})
 
@@ -170,7 +189,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	}
 	flags |= closureFlag
 
-	if err := c.emitInnerFunctionCode(innerScope, name, args, body, scopeKey); err != nil {
+	if err := c.emitInnerFunctionCode(innerScope, name, args, body, scopeKey, funcFirstLineno); err != nil {
 		return err
 	}
 
@@ -243,6 +262,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 // CPython: Python/codegen.c:L1311 codegen_function_body
 func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	name string, args *ast.Arguments, body ast.Seq[ast.Stmt], key any,
+	funcFirstLineno int,
 ) error {
 	// Save the outer scope so we can restore it after the inner body.
 	outerScope := c.scope
@@ -250,6 +270,16 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
+
+	// A decorated function's co_firstlineno is the line of its first
+	// decorator, not the `def` line. enterScope derives firstlineno from
+	// the symtable entry (the def line), so override it here.
+	//
+	// CPython: Python/codegen.c:1420 codegen_function (firstlineno =
+	// decos[0]->lineno when the decorator list is non-empty)
+	if funcFirstLineno > 0 {
+		c.unit().FirstLineno = funcFirstLineno
+	}
 
 	// Pin the docstring at consts[0] before RESUME / declareArgs run,
 	// so the first const slot belongs to the docstring (functions surface
@@ -329,10 +359,13 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 }
 
 // declareArgs registers each parameter in the per-unit varnames pool
-// in declaration order: posonly, args, varargs, kwonly, kwargs.
-// Mirrors CPython's compiler_arguments.
+// in the same order the symtable adds them: posonly, args, kwonly,
+// vararg, kwarg. This is what fixes co_varnames so *args / **kwargs
+// land after the keyword-only slots, matching CPython's
+// symtable_visit_arguments name order (which is what compile.c reads
+// to build u_varnames).
 //
-// CPython: Python/compile.c compiler_arguments
+// CPython: Python/symtable.c:2884 symtable_visit_arguments
 func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	for _, a := range args.Posonlyargs {
 		c.declareArg(a.Arg)
@@ -340,11 +373,11 @@ func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	for _, a := range args.Args {
 		c.declareArg(a.Arg)
 	}
-	if args.Vararg != nil {
-		c.declareArg(args.Vararg.Arg)
-	}
 	for _, a := range args.Kwonlyargs {
 		c.declareArg(a.Arg)
+	}
+	if args.Vararg != nil {
+		c.declareArg(args.Vararg.Arg)
 	}
 	if args.Kwarg != nil {
 		c.declareArg(args.Kwarg.Arg)
@@ -438,6 +471,11 @@ func (c *Compiler) emitMakeFunction(flags int32, l ast.Pos) {
 	}
 	if flags&0x04 != 0 {
 		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x04, l)
+	}
+	// MAKE_FUNCTION_ANNOTATE (0x10): the PEP 649 __annotate__ callable.
+	// CPython: Python/codegen.c:950 codegen_make_closure
+	if flags&0x10 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x10, l)
 	}
 	if flags&0x02 != 0 {
 		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x02, l)

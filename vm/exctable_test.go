@@ -59,23 +59,26 @@ func TestReadExcVarintTruncated(t *testing.T) {
 }
 
 func TestFindExcHandlerHit(t *testing.T) {
-	// One entry: start=4, size=6 (covers [4,10)), target=20, depth=2, preserveLasti=0
+	// Encoded fields are code-unit offsets: start=4, size=6 (covers
+	// code units [4,10)), target=20, depth=2. findExcHandler scales
+	// these to bytes, so the live range is [8,20) and target=40.
 	tab := encEntry(nil, 4, 6, 20, 2<<1)
-	for _, pc := range []int{4, 5, 9} {
+	for _, pc := range []int{8, 9, 19} {
 		entry, ok := findExcHandler(tab, pc)
 		if !ok {
 			t.Errorf("pc=%d: expected hit", pc)
 			continue
 		}
-		if entry.start != 4 || entry.end != 10 || entry.target != 20 || entry.depth != 2 || entry.preserveLasti {
+		if entry.start != 8 || entry.end != 20 || entry.target != 40 || entry.depth != 2 || entry.preserveLasti {
 			t.Errorf("pc=%d: got %+v", pc, entry)
 		}
 	}
 }
 
 func TestFindExcHandlerMiss(t *testing.T) {
+	// Code units [4,10) scale to bytes [8,20); everything outside misses.
 	tab := encEntry(nil, 4, 6, 20, 0)
-	for _, pc := range []int{0, 3, 10, 100} {
+	for _, pc := range []int{0, 7, 20, 100} {
 		if _, ok := findExcHandler(tab, pc); ok {
 			t.Errorf("pc=%d: expected miss", pc)
 		}
@@ -85,11 +88,12 @@ func TestFindExcHandlerMiss(t *testing.T) {
 func TestFindExcHandlerSecondEntry(t *testing.T) {
 	tab := encEntry(nil, 0, 4, 100, 0)
 	tab = encEntry(tab, 8, 4, 200, (3<<1)|1)
-	entry, ok := findExcHandler(tab, 9)
+	// Second entry covers code units [8,12) -> bytes [16,24).
+	entry, ok := findExcHandler(tab, 18)
 	if !ok {
 		t.Fatal("expected hit on second entry")
 	}
-	if entry.target != 200 || entry.depth != 3 || !entry.preserveLasti {
+	if entry.target != 400 || entry.depth != 3 || !entry.preserveLasti {
 		t.Errorf("got %+v", entry)
 	}
 }
@@ -101,13 +105,13 @@ func TestFindExcHandlerEmpty(t *testing.T) {
 }
 
 func TestFindExcHandlerLargeOffsets(t *testing.T) {
-	// Force multi-byte varints.
+	// Force multi-byte varints. Encoded code units scale to bytes (2x).
 	tab := encEntry(nil, 1<<14, 1<<10, 1<<16, 0)
-	entry, ok := findExcHandler(tab, 1<<14+5)
+	entry, ok := findExcHandler(tab, 2<<14+5)
 	if !ok {
 		t.Fatal("expected hit")
 	}
-	if entry.start != 1<<14 || entry.end != 1<<14+1<<10 || entry.target != 1<<16 {
+	if entry.start != 2<<14 || entry.end != 2<<14+2<<10 || entry.target != 2<<16 {
 		t.Errorf("got %+v", entry)
 	}
 }

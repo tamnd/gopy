@@ -63,6 +63,28 @@ type basicblock struct {
 //
 // CPython: Python/flowgraph.c:189 basicblock_addop
 func (b *basicblock) addOp(op Opcode, oparg int32, loc ast.Pos) {
+	// CPython's basicblock_addop writes only i_opcode/i_oparg/i_target/i_loc
+	// and leaves i_except untouched (flowgraph.c:189). The instruction lands
+	// in the slot just past b_iused; basicblock arrays grow in place and the
+	// compaction passes (remove_redundant_nops) shrink b_iused with a memmove
+	// that does not clear the freed tail, so that slot frequently still holds
+	// a since-removed instruction of this same block, carrying that block's
+	// exception handler. Go slices behave the same way: remove_redundant_nops
+	// here reslices in place (flowgraph_cfg_passes.go), so the backing slot at
+	// the new length retains the former instruction's Except. Reusing the slot
+	// without a full struct literal preserves that stale handler, matching the
+	// protected fall-through CPython emits for a conditional jump inside a try
+	// or with body. When the slice has no spare capacity the append grows and
+	// the fresh tail is zeroed (Except == nil), mirroring C's realloc+memset.
+	if n := len(b.Instr); n < cap(b.Instr) {
+		b.Instr = b.Instr[:n+1]
+		slot := &b.Instr[n]
+		slot.Op = op
+		slot.Oparg = oparg
+		slot.Loc = loc
+		slot.Target = nil
+		return
+	}
 	b.Instr = append(b.Instr, cfgInstr{Op: op, Oparg: oparg, Loc: loc})
 }
 

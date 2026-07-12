@@ -32,6 +32,17 @@ var DeprecWarnHook func(msg string) error
 // CPython: Objects/typeobject.c:4667 type_new (PyErr_WarnFormat RuntimeWarning)
 var RuntimeWarnHook func(msg string) error
 
+// CodeDeoptHook is set by the specialize package at init time so the
+// co_code getter can return the deoptimized form of the executable
+// bytecode without importing specialize (which imports objects). The
+// hook rewrites every specialized opcode back to its adaptive parent
+// and zeroes the inline cache cells, returning a fresh slice. nil when
+// specialization is not wired (tests / minimal builds), in which case
+// co_code returns the raw bytes unchanged.
+//
+// CPython: Objects/codeobject.c:2310 _PyCode_GetCode (runs deopt_code)
+var CodeDeoptHook func(code []byte) []byte
+
 func init() {
 	SetTypeDescr(CodeType, "co_lines", NewMethodDescr(CodeType, "co_lines", codeCoLinesMethod))
 	SetTypeDescr(CodeType, "co_positions", NewMethodDescr(CodeType, "co_positions", codeCoPositionsMethod))
@@ -45,11 +56,31 @@ func init() {
 func codeAttrLookup(c *Code, name string) (Object, bool) {
 	switch name {
 	case "co_code":
+		// co_code is the deoptimized snapshot: specialized opcodes the
+		// adaptive interpreter wrote in place are mapped back to their
+		// adaptive parent and the inline cache cells zeroed, so dis and
+		// marshal observe a stable, specialization-independent form.
+		//
+		// CPython: Objects/codeobject.c:2310 _PyCode_GetCode
+		if CodeDeoptHook != nil {
+			return NewBytes(CodeDeoptHook(c.Code)), true
+		}
 		return NewBytes(c.Code), true
 	case "_co_code_adaptive":
 		// CPython: Objects/codeobject.c:2777 code_getcodeadaptive
 		return NewBytes(c.Code), true
 	case "co_consts":
+		// The cached tuple is a counted reference owned by the code
+		// object; hand the reader a fresh reference so a transient read
+		// (e.g. LOAD_ATTR followed by a DECREF) does not draw the pinned
+		// object down to zero and clear it. CPython's getter returns
+		// Py_NewRef(co->co_consts).
+		//
+		// CPython: Objects/codeobject.c:2724 code_memberlist (T_OBJECT)
+		if c.constsObj != nil {
+			Incref(c.constsObj)
+			return c.constsObj, true
+		}
 		return constsAsTuple(c.Consts), true
 	case "co_names":
 		return stringsAsTuple(c.Names), true
@@ -84,6 +115,10 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		// CPython: Include/cpython/code.h:92 co_localsplusnames
 		return stringsAsTuple(c.LocalsplusNames), true
 	case "co_linetable":
+		if c.linetableObj != nil {
+			Incref(c.linetableObj)
+			return c.linetableObj, true
+		}
 		return NewBytes(c.Linetable), true
 	case "co_lnotab":
 		// Deprecated since Python 3.12; emit DeprecationWarning.
@@ -93,6 +128,10 @@ func codeAttrLookup(c *Code, name string) (Object, bool) {
 		}
 		return NewBytes(c.Linetable), true
 	case "co_exceptiontable":
+		if c.exceptiontableObj != nil {
+			Incref(c.exceptiontableObj)
+			return c.exceptiontableObj, true
+		}
 		return NewBytes(c.ExceptionTable), true
 	}
 	return nil, false
@@ -119,6 +158,42 @@ func stringsAsTuple(ss []string) *Tuple {
 	return NewTuple(items)
 }
 
+// WrapConstStr lifts a string constant into a *Unicode, interning it
+// when it qualifies. CPython interns identifier-like string constants
+// when the code object is built (intern_constants, recursing into
+// tuples and frozensets); gopy materializes consts lazily, so every
+// path that turns a const string into an Object routes through here so
+// the interning is uniform whether the const is read via co_consts or
+// loaded by the VM.
+//
+// CPython: Objects/codeobject.c:203 intern_constants
+func WrapConstStr(s string) Object {
+	if shouldInternString(s) {
+		return InternFromString(s)
+	}
+	return NewStr(s)
+}
+
+// shouldInternString reports whether a string constant qualifies for
+// interning: ASCII and made up only of [a-zA-Z0-9_]. This is the
+// default-build (non free-threaded) predicate; the free-threaded build
+// interns every string constant.
+//
+// CPython: Objects/codeobject.c:117 should_intern_string
+func shouldInternString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			return false
+		}
+		isalnum := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !isalnum && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 // wrapConstAttr lifts one raw constant into an Object. Mirrors
 // vm.wrapConst for the scalar types marshal recovers, but lives in
 // objects/ so codeGetAttr can use it without an import cycle. Compile
@@ -143,7 +218,7 @@ func wrapConstAttr(v any) Object {
 	case complex128:
 		return NewComplex(real(x), imag(x))
 	case string:
-		return NewStr(x)
+		return WrapConstStr(x)
 	case []byte:
 		return NewBytes(x)
 	case *Code:
@@ -258,19 +333,15 @@ func codeVarnameFromOpargMethod(args []Object, kwargs map[string]Object) (Object
 	}
 	i64, _ := idxObj.Int64()
 	idx := int(i64)
-	if idx < 0 {
+	// The oparg is a localsplus offset, so it indexes co_localsplusnames
+	// directly. Reconstructing from varnames+cellvars+freevars would
+	// double-count arg-cells (an argument that is also a cell shares one
+	// localsplus slot), shifting freevars by the number of such cells.
+	//
+	// CPython: Objects/codeobject.c:2955 code__varname_from_oparg_impl
+	// (PyTuple_GET_ITEM(co->co_localsplusnames, oparg))
+	if idx < 0 || idx >= len(c.LocalsplusNames) {
 		return nil, fmt.Errorf("IndexError: _varname_from_oparg(): oparg out of range")
 	}
-	if idx < len(c.Varnames) {
-		return NewStr(c.Varnames[idx]), nil
-	}
-	idx -= len(c.Varnames)
-	if idx < len(c.Cellvars) {
-		return NewStr(c.Cellvars[idx]), nil
-	}
-	idx -= len(c.Cellvars)
-	if idx < len(c.Freevars) {
-		return NewStr(c.Freevars[idx]), nil
-	}
-	return nil, fmt.Errorf("IndexError: _varname_from_oparg(): oparg out of range")
+	return NewStr(c.LocalsplusNames[idx]), nil
 }

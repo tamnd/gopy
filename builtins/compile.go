@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -66,7 +67,7 @@ func Compile(args []objects.Object, kwargs map[string]objects.Object) (objects.O
 	if err != nil {
 		return nil, err
 	}
-	return liftCompileCode(cco), nil
+	return LiftCompileCode(cco), nil
 }
 
 type compileArgs struct {
@@ -120,6 +121,16 @@ func parseCompileArgs(args []objects.Object, kwargs map[string]objects.Object) (
 	mode, err := parseCompileMode(modeStr)
 	if err != nil {
 		return compileArgs{}, err
+	}
+	// When the source is an AST object, its top node must match the
+	// requested mode: exec wants Module, eval Expression, single
+	// Interactive. PyAST_obj2mod rejects a mismatch before conversion.
+	//
+	// CPython: Python/Python-ast.c:18427 PyAst_CheckMode
+	if astMod != nil {
+		if err := checkASTMode(astMod, bound[0], mode); err != nil {
+			return compileArgs{}, err
+		}
 	}
 	flags, err := parseCompileFlags(bound[3])
 	if err != nil {
@@ -184,6 +195,15 @@ func compileFilenameArg(o objects.Object) (string, error) {
 func compileSourceArg(o objects.Object) (string, []byte, error) {
 	switch v := o.(type) {
 	case *objects.Unicode:
+		// _Py_SourceAsString encodes a str source through the strict
+		// utf-8 codec (PyUnicode_AsUTF8AndSize), so a lone surrogate
+		// raises UnicodeEncodeError here rather than reaching the
+		// tokenizer as a "Non-UTF-8 code" SyntaxError.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString
+		if _, _, encErr := codecs.Encode(v.Value(), "utf-8", "strict"); encErr != nil {
+			return "", nil, encErr
+		}
 		return v.Value(), nil, nil
 	case *objects.Bytes:
 		b := v.Bytes()
@@ -292,6 +312,37 @@ func parseCompileMode(modeStr string) (parser.Mode, error) {
 	return 0, fmt.Errorf("ValueError: compile() mode must be 'exec', 'eval', 'single' or 'func_type'")
 }
 
+// checkASTMode enforces that an AST source object's top node matches the
+// requested compile mode: exec wants Module, eval Expression, single
+// Interactive. CPython does this with an isinstance() check against the
+// per-mode required type and raises TypeError("expected %s node, got
+// %.400s") on a mismatch.
+//
+// CPython: Python/Python-ast.c:18427 PyAst_CheckMode
+func checkASTMode(astMod ast.Mod, src objects.Object, mode parser.Mode) error {
+	var reqName string
+	var match bool
+	switch mode {
+	case parser.ModeFile:
+		reqName = "Module"
+		_, match = astMod.(*ast.Module)
+	case parser.ModeEval:
+		reqName = "Expression"
+		_, match = astMod.(*ast.Expression)
+	case parser.ModeSingle:
+		reqName = "Interactive"
+		_, match = astMod.(*ast.Interactive)
+	default:
+		// func_type and any future mode have no Module/Expression/
+		// Interactive requirement; leave validation to conversion.
+		return nil
+	}
+	if match {
+		return nil
+	}
+	return fmt.Errorf("TypeError: expected %s node, got %.400s", reqName, src.Type().Name)
+}
+
 // PyCF_ONLY_AST and PyCF_OPTIMIZED_AST flag constants.
 //
 // CPython: Include/cpython/code.h PyCF_ONLY_AST / PyCF_OPTIMIZED_AST
@@ -360,18 +411,17 @@ func parseCompileFlags(o objects.Object) (int, error) {
 
 // checkDontInherit accepts dont_inherit for signature parity. gopy has
 // no surrounding compiler-flags context to inherit, so the value is a
-// no-op either way; only the type is validated.
+// no-op either way, but the argument is still run through the truth test
+// so a misbehaving __bool__ / __len__ surfaces the same error CPython's
+// PyObject_IsTrue conversion does.
+//
+// CPython: Python/clinic/bltinmodule.c.h:341 dont_inherit = PyObject_IsTrue(args[4])
 func checkDontInherit(o objects.Object) error {
 	if o == nil {
 		return nil
 	}
-	if _, ok := o.(*objects.Int); ok {
-		return nil
-	}
-	if _, ok := o.(*objects.Bool); ok {
-		return nil
-	}
-	return fmt.Errorf("TypeError: compile() arg 5 (dont_inherit) must be int or bool")
+	_, err := objects.IsTruthy(o)
+	return err
 }
 
 // parseCompileOptimize reads the optional optimize arg. -1 is the
@@ -438,7 +488,7 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 	// CPython: Python/bltinmodule.c:843 _PyAST_Validate
 	if err := ast.Validate(mod); err != nil {
-		return nil, fmt.Errorf("ValueError: %w", err)
+		return nil, ast.WrapValidationError(err)
 	}
 	// CPython: Python/bltinmodule.c:846
 	// syntax_check_only = ((flags & PyCF_OPTIMIZED_AST) == PyCF_ONLY_AST)
@@ -455,6 +505,20 @@ func parseOnlyResult(mod ast.Mod, parsed *compileArgs) (objects.Object, error) {
 		SyntaxCheckOnly: syntaxCheckOnly,
 	})
 	return astModToObject(mod), nil
+}
+
+// LiftCompileCode exposes liftCompileCode so the _testinternalcapi
+// compiler-pipeline helpers can turn an assembled compile.Code into the
+// objects.Code that CPython's _PyCompile_Assemble hands back. It is the
+// top-level lift boundary, so it also runs the per-compile constant
+// merge that shares equal co_consts / co_linetable / co_filename
+// objects across the whole code tree.
+//
+// CPython: Python/compile.c:1707 const_cache lifetime
+func LiftCompileCode(c *compile.Code) *objects.Code {
+	top := liftCompileCode(c)
+	objects.InternCodeConstants(top)
+	return top
 }
 
 // liftCompileCode adapts compile.Code into objects.Code. Mirrors the
@@ -513,6 +577,17 @@ func liftCompileConst(v any) any {
 	case *compile.ConstTuple:
 		items := make([]any, len(x.Values))
 		for i, raw := range x.Values {
+			items[i] = liftCompileConst(raw)
+		}
+		return items
+	case *compile.ConstSlice:
+		return objects.NewSliceFromConst(x.Start, x.Stop, x.Step)
+	case ast.FrozenSet:
+		// A frozenset const may hold tuple elements that codegen left as
+		// *compile.ConstTuple; lift each one so marshal and the runtime
+		// see only native values.
+		items := make(ast.FrozenSet, len(x))
+		for i, raw := range x {
 			items[i] = liftCompileConst(raw)
 		}
 		return items

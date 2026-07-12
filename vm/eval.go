@@ -431,6 +431,21 @@ func (e *evalState) run() (objects.Object, error) {
 			if e.f.Owner != frame.OwnedByGenerator {
 				e.f.DropStack(e.f.StackTop)
 			}
+			// A reraiseError suppresses attachFrameTraceback only for the
+			// frame that executed RERAISE (its goto exception_unwind skips
+			// the `error` label's PyTraceBack_Here). Once that frame has no
+			// handler and the exception propagates to the caller, CPython's
+			// caller-side error label DOES call PyTraceBack_Here for the
+			// caller frame. Unwrap the marker here so the next frame up
+			// attaches its own tb entry instead of inheriting the skip
+			// (otherwise an exception escaping exec()/eval() loses every
+			// caller frame above the reraising one).
+			//
+			// CPython: Python/ceval.c error label (PyTraceBack_Here per frame)
+			var rr *reraiseError
+			if errors.As(err, &rr) {
+				err = excSentinel(rr.exc)
+			}
 			return nil, err
 		}
 		e.f.InstrPtr = next

@@ -145,20 +145,61 @@ func opcodeArg(name string, args []objects.Object, kwargs map[string]objects.Obj
 //
 // CPython: Include/internal/pycore_opcode_metadata.h IS_VALID_OPCODE
 func isValidOpcode(op int) bool {
-	if op < 0 || op > 255 {
+	if op < 0 || op > 266 {
 		return false
 	}
 	return compile.Opcode(op).Name() != ""
 }
 
-// stackEffect would call PyCompile_OpcodeStackEffectWithJump; gopy does
-// not have an analytic stack-effect table yet, so we raise so callers
-// learn early. dis.stack_effect is the only consumer and never fires
-// during opcode.py / dis.py module load.
+// stackEffect implements stack_effect(opcode, oparg=None, *, jump=None),
+// returning the net operand-stack effect of opcode. jump selects the
+// branch column for jumping/exception opcodes (None/True/False).
 //
 // CPython: Modules/_opcode.c:37 _opcode_stack_effect_impl
 func stackEffect(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: _opcode.stack_effect is not yet ported")
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: stack_effect() takes 1 or 2 positional arguments")
+	}
+	opObj, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: stack_effect() argument 'opcode' must be int")
+	}
+	opv, ok := opObj.Int64()
+	if !ok {
+		return nil, fmt.Errorf("OverflowError: opcode value too large")
+	}
+
+	oparg := int32(0)
+	if len(args) == 2 && args[1] != objects.None() {
+		argObj, ok := args[1].(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: stack_effect() argument 'oparg' must be int or None")
+		}
+		v, ok := argObj.Int64()
+		if !ok {
+			return nil, fmt.Errorf("OverflowError: oparg value too large")
+		}
+		oparg = int32(v)
+	}
+
+	// jump: None -> -1, True -> 1, False -> 0.
+	jump := -1
+	switch kwargs["jump"] {
+	case nil, objects.None():
+		jump = -1
+	case objects.True():
+		jump = 1
+	case objects.False():
+		jump = 0
+	default:
+		return nil, fmt.Errorf("ValueError: stack_effect: jump must be False, True or None")
+	}
+
+	effect := compile.OpcodeStackEffectWithJump(int(opv), oparg, jump)
+	if effect == compile.InvalidStackEffect {
+		return nil, fmt.Errorf("ValueError: invalid opcode or oparg")
+	}
+	return objects.NewInt(int64(effect)), nil
 }
 
 // CPython: Modules/_opcode.c:83 _opcode_is_valid_impl

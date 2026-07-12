@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/codecs"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -281,11 +282,11 @@ func codeForSource(source objects.Object, fnName string, mode parser.Mode) (*obj
 		}
 		mod = m
 	}
-	cco, err := compile.Compile(mod, "<string>", 0)
+	cco, err := compile.Compile(mod, "<string>", -1)
 	if err != nil {
 		return nil, err
 	}
-	return liftCompileCode(cco), nil
+	return LiftCompileCode(cco), nil
 }
 
 // sourceAsString is the gopy port of CPython's _Py_SourceAsString.
@@ -303,11 +304,33 @@ func sourceAsString(cmd objects.Object, fnName string) (string, bool, error) {
 	isUnicode := false
 	switch v := cmd.(type) {
 	case *objects.Unicode:
+		// _Py_SourceAsString routes a str through PyUnicode_AsUTF8AndSize,
+		// the strict utf-8 encoder. A source string carrying a lone
+		// surrogate (e.g. the console fed "'\ud800'") therefore raises
+		// UnicodeEncodeError here, before the tokenizer ever runs, rather
+		// than surfacing as the lexer's "Non-UTF-8 code" SyntaxError.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString
+		// (PyUnicode_AsUTF8AndSize)
+		if _, _, encErr := codecs.Encode(v.Value(), "utf-8", "strict"); encErr != nil {
+			return "", false, encErr
+		}
 		s = v.Value()
 		isUnicode = true
 	case *objects.Bytes:
 		s = string(v.Bytes())
 	case *objects.ByteArray:
+		s = string(v.Bytes())
+	case *objects.MemoryView:
+		// _Py_SourceAsString accepts any object exposing the buffer
+		// protocol; memoryview is the gopy surface for that, so a
+		// sliced memoryview feeds eval()/exec()/compile() straight
+		// through here.
+		//
+		// CPython: Python/pythonrun.c:1572 _Py_SourceAsString (PyObject_CheckBuffer)
+		if err := objects.CheckBufferReleased(v); err != nil {
+			return "", false, err
+		}
 		s = string(v.Bytes())
 	default:
 		return "", false, fmt.Errorf("TypeError: %s() arg 1 must be a string, bytes or code object", fnName)

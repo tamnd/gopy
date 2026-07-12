@@ -387,34 +387,50 @@ var opcodeFlags = [267]uint16{
 	UNPACK_SEQUENCE:                   0x0301,
 	YIELD_VALUE:                       0x0001,
 	RESUME:                            0x4341,
-	BINARY_OP_ADD_FLOAT:               0x0500,
-	BINARY_OP_ADD_INT:                 0x0700,
-	BINARY_OP_ADD_UNICODE:             0x0500,
-	BINARY_OP_EXTEND:                  0x0380,
-	BINARY_OP_MULTIPLY_FLOAT:          0x0500,
-	BINARY_OP_MULTIPLY_INT:            0x0700,
-	BINARY_OP_SUBSCR_DICT:             0x0700,
-	BINARY_OP_SUBSCR_GETITEM:          0x0080,
-	BINARY_OP_SUBSCR_LIST_INT:         0x0680,
-	BINARY_OP_SUBSCR_LIST_SLICE:       0x0700,
-	BINARY_OP_SUBSCR_STR_INT:          0x0680,
-	BINARY_OP_SUBSCR_TUPLE_INT:        0x0480,
-	BINARY_OP_SUBTRACT_FLOAT:          0x0500,
-	BINARY_OP_SUBTRACT_INT:            0x0700,
-	CALL_ALLOC_AND_ENTER_INIT:         0x4381,
-	CALL_BOUND_METHOD_EXACT_ARGS:      0x0681,
-	CALL_BOUND_METHOD_GENERAL:         0x4781,
-	CALL_BUILTIN_CLASS:                0x03c1,
-	CALL_BUILTIN_FAST:                 0x03c1,
-	CALL_BUILTIN_FAST_WITH_KEYWORDS:   0x03c1,
-	CALL_BUILTIN_O:                    0x0741,
-	CALL_ISINSTANCE:                   0x4381,
-	CALL_KW_BOUND_METHOD:              0x0781,
-	CALL_KW_NON_PY:                    0x0741,
-	CALL_KW_PY:                        0x0781,
-	CALL_LEN:                          0x4380,
-	CALL_LIST_APPEND:                  0x0381,
-	CALL_METHOD_DESCRIPTOR_FAST:       0x0741,
+	// Pseudo-instruction flags. The legacy opcodes_go generator stopped at
+	// the real-opcode range and never emitted these, so HasArg/HasJump
+	// returned false for every pseudo op (breaking dis.hasarg widths and
+	// the has_arg surface). Transcribed verbatim from CPython's metadata.
+	//
+	// CPython: Include/internal/pycore_opcode_metadata.h _PyOpcode_opcode_metadata
+	JUMP:                                      0x0349, // HAS_ARG|HAS_JUMP|HAS_EVAL_BREAK|HAS_ERROR|HAS_ESCAPES
+	JUMP_IF_FALSE:                             0x0309, // HAS_ARG|HAS_JUMP|HAS_ERROR|HAS_ESCAPES
+	JUMP_IF_TRUE:                              0x0309, // HAS_ARG|HAS_JUMP|HAS_ERROR|HAS_ESCAPES
+	JUMP_NO_INTERRUPT:                         0x0009, // HAS_ARG|HAS_JUMP
+	LOAD_CLOSURE:                              0x0821, // HAS_ARG|HAS_LOCAL|HAS_PURE
+	POP_BLOCK:                                 0x0800, // HAS_PURE
+	SETUP_CLEANUP:                             0x0801, // HAS_PURE|HAS_ARG
+	SETUP_FINALLY:                             0x0801, // HAS_PURE|HAS_ARG
+	SETUP_WITH:                                0x0801, // HAS_PURE|HAS_ARG
+	STORE_FAST_MAYBE_NULL:                     0x0221, // HAS_ARG|HAS_LOCAL|HAS_ESCAPES
+	BINARY_OP_ADD_FLOAT:                       0x0500,
+	BINARY_OP_ADD_INT:                         0x0700,
+	BINARY_OP_ADD_UNICODE:                     0x0500,
+	BINARY_OP_EXTEND:                          0x0380,
+	BINARY_OP_MULTIPLY_FLOAT:                  0x0500,
+	BINARY_OP_MULTIPLY_INT:                    0x0700,
+	BINARY_OP_SUBSCR_DICT:                     0x0700,
+	BINARY_OP_SUBSCR_GETITEM:                  0x0080,
+	BINARY_OP_SUBSCR_LIST_INT:                 0x0680,
+	BINARY_OP_SUBSCR_LIST_SLICE:               0x0700,
+	BINARY_OP_SUBSCR_STR_INT:                  0x0680,
+	BINARY_OP_SUBSCR_TUPLE_INT:                0x0480,
+	BINARY_OP_SUBTRACT_FLOAT:                  0x0500,
+	BINARY_OP_SUBTRACT_INT:                    0x0700,
+	CALL_ALLOC_AND_ENTER_INIT:                 0x4381,
+	CALL_BOUND_METHOD_EXACT_ARGS:              0x0681,
+	CALL_BOUND_METHOD_GENERAL:                 0x4781,
+	CALL_BUILTIN_CLASS:                        0x03c1,
+	CALL_BUILTIN_FAST:                         0x03c1,
+	CALL_BUILTIN_FAST_WITH_KEYWORDS:           0x03c1,
+	CALL_BUILTIN_O:                            0x0741,
+	CALL_ISINSTANCE:                           0x4381,
+	CALL_KW_BOUND_METHOD:                      0x0781,
+	CALL_KW_NON_PY:                            0x0741,
+	CALL_KW_PY:                                0x0781,
+	CALL_LEN:                                  0x4380,
+	CALL_LIST_APPEND:                          0x0381,
+	CALL_METHOD_DESCRIPTOR_FAST:               0x0741,
 	CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS: 0x0741,
 	CALL_METHOD_DESCRIPTOR_NOARGS:             0x0741,
 	CALL_METHOD_DESCRIPTOR_O:                  0x0741,

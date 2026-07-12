@@ -533,7 +533,18 @@ func moduleSetattr(o Object, name, value Object) error {
 		}
 	}
 	if value == nil {
-		return m.dict.DelItem(name)
+		// Deleting a missing key surfaces as KeyError from the dict;
+		// generic delattr promotes that to AttributeError.
+		//
+		// CPython: Objects/object.c:2026 _PyObject_GenericSetAttrWithDict
+		if err := m.dict.DelItem(name); err != nil {
+			if isKeyError(err) {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'",
+					m.Type().Name, attrNameStr(name))
+			}
+			return err
+		}
+		return nil
 	}
 	return m.dict.SetItem(name, value)
 }

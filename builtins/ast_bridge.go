@@ -9,6 +9,8 @@
 package builtins
 
 import (
+	"math/big"
+
 	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -788,6 +790,8 @@ func (b *astBridge) convertConstantValue(v any) objects.Object {
 	switch x := v.(type) {
 	case int64:
 		return objects.NewInt(x)
+	case *big.Int:
+		return objects.NewIntFromBig(x)
 	case float64:
 		return objects.NewFloat(x)
 	case string:
@@ -809,6 +813,16 @@ func (b *astBridge) convertConstantValue(v any) objects.Object {
 			items[i] = b.convertConstantValue(elem)
 		}
 		return objects.NewTuple(items)
+	case ast.FrozenSet:
+		items := make([]objects.Object, len(x))
+		for i, elem := range x {
+			items[i] = b.convertConstantValue(elem)
+		}
+		fs, err := objects.NewFrozenset(items)
+		if err != nil {
+			return objects.None()
+		}
+		return fs
 	}
 	return objects.None()
 }

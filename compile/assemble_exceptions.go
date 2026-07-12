@@ -67,8 +67,11 @@ func AssembleExceptionTable(seq *Sequence) []byte { return assembleExceptionTabl
 
 // assembleExceptionTable walks the post-flowgraph instruction stream,
 // groups runs that share a handler, and emits one varint record per
-// run. The byte-offset cursor mirrors how the code stream is packed
-// (one codeunit = two bytes, plus EXTENDED_ARG prefixes).
+// run. Offsets are in code units (one codeunit per opcode plus its
+// EXTENDED_ARG prefixes and inline caches), matching CPython's
+// exception-table format: dis.py and the unwinder both read these
+// values as instruction offsets and scale by the codeunit size, so
+// the serialized table must NOT pre-multiply to bytes.
 //
 // CPython: Python/assemble.c:L157 assemble_exception_table
 func assembleExceptionTable(seq *Sequence) []byte {
@@ -79,7 +82,7 @@ func assembleExceptionTable(seq *Sequence) []byte {
 	off := 0
 	for i := range seq.Instrs {
 		offsets[i] = off
-		off += instrSize(&seq.Instrs[i]) * 2
+		off += instrSize(&seq.Instrs[i])
 	}
 	totalBytes := off
 

@@ -34,6 +34,17 @@ func (p *Parser) RaiseSyntaxError(format string, args ...any) {
 	p.recordError(perrors.KindSyntax, pos, fmt.Sprintf(format, args...))
 }
 
+// RaiseMultipleStatements pins the "multiple statements found while
+// compiling a single statement" SyntaxError that Py_single_input mode
+// raises when source past the parsed statement carries non-trivial
+// tokens. Kept here (not in the generated table) so parser_gen.go need
+// not import the parser/errors message catalog.
+//
+// CPython: Parser/pegen.c:754 bad_single_statement
+func (p *Parser) RaiseMultipleStatements() {
+	p.RaiseSyntaxError(perrors.MsgMultipleStmtsInteract)
+}
+
 // RaiseSyntaxErrorKnownLocation pins a SyntaxError at a caller-given
 // span. Used by action helpers that already know where they want the
 // caret to land (invalid LHS, "did you mean :=", paren mismatch).

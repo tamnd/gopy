@@ -684,7 +684,13 @@ func sliceContainer(container, start, stop objects.Object) (objects.Object, erro
 		sl := objects.NewSlice(start, stop, nil)
 		return objects.StrGetSlice(c, sl)
 	}
-	return nil, errors.New("TypeError: BINARY_SLICE: unsupported container type '" + container.Type().Name + "'")
+	// CPython BINARY_SLICE builds a slice object and defers to
+	// PyObject_GetItem for any container without a fast path, so
+	// memoryview / bytes / bytearray and user types reach their
+	// mp_subscript here instead of hitting an error.
+	//
+	// CPython: Python/bytecodes.c BINARY_SLICE (_PyBuildSlice_ConsumeRefs + PyObject_GetItem)
+	return objects.GetItem(container, objects.NewSlice(start, stop, nil))
 }
 
 func storeSlice(container, start, stop, value objects.Object) error {

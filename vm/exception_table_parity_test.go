@@ -182,10 +182,13 @@ func walkExcEntries(tab []byte) []excEntry {
 			return out
 		}
 		pos += n
+		// Mirror findExcHandler: the table stores code-unit offsets,
+		// scaled to bytes (two bytes per code unit) so they line up
+		// with the VM's byte-based instruction pointer.
 		out = append(out, excEntry{
-			start:         start,
-			end:           start + size,
-			target:        target,
+			start:         start * 2,
+			end:           (start + size) * 2,
+			target:        target * 2,
 			depth:         depthLasti >> 1,
 			preserveLasti: depthLasti&1 != 0,
 		})

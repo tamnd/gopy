@@ -47,6 +47,12 @@ type fblock struct {
 	// Datum carries the original AST node so
 	// unwindFblock can re-evaluate context expressions.
 	Datum any
+	// Loc mirrors CPython's fblockinfo.fb_loc. The with/async-with
+	// unwind restores it so the exit-protocol ops carry the location
+	// of the with statement rather than the unwinding statement.
+	//
+	// CPython: Python/codegen.c fblockinfo.fb_loc
+	Loc ast.Pos
 }
 
 // pushFblock pushes a frame block onto the active unit's stack.
@@ -54,6 +60,12 @@ type fblock struct {
 // CPython: Python/codegen.c codegen_push_fblock
 func (c *Compiler) pushFblock(kind fblockKind, block, exit JumpTargetLabel, datum any) {
 	c.fblocks = append(c.fblocks, fblock{Kind: kind, Block: block, Exit: exit, Datum: datum})
+	// The FINALLY_END fblock guards the second (exception-path) copy of
+	// a finally body; suppress duplicate SyntaxWarnings while it is live.
+	// CPython: Python/compile.c:769 _PyCompile_PushFBlock
+	if kind == fblockFinallyEnd {
+		c.disableWarning++
+	}
 }
 
 // popFblock pops the top frame block. Asserts the kind matches what
@@ -70,6 +82,10 @@ func (c *Compiler) popFblock(kind fblockKind) error {
 			c.fblocks[n-1].Kind, kind)
 	}
 	c.fblocks = c.fblocks[:n-1]
+	// CPython: Python/compile.c:783 _PyCompile_PopFBlock
+	if kind == fblockFinallyEnd {
+		c.disableWarning--
+	}
 	return nil
 }
 

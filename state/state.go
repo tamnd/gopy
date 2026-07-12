@@ -163,6 +163,15 @@ type Thread struct {
 	// CPython: Include/cpython/pystate.h:128 tracing
 	Tracing int
 
+	// WhatEvent is the monitoring event currently being delivered to a
+	// trace/profile callback, or -1 when no callback is running. The
+	// f_lineno setter consults it to decide whether a line jump is
+	// permitted: jumps are only allowed from a 'line' (and a handful of
+	// related) event, and never when not tracing.
+	//
+	// CPython: Include/cpython/pystate.h:130 what_event
+	WhatEvent int
+
 	// CoroutineOriginTrackingDepth is how many traceback frames to
 	// capture on coroutine creation, set by
 	// sys.set_coroutine_origin_tracking_depth. Depth 0 disables
@@ -365,7 +374,7 @@ func (r *Runtime) DropInterpreters() {
 //
 // CPython: Python/pystate.c:L915 PyThreadState_New
 func (i *Interpreter) AttachThread() *Thread {
-	t := &Thread{interp: i, id: threadIDCounter.Add(1)}
+	t := &Thread{interp: i, id: threadIDCounter.Add(1), WhatEvent: -1}
 	t.exc.Store(excHolder{})
 	i.threads = append(i.threads, t)
 	return t

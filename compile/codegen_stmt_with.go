@@ -46,6 +46,7 @@ func (c *Compiler) visitWithInner(s *ast.With, pos int) error {
 
 	c.useLabel(block)
 	c.pushFblock(fblockWith, block, final, s)
+	c.fblocks[len(c.fblocks)-1].Loc = l
 
 	if item.OptionalVars != nil {
 		if err := c.assignTo(item.OptionalVars, l); err != nil {
@@ -126,6 +127,7 @@ func (c *Compiler) visitAsyncWithInner(s *ast.AsyncWith, pos int) error {
 
 	c.useLabel(block)
 	c.pushFblock(fblockAsyncWith, block, final, s)
+	c.fblocks[len(c.fblocks)-1].Loc = l
 
 	if item.OptionalVars != nil {
 		if err := c.assignTo(item.OptionalVars, l); err != nil {

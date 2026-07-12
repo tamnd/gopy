@@ -96,6 +96,17 @@ var WarnUnawaitedCoroutineHook func(coro Object)
 // CPython: Python/ceval.c:_PyEval_SetOpcodeTrace
 var SetOpcodeTraceHook func(f *Frame, enable bool) error
 
+// SetLinenoHook implements frame.f_lineno's setter (the debugger line
+// jump). It validates the requested line against the running frame's
+// code, models the evaluation stack to pick a compatible bytecode
+// offset, binds any newly-live locals to None, pops excess stack
+// values, and moves the instruction pointer. objects/ stays free of
+// the vm/frame/monitor machinery the implementation needs by routing
+// through this hook, installed by the vm at startup.
+//
+// CPython: Objects/frameobject.c:1640 frame_lineno_set_impl
+var SetLinenoHook func(f *Frame, value Object) error
+
 // WarnUnawaitedAgenMethodHook routes a never-awaited async-generator
 // asend/athrow/aclose awaitable through warnings so the consumer sees a
 // RuntimeWarning of the form "coroutine method 'asend' of '<qualname>'

@@ -25,15 +25,14 @@ import (
 // keywordCandidates lists the parameter names eligible for keyword
 // binding so UnexpectedKeywordError can offer a "Did you mean 'X'?"
 // suggestion. It mirrors CPython's co_varnames[posonlyargcount :
-// total_args]: positional-only slots and the *args slot are skipped.
+// total_args]: positional-only slots are skipped. The *args / **kwargs
+// slots follow the kw-only window (kwWindow = argcount + kwonlyargcount)
+// so they fall outside the [nposonly, kwWindow) range already.
 //
 // CPython: Python/ceval.c:1792 (possible_keywords list)
-func keywordCandidates(co *objects.Code, nposonly, npos, kwWindow int, hasVarargs bool) []string {
+func keywordCandidates(co *objects.Code, nposonly, kwWindow int) []string {
 	out := make([]string, 0, kwWindow)
 	for i := nposonly; i < kwWindow; i++ {
-		if i == npos && hasVarargs {
-			continue
-		}
 		out = append(out, co.Varnames[i])
 	}
 	return out
@@ -245,6 +244,12 @@ func init() {
 	//
 	// CPython: Python/legacy_tracing.c:159 _PyEval_SetOpcodeTrace
 	objects.SetOpcodeTraceHook = setOpcodeTraceHook
+	// Back frame.f_lineno's setter (the debugger line jump). objects/
+	// cannot reach the mark_stacks / instruction-pointer machinery, so
+	// it routes through this hook.
+	//
+	// CPython: Objects/frameobject.c:1640 frame_lineno_set_impl
+	objects.SetLinenoHook = frameLinenoSetHook
 	// Expose the same hook to module/sys for sys._getframe().
 	//
 	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
@@ -544,14 +549,18 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		f.SetLocal(i, stackref.FromObjectNew(args[i]))
 	}
 	// *args: pack any extra positionals into a tuple at the varargs slot.
+	// The varargs slot follows the kw-only slots, so it sits at
+	// npos+nkwonly (co_varnames order: posonly, posorkw, kwonly, *args,
+	// **kwargs).
 	if hasVarargs {
 		extra := args[bound:]
 		items := make([]objects.Object, len(extra))
 		copy(items, extra)
-		f.SetLocal(npos, stackref.FromObject(objects.NewTuple(items)))
+		f.SetLocal(npos+nkwonly, stackref.FromObject(objects.NewTuple(items)))
 	}
 	// **kwargs: collect unknown keyword args here. Allocate eagerly so
-	// the slot is bound even when no keywords are passed.
+	// the slot is bound even when no keywords are passed. It sits after
+	// the varargs slot when one is present.
 	var kwSlot int
 	var kwDict *objects.Dict
 	if hasVarkw {
@@ -565,24 +574,18 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 	// Keyword bind: scan the positional + kw-only window for a name
 	// match. Positional-only slots [0..nposonly) are not eligible for
 	// keyword binding; collisions route to **kwargs when present or
-	// surface as positional_only_passed_as_keyword. With *args, the
-	// varargs slot sits at index npos so the kw-only slots shift to
-	// [npos+1 .. npos+1+nkwonly).
+	// surface as positional_only_passed_as_keyword. The kw-eligible
+	// slots are [nposonly .. npos+nkwonly); the varargs / varkw slots
+	// follow and are never keyword targets.
 	//
 	// CPython: Python/ceval.c:1546 positional_only_passed_as_keyword
 	// CPython: Objects/call.c _PyEval_BindArguments keyword loop
 	kwWindow := npos + nkwonly
-	if hasVarargs {
-		kwWindow++
-	}
 	var posonlyAsKw []string
 	for k, v := range kwargs {
 		idx := -1
 		for i := 0; i < kwWindow; i++ {
 			if i < nposonly {
-				continue
-			}
-			if i == npos && hasVarargs {
 				continue
 			}
 			if co.Varnames[i] == k {
@@ -610,7 +613,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, kwWindow))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
@@ -651,12 +654,10 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 			}
 		}
 	}
-	// Keyword-only defaults fill any unbound kw-only slots.
+	// Keyword-only defaults fill any unbound kw-only slots. The kw-only
+	// slots sit at [npos, npos+nkwonly), before any *args / **kwargs.
 	if fn.KwDefaults != nil && nkwonly > 0 {
 		base := npos
-		if hasVarargs {
-			base++
-		}
 		for i := 0; i < nkwonly; i++ {
 			slot := base + i
 			if !f.LocalAt(slot).IsNull() {
@@ -682,9 +683,6 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		return nil, objects.MissingArgumentsError(qualname, "positional", missingPos)
 	}
 	kwOnlyBase := npos
-	if hasVarargs {
-		kwOnlyBase++
-	}
 	var missingKw []string
 	for i := 0; i < nkwonly; i++ {
 		slot := kwOnlyBase + i
@@ -781,7 +779,6 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 	npos := co.Argcount
 	nkwonly := co.KwonlyArgcount
 	nposonly := co.PosonlyArgcount
-	hasVarargs := co.Flags&int(0x04) != 0
 	hasVarkw := co.Flags&int(0x08) != 0
 	qualname := fn.Qualname
 	if qualname == "" {
@@ -799,9 +796,6 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 		nkw := kwnames.Len()
 		kwargs = make(map[string]objects.Object, nkw)
 		kwWindow := npos + nkwonly
-		if hasVarargs {
-			kwWindow++
-		}
 		for i := 0; i < nkw; i++ {
 			kwname := kwnames.Item(i)
 			val := args[nposArgs+i]
@@ -823,9 +817,6 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 				if j < nposonly {
 					continue
 				}
-				if j == npos && hasVarargs {
-					continue
-				}
 				eq, err := objects.RichCmpBool(kwname, objects.NewStr(co.Varnames[j]), objects.CompareEQ)
 				if err != nil {
 					return nil, err
@@ -844,7 +835,7 @@ func pyFunctionVectorcall(o objects.Object, args []objects.Object, nargsf uint, 
 				if !hasVarkw {
 					// Best-effort string repr for error message.
 					ks, _ := objects.Str(kwname)
-					return nil, objects.UnexpectedKeywordError(qualname, ks, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
+					return nil, objects.UnexpectedKeywordError(qualname, ks, keywordCandidates(co, nposonly, kwWindow))
 				}
 				rawKwEntries = append(rawKwEntries, rawKwEntry{key: kwname, val: val})
 			}
@@ -916,7 +907,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 				objects.Incref(it)
 			}
 		}
-		f.SetLocal(npos, stackref.FromObject(objects.NewTuple(items)))
+		f.SetLocal(npos+nkwonly, stackref.FromObject(objects.NewTuple(items)))
 	}
 	var kwSlot int
 	var kwDict *objects.Dict
@@ -929,9 +920,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		f.SetLocal(kwSlot, stackref.FromObject(kwDict))
 	}
 	kwWindow := npos + nkwonly
-	if hasVarargs {
-		kwWindow++
-	}
 	// Iterate kwargs in kwOrder (preserving caller insertion order) when
 	// available, otherwise fall back to Go map iteration. kwOrder is
 	// always non-nil when called from pyFunctionVectorcall.
@@ -952,9 +940,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		idx := -1
 		for i := 0; i < kwWindow; i++ {
 			if i < nposonly {
-				continue
-			}
-			if i == npos && hasVarargs {
 				continue
 			}
 			if co.Varnames[i] == k {
@@ -982,7 +967,7 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 					continue
 				}
 			}
-			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, npos, kwWindow, hasVarargs))
+			return nil, objects.UnexpectedKeywordError(qualname, k, keywordCandidates(co, nposonly, kwWindow))
 		}
 		if !f.LocalAt(idx).IsNull() {
 			return nil, objects.MultipleValuesForArgumentError(qualname, k)
@@ -1032,9 +1017,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 	}
 	if fn.KwDefaults != nil && nkwonly > 0 {
 		base := npos
-		if hasVarargs {
-			base++
-		}
 		for i := 0; i < nkwonly; i++ {
 			slot := base + i
 			if !f.LocalAt(slot).IsNull() {
@@ -1057,9 +1039,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		return nil, objects.MissingArgumentsError(qualname, "positional", missingPos)
 	}
 	kwOnlyBase := npos
-	if hasVarargs {
-		kwOnlyBase++
-	}
 	var missingKw []string
 	for i := 0; i < nkwonly; i++ {
 		slot := kwOnlyBase + i
@@ -1081,9 +1060,6 @@ func callPyFunctionRaw(fn *objects.Function, co *objects.Code, posArgs []objects
 		}
 		kwonlyGiven := 0
 		kwOnlyBaseInner := npos
-		if hasVarargs {
-			kwOnlyBaseInner++
-		}
 		for i := 0; i < nkwonly; i++ {
 			if !f.LocalAt(kwOnlyBaseInner + i).IsNull() {
 				name := co.Varnames[kwOnlyBaseInner+i]

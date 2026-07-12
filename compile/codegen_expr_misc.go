@@ -43,9 +43,10 @@ func (c *Compiler) visitYield(e *ast.Yield) error {
 }
 
 // addopYield emits the wrap intrinsic when the scope is an async
-// generator, then YIELD_VALUE. Centralizes the codegen so the
-// comprehension elt-tail and the `yield` expression visit go through
-// the same path, mirroring CPython's ADDOP_YIELD macro.
+// generator, then YIELD_VALUE followed by the RESUME that marks the
+// resume point after the generator is sent back into. Centralizes the
+// codegen so the comprehension elt-tail and the `yield` expression
+// visit go through the same path, mirroring CPython's ADDOP_YIELD macro.
 //
 // CPython: Python/codegen.c:3168 codegen_addop_yield
 func (c *Compiler) addopYield(l ast.Pos) {
@@ -53,6 +54,7 @@ func (c *Compiler) addopYield(l ast.Pos) {
 		c.addOpI(CALL_INTRINSIC_1, intrinsicAsyncGenWrap, l)
 	}
 	c.addOpI(YIELD_VALUE, 0, l)
+	c.addOpI(RESUME, resumeAfterYield, l)
 }
 
 // visitYieldFrom lowers `yield from x` to GET_YIELD_FROM_ITER plus a
